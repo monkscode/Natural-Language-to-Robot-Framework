@@ -1,0 +1,9 @@
+opencv-python
+numpy
+torch
+torchvision
+ultralytics
+transformers
+timm
+pytorchvideo
+einops
