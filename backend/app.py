@@ -3,6 +3,7 @@ import json
 import asyncio
 import uuid
 from quart import Quart, request, jsonify, render_template
+from quart_cors import cors
 from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ class RobotTest(BaseModel):
 controller = Controller(output_model=RobotTest)
 
 app = Quart(__name__, static_folder='../frontend', template_folder='../frontend')
+app = cors(app, allow_origin="*")
 
 @app.route('/')
 async def index():
@@ -51,7 +53,7 @@ async def generate_and_run():
         # Save the robot code to a file
         robot_tests_dir = os.path.abspath('../robot_tests')
         os.makedirs(robot_tests_dir, exist_ok=True)
-        test_filename = f"{uuid.uuid4()}.robot"
+        test_filename = get_next_test_filename(robot_tests_dir)
         test_filepath = os.path.join(robot_tests_dir, test_filename)
         with open(test_filepath, 'w') as f:
             f.write(robot_code)
@@ -117,6 +119,29 @@ def generate_robot_code(robot_test: RobotTest) -> str:
         code += line + "\n"
 
     return code
+
+def get_next_test_filename(directory: str) -> str:
+    """
+    Finds the next available test filename in the format testN.robot.
+    """
+    if not os.path.exists(directory):
+        return "test1.robot"
+
+    test_files = [f for f in os.listdir(directory) if f.startswith('test') and f.endswith('.robot')]
+    if not test_files:
+        return "test1.robot"
+
+    max_num = 0
+    for f in test_files:
+        try:
+            num = int(f.replace('test', '').replace('.robot', ''))
+            if num > max_num:
+                max_num = num
+        except ValueError:
+            # Ignore files that don't match the pattern, e.g., test_abc.robot
+            continue
+
+    return f"test{max_num + 1}.robot"
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
