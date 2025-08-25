@@ -1,0 +1,14 @@
+# Environment variables
+**/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Docker
+.dockerignore
+
+# Logs
+*.log

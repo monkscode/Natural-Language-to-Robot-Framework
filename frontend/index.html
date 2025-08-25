@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Natural Language to Robot Framework</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Natural Language to Robot Framework</h1>
+        <p>Enter your test case in plain English below.</p>
+        <textarea id="query-input" placeholder="e.g., Open browser to google.com, search for 'Robot Framework', and then close the browser."></textarea>
+        <button id="generate-btn">Generate & Run</button>
+        <div id="results-container">
+            <h2>Generated Robot Code</h2>
+            <pre id="robot-code"></pre>
+            <button id="download-btn" style="display:none;">Download .robot file</button>
+            <h2>Execution Logs</h2>
+            <pre id="execution-logs"></pre>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
