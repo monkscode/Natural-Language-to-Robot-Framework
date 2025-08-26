@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import shutil
 import uuid
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -8,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
-from browser_use import Agent, ChatGoogle, Controller
+from browser_use import Agent, ChatGoogle, Controller, BrowserProfile
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,11 +31,14 @@ controller = Controller(output_model=RobotTest)
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="../frontend"), name="static")
+# Define the path to the frontend directory, relative to this file
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
+
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    with open("../frontend/index.html") as f:
+    with open(os.path.join(FRONTEND_DIR, "index.html")) as f:
         return HTMLResponse(content=f.read(), status_code=200)
 
 @app.post('/generate-and-run')
@@ -45,7 +49,14 @@ async def generate_and_run(query: Query):
 
     # Use browser-use to convert the query into Robot Framework steps
     llm = ChatGoogle(model='gemini-1.5-flash')
-    agent = Agent(task=user_query, llm=llm, controller=controller)
+    browser_profile = BrowserProfile(headless=True)
+    agent = Agent(
+        task=user_query,
+        llm=llm,
+        controller=controller,
+        browser_profile=browser_profile,
+        vision_detail_level='low'
+    )
 
     history = await agent.run()
     result = history.final_result()
@@ -55,7 +66,7 @@ async def generate_and_run(query: Query):
         robot_code = generate_robot_code(robot_test)
 
         # Save the robot code to a file
-        robot_tests_dir = os.path.abspath('../robot_tests')
+        robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
         os.makedirs(robot_tests_dir, exist_ok=True)
         test_filename = get_next_test_filename(robot_tests_dir)
         test_filepath = os.path.join(robot_tests_dir, test_filename)
@@ -64,6 +75,9 @@ async def generate_and_run(query: Query):
 
         # Run the test in a Docker container
         try:
+            if not shutil.which("docker"):
+                raise HTTPException(status_code=500, detail="Docker is not installed or not in the system's PATH. Please install Docker to run the robot tests.")
+
             image_tag = "robot-framework-runner"
 
             # Build the image using asyncio.create_subprocess_exec
@@ -120,6 +134,85 @@ def generate_robot_code(robot_test: RobotTest) -> str:
         code += line + "\n"
 
     return code
+
+@app.post('/generate-and-run-test')
+async def generate_and_run_test(query: Query):
+    user_query = query.query
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Query not provided")
+
+    # Mock result from agent.run()
+    result = """
+{
+    "steps": [
+        {
+            "keyword": "Open Browser",
+            "locator": "https://www.google.com/search?q=Robot+Framework",
+            "value": "browser=chrome"
+        },
+        {
+            "keyword": "Close Browser",
+            "locator": "",
+            "value": ""
+        }
+    ]
+}
+"""
+
+    if result:
+        robot_test = RobotTest.model_validate_json(result)
+        robot_code = generate_robot_code(robot_test)
+
+        # Save the robot code to a file
+        robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
+        os.makedirs(robot_tests_dir, exist_ok=True)
+        test_filename = get_next_test_filename(robot_tests_dir)
+        test_filepath = os.path.join(robot_tests_dir, test_filename)
+        with open(test_filepath, 'w') as f:
+            f.write(robot_code)
+
+        # Run the test in a Docker container
+        try:
+            if not shutil.which("docker"):
+                raise HTTPException(status_code=500, detail="Docker is not installed or not in the system's PATH. Please install Docker to run the robot tests.")
+
+            image_tag = "robot-framework-runner"
+
+            # Build the image using asyncio.create_subprocess_exec
+            build_command = ["docker", "build", "-t", image_tag, "."]
+            process = await asyncio.create_subprocess_exec(
+                *build_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd="backend"
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                raise HTTPException(status_code=500, detail={"error": "Docker build failed", "logs": stderr.decode()})
+
+            # Run the container using asyncio.create_subprocess_exec
+            run_command = [
+                "docker", "run", "--rm",
+                "-v", f"{os.path.abspath('../robot_tests')}:/home/robot/tests",
+                "-w", "/home/robot/tests",
+                image_tag,
+                "robot", test_filename
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *run_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            logs = stdout.decode() + stderr.decode()
+
+            return {'robot_code': robot_code, 'logs': logs}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "An unexpected error occurred", "details": str(e)})
+    else:
+        raise HTTPException(status_code=500, detail="Failed to generate Robot Framework steps")
 
 def get_next_test_filename(directory: str) -> str:
     """
