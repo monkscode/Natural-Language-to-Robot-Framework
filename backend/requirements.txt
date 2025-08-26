@@ -1,8 +1,7 @@
-quart
-quart-cors
+fastapi
+uvicorn
 browser-use
 python-dotenv
 google-generativeai
 robotframework-seleniumlibrary
-gunicorn
 docker

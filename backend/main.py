@@ -2,8 +2,9 @@ import os
 import json
 import asyncio
 import uuid
-from quart import Quart, request, jsonify, render_template
-from quart_cors import cors
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
@@ -21,23 +22,26 @@ class RobotStep(BaseModel):
 class RobotTest(BaseModel):
     steps: List[RobotStep]
 
+class Query(BaseModel):
+    query: str
+
 # Create a controller to enforce the output format
 controller = Controller(output_model=RobotTest)
 
-app = Quart(__name__, static_folder='../frontend', template_folder='../frontend')
-app = cors(app, allow_origin="*")
+app = FastAPI()
 
-@app.route('/')
-async def index():
-    return await render_template('index.html')
+app.mount("/static", StaticFiles(directory="../frontend"), name="static")
 
-@app.route('/generate-and-run', methods=['POST'])
-async def generate_and_run():
-    data = await request.get_json()
-    if not data or 'query' not in data:
-        return jsonify({'error': 'Query not provided'}), 400
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    with open("../frontend/index.html") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
 
-    user_query = data['query']
+@app.post('/generate-and-run')
+async def generate_and_run(query: Query):
+    user_query = query.query
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Query not provided")
 
     # Use browser-use to convert the query into Robot Framework steps
     llm = ChatGoogle(model='gemini-1.5-flash')
@@ -62,11 +66,8 @@ async def generate_and_run():
         try:
             image_tag = "robot-framework-runner"
 
-            # WARNING: Running Docker with sudo from a web application is a security risk.
-            # This is a workaround for the environment's permission issues.
-            # In a production environment, you should configure Docker to run as a non-root user.
             # Build the image using asyncio.create_subprocess_exec
-            build_command = ["sudo", "docker", "build", "-t", image_tag, "."]
+            build_command = ["docker", "build", "-t", image_tag, "."]
             process = await asyncio.create_subprocess_exec(
                 *build_command,
                 stdout=asyncio.subprocess.PIPE,
@@ -76,11 +77,11 @@ async def generate_and_run():
             stdout, stderr = await process.communicate()
 
             if process.returncode != 0:
-                return jsonify({'error': 'Docker build failed', 'logs': stderr.decode()}), 500
+                raise HTTPException(status_code=500, detail={"error": "Docker build failed", "logs": stderr.decode()})
 
             # Run the container using asyncio.create_subprocess_exec
             run_command = [
-                "sudo", "docker", "run", "--rm",
+                "docker", "run", "--rm",
                 "-v", f"{os.path.abspath('../robot_tests')}:/home/robot/tests",
                 "-w", "/home/robot/tests",
                 image_tag,
@@ -95,11 +96,11 @@ async def generate_and_run():
 
             logs = stdout.decode() + stderr.decode()
 
-            return jsonify({'robot_code': robot_code, 'logs': logs})
+            return {'robot_code': robot_code, 'logs': logs}
         except Exception as e:
-            return jsonify({'error': 'An unexpected error occurred', 'details': str(e)}), 500
+            raise HTTPException(status_code=500, detail={"error": "An unexpected error occurred", "details": str(e)})
     else:
-        return jsonify({'error': 'Failed to generate Robot Framework steps'}), 500
+        raise HTTPException(status_code=500, detail="Failed to generate Robot Framework steps")
 
 def generate_robot_code(robot_test: RobotTest) -> str:
     """Generates the content of a .robot file from a RobotTest object."""
@@ -142,6 +143,3 @@ def get_next_test_filename(directory: str) -> str:
             continue
 
     return f"test{max_num + 1}.robot"
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
