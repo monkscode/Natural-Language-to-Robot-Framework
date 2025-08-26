@@ -96,7 +96,7 @@ async def generate_and_run(query: Query):
             # Run the container using asyncio.create_subprocess_exec
             run_command = [
                 "docker", "run", "--rm",
-                "-v", f"{os.path.abspath('../robot_tests')}:/home/robot/tests",
+                "-v", f"{robot_tests_dir}:/home/robot/tests",
                 "-w", "/home/robot/tests",
                 image_tag,
                 "robot", test_filename
@@ -194,7 +194,7 @@ async def generate_and_run_test(query: Query):
             # Run the container using asyncio.create_subprocess_exec
             run_command = [
                 "docker", "run", "--rm",
-                "-v", f"{os.path.abspath('../robot_tests')}:/home/robot/tests",
+                "-v", f"{robot_tests_dir}:/home/robot/tests",
                 "-w", "/home/robot/tests",
                 image_tag,
                 "robot", test_filename
