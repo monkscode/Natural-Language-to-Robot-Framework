@@ -9,9 +9,12 @@ from pydantic import BaseModel, Field
 from typing import List
 from dotenv import load_dotenv
 from browser_use import Agent, ChatGoogle, Controller, BrowserProfile
+from browser_use.llm.messages import UserMessage
 
 # Load environment variables from .env file
 load_dotenv()
+
+BROWSER_NAME = "chrome"
 
 # Define the output format as a Pydantic model
 class RobotStep(BaseModel):
@@ -40,17 +43,34 @@ async def read_root():
     with open(os.path.join(FRONTEND_DIR, "index.html")) as f:
         return HTMLResponse(content=f.read(), status_code=200)
 
+async def enhance_query(query: str) -> str:
+    """
+    Enhances the user's query using an LLM to make it more detailed and explicit.
+    """
+    llm = ChatGoogle(model='gemini-2.0-flash')
+    prompt = f"""
+    Given the user's query: "{query}", enhance it to be more detailed and explicit for a browser automation agent.
+    The enhanced query should break down the task into clear, actionable steps.
+    For example, if the user says "search for cats on google", the enhanced query could be:
+    "1. Go to google.com. 2. In the search bar, type 'cats'. 3. Click the search button."
+    Enhanced query:
+    """
+    response = await llm.ainvoke([UserMessage(content=prompt)])
+    return response.completion.strip()
+
 @app.post('/generate-and-run')
 async def generate_and_run(query: Query):
     user_query = query.query
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
 
+    enhanced_query = await enhance_query(user_query)
+
     # Use browser-use to convert the query into Robot Framework steps
-    llm = ChatGoogle(model='gemini-1.5-flash')
-    browser_profile = BrowserProfile(headless=False)
+    llm = ChatGoogle(model='gemini-2.0-flash')
+    browser_profile = BrowserProfile(channel=BROWSER_NAME)
     agent = Agent(
-        task=user_query,
+        task=enhanced_query,
         llm=llm,
         controller=controller,
         browser_profile=browser_profile,
@@ -107,6 +127,7 @@ def generate_robot_code(robot_test: RobotTest) -> str:
         if step.value:
             line += f"    {step.value}"
         if step.keyword == "Open Browser":
+            line += f"    browser={BROWSER_NAME}"
             line += "    options=add_argument('--no-sandbox');add_argument('--disable-dev-shm-usage')"
         code += line + "\n"
 
