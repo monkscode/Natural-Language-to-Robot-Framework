@@ -7,16 +7,19 @@ if [ ! -f "backend/.env" ]; then
     exit 1
 fi
 
-# Create a virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
+# Check if venv exists and is valid
+if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
+    echo "Using existing virtual environment..."
+    source venv/bin/activate
+else
+    echo "Creating new virtual environment..."
+    # Remove invalid venv if it exists
+    [ -d "venv" ] && rm -rf venv
+    python -m venv venv
+    source venv/bin/activate
+    echo "Installing dependencies..."
+    pip install -r backend/requirements.txt
 fi
-
-# Activate the virtual environment and install dependencies
-echo "Activating virtual environment and installing dependencies..."
-source venv/bin/activate
-pip install -r backend/requirements.txt
 
 # Run the application
 echo "Starting the application..."
