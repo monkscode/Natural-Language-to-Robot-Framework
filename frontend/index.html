@@ -11,6 +11,14 @@
         <h1>Natural Language to Robot Framework</h1>
         <p>Enter your test case in plain English below.</p>
         <textarea id="query-input" placeholder="e.g., Open browser to google.com, search for 'Robot Framework', and then close the browser."></textarea>
+        <div class="model-selector">
+            <label for="model-select">Select Model:</label>
+            <select id="model-select">
+                <option value="gemini-2.5-pro" selected>Gemini 2.5 Pro</option>
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+            </select>
+        </div>
         <button id="generate-btn">Generate & Run</button>
         <div id="results-container">
             <h2>Generated Robot Code</h2>

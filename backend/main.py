@@ -27,6 +27,8 @@ class RobotTest(BaseModel):
 
 class Query(BaseModel):
     query: str
+    model: str = "gemini-2.5-pro"
+
 
 # Create a controller to enforce the output format
 controller = Controller(output_model=RobotTest)
@@ -43,16 +45,33 @@ async def read_root():
     with open(os.path.join(FRONTEND_DIR, "index.html")) as f:
         return HTMLResponse(content=f.read(), status_code=200)
 
-async def enhance_query(query: str) -> str:
+async def enhance_query(query: str, model: str) -> str:
     """
     Enhances the user's query using an LLM to make it more detailed and explicit.
     """
-    llm = ChatGoogle(model='gemini-2.0-flash')
+    llm = ChatGoogle(model=model)
     prompt = f"""
-    Given the user's query: "{query}", enhance it to be more detailed and explicit for a browser automation agent.
-    The enhanced query should break down the task into clear, actionable steps.
-    For example, if the user says "search for cats on google", the enhanced query could be:
-    "1. Go to google.com. 2. In the search bar, type 'cats'. 3. Click the search button."
+    You are an expert at breaking down user requests into precise, step-by-step instructions for a web automation agent.
+    Your output will be used to generate Robot Framework test cases.
+    The user's request is: "{{query}}"
+
+    Please convert this request into a numbered list of simple, explicit actions. Each action should correspond to a single browser interaction (e.g., navigate to a URL, type text, click an element).
+
+    **Good Example:**
+    User request: "Log in to our site with username 'testuser' and password 'password123', then navigate to the dashboard and verify the welcome message."
+    Your output:
+    1. Go to https://my-app.com/login.
+    2. Input 'testuser' into the username field with locator 'id=username'.
+    3. Input 'password123' into the password field with locator 'id=password'.
+    4. Click the login button with locator 'tag=button'.
+    5. Wait until the page contains the text 'Welcome, testuser!'.
+    6. Verify that the element with locator 'css=.welcome-message' contains the text 'Welcome, testuser!'.
+
+    **Bad Example (what to avoid):**
+    - "Login and check the dashboard." (Too vague)
+    - "Fill out the form." (Doesn't specify what to fill or where)
+
+    Now, generate the detailed steps for the user's query.
     Enhanced query:
     """
     response = await llm.ainvoke([UserMessage(content=prompt)])
@@ -61,13 +80,14 @@ async def enhance_query(query: str) -> str:
 @app.post('/generate-and-run')
 async def generate_and_run(query: Query):
     user_query = query.query
+    model = query.model
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
 
-    enhanced_query = await enhance_query(user_query)
+    enhanced_query = await enhance_query(user_query, model)
 
     # Use browser-use to convert the query into Robot Framework steps
-    llm = ChatGoogle(model='gemini-2.0-flash')
+    llm = ChatGoogle(model=model)
     browser_profile = BrowserProfile(channel=BROWSER_NAME)
     agent = Agent(
         task=enhanced_query,

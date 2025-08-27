@@ -7,8 +7,15 @@ if [ ! -f "backend/.env" ]; then
     exit 1
 fi
 
-# Install dependencies
-echo "Installing dependencies..."
+# Create a virtual environment if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# Activate the virtual environment and install dependencies
+echo "Activating virtual environment and installing dependencies..."
+source venv/bin/activate
 pip install -r backend/requirements.txt
 
 # Run the application
