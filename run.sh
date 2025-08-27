@@ -12,19 +12,6 @@ echo "Installing dependencies..."
 pip install -r backend/requirements.txt
 
 # Run the application
-PORT=5000
-echo "Attempting to kill any process running on port $PORT..."
-if command -v lsof &> /dev/null
-then
-    PID=$(lsof -t -i:$PORT)
-    if [ -n "$PID" ]
-    then
-        kill $PID
-    fi
-else
-    echo "lsof command not found, skipping process kill. Please ensure no process is running on port $PORT."
-fi
-
 echo "Starting the application..."
-echo "You can access it at http://localhost:$PORT"
-uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+echo "You can access it at http://localhost:5000"
+uvicorn backend.main:app --host 0.0.0.0 --port 5000

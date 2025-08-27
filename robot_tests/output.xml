@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.3.2 (Python 3.12.11 on linux)" generated="2025-08-27T07:07:17.653164" rpa="false" schemaversion="5">
+<suite id="s1" name="Test1" source="/app/robot_tests/test1.robot">
+<test id="s1-t1" name="User Defined Test" line="5">
+<kw name="Open Browser" owner="SeleniumLibrary">
+<msg time="2025-08-27T07:07:17.971637" level="INFO">Opening browser 'chrome' to base url 'https://www.google.com/search?q=Robot+Framework'.</msg>
+<msg time="2025-08-27T07:07:18.505037" level="WARN">The chromedriver version (138.0.7204.168) detected in PATH at /home/jules/.nvm/versions/node/v22.17.1/bin/chromedriver might not be compatible with the detected chrome version (139.0.7258.154); currently, chromedriver 139.0.7258.154 is recommended for chrome 139.*, so it is advised to delete the driver in PATH and retry</msg>
+<msg time="2025-08-27T07:07:19.533872" level="INFO">Cannot capture screenshot because no browser is open.</msg>
+<msg time="2025-08-27T07:07:19.534316" level="FAIL">SessionNotCreatedException: Message: session not created: probably user data directory is already in use, please specify a unique value for --user-data-dir argument, or don't use --user-data-dir; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+#0 0x564b12dc987a &lt;unknown&gt;
+#1 0x564b1286e2e0 &lt;unknown&gt;
+#2 0x564b128a87bd &lt;unknown&gt;
+#3 0x564b128a3ad7 &lt;unknown&gt;
+#4 0x564b128f3e9e &lt;unknown&gt;
+#5 0x564b128f3466 &lt;unknown&gt;
+#6 0x564b128e5683 &lt;unknown&gt;
+#7 0x564b128b1b5b &lt;unknown&gt;
+#8 0x564b128b2f31 &lt;unknown&gt;
+#9 0x564b12d8e7cb &lt;unknown&gt;
+#10 0x564b12d925d4 &lt;unknown&gt;
+#11 0x564b12d752c9 &lt;unknown&gt;
+#12 0x564b12d93178 &lt;unknown&gt;
+#13 0x564b12d596bf &lt;unknown&gt;
+#14 0x564b12db6e78 &lt;unknown&gt;
+#15 0x564b12db7056 &lt;unknown&gt;
+#16 0x564b12dc8b96 &lt;unknown&gt;
+#17 0x7f5e214b0aa4 &lt;unknown&gt;
+#18 0x7f5e2153dc3c &lt;unknown&gt;
+</msg>
+<arg>https://www.google.com/search?q=Robot+Framework</arg>
+<arg>browser=chrome</arg>
+<arg>options=add_argument('--no-sandbox');add_argument('--disable-dev-shm-usage')</arg>
+<doc>Opens a new browser instance to the optional ``url``.</doc>
+<status status="FAIL" start="2025-08-27T07:07:17.971149" elapsed="1.569656">SessionNotCreatedException: Message: session not created: probably user data directory is already in use, please specify a unique value for --user-data-dir argument, or don't use --user-data-dir; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+#0 0x564b12dc987a &lt;unknown&gt;
+#1 0x564b1286e2e0 &lt;unknown&gt;
+#2 0x564b128a87bd &lt;unknown&gt;
+#3 0x564b128a3ad7 &lt;unknown&gt;
+#4 0x564b128f3e9e &lt;unknown&gt;
+#5 0x564b128f3466 &lt;unknown&gt;
+#6 0x564b128e5683 &lt;unknown&gt;
+#7 0x564b128b1b5b &lt;unknown&gt;
+#8 0x564b128b2f31 &lt;unknown&gt;
+#9 0x564b12d8e7cb &lt;unknown&gt;
+#10 0x564b12d925d4 &lt;unknown&gt;
+#11 0x564b12d752c9 &lt;unknown&gt;
+#12 0x564b12d93178 &lt;unknown&gt;
+#13 0x564b12d596bf &lt;unknown&gt;
+#14 0x564b12db6e78 &lt;unknown&gt;
+#15 0x564b12db7056 &lt;unknown&gt;
+#16 0x564b12dc8b96 &lt;unknown&gt;
+#17 0x7f5e214b0aa4 &lt;unknown&gt;
+#18 0x7f5e2153dc3c &lt;unknown&gt;
+</status>
+</kw>
+<kw name="Close Browser" owner="SeleniumLibrary">
+<doc>Closes the current browser.</doc>
+<status status="NOT RUN" start="2025-08-27T07:07:19.541332" elapsed="0.000096"/>
+</kw>
+<doc>Test case generated from user query</doc>
+<status status="FAIL" start="2025-08-27T07:07:17.969510" elapsed="1.572243">SessionNotCreatedException: Message: session not created: probably user data directory is already in use, please specify a unique value for --user-data-dir argument, or don't use --user-data-dir; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+#0 0x564b12dc987a &lt;unknown&gt;
+#1 0x564b1286e2e0 &lt;unknown&gt;
+#2 0x564b128a87bd &lt;unknown&gt;
+#3 0x564b128a3ad7 &lt;unknown&gt;
+#4 0x564b128f3e9e &lt;unknown&gt;
+#5 0x564b128f3466 &lt;unknown&gt;
+#6 0x564b128e5683 &lt;unknown&gt;
+#7 0x564b128b1b5b &lt;unknown&gt;
+#8 0x564b128b2f31 &lt;unknown&gt;
+#9 0x564b12d8e7cb &lt;unknown&gt;
+#10 0x564b12d925d4 &lt;unknown&gt;
+#11 0x564b12d752c9 &lt;unknown&gt;
+#12 0x564b12d93178 &lt;unknown&gt;
+#13 0x564b12d596bf &lt;unknown&gt;
+#14 0x564b12db6e78 &lt;unknown&gt;
+#15 0x564b12db7056 &lt;unknown&gt;
+#16 0x564b12dc8b96 &lt;unknown&gt;
+#17 0x7f5e214b0aa4 &lt;unknown&gt;
+#18 0x7f5e2153dc3c &lt;unknown&gt;
+</status>
+</test>
+<status status="FAIL" start="2025-08-27T07:07:17.655056" elapsed="1.887557"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Test1" id="s1" pass="0" fail="1" skip="0">Test1</stat>
+</suite>
+</statistics>
+<errors>
+<msg time="2025-08-27T07:07:18.505037" level="WARN">The chromedriver version (138.0.7204.168) detected in PATH at /home/jules/.nvm/versions/node/v22.17.1/bin/chromedriver might not be compatible with the detected chrome version (139.0.7258.154); currently, chromedriver 139.0.7258.154 is recommended for chrome 139.*, so it is advised to delete the driver in PATH and retry</msg>
+</errors>
+</robot>

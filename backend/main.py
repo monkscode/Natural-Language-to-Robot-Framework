@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import shutil
 import uuid
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -49,7 +48,7 @@ async def generate_and_run(query: Query):
 
     # Use browser-use to convert the query into Robot Framework steps
     llm = ChatGoogle(model='gemini-1.5-flash')
-    browser_profile = BrowserProfile(headless=True)
+    browser_profile = BrowserProfile(headless=False)
     agent = Agent(
         task=user_query,
         llm=llm,
@@ -73,38 +72,14 @@ async def generate_and_run(query: Query):
         with open(test_filepath, 'w') as f:
             f.write(robot_code)
 
-        # Run the test in a Docker container
+        # Run the test directly
         try:
-            if not shutil.which("docker"):
-                raise HTTPException(status_code=500, detail="Docker is not installed or not in the system's PATH. Please install Docker to run the robot tests.")
-
-            image_tag = "robot-framework-runner"
-
-            # Build the image using asyncio.create_subprocess_exec
-            build_command = ["docker", "build", "-t", image_tag, "."]
-            process = await asyncio.create_subprocess_exec(
-                *build_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd="backend"
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                raise HTTPException(status_code=500, detail={"error": "Docker build failed", "logs": stderr.decode()})
-
-            # Run the container using asyncio.create_subprocess_exec
-            run_command = [
-                "docker", "run", "--rm",
-                "-v", f"{robot_tests_dir}:/home/robot/tests",
-                "-w", "/home/robot/tests",
-                image_tag,
-                "robot", test_filename
-            ]
+            run_command = ["robot", test_filename]
             process = await asyncio.create_subprocess_exec(
                 *run_command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                cwd=robot_tests_dir
             )
             stdout, stderr = await process.communicate()
 
@@ -131,9 +106,12 @@ def generate_robot_code(robot_test: RobotTest) -> str:
             line += f"    {step.locator}"
         if step.value:
             line += f"    {step.value}"
+        if step.keyword == "Open Browser":
+            line += "    options=add_argument('--no-sandbox');add_argument('--disable-dev-shm-usage')"
         code += line + "\n"
 
     return code
+
 
 @app.post('/generate-and-run-test')
 async def generate_and_run_test(query: Query):
@@ -171,38 +149,14 @@ async def generate_and_run_test(query: Query):
         with open(test_filepath, 'w') as f:
             f.write(robot_code)
 
-        # Run the test in a Docker container
+        # Run the test directly
         try:
-            if not shutil.which("docker"):
-                raise HTTPException(status_code=500, detail="Docker is not installed or not in the system's PATH. Please install Docker to run the robot tests.")
-
-            image_tag = "robot-framework-runner"
-
-            # Build the image using asyncio.create_subprocess_exec
-            build_command = ["docker", "build", "-t", image_tag, "."]
-            process = await asyncio.create_subprocess_exec(
-                *build_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd="backend"
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                raise HTTPException(status_code=500, detail={"error": "Docker build failed", "logs": stderr.decode()})
-
-            # Run the container using asyncio.create_subprocess_exec
-            run_command = [
-                "docker", "run", "--rm",
-                "-v", f"{robot_tests_dir}:/home/robot/tests",
-                "-w", "/home/robot/tests",
-                image_tag,
-                "robot", test_filename
-            ]
+            run_command = ["robot", test_filename]
             process = await asyncio.create_subprocess_exec(
                 *run_command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                cwd=robot_tests_dir
             )
             stdout, stderr = await process.communicate()
 
