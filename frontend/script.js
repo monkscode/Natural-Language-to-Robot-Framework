@@ -1,6 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');
-    const modelSelect = document.getElementById('model-select');
     const generateBtn = document.getElementById('generate-btn');
     const robotCodeEl = document.getElementById('robot-code');
     const executionLogsEl = document.getElementById('execution-logs');
@@ -9,7 +8,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     generateBtn.addEventListener('click', async () => {
         const query = queryInput.value;
-        const model = modelSelect.value;
         if (!query) {
             alert('Please enter a query.');
             return;
@@ -26,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ query, model }),
+                body: JSON.stringify({ query }),
             });
 
             if (!response.ok) {
