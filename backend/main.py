@@ -27,7 +27,7 @@ class RobotTest(BaseModel):
 
 class Query(BaseModel):
     query: str
-    model: str = "gemini-2.5-pro"
+    model: str = "models/gemini-1.5-pro-latest"
 
 
 # Create a controller to enforce the output format
@@ -53,9 +53,10 @@ async def enhance_query(query: str, model: str) -> str:
     prompt = f"""
     You are an expert at breaking down user requests into precise, step-by-step instructions for a web automation agent.
     Your output will be used to generate Robot Framework test cases.
-    The user's request is: "{{query}}"
+    The user's request is: "{query}"
 
-    Please convert this request into a numbered list of simple, explicit actions. Each action should correspond to a single browser interaction (e.g., navigate to a URL, type text, click an element).
+    Please convert this request into a numbered list of simple, explicit actions. Each action should correspond to a single browser interaction.
+    For each action, provide a clear and specific locator. Locators should be in a format compatible with Robot Framework's SeleniumLibrary (e.g., 'id=element_id', 'xpath=//div[@class="some_class"]', 'css=.some-class').
 
     **Good Example:**
     User request: "Log in to our site with username 'testuser' and password 'password123', then navigate to the dashboard and verify the welcome message."
@@ -70,11 +71,12 @@ async def enhance_query(query: str, model: str) -> str:
     **Bad Example (what to avoid):**
     - "Login and check the dashboard." (Too vague)
     - "Fill out the form." (Doesn't specify what to fill or where)
+    - "Click the button." (Doesn't specify which button or its locator)
 
     Now, generate the detailed steps for the user's query.
     Enhanced query:
     """
-    response = await llm.ainvoke([UserMessage(content=prompt)])
+    response = await llm.ainvoke([UserMessage(content=prompt.format(query=query))])
     return response.completion.strip()
 
 @app.post('/generate-and-run')
@@ -102,7 +104,7 @@ async def generate_and_run(query: Query):
 
     if result:
         robot_test = RobotTest.model_validate_json(result)
-        robot_code = generate_robot_code(robot_test)
+        robot_code = await generate_robot_code_with_llm(robot_test, model)
 
         # Save the robot code to a file
         robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
@@ -131,83 +133,32 @@ async def generate_and_run(query: Query):
     else:
         raise HTTPException(status_code=500, detail="Failed to generate Robot Framework steps")
 
-def generate_robot_code(robot_test: RobotTest) -> str:
-    """Generates the content of a .robot file from a RobotTest object."""
-    code = "*** Settings ***\n"
-    code += "Library    SeleniumLibrary\n\n"
-    code += "*** Test Cases ***\n"
-    code += "User Defined Test\n"
-    code += "    [Documentation]    Test case generated from user query\n"
+async def generate_robot_code_with_llm(robot_test: RobotTest, model: str) -> str:
+    """
+    Generates the full content of a .robot file using an LLM.
+    """
+    llm = ChatGoogle(model=model)
 
-    for step in robot_test.steps:
-        # A simple way to format the line, might need improvement
-        line = f"    {step.keyword}"
-        if step.locator:
-            line += f"    {step.locator}"
-        if step.value:
-            line += f"    {step.value}"
-        if step.keyword == "Open Browser":
-            line += f"    browser={BROWSER_NAME}"
-            line += "    options=add_argument('--no-sandbox');add_argument('--disable-dev-shm-usage')"
-        code += line + "\n"
+    # Convert the robot_test object to a JSON string for the prompt
+    steps_json = robot_test.model_dump_json(indent=2)
 
-    return code
+    prompt = f"""
+    You are an expert in Robot Framework. Your task is to generate a complete and valid .robot file based on a list of steps provided in JSON format.
+
+    The generated file must include all necessary sections: `*** Settings ***`, `*** Test Cases ***`.
+    Under `*** Settings ***`, you must include `Library    SeleniumLibrary`.
+    The test case should be named "User Defined Test".
+
+    Here is the JSON object containing the test steps:
+    {steps_json}
+
+    Please generate the full .robot file content. Do not include any explanations or markdown formatting in your response, only the raw Robot Framework code.
+    """
+
+    response = await llm.ainvoke([UserMessage(content=prompt)])
+    return response.completion.strip()
 
 
-@app.post('/generate-and-run-test')
-async def generate_and_run_test(query: Query):
-    user_query = query.query
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Query not provided")
-
-    # Mock result from agent.run()
-    result = """
-{
-    "steps": [
-        {
-            "keyword": "Open Browser",
-            "locator": "https://www.google.com/search?q=Robot+Framework",
-            "value": "browser=chrome"
-        },
-        {
-            "keyword": "Close Browser",
-            "locator": "",
-            "value": ""
-        }
-    ]
-}
-"""
-
-    if result:
-        robot_test = RobotTest.model_validate_json(result)
-        robot_code = generate_robot_code(robot_test)
-
-        # Save the robot code to a file
-        robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
-        os.makedirs(robot_tests_dir, exist_ok=True)
-        test_filename = get_next_test_filename(robot_tests_dir)
-        test_filepath = os.path.join(robot_tests_dir, test_filename)
-        with open(test_filepath, 'w') as f:
-            f.write(robot_code)
-
-        # Run the test directly
-        try:
-            run_command = ["robot", test_filename]
-            process = await asyncio.create_subprocess_exec(
-                *run_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=robot_tests_dir
-            )
-            stdout, stderr = await process.communicate()
-
-            logs = stdout.decode() + stderr.decode()
-
-            return {'robot_code': robot_code, 'logs': logs}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail={"error": "An unexpected error occurred", "details": str(e)})
-    else:
-        raise HTTPException(status_code=500, detail="Failed to generate Robot Framework steps")
 
 def get_next_test_filename(directory: str) -> str:
     """
