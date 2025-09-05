@@ -5,3 +5,4 @@ robotframework-seleniumlibrary
 docker
 pydantic
 google-generativeai
+ollama

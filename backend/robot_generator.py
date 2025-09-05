@@ -5,6 +5,7 @@ import time
 from typing import List, Optional
 from pydantic import BaseModel, Field
 import google.generativeai as genai
+import ollama
 
 # --- Pydantic Models for Agent Communication ---
 # These models define the "contracts" for data passed between agents.
@@ -22,9 +23,9 @@ class LocatedStep(PlannedStep):
 
 # --- Agent Implementations ---
 
-def agent_step_planner(query: str, model_name: str) -> List[PlannedStep]:
+def agent_step_planner(query: str, model_provider: str, model_name: str) -> List[PlannedStep]:
     """Agent 1 (AI): Breaks the query into a structured plan of high-level steps."""
-    logging.info("Step Planner: Analyzing query.")
+    logging.info(f"Step Planner: Analyzing query with {model_provider} model '{model_name}'.")
     prompt = f"""
     You are an expert test automation planner for Robot Framework. Your task is to break down a natural language query into a structured series of high-level test steps.
     The user query is: "{query}"
@@ -59,39 +60,50 @@ def agent_step_planner(query: str, model_name: str) -> List[PlannedStep]:
     ]
     """
     try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+        if model_provider == "local":
+            response = ollama.chat(
+                model=model_name,
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.0},
+                format="json"
+            )
+            cleaned_response = response['message']['content']
+        else: # Default to online
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+
         planned_steps_json = json.loads(cleaned_response)
         return [PlannedStep(**step) for step in planned_steps_json]
     except Exception as e:
-        logging.error(f"Step Planner Agent failed: {e}\nResponse was:\n{response.text}")
+        raw_response = ""
+        if model_provider == "local" and 'response' in locals():
+            raw_response = response['message']['content']
+        elif 'response' in locals():
+            raw_response = response.text
+        logging.error(f"Step Planner Agent failed: {e}\nRaw response was:\n{raw_response}")
         return []
 
-def agent_element_identifier(steps: List[PlannedStep], model_name: str) -> List[LocatedStep]:
+def agent_element_identifier(steps: List[PlannedStep], model_provider: str, model_name: str) -> List[LocatedStep]:
     """Agent 2 (AI): For each step, finds the best locator for the described element."""
-    logging.info("Element Identifier: Finding locators for planned steps.")
+    logging.info(f"Element Identifier: Finding locators with {model_provider} model '{model_name}'.")
     located_steps = []
-    # Read the configurable delay from environment variables, defaulting to 0 if not set.
     delay_seconds = int(os.getenv("SECONDS_BETWEEN_API_CALLS", "0"))
 
     for i, step in enumerate(steps):
         if step.element_description:
-            # Add a delay before making the API call, but skip it for the very first item.
             if i > 0 and delay_seconds > 0:
-                logging.info(f"Element Identifier: Waiting for {delay_seconds} second(s) to avoid rate limiting.")
+                logging.info(f"Element Identifier: Waiting for {delay_seconds} second(s).")
                 time.sleep(delay_seconds)
 
             prompt = f"""
             You are an expert in Selenium and Robot Framework locators. Your task is to find the best, most stable locator for a given web element based on its description.
-
             The element is described as: "{step.element_description}"
             The action to be performed is: "{step.step_description}"
             The value associated with the action is: "{step.value or 'N/A'}"
 
             Respond with a single JSON object with one key: "locator".
-            The value must be a valid Robot Framework locator string (e.g., "id=search-bar", "name=q", "css=.search-button", "xpath=//a[1]").
-            Be as specific and stable as possible.
+            The value must be a valid Robot Framework locator string.
 
             Example 1:
             - Element Description: "the search button"
@@ -108,16 +120,31 @@ def agent_element_identifier(steps: List[PlannedStep], model_name: str) -> List[
             Now, provide the JSON response for the element described above.
             """
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+                if model_provider == "local":
+                    response = ollama.chat(
+                        model=model_name,
+                        messages=[{'role': 'user', 'content': prompt}],
+                        options={'temperature': 0.0},
+                        format="json"
+                    )
+                    cleaned_response = response['message']['content']
+                else: # Default to online
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+
                 locator_json = json.loads(cleaned_response)
                 located_steps.append(LocatedStep(**step.model_dump(), locator=locator_json.get("locator")))
             except Exception as e:
-                logging.error(f"Element Identifier Agent failed for step '{step.step_description}': {e}\nResponse was:\n{response.text}")
-                located_steps.append(LocatedStep(**step.model_dump(), locator=None)) # Proceed without locator on failure
+                raw_response = ""
+                if model_provider == "local" and 'response' in locals():
+                    raw_response = response['message']['content']
+                elif 'response' in locals():
+                    raw_response = response.text
+                logging.error(f"Element Identifier Agent failed for step '{step.step_description}': {e}\nRaw response was:\n{raw_response}")
+                located_steps.append(LocatedStep(**step.model_dump(), locator=None))
         else:
-            located_steps.append(LocatedStep(**step.model_dump())) # Pass through steps without elements
+            located_steps.append(LocatedStep(**step.model_dump()))
     return located_steps
 
 def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
@@ -142,25 +169,28 @@ def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
 
 # --- Orchestrator ---
 
-def run_agentic_workflow(natural_language_query: str, model_name: str) -> Optional[str]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Optional[str]:
     """
     Orchestrates the multi-agent workflow to generate Robot Framework code.
     """
     logging.info("--- Starting Multi-Agent Workflow ---")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        logging.error("Orchestrator: GEMINI_API_KEY not found.")
-        raise ValueError("GEMINI_API_KEY not found in environment variables.")
-    genai.configure(api_key=api_key)
+
+    # Configure online provider if used
+    if model_provider == "online":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            logging.error("Orchestrator: GEMINI_API_KEY not found for online provider.")
+            raise ValueError("GEMINI_API_KEY not found in environment variables.")
+        genai.configure(api_key=api_key)
 
     # Agent 1: Plan
-    planned_steps = agent_step_planner(natural_language_query, model_name)
+    planned_steps = agent_step_planner(natural_language_query, model_provider, model_name)
     if not planned_steps:
         logging.error("Orchestrator: Step Planner failed. Aborting.")
         return None
 
     # Agent 2: Identify Locators
-    located_steps = agent_element_identifier(planned_steps, model_name)
+    located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
     if not located_steps:
         logging.error("Orchestrator: Element Identifier failed. Aborting.")
         return None

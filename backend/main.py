@@ -40,14 +40,28 @@ async def read_root():
 @app.post('/generate-and-run')
 async def generate_and_run(query: Query):
     user_query = query.query
-    model = query.model
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
 
-    logging.info(f"Received query: '{user_query}' for model '{model}'. Starting agentic workflow...")
+    # Determine the model provider and model name
+    model_provider = os.getenv("MODEL_PROVIDER", "online").lower()
+    if model_provider == "local":
+        model_name = os.getenv("LOCAL_MODEL", "llama3")
+        logging.info(f"Using local model provider: {model_name}")
+    else:
+        # Fallback to online model, using the request body if env var is not set
+        model_name = os.getenv("ONLINE_MODEL", query.model)
+        logging.info(f"Using online model provider: {model_name}")
+
+
+    logging.info(f"Received query: '{user_query}' for model '{model_name}'. Starting agentic workflow...")
 
     # Call our new agentic workflow to generate the code
-    robot_code = run_agentic_workflow(user_query, model)
+    robot_code = run_agentic_workflow(
+        natural_language_query=user_query,
+        model_provider=model_provider,
+        model_name=model_name
+    )
 
     if not robot_code:
         logging.error("Agentic workflow failed to generate Robot Framework code.")
@@ -87,14 +101,14 @@ async def generate_and_run(query: Query):
         logs = container_logs.decode('utf-8')
         logging.info("Docker container finished execution.")
 
-        return {'model_used': model, 'robot_code': robot_code, 'logs': logs}
+        return {'model_used': model_name, 'robot_code': robot_code, 'logs': logs}
 
     except docker.errors.BuildError as e:
         logging.error(f"Docker build failed: {e}")
-        return {'model_used': model, 'robot_code': robot_code, 'logs': f"Docker build failed: {e}"}
+        return {'model_used': model_name, 'robot_code': robot_code, 'logs': f"Docker build failed: {e}"}
     except docker.errors.ContainerError as e:
         logging.error(f"Docker container failed: {e}")
-        return {'model_used': model, 'robot_code': robot_code, 'logs': f"Docker container exited with error: {e.stderr.decode('utf-8')}"}
+        return {'model_used': model_name, 'robot_code': robot_code, 'logs': f"Docker container exited with error: {e.stderr.decode('utf-8')}"}
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
