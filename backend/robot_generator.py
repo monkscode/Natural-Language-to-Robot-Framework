@@ -1,85 +1,172 @@
-import re
+import os
+import json
+import logging
+import time
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+import google.generativeai as genai
 
-# --- Pydantic Models ---
-class RobotStep(BaseModel):
-    keyword: str
-    locator: Optional[str] = None
-    value: Optional[str] = None
+# --- Pydantic Models for Agent Communication ---
+# These models define the "contracts" for data passed between agents.
 
-class RobotTest(BaseModel):
-    steps: List[RobotStep]
-    teardown: Optional[str] = None
+class PlannedStep(BaseModel):
+    """The output of the Step-Planning Agent."""
+    step_description: str = Field(description="A high-level description of a single action to perform.")
+    element_description: Optional[str] = Field(None, description="The description of the UI element to interact with, if any.")
+    value: Optional[str] = Field(None, description="The value to be used in the action, e.g., text to input or a URL.")
+    keyword: str = Field(description="The suggested Robot Framework keyword to use for this step (e.g., 'Input Text', 'Click Element').")
 
-# --- Agent Functions ---
-def analyze_query(natural_language_query: str) -> dict:
-    """Agent 1: Analyzes the query to extract key information."""
-    query_lower = natural_language_query.lower()
-    search_term_match = re.search(r"search for '(.+?)'", query_lower)
-    if "google" in query_lower and search_term_match:
-        original_search_term_match = re.search(r"search for '(.+?)'", natural_language_query, re.IGNORECASE)
-        if original_search_term_match:
-            return {"test_type": "web_search", "search_term": original_search_term_match.group(1)}
-    return {}
+class LocatedStep(PlannedStep):
+    """The output of the Element-Identification Agent."""
+    locator: Optional[str] = Field(None, description="The Robot Framework locator for the element (e.g., 'id=search-bar').")
 
-def find_best_locator(element_description: str) -> Optional[str]:
-    """Agent 2: Finds the best locator for an element."""
-    if "search input" in element_description.lower():
-        return '[aria-label="Search"]'
-    return None
+# --- Agent Implementations ---
 
-def create_test_from_analysis(analysis: dict) -> RobotTest:
-    """Agent 3: Creates a structured RobotTest object."""
-    steps = []
-    teardown = None
-    if analysis.get("test_type") == "web_search":
-        search_term = analysis["search_term"]
-        input_locator = find_best_locator("the search input")
-        steps.extend([
-            RobotStep(keyword="Open Browser", value=f"https://www.google.com    chrome"),
-            RobotStep(keyword="Input Text", locator=input_locator, value=search_term),
-            RobotStep(keyword="Press Keys", locator=input_locator, value="ENTER"),
-            RobotStep(keyword="Wait Until Page Contains", value=search_term),
-            RobotStep(keyword="Title Should Be", value=f"{search_term} - Google Search")
-        ])
-        teardown = "Close Browser"
-    return RobotTest(steps=steps, teardown=teardown)
+def agent_step_planner(query: str, model_name: str) -> List[PlannedStep]:
+    """Agent 1 (AI): Breaks the query into a structured plan of high-level steps."""
+    logging.info("Step Planner: Analyzing query.")
+    prompt = f"""
+    You are an expert test automation planner for Robot Framework. Your task is to break down a natural language query into a structured series of high-level test steps.
+    The user query is: "{query}"
 
-def generate_robot_code(robot_test: RobotTest) -> str:
-    """Agent 4: Generates Robot Framework code by manually building the string."""
-    lines = ["*** Settings ***", "Library    SeleniumLibrary", "", "*** Test Cases ***", "User Defined Test"]
-    for step in robot_test.steps:
+    Respond with a JSON array of objects. Each object must have the following keys:
+    - "step_description": A clear, high-level description of the action (e.g., "Navigate to a URL", "Input text into a field", "Click an element").
+    - "element_description": A description of the UI element involved (e.g., "the search input field", "the search button"). This can be null if the action doesn't involve an element.
+    - "value": The value to use, such as a URL or the text to type. This can be null.
+    - "keyword": The most appropriate Robot Framework keyword from SeleniumLibrary for this action. Examples: 'Open Browser', 'Input Text', 'Click Element', 'Press Keys', 'Title Should Be'.
+
+    Example Query: "go to google.com and search for 'robot framework'"
+    Example JSON Response:
+    [
+        {{
+            "step_description": "Navigate to a URL",
+            "element_description": null,
+            "value": "https://www.google.com",
+            "keyword": "Open Browser"
+        }},
+        {{
+            "step_description": "Input text into the search field",
+            "element_description": "the search input field",
+            "value": "robot framework",
+            "keyword": "Input Text"
+        }},
+        {{
+            "step_description": "Press the ENTER key on the search field",
+            "element_description": "the search input field",
+            "value": "ENTER",
+            "keyword": "Press Keys"
+        }}
+    ]
+    """
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+        planned_steps_json = json.loads(cleaned_response)
+        return [PlannedStep(**step) for step in planned_steps_json]
+    except Exception as e:
+        logging.error(f"Step Planner Agent failed: {e}\nResponse was:\n{response.text}")
+        return []
+
+def agent_element_identifier(steps: List[PlannedStep], model_name: str) -> List[LocatedStep]:
+    """Agent 2 (AI): For each step, finds the best locator for the described element."""
+    logging.info("Element Identifier: Finding locators for planned steps.")
+    located_steps = []
+    # Read the configurable delay from environment variables, defaulting to 0 if not set.
+    delay_seconds = int(os.getenv("SECONDS_BETWEEN_API_CALLS", "0"))
+
+    for i, step in enumerate(steps):
+        if step.element_description:
+            # Add a delay before making the API call, but skip it for the very first item.
+            if i > 0 and delay_seconds > 0:
+                logging.info(f"Element Identifier: Waiting for {delay_seconds} second(s) to avoid rate limiting.")
+                time.sleep(delay_seconds)
+
+            prompt = f"""
+            You are an expert in Selenium and Robot Framework locators. Your task is to find the best, most stable locator for a given web element based on its description.
+
+            The element is described as: "{step.element_description}"
+            The action to be performed is: "{step.step_description}"
+            The value associated with the action is: "{step.value or 'N/A'}"
+
+            Respond with a single JSON object with one key: "locator".
+            The value must be a valid Robot Framework locator string (e.g., "id=search-bar", "name=q", "css=.search-button", "xpath=//a[1]").
+            Be as specific and stable as possible.
+
+            Example 1:
+            - Element Description: "the search button"
+            - JSON Response: {{"locator": "css=button[aria-label='Google Search']"}}
+
+            Example 2:
+            - Element Description: "the first video in the search results"
+            - JSON Response: {{"locator": "xpath=(//ytd-video-renderer)[1]"}}
+
+            Example 3:
+            - Element Description: "the search input field"
+            - JSON Response: {{"locator": "name=search_query"}}
+
+            Now, provide the JSON response for the element described above.
+            """
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+                locator_json = json.loads(cleaned_response)
+                located_steps.append(LocatedStep(**step.model_dump(), locator=locator_json.get("locator")))
+            except Exception as e:
+                logging.error(f"Element Identifier Agent failed for step '{step.step_description}': {e}\nResponse was:\n{response.text}")
+                located_steps.append(LocatedStep(**step.model_dump(), locator=None)) # Proceed without locator on failure
+        else:
+            located_steps.append(LocatedStep(**step.model_dump())) # Pass through steps without elements
+    return located_steps
+
+def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
+    """Agent 3 (Logic): Assembles the final Robot Framework code from the structured steps."""
+    logging.info("Code Assembler: Building the final .robot file.")
+    lines = [
+        "*** Settings ***",
+        "Library    SeleniumLibrary",
+        "",
+        "*** Test Cases ***",
+        f"Test Case From Query: {query}"
+    ]
+    for step in steps:
         line = f"    {step.keyword}"
         if step.locator:
             line += f"    {step.locator}"
         if step.value:
             line += f"    {step.value}"
         lines.append(line)
-    if robot_test.teardown:
-        lines.append(f"    [Teardown]    {robot_test.teardown}")
+    lines.append("    [Teardown]    Close Browser")
     return "\n".join(lines)
 
-def review_generated_code(robot_code: str) -> bool:
-    """Agent 5: Validates the generated Robot Framework code."""
-    if "*** Settings ***" not in robot_code or "*** Test Cases ***" not in robot_code:
-        return False
-    return True
+# --- Orchestrator ---
 
-# --- Main Workflow Function ---
-def run_agentic_workflow(natural_language_query: str) -> Optional[str]:
+def run_agentic_workflow(natural_language_query: str, model_name: str) -> Optional[str]:
     """
-    Orchestrates the agentic workflow to generate Robot Framework code.
-    Returns the generated code as a string, or None if any step fails.
+    Orchestrates the multi-agent workflow to generate Robot Framework code.
     """
-    analysis_result = analyze_query(natural_language_query)
-    if not analysis_result:
+    logging.info("--- Starting Multi-Agent Workflow ---")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logging.error("Orchestrator: GEMINI_API_KEY not found.")
+        raise ValueError("GEMINI_API_KEY not found in environment variables.")
+    genai.configure(api_key=api_key)
+
+    # Agent 1: Plan
+    planned_steps = agent_step_planner(natural_language_query, model_name)
+    if not planned_steps:
+        logging.error("Orchestrator: Step Planner failed. Aborting.")
         return None
 
-    robot_test_object = create_test_from_analysis(analysis_result)
-    robot_code = generate_robot_code(robot_test_object)
-
-    if not review_generated_code(robot_code):
+    # Agent 2: Identify Locators
+    located_steps = agent_element_identifier(planned_steps, model_name)
+    if not located_steps:
+        logging.error("Orchestrator: Element Identifier failed. Aborting.")
         return None
 
+    # Agent 3: Assemble Code
+    robot_code = agent_code_assembler(located_steps, natural_language_query)
+
+    logging.info("--- Multi-Agent Workflow Complete ---")
     return robot_code

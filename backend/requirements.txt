@@ -4,3 +4,4 @@ python-dotenv
 robotframework-seleniumlibrary
 docker
 pydantic
+google-generativeai

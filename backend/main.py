@@ -21,6 +21,7 @@ logging.info("Environment variables loaded.")
 # --- Pydantic Models ---
 class Query(BaseModel):
     query: str
+    model: str = "gemini-1.5-pro-latest"
 
 # --- FastAPI App ---
 app = FastAPI()
@@ -39,13 +40,14 @@ async def read_root():
 @app.post('/generate-and-run')
 async def generate_and_run(query: Query):
     user_query = query.query
+    model = query.model
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
 
-    logging.info(f"Received query: '{user_query}'. Starting agentic workflow...")
+    logging.info(f"Received query: '{user_query}' for model '{model}'. Starting agentic workflow...")
 
     # Call our new agentic workflow to generate the code
-    robot_code = run_agentic_workflow(user_query)
+    robot_code = run_agentic_workflow(user_query, model)
 
     if not robot_code:
         logging.error("Agentic workflow failed to generate Robot Framework code.")
@@ -85,14 +87,14 @@ async def generate_and_run(query: Query):
         logs = container_logs.decode('utf-8')
         logging.info("Docker container finished execution.")
 
-        return {'model_used': 'Custom Agentic Workflow', 'robot_code': robot_code, 'logs': logs}
+        return {'model_used': model, 'robot_code': robot_code, 'logs': logs}
 
     except docker.errors.BuildError as e:
         logging.error(f"Docker build failed: {e}")
-        return {'model_used': 'Custom Agentic Workflow', 'robot_code': robot_code, 'logs': f"Docker build failed: {e}"}
+        return {'model_used': model, 'robot_code': robot_code, 'logs': f"Docker build failed: {e}"}
     except docker.errors.ContainerError as e:
         logging.error(f"Docker container failed: {e}")
-        return {'model_used': 'Custom Agentic Workflow', 'robot_code': robot_code, 'logs': f"Docker container exited with error: {e.stderr.decode('utf-8')}"}
+        return {'model_used': model, 'robot_code': robot_code, 'logs': f"Docker container exited with error: {e.stderr.decode('utf-8')}"}
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
