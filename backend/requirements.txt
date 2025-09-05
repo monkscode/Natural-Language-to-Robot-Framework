@@ -1,10 +1,6 @@
 fastapi
 uvicorn
-browser-use
 python-dotenv
 robotframework-seleniumlibrary
 docker
-Jinja2
-langchain-community
-langchain-ollama
-google-generativeai
+pydantic
