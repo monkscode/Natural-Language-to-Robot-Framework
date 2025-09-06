@@ -96,3 +96,13 @@ If a test fails, you can find detailed information in the `robot_tests` director
 -   `output.xml`: The machine-readable XML output from Robot Framework.
 
 Simply open `log.html` in your browser to get a complete picture of the failure.
+
+---
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+We welcome contributions to this project! Please see the [CONTRIBUTING.md](CONTRIBUTING.md) file for details on how to get started and to review our contributor license agreement.
