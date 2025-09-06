@@ -27,55 +27,48 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
     """Agent 1 (AI): Breaks the query into a structured plan of high-level steps."""
     logging.info(f"Step Planner: Analyzing query with {model_provider} model '{model_name}'.")
     prompt = f"""
-    You are an expert test automation planner for Robot Framework. Your task is to break down a natural language query into a structured series of high-level test steps.
+    You are an expert test automation planner for Robot Framework. Your task is to break down a natural language query into a structured series of high-level test steps. You must convert ALL actions mentioned in the query into a step. Do not drop or ignore any part of the query.
+
     The user query is: "{query}"
 
-    Respond with a JSON array of objects. Each object must have the following keys:
-    - "step_description": A clear, high-level description of the action (e.g., "Navigate to a URL", "Input text into a field", "Click an element").
-    - "element_description": A description of the UI element involved (e.g., "the search input field", "the search button"). This can be null if the action doesn't involve an element.
-    - "value": The value to use, such as a URL or the text to type. This can be null.
-    - "keyword": The most appropriate Robot Framework keyword from SeleniumLibrary for this action. Examples: 'Open Browser', 'Input Text', 'Click Element', 'Press Keys', 'Title Should Be'.
-
-    IMPORTANT RULE: If the query involves a web search (e.g., "search for X", "look up Y") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL in this step.
+    --- RULES ---
+    1.  Respond with a JSON array of objects. Each object represents a single test step.
+    2.  Each object must have keys: "step_description", "element_description", "value", and "keyword".
+    3.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
+    4.  When generating an "Open Browser" step, you MUST also include the `browser=chrome` argument and options to ensure a clean session. Use `options=add_argument("--headless");add_argument("--no-sandbox")`.
 
     --- EXAMPLES ---
 
-    Example Query 1: "go to google.com and search for 'robot framework'"
+    Example Query 1: "go to aqa.science and click the login button"
     Example JSON Response 1:
     [
         {{
             "step_description": "Navigate to a URL",
             "element_description": null,
-            "value": "https://www.google.com",
+            "value": "https://aqa.science  browser=chrome  options=add_argument(\"--headless\");add_argument(\"--no-sandbox\")",
             "keyword": "Open Browser"
         }},
         {{
-            "step_description": "Input text into the search field",
-            "element_description": "the search input field",
-            "value": "robot framework",
-            "keyword": "Input Text"
-        }},
-        {{
-            "step_description": "Press the ENTER key on the search field",
-            "element_description": "the search input field",
-            "value": "ENTER",
-            "keyword": "Press Keys"
+            "step_description": "Click the login button",
+            "element_description": "the login button",
+            "value": null,
+            "keyword": "Click Element"
         }}
     ]
 
-    Example Query 2: "search for funny cat videos"
+    Example Query 2: "search for dhruvil vyas and then close the browser"
     Example JSON Response 2:
     [
         {{
             "step_description": "Navigate to a search engine",
             "element_description": null,
-            "value": "https://www.google.com",
+            "value": "https://www.google.com    browser=chrome",
             "keyword": "Open Browser"
         }},
         {{
             "step_description": "Input the search term into the search bar",
             "element_description": "the search input field",
-            "value": "funny cat videos",
+            "value": "dhruvil vyas",
             "keyword": "Input Text"
         }},
         {{
@@ -85,6 +78,8 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
             "keyword": "Press Keys"
         }}
     ]
+
+    Now, process the user query following all rules and generate the JSON response.
     """
     try:
         if model_provider == "local":
@@ -223,28 +218,45 @@ def agent_code_validator(code: str, model_provider: str, model_name: str) -> Val
     {code}
     ```
 
-    Check for common syntax errors, such as:
-    - Keywords being called with the wrong number of arguments. For example, `Open Browser` requires a `url` and optionally a `browser`. `Input Text` requires a `locator` and the `text` to input.
-    - Malformed settings, variables, or test case tables.
-    - Incorrect indentation or spacing.
+    --- VALIDATION RULES ---
+    1. Check for common syntax errors like incorrect indentation or malformed tables.
+    2. Ensure keywords are called with the correct number of mandatory arguments.
+    3. **CRITICAL RULE:** The `Open Browser` keyword MUST be called with the `browser=chrome` argument.
+    4. **CRITICAL RULE:** The `Open Browser` keyword MUST include the headless and no-sandbox options, like `options=add_argument("--headless");add_argument("--no-sandbox")`.
 
     Respond with a single JSON object with two keys:
     1. "valid": A boolean (`true` or `false`).
     2. "reason": A brief, one-sentence explanation for your decision.
 
+    --- EXAMPLES ---
+
     Example 1 (Valid Code):
     - Input Code:
         *** Test Cases ***
         My Test
-            Open Browser    https://google.com
-    - JSON Response: {{"valid": true, "reason": "The code appears to be syntactically valid."}}
+            Open Browser    https://google.com    browser=chrome    options=add_argument("--headless");add_argument("--no-sandbox")
+    - JSON Response: {{"valid": true, "reason": "The code appears to be syntactically valid and follows all rules."}}
 
-    Example 2 (Invalid Code):
+    Example 2 (Invalid - Missing URL):
     - Input Code:
         *** Test Cases ***
         My Test
-            Open Browser
+            Open Browser    browser=chrome    options=add_argument("--headless");add_argument("--no-sandbox")
     - JSON Response: {{"valid": false, "reason": "The keyword 'Open Browser' is missing its mandatory 'url' argument."}}
+
+    Example 3 (Invalid - Missing Browser):
+    - Input Code:
+        *** Test Cases ***
+        My Test
+            Open Browser    https://google.com    options=add_argument("--headless");add_argument("--no-sandbox")
+    - JSON Response: {{"valid": false, "reason": "The 'Open Browser' keyword is missing the required 'browser=chrome' argument."}}
+
+    Example 4 (Invalid - Missing Options):
+    - Input Code:
+        *** Test Cases ***
+        My Test
+            Open Browser    https://google.com    browser=chrome
+    - JSON Response: {{"valid": false, "reason": "The 'Open Browser' keyword is missing the required 'options' argument for headless/no-sandbox."}}
 
     Now, provide the validation result for the code provided above.
     """
