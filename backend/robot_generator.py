@@ -73,8 +73,13 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
             response = model.generate_content(prompt)
             cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
 
-        planned_steps_json = json.loads(cleaned_response)
-        return [PlannedStep(**step) for step in planned_steps_json]
+        planned_steps_data = json.loads(cleaned_response)
+
+        # Handle both single object and list of objects
+        if isinstance(planned_steps_data, dict):
+            planned_steps_data = [planned_steps_data]
+
+        return [PlannedStep(**step) for step in planned_steps_data]
     except Exception as e:
         raw_response = ""
         if model_provider == "local" and 'response' in locals():
@@ -133,8 +138,15 @@ def agent_element_identifier(steps: List[PlannedStep], model_provider: str, mode
                     response = model.generate_content(prompt)
                     cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
 
-                locator_json = json.loads(cleaned_response)
-                located_steps.append(LocatedStep(**step.model_dump(), locator=locator_json.get("locator")))
+                locator_data = json.loads(cleaned_response)
+
+                # Handle both single object and list of objects
+                if isinstance(locator_data, dict):
+                    locator_data = [locator_data]
+
+                final_locator = locator_data[0].get("locator") if isinstance(locator_data, list) and locator_data and isinstance(locator_data[0], dict) else None
+
+                located_steps.append(LocatedStep(**step.model_dump(), locator=final_locator))
             except Exception as e:
                 raw_response = ""
                 if model_provider == "local" and 'response' in locals():
