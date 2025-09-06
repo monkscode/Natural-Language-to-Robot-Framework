@@ -4,12 +4,15 @@ FROM python:3.9-slim
 # Set working directory
 WORKDIR /app
 
-# Install Google Chrome
-RUN apt-get update && apt-get install -y wget gnupg
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-RUN sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-RUN apt-get -y update
-RUN apt-get install -y google-chrome-stable
+# Install Google Chrome and other dependencies
+RUN apt-get update && \
+    apt-get install -y wget gnupg && \
+    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y google-chrome-stable && \
+    # Clean up apt lists to reduce image size
+    rm -rf /var/lib/apt/lists/*
 
 # Install Robot Framework and SeleniumLibrary
 RUN pip install robotframework robotframework-seleniumlibrary
