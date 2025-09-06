@@ -626,8 +626,8 @@
                 }
 
                 setButtonLoading(true);
-                robotCodeEl.innerHTML = '';
-                executionLogsEl.innerHTML = '';
+                robotCodeEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><p>Generated Robot Framework code will appear here</p></div>';
+                executionLogsEl.innerHTML = ''; // Clear previous logs
                 downloadBtn.style.display = 'none';
                 robotCodeContent = '';
 
@@ -687,19 +687,40 @@
                 updateStatus('processing', data.message);
 
                 if (data.stage === 'generation') {
-                    if (data.status === 'complete' && data.robot_code) {
+                    // Display running logs for generation stage
+                    if (data.status === 'running') {
+                        const logEntry = document.createElement('div');
+                        logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
+                        executionLogsEl.appendChild(logEntry);
+                        executionLogsEl.scrollTop = executionLogsEl.scrollHeight; // Auto-scroll
+                    } else if (data.status === 'complete' && data.robot_code) {
                         robotCodeContent = data.robot_code;
                         robotCodeEl.textContent = robotCodeContent;
                         downloadBtn.style.display = 'inline-flex';
+                        // Clear generation logs and prepare for execution logs
+                        executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
                     } else if (data.status === 'error') {
                         updateStatus('error', 'Generation failed');
                         robotCodeEl.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>${data.message}</p></div>`;
+                        const errorEntry = document.createElement('div');
+                        errorEntry.style.color = 'var(--error)';
+                        errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
+                        executionLogsEl.appendChild(errorEntry);
                         hideStatus();
                     }
                 } else if (data.stage === 'execution') {
-                    if (data.status === 'complete' && data.result) {
+                    // When execution starts, clear the placeholder and show the first real log
+                    if (executionLogsEl.querySelector('.empty-state')) {
+                        executionLogsEl.innerHTML = '';
+                    }
+                    if (data.status === 'running') {
+                        const logEntry = document.createElement('div');
+                        logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
+                        executionLogsEl.appendChild(logEntry);
+                        executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+                    } else if (data.status === 'complete' && data.result) {
                         const logs = data.result.logs || 'No execution logs available';
-                        executionLogsEl.textContent = logs;
+                        executionLogsEl.textContent = logs; // Replace with final, full logs
                         if (logs.includes('PASSED')) {
                             updateStatus('success', 'Test passed');
                         } else {
@@ -708,7 +729,10 @@
                         hideStatus();
                     } else if (data.status === 'error') {
                         updateStatus('error', 'Execution failed');
-                        executionLogsEl.textContent = data.message;
+                        const errorEntry = document.createElement('div');
+                        errorEntry.style.color = 'var(--error)';
+                        errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
+                        executionLogsEl.appendChild(errorEntry);
                         hideStatus();
                     }
                 }

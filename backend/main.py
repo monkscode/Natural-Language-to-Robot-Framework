@@ -9,6 +9,9 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import asyncio
+from queue import Queue, Empty
+from threading import Thread
 
 # Import the new agentic workflow orchestrator
 from backend.robot_generator import run_agentic_workflow
@@ -37,29 +40,72 @@ app.add_middleware(
 )
 
 # --- Main Endpoint ---
-async def stream_generate_and_run(user_query: str, model_name: str):
-    """Generator function to stream logs and results."""
-
-    # Stage 1: Generating Code
-    yield f"data: {json.dumps({'stage': 'generation', 'status': 'running', 'message': 'AI agents are analyzing your query...'})}\n\n"
-
+def run_workflow_in_thread(queue, user_query, model_provider, model_name):
+    """Runs the synchronous agentic workflow and puts results in a queue."""
     try:
-        model_provider = os.getenv("MODEL_PROVIDER", "online").lower()
-        robot_code = run_agentic_workflow(
-            natural_language_query=user_query,
-            model_provider=model_provider,
-            model_name=model_name
-        )
-        if not robot_code:
-            raise Exception("Agentic workflow failed to generate Robot Framework code.")
-
-        yield f"data: {json.dumps({'stage': 'generation', 'status': 'complete', 'message': 'Code generation complete.', 'robot_code': robot_code})}\n\n"
+        for event in run_agentic_workflow(user_query, model_provider, model_name):
+            queue.put(event)
     except Exception as e:
-        logging.error(f"Error during code generation: {e}")
-        yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': str(e)})}\n\n"
-        return
+        logging.error(f"Exception in workflow thread: {e}")
+        queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
-    # Stage 2: Docker Execution
+async def stream_generate_and_run(user_query: str, model_name: str):
+    """
+    Generator function that streams logs and results, with a heartbeat
+    to prevent timeouts and buffer flushing issues.
+    """
+    robot_code = None
+    model_provider = os.getenv("MODEL_PROVIDER", "online").lower()
+    q = Queue()
+
+    # Run the synchronous workflow in a separate thread
+    workflow_thread = Thread(
+        target=run_workflow_in_thread,
+        args=(q, user_query, model_provider, model_name)
+    )
+    workflow_thread.start()
+
+    # --- Stage 1: Generating Code ---
+    while workflow_thread.is_alive():
+        try:
+            event = q.get_nowait()
+            event_data = {'stage': 'generation', **event}
+            yield f"data: {json.dumps(event_data)}\n\n"
+
+            if event.get("status") == "complete" and "robot_code" in event:
+                robot_code = event["robot_code"]
+                # Generation is done, we can break this loop and move to execution
+                workflow_thread.join() # Ensure thread is cleaned up
+                break
+            elif event.get("status") == "error":
+                logging.error(f"Error during code generation: {event.get('message')}")
+                workflow_thread.join()
+                return
+        except Empty:
+            # Send a heartbeat comment to keep the connection open
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+
+    # In case the thread finished but we didn't get the code
+    if not robot_code:
+        # Check the queue one last time
+        while not q.empty():
+            event = q.get_nowait()
+            event_data = {'stage': 'generation', **event}
+            yield f"data: {json.dumps(event_data)}\n\n"
+            if event.get("status") == "complete" and "robot_code" in event:
+                robot_code = event["robot_code"]
+            elif event.get("status") == "error":
+                return # Error was already sent
+
+        if not robot_code:
+            final_error_message = "Agentic workflow finished without generating code."
+            logging.error(final_error_message)
+            yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
+            return
+
+
+    # --- Stage 2: Docker Execution ---
     run_id = str(uuid.uuid4())
     robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests', run_id)
     os.makedirs(robot_tests_dir, exist_ok=True)

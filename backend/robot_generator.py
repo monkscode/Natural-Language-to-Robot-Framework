@@ -288,12 +288,13 @@ def agent_code_validator(code: str, model_provider: str, model_name: str) -> Val
 
 # --- Orchestrator ---
 
-def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Optional[str]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str):
     """
     Orchestrates the multi-agent workflow to generate Robot Framework code,
-    including a self-correction loop.
+    yielding progress updates and the final code.
     """
     logging.info("--- Starting Multi-Agent Workflow ---")
+    yield {"status": "running", "message": "Starting agentic workflow..."}
     MAX_ATTEMPTS = 3
 
     # Configure online provider if used
@@ -301,40 +302,51 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             logging.error("Orchestrator: GEMINI_API_KEY not found for online provider.")
-            raise ValueError("GEMINI_API_KEY not found in environment variables.")
+            yield {"status": "error", "message": "GEMINI_API_KEY not found."}
+            return
         genai.configure(api_key=api_key)
 
-    # The initial query for the first attempt
     current_query = natural_language_query
 
     for attempt in range(MAX_ATTEMPTS):
         logging.info(f"--- Attempt {attempt + 1} of {MAX_ATTEMPTS} ---")
+        yield {"status": "running", "message": f"Starting attempt {attempt + 1}/{MAX_ATTEMPTS}..."}
 
         # Agent 1: Plan
+        yield {"status": "running", "message": "Agent 1/4: Planning test steps..."}
         planned_steps = agent_step_planner(current_query, model_provider, model_name)
         if not planned_steps:
             logging.error("Orchestrator: Step Planner failed. Aborting.")
-            return None
+            yield {"status": "error", "message": "Failed to generate a test plan."}
+            return
+        yield {"status": "running", "message": "Agent 1/4: Test step planning complete."}
 
         # Agent 2: Identify Locators
+        yield {"status": "running", "message": "Agent 2/4: Identifying UI element locators..."}
         located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
         if not located_steps:
             logging.error("Orchestrator: Element Identifier failed. Aborting.")
-            return None
+            yield {"status": "error", "message": "Failed to identify UI element locators."}
+            return
+        yield {"status": "running", "message": "Agent 2/4: UI element locator identification complete."}
 
         # Agent 3: Assemble Code
+        yield {"status": "running", "message": "Agent 3/4: Assembling Robot Framework code..."}
         robot_code = agent_code_assembler(located_steps, natural_language_query)
+        yield {"status": "running", "message": "Agent 3/4: Code assembly complete."}
 
         # Agent 4: Validate
+        yield {"status": "running", "message": "Agent 4/4: Validating generated code..."}
         validation = agent_code_validator(robot_code, model_provider, model_name)
+        yield {"status": "running", "message": "Agent 4/4: Code validation complete."}
 
         if validation.valid:
             logging.info("Code validation successful. Workflow complete.")
-            logging.info("--- Multi-Agent Workflow Complete ---")
-            return robot_code
+            yield {"status": "complete", "robot_code": robot_code, "message": "Code generation successful."}
+            return
         else:
             logging.warning(f"Code validation failed. Reason: {validation.reason}")
-            # Prepare for the next attempt by creating a corrective query
+            yield {"status": "running", "message": f"Validation failed: {validation.reason}. Attempting self-correction..."}
             current_query = f"""
             The previous attempt to generate a test plan failed validation.
             The user's original query was: "{natural_language_query}"
@@ -349,5 +361,4 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info("Attempting self-correction...")
 
     logging.error("Orchestrator: Failed to generate valid code after multiple attempts.")
-    logging.info("--- Multi-Agent Workflow Failed ---")
-    return None
+    yield {"status": "error", "message": "Failed to generate valid code after multiple attempts."}
