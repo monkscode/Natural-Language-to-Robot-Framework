@@ -1,6 +1,6 @@
-# Mark 1: AI-Powered Test Automation Framework
+# Natural Language to Robot Framework
 
-**Mark 1** is a sophisticated, AI-driven framework that translates natural language test cases into executable Robot Framework code. It leverages a multi-agent system to interpret, plan, validate, and self-correct test automation scripts, providing a seamless experience for testers and developers.
+This project is a sophisticated, AI-driven framework that translates natural language test cases into executable Robot Framework code. It leverages a multi-agent system to interpret, plan, validate, and self-correct test automation scripts, providing a seamless experience for testers and developers.
 
 ---
 
