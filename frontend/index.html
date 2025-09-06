@@ -3,23 +3,752 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Natural Language to Robot Framework</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Mark 1 - AI Test Automation Platform</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --secondary: #64748b;
+            --success: #059669;
+            --warning: #d97706;
+            --error: #dc2626;
+            --gray-50: #f8fafc;
+            --gray-100: #f1f5f9;
+            --gray-200: #e2e8f0;
+            --gray-300: #cbd5e1;
+            --gray-400: #94a3b8;
+            --gray-500: #64748b;
+            --gray-600: #475569;
+            --gray-700: #334155;
+            --gray-800: #1e293b;
+            --gray-900: #0f172a;
+            --white: #ffffff;
+            --border-radius: 8px;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--gray-50);
+            color: var(--gray-800);
+            line-height: 1.6;
+        }
+
+        .navbar {
+            background: var(--white);
+            border-bottom: 1px solid var(--gray-200);
+            padding: 1rem 0;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .nav-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--primary);
+            border-radius: var(--border-radius);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--white);
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .logo-text {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+
+        .nav-info {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            color: var(--gray-600);
+            font-size: 0.875rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .main-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 3rem 2rem;
+        }
+
+        .hero {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            color: var(--gray-900);
+            margin-bottom: 1rem;
+            letter-spacing: -0.025em;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--gray-600);
+            max-width: 600px;
+            margin: 0 auto 2rem;
+        }
+
+        .capabilities {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .capability {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--gray-600);
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .capability-icon {
+            width: 20px;
+            height: 20px;
+            color: var(--primary);
+        }
+
+        .workspace {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 3rem;
+            margin-bottom: 3rem;
+        }
+
+        .section {
+            background: var(--white);
+            border: 1px solid var(--gray-200);
+            border-radius: 12px;
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+        }
+
+        .section-header {
+            background: var(--gray-50);
+            border-bottom: 1px solid var(--gray-200);
+            padding: 1.5rem 2rem;
+        }
+
+        .section-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: var(--gray-900);
+            margin-bottom: 0.25rem;
+        }
+
+        .section-subtitle {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+        }
+
+        .section-content {
+            padding: 2rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--gray-700);
+            margin-bottom: 0.5rem;
+        }
+
+        .form-input {
+            width: 100%;
+            min-height: 150px;
+            padding: 1rem;
+            border: 1px solid var(--gray-300);
+            border-radius: var(--border-radius);
+            font-size: 0.875rem;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgb(37 99 235 / 0.1);
+        }
+
+        .form-input::placeholder {
+            color: var(--gray-400);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: var(--border-radius);
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: var(--white);
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-primary:disabled {
+            background: var(--gray-300);
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: var(--gray-100);
+            color: var(--gray-700);
+            border: 1px solid var(--gray-300);
+        }
+
+        .btn-secondary:hover {
+            background: var(--gray-200);
+        }
+
+        .btn-full {
+            width: 100%;
+        }
+
+        .btn-loading {
+            position: relative;
+        }
+
+        .btn-loading .btn-text {
+            opacity: 0;
+        }
+
+        .btn-spinner {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid var(--white);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .code-block {
+            background: var(--gray-900);
+            color: #e2e8f0;
+            padding: 1.5rem;
+            border-radius: var(--border-radius);
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.8125rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .code-block::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .code-block::-webkit-scrollbar-track {
+            background: var(--gray-800);
+        }
+
+        .code-block::-webkit-scrollbar-thumb {
+            background: var(--gray-600);
+            border-radius: 3px;
+        }
+
+        .logs-block {
+            background: var(--gray-50);
+            color: var(--gray-700);
+            padding: 1.5rem;
+            border-radius: var(--border-radius);
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.8125rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--gray-200);
+        }
+
+        .logs-block::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .logs-block::-webkit-scrollbar-track {
+            background: var(--gray-100);
+        }
+
+        .logs-block::-webkit-scrollbar-thumb {
+            background: var(--gray-300);
+            border-radius: 3px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+
+        .status-processing {
+            background: rgb(245 158 11 / 0.1);
+            color: var(--warning);
+        }
+
+        .status-success {
+            background: rgb(5 150 105 / 0.1);
+            color: var(--success);
+        }
+
+        .status-error {
+            background: rgb(220 38 38 / 0.1);
+            color: var(--error);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--gray-400);
+        }
+
+        .empty-state-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+
+        .result-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .download-success {
+            background: var(--success) !important;
+            color: var(--white) !important;
+        }
+
+        @media (max-width: 1024px) {
+            .workspace {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+
+            .capabilities {
+                flex-wrap: wrap;
+                gap: 1rem;
+            }
+
+            .nav-info {
+                display: none;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .main-content {
+                padding: 2rem 1rem;
+            }
+
+            .hero h1 {
+                font-size: 2rem;
+            }
+
+            .hero p {
+                font-size: 1rem;
+            }
+
+            .section-content {
+                padding: 1.5rem;
+            }
+
+            .capabilities {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Natural Language to Robot Framework</h1>
-        <p>Enter your test case in plain English below.</p>
-        <textarea id="query-input" placeholder="e.g., Open browser to google.com, search for 'Robot Framework', and then close the browser."></textarea>
-        <button id="generate-btn">Generate & Run</button>
-        <div id="results-container">
-            <h2>Generated Robot Code</h2>
-            <pre id="robot-code"></pre>
-            <button id="download-btn" style="display:none;">Download .robot file</button>
-            <h2>Execution Logs</h2>
-            <pre id="execution-logs"></pre>
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="logo">
+                <div class="logo-icon">M1</div>
+                <div class="logo-text">Mark 1</div>
+            </div>
+            <div class="nav-info">
+                <div class="status-dot"></div>
+                <span>AI System Online</span>
+                <span>•</span>
+                <span>Multi-Agent Pipeline</span>
+            </div>
         </div>
-    </div>
-    <script src="script.js"></script>
+    </nav>
+
+    <main class="main-content">
+        <div class="hero">
+            <h1>AI Test Automation Platform</h1>
+            <p>Transform natural language descriptions into executable Robot Framework tests using our advanced multi-agent AI system.</p>
+
+            <div class="capabilities">
+                <div class="capability">
+                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                    </svg>
+                    <span>Intelligent Code Generation</span>
+                </div>
+                <div class="capability">
+                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>Self-Correcting Validation</span>
+                </div>
+                <div class="capability">
+                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M9 9h6"></path>
+                    </svg>
+                    <span>Containerized Execution</span>
+                </div>
+                <div class="capability">
+                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>Real-time Results</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="workspace">
+            <div class="section">
+                <div class="section-header">
+                    <div class="section-title">Test Description</div>
+                    <div class="section-subtitle">Describe your test scenario in plain English</div>
+                </div>
+                <div class="section-content">
+                    <div class="form-group">
+                        <label for="query-input" class="form-label">What would you like to test?</label>
+                        <textarea
+                            id="query-input"
+                            class="form-input"
+                            placeholder="Examples:
+
+• Open Google, search for 'Robot Framework tutorials', and click the first result
+• Navigate to GitHub, search for 'selenium automation', and explore the most starred repository
+• Go to YouTube, search for 'Python automation', filter by upload date, and play the first video
+• Visit Amazon, search for 'wireless headphones', filter by rating, and add the top result to cart"
+                        ></textarea>
+                    </div>
+                    <button id="generate-btn" class="btn btn-primary btn-full">
+                        <span class="btn-text">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"></path>
+                            </svg>
+                            Generate & Execute Test
+                        </span>
+                        <div class="btn-spinner" style="display: none;"></div>
+                    </button>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <div class="result-actions">
+                        <div>
+                            <div class="section-title">Generated Code</div>
+                            <div class="section-subtitle">Robot Framework test script</div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <div id="status-badge" class="status-badge" style="display: none;">
+                                <div class="status-dot"></div>
+                                <span id="status-text">Processing</span>
+                            </div>
+                            <button id="download-btn" class="btn btn-secondary" style="display: none;">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                Download
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="section-content">
+                    <div id="robot-code" class="code-block">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">⚡</div>
+                            <p>Generated Robot Framework code will appear here</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Execution Results</div>
+                <div class="section-subtitle">Real-time test execution logs and results</div>
+            </div>
+            <div class="section-content">
+                <div id="execution-logs" class="logs-block">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📋</div>
+                        <p>Test execution logs will appear here</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const queryInput = document.getElementById('query-input');
+            const generateBtn = document.getElementById('generate-btn');
+            const robotCodeEl = document.getElementById('robot-code');
+            const executionLogsEl = document.getElementById('execution-logs');
+            const downloadBtn = document.getElementById('download-btn');
+            const statusBadge = document.getElementById('status-badge');
+            const statusText = document.getElementById('status-text');
+
+            let robotCodeContent = '';
+
+            function updateStatus(status, text) {
+                statusBadge.style.display = 'flex';
+                statusBadge.className = `status-badge status-${status}`;
+                statusText.textContent = text;
+            }
+
+            function hideStatus() {
+                setTimeout(() => {
+                    statusBadge.style.display = 'none';
+                }, 5000);
+            }
+
+            function setButtonLoading(loading) {
+                const btnText = generateBtn.querySelector('.btn-text');
+                const btnSpinner = generateBtn.querySelector('.btn-spinner');
+
+                if (loading) {
+                    generateBtn.classList.add('btn-loading');
+                    btnSpinner.style.display = 'block';
+                    generateBtn.disabled = true;
+                } else {
+                    generateBtn.classList.remove('btn-loading');
+                    btnSpinner.style.display = 'none';
+                    generateBtn.disabled = false;
+                }
+            }
+
+            // Auto-resize textarea
+            queryInput.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.max(150, this.scrollHeight) + 'px';
+            });
+
+            generateBtn.addEventListener('click', async () => {
+                const query = queryInput.value.trim();
+                if (!query) {
+                    queryInput.focus();
+                    queryInput.style.borderColor = 'var(--error)';
+                    setTimeout(() => {
+                        queryInput.style.borderColor = '';
+                    }, 2000);
+                    return;
+                }
+
+                setButtonLoading(true);
+                robotCodeEl.innerHTML = '';
+                executionLogsEl.innerHTML = '';
+                downloadBtn.style.display = 'none';
+                robotCodeContent = '';
+
+                try {
+                    const requestPayload = {
+                        query: query,
+                        model: "gemini-1.5-pro-latest"
+                    };
+
+                    const response = await fetch('http://localhost:5000/generate-and-run', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'text/event-stream'
+                        },
+                        body: JSON.stringify(requestPayload),
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value);
+                        const lines = chunk.split('\n\n');
+
+                        for (const line of lines) {
+                            if (line.startsWith('data:')) {
+                                const jsonData = line.substring(5);
+                                if (jsonData.trim()) {
+                                    try {
+                                        const data = JSON.parse(jsonData);
+                                        handleStreamedData(data);
+                                    } catch (e) {
+                                        console.error('Failed to parse JSON from stream:', jsonData);
+                                    }
+                                 }
+                            }
+                        }
+                    }
+                } catch (error) {
+                    updateStatus('error', 'Request failed');
+                    executionLogsEl.textContent = `Error: ${error.message}`;
+                    hideStatus();
+                } finally {
+                    setButtonLoading(false);
+                }
+            });
+
+            function handleStreamedData(data) {
+                updateStatus('processing', data.message);
+
+                if (data.stage === 'generation') {
+                    if (data.status === 'complete' && data.robot_code) {
+                        robotCodeContent = data.robot_code;
+                        robotCodeEl.textContent = robotCodeContent;
+                        downloadBtn.style.display = 'inline-flex';
+                    } else if (data.status === 'error') {
+                        updateStatus('error', 'Generation failed');
+                        robotCodeEl.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>${data.message}</p></div>`;
+                        hideStatus();
+                    }
+                } else if (data.stage === 'execution') {
+                    if (data.status === 'complete' && data.result) {
+                        const logs = data.result.logs || 'No execution logs available';
+                        executionLogsEl.textContent = logs;
+                        if (logs.includes('PASSED')) {
+                            updateStatus('success', 'Test passed');
+                        } else {
+                            updateStatus('error', 'Test failed');
+                        }
+                        hideStatus();
+                    } else if (data.status === 'error') {
+                        updateStatus('error', 'Execution failed');
+                        executionLogsEl.textContent = data.message;
+                        hideStatus();
+                    }
+                }
+            }
+
+            downloadBtn.addEventListener('click', () => {
+                const blob = new Blob([robotCodeContent], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'generated_test.robot';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                // Success feedback
+                downloadBtn.classList.add('download-success');
+                const originalHTML = downloadBtn.innerHTML;
+                downloadBtn.innerHTML = `
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                    </svg>
+                    Downloaded
+                `;
+
+                setTimeout(() => {
+                    downloadBtn.classList.remove('download-success');
+                    downloadBtn.innerHTML = originalHTML;
+                }, 2000);
+            });
+
+            // Keyboard shortcut
+            queryInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    generateBtn.click();
+                }
+            });
+        });
+    </script>
 </body>
 </html>
