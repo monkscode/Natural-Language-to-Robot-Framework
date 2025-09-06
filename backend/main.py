@@ -67,7 +67,8 @@ async def generate_and_run(query: Query):
         logging.error("Agentic workflow failed to generate Robot Framework code.")
         raise HTTPException(status_code=500, detail="Failed to generate valid Robot Framework code from the query.")
 
-    logging.info("Agentic workflow completed successfully. Running test in Docker...")
+    logging.info(f"Generated Robot Code:\n{robot_code}")
+    logging.info("Attempting to run test in Docker...")
 
     # --- Docker Execution ---
     robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
@@ -82,16 +83,27 @@ async def generate_and_run(query: Query):
 
     try:
         client = docker.from_env()
-        image_tag = f"robot-test-runner:{uuid.uuid4()}"
+        image_tag = "robot-test-runner:latest"
 
-        logging.info(f"Building Docker image: {image_tag}")
+        logging.info(f"Building Docker image '{image_tag}' (if not already cached)...")
         client.images.build(path=robot_tests_dir, tag=image_tag, rm=True)
+        logging.info("Docker image build process completed.")
 
         logging.info(f"Running Docker container with test: {test_filename}")
+
+        # Command to execute inside the container.
+        # We specify an output directory so that logs are written to the mounted volume.
+        robot_command = [
+            "robot",
+            "--outputdir", "/app/robot_tests",
+            f"robot_tests/{test_filename}"
+        ]
+
+        # Run the container with the volume mounted as read-write.
         container_logs = client.containers.run(
             image=image_tag,
-            command=["robot", test_filename],
-            volumes={os.path.abspath(robot_tests_dir): {'bind': '/app', 'mode': 'ro'}},
+            command=robot_command,
+            volumes={os.path.abspath(robot_tests_dir): {'bind': '/app/robot_tests', 'mode': 'rw'}},
             working_dir="/app",
             stderr=True,
             stdout=True,
@@ -99,7 +111,10 @@ async def generate_and_run(query: Query):
             auto_remove=True
         )
         logs = container_logs.decode('utf-8')
-        logging.info("Docker container finished execution.")
+        logging.info("Docker container finished execution successfully.")
+
+        # On success, also include a hint about where to find the detailed logs.
+        logs += "\n\n--- Robot Framework HTML logs (log.html, report.html) are available in the 'robot_tests' directory. ---"
 
         return {'model_used': model_name, 'robot_code': robot_code, 'logs': logs}
 
@@ -108,7 +123,17 @@ async def generate_and_run(query: Query):
         return {'model_used': model_name, 'robot_code': robot_code, 'logs': f"Docker build failed: {e}"}
     except docker.errors.ContainerError as e:
         logging.error(f"Docker container failed: {e}")
-        return {'model_used': model_name, 'robot_code': robot_code, 'logs': f"Docker container exited with error: {e.stderr.decode('utf-8')}"}
+        error_logs = f"Docker container exited with error code {e.exit_status}.\n"
+
+        # The output from the container should be in the 'logs' attribute of the exception
+        if hasattr(e, 'logs') and e.logs:
+            error_logs += f"Container Logs:\n{e.logs.decode('utf-8', errors='ignore')}"
+        else:
+            error_logs += "No logs were captured from the container."
+
+        error_logs += "\n\n--- Robot Framework HTML logs (log.html, report.html) may be available in the 'robot_tests' directory for inspection. ---"
+
+        return {'model_used': model_name, 'robot_code': robot_code, 'logs': error_logs}
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))

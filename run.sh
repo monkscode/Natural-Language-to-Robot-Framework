@@ -7,16 +7,26 @@ if [ ! -f "backend/.env" ]; then
     exit 1
 fi
 
+# Cross-platform venv activation and path handling
+VENV_DIR="venv"
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    # Windows (using Git Bash, Cygwin, etc.)
+    VENV_ACTIVATE="$VENV_DIR/Scripts/activate"
+else
+    # Linux, macOS
+    VENV_ACTIVATE="$VENV_DIR/bin/activate"
+fi
+
 # Check if venv exists and is valid
-if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
+if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     echo "Using existing virtual environment..."
-    source venv/bin/activate
+    source "$VENV_ACTIVATE"
 else
     echo "Creating new virtual environment..."
     # Remove invalid venv if it exists
-    [ -d "venv" ] && rm -rf venv
-    python -m venv venv
-    source venv/bin/activate
+    [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
+    python -m venv "$VENV_DIR"
+    source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install -r backend/requirements.txt
 fi

@@ -36,8 +36,12 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
     - "value": The value to use, such as a URL or the text to type. This can be null.
     - "keyword": The most appropriate Robot Framework keyword from SeleniumLibrary for this action. Examples: 'Open Browser', 'Input Text', 'Click Element', 'Press Keys', 'Title Should Be'.
 
-    Example Query: "go to google.com and search for 'robot framework'"
-    Example JSON Response:
+    IMPORTANT RULE: If the query involves a web search (e.g., "search for X", "look up Y") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL in this step.
+
+    --- EXAMPLES ---
+
+    Example Query 1: "go to google.com and search for 'robot framework'"
+    Example JSON Response 1:
     [
         {{
             "step_description": "Navigate to a URL",
@@ -53,6 +57,29 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
         }},
         {{
             "step_description": "Press the ENTER key on the search field",
+            "element_description": "the search input field",
+            "value": "ENTER",
+            "keyword": "Press Keys"
+        }}
+    ]
+
+    Example Query 2: "search for funny cat videos"
+    Example JSON Response 2:
+    [
+        {{
+            "step_description": "Navigate to a search engine",
+            "element_description": null,
+            "value": "https://www.google.com",
+            "keyword": "Open Browser"
+        }},
+        {{
+            "step_description": "Input the search term into the search bar",
+            "element_description": "the search input field",
+            "value": "funny cat videos",
+            "keyword": "Input Text"
+        }},
+        {{
+            "step_description": "Press the ENTER key to start the search",
             "element_description": "the search input field",
             "value": "ENTER",
             "keyword": "Press Keys"
@@ -179,13 +206,83 @@ def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
     lines.append("    [Teardown]    Close Browser")
     return "\n".join(lines)
 
+
+class ValidationResult(BaseModel):
+    """The output of the Code-Validation Agent."""
+    valid: bool = Field(description="True if the code is valid, False otherwise.")
+    reason: str = Field(description="A brief explanation of why the code is valid or invalid.")
+
+def agent_code_validator(code: str, model_provider: str, model_name: str) -> ValidationResult:
+    """Agent 4 (AI): Validates the generated Robot Framework code for correctness."""
+    logging.info(f"Code Validator: Validating code with {model_provider} model '{model_name}'.")
+    prompt = f"""
+    You are an expert Robot Framework linter and quality assurance engineer. Your sole task is to validate the following Robot Framework code.
+
+    The code to validate is:
+    ```robotframework
+    {code}
+    ```
+
+    Check for common syntax errors, such as:
+    - Keywords being called with the wrong number of arguments. For example, `Open Browser` requires a `url` and optionally a `browser`. `Input Text` requires a `locator` and the `text` to input.
+    - Malformed settings, variables, or test case tables.
+    - Incorrect indentation or spacing.
+
+    Respond with a single JSON object with two keys:
+    1. "valid": A boolean (`true` or `false`).
+    2. "reason": A brief, one-sentence explanation for your decision.
+
+    Example 1 (Valid Code):
+    - Input Code:
+        *** Test Cases ***
+        My Test
+            Open Browser    https://google.com
+    - JSON Response: {{"valid": true, "reason": "The code appears to be syntactically valid."}}
+
+    Example 2 (Invalid Code):
+    - Input Code:
+        *** Test Cases ***
+        My Test
+            Open Browser
+    - JSON Response: {{"valid": false, "reason": "The keyword 'Open Browser' is missing its mandatory 'url' argument."}}
+
+    Now, provide the validation result for the code provided above.
+    """
+    try:
+        if model_provider == "local":
+            response = ollama.chat(
+                model=model_name,
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.0},
+                format="json"
+            )
+            cleaned_response = response['message']['content']
+        else: # Default to online
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
+
+        validation_data = json.loads(cleaned_response)
+        return ValidationResult(**validation_data)
+    except Exception as e:
+        raw_response = ""
+        if model_provider == "local" and 'response' in locals():
+            raw_response = response['message']['content']
+        elif 'response' in locals():
+            raw_response = response.text
+        logging.error(f"Code Validator Agent failed: {e}\nRaw response was:\n{raw_response}")
+        # If validation fails due to an exception, assume the code is invalid.
+        return ValidationResult(valid=False, reason=f"Validator agent threw an exception: {e}")
+
 # --- Orchestrator ---
 
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Optional[str]:
     """
-    Orchestrates the multi-agent workflow to generate Robot Framework code.
+    Orchestrates the multi-agent workflow to generate Robot Framework code,
+    including a self-correction loop.
     """
     logging.info("--- Starting Multi-Agent Workflow ---")
+    MAX_ATTEMPTS = 3
 
     # Configure online provider if used
     if model_provider == "online":
@@ -195,20 +292,50 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             raise ValueError("GEMINI_API_KEY not found in environment variables.")
         genai.configure(api_key=api_key)
 
-    # Agent 1: Plan
-    planned_steps = agent_step_planner(natural_language_query, model_provider, model_name)
-    if not planned_steps:
-        logging.error("Orchestrator: Step Planner failed. Aborting.")
-        return None
+    # The initial query for the first attempt
+    current_query = natural_language_query
 
-    # Agent 2: Identify Locators
-    located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
-    if not located_steps:
-        logging.error("Orchestrator: Element Identifier failed. Aborting.")
-        return None
+    for attempt in range(MAX_ATTEMPTS):
+        logging.info(f"--- Attempt {attempt + 1} of {MAX_ATTEMPTS} ---")
 
-    # Agent 3: Assemble Code
-    robot_code = agent_code_assembler(located_steps, natural_language_query)
+        # Agent 1: Plan
+        planned_steps = agent_step_planner(current_query, model_provider, model_name)
+        if not planned_steps:
+            logging.error("Orchestrator: Step Planner failed. Aborting.")
+            return None
 
-    logging.info("--- Multi-Agent Workflow Complete ---")
-    return robot_code
+        # Agent 2: Identify Locators
+        located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
+        if not located_steps:
+            logging.error("Orchestrator: Element Identifier failed. Aborting.")
+            return None
+
+        # Agent 3: Assemble Code
+        robot_code = agent_code_assembler(located_steps, natural_language_query)
+
+        # Agent 4: Validate
+        validation = agent_code_validator(robot_code, model_provider, model_name)
+
+        if validation.valid:
+            logging.info("Code validation successful. Workflow complete.")
+            logging.info("--- Multi-Agent Workflow Complete ---")
+            return robot_code
+        else:
+            logging.warning(f"Code validation failed. Reason: {validation.reason}")
+            # Prepare for the next attempt by creating a corrective query
+            current_query = f"""
+            The previous attempt to generate a test plan failed validation.
+            The user's original query was: "{natural_language_query}"
+            The generated code was:
+            ```robotframework
+            {robot_code}
+            ```
+            The validation error was: "{validation.reason}"
+
+            Please analyze the error and the original query, then generate a new, corrected plan.
+            """
+            logging.info("Attempting self-correction...")
+
+    logging.error("Orchestrator: Failed to generate valid code after multiple attempts.")
+    logging.info("--- Multi-Agent Workflow Failed ---")
+    return None
