@@ -1,75 +1,98 @@
-# Natural Language to Robot Framework
+# Mark 1: AI-Powered Test Automation Framework
 
-This project is a web application that converts natural language commands into Robot Framework code. The application uses a local Large Language Model (LLM) served by Ollama to understand the user's query and generate the corresponding Robot Framework steps. The generated code is then executed in a Docker container, and the results are displayed to the user.
+**Mark 1** is a sophisticated, AI-driven framework that translates natural language test cases into executable Robot Framework code. It leverages a multi-agent system to interpret, plan, validate, and self-correct test automation scripts, providing a seamless experience for testers and developers.
 
-## Features
+---
 
--   Convert natural language to Robot Framework code.
--   Execute the generated code in a Docker container.
--   User-friendly web interface.
--   Downloadable Robot Framework files.
+## Key Features
 
-## Setup
+-   **Natural Language Conversion:** Simply describe a test case in plain English, and Mark 1 will generate the corresponding Robot Framework script.
+-   **Multi-Agent System:** Utilizes a robust pipeline of specialized AI agents (Planner, Identifier, Validator) to ensure high-quality code generation.
+-   **Self-Correction Loop:** If the generated code is syntactically incorrect, the system automatically attempts to fix its own mistakes, significantly improving reliability.
+-   **Containerized Execution:** Tests are executed in a clean, isolated Docker container, guaranteeing consistency and eliminating the "it works on my machine" problem.
+-   **Flexible Model Support:** Seamlessly switch between local LLMs (via Ollama) and powerful online models like Google's Gemini for maximum flexibility.
+-   **Detailed Debugging:** Automatically saves detailed HTML logs and reports from every test run, allowing for easy inspection and debugging of test failures.
 
-### 1. Install Ollama
+---
 
-This project uses a local LLM served by [Ollama](https://ollama.ai/).
+## Architecture Overview
 
-1.  Download and install Ollama from the official website.
-2.  Pull the model you want to use. We recommend `llama3`.
+Mark 1 employs a sophisticated multi-agent workflow to ensure the generated code is both accurate and robust.
+
+1.  **Step Planner Agent:** The initial agent receives the natural language query. Its job is to decompose the query into a high-level, structured plan, identifying each distinct action required for the test case.
+2.  **Element Identifier Agent:** This agent takes the plan and, for each step involving a UI element, uses an AI model to determine the best and most stable web locator (e.g., CSS selector, XPath).
+3.  **Code Assembler Agent:** A deterministic agent that assembles the planned and located steps into a syntactically-structured `.robot` file.
+4.  **Validator Agent:** Before execution, this crucial agent inspects the generated code against a set of rules (e.g., ensuring keywords have the correct arguments).
+5.  **Self-Correction Orchestrator:** If the Validator Agent finds a flaw, the orchestrator feeds the error back to the Step Planner Agent, which then attempts to generate a corrected plan. This loop can run multiple times to resolve errors automatically.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+-   **Docker:** Required for running the containerized test execution environment. [Install Docker](https://docs.docker.com/get-docker/).
+-   **Python 3.9+**
+-   **(Optional) Ollama:** If you wish to use a local LLM, you must have Ollama installed and running. [Install Ollama](https://ollama.com/).
+
+### Installation & Setup
+
+1.  **Clone the Repository**
     ```bash
-    ollama pull llama3
-    ```
-3.  Ensure the Ollama server is running.
-
-### 2. Clone the repository
-
-```bash
-git clone <repository-url>
-cd <repository-directory>
-```
-
-### 3. Configure the environment
-
-Copy the `backend/.env.example` file to `backend/.env`:
-```bash
-cp backend/.env.example backend/.env
-```
-The `.env` file is used to configure the Ollama model and base URL. The default values are:
-```
-OLLAMA_MODEL=llama3
-OLLAMA_BASE_URL=http://localhost:11434
-```
-You can change these values if needed.
-
-### 4. Make the scripts executable
-    ```bash
-    chmod +x run.sh
-    chmod +x test.sh
+    git clone <repository-url>
+    cd <repository-directory>
     ```
 
-## Usage
+2.  **Configure Environment Variables**
+    Copy the example `.env` file:
+    ```bash
+    cp backend/.env.example backend/.env
+    ```
+    Now, edit `backend/.env` to configure your desired model provider.
 
-1.  **Run the application:**
+    **For Local Models (via Ollama):**
+    ```dotenv
+    MODEL_PROVIDER=local
+    LOCAL_MODEL=llama3 # The name of the model you have pulled with Ollama
+    ```
+
+    **For Online Models (Google Gemini):**
+    ```dotenv
+    MODEL_PROVIDER=online
+    GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+    # ONLINE_MODEL=gemini-1.5-pro-latest # (Optional) Specify a different Gemini model
+    ```
+
+3.  **Make Scripts Executable** (for Linux/macOS)
+    ```bash
+    chmod +x run.sh test.sh
+    ```
+
+### Running the Application
+
+1.  **Start the Server**
     ```bash
     ./run.sh
     ```
-    This script will automatically create a Python virtual environment, install the required dependencies into it, and then start the web application on `http://localhost:5000`.
+    This script automatically creates a Python virtual environment, installs all dependencies, and starts the FastAPI server on `http://localhost:5000`.
 
-2.  **Test the application:**
-    Open a new terminal and run the test script:
-    ```bash
-    ./test.sh
-    ```
-    This will send a sample request to the running application and print the response.
+2.  **Access the Web Interface**
+    Open your browser and navigate to `http://localhost:5000`.
 
-## How it Works
+---
 
-1.  The user enters a natural language query in the web interface.
-2.  The frontend sends the query to the backend.
-3.  The backend enhances the query using a local LLM (via Ollama) to create a detailed, step-by-step plan.
-4.  The backend uses the `browser-use` library, powered by the same local LLM, to convert the enhanced query into a structured list of Robot Framework steps.
-5.  The backend uses a Jinja2 template to generate a `.robot` file from the structured steps. This is a deterministic process that ensures the generated code is always valid.
-6.  The backend builds a dedicated Docker image for the test environment and runs the generated `.robot` file in a container.
-7.  The backend returns the generated Robot Framework code and the execution logs to the frontend.
-8.  The frontend displays the results to the user.
+## Usage
+
+1.  Enter your test case in plain English in the text area (e.g., "search for the latest news on google and verify the title").
+2.  Click "Generate and Run".
+3.  The backend will process the query, generate the Robot Framework code, and execute it in a Docker container.
+4.  The results, including the generated code and execution logs, will be displayed on the page.
+
+### Debugging Failed Tests
+
+If a test fails, you can find detailed information in the `robot_tests` directory. The framework automatically saves the following files from the container to your local machine:
+-   `log.html`: A detailed, step-by-step log of the test execution with expandable views.
+-   `report.html`: A high-level report of the test run.
+-   `output.xml`: The machine-readable XML output from Robot Framework.
+
+Simply open `log.html` in your browser to get a complete picture of the failure.
