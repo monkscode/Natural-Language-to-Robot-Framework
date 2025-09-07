@@ -240,6 +240,11 @@ def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
         if step.value:
             line += f"    {step.value}"
         lines.append(line)
+
+        # If the browser is opened, automatically maximize it
+        if step.keyword == "Open Browser":
+            lines.append("    Maximize Browser Window")
+
     lines.append("    [Teardown]    Close Browser")
     return "\n".join(lines)
 
