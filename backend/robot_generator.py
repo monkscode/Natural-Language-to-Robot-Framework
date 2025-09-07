@@ -165,29 +165,92 @@ def agent_element_identifier(steps: List[PlannedStep], model_provider: str, mode
                 logging.info(f"Element Identifier: Waiting for {delay_seconds} second(s).")
                 time.sleep(delay_seconds)
 
-            prompt = f"""
-            You are an expert in Selenium and Robot Framework locators. Your task is to find the best, most stable locator for a given web element based on its description.
-            The element is described as: "{step.element_description}"
-            The action to be performed is: "{step.step_description}"
-            The value associated with the action is: "{step.value or 'N/A'}"
+            prompt = f"""You are an expert web element locator specialist for Robot Framework automation. Your task is to generate the most reliable and stable locator for web elements based on their description.
 
-            Respond with a single JSON object with one key: "locator".
-            The value must be a valid Robot Framework locator string.
+<task_description>
+Your goal is to identify the best locator for a web element described as: "{step.element_description}"
+The action to be performed is: "{step.step_description}"
+The value/data to be used: "{step.value or 'N/A'}"
+</task_description>
 
-            Example 1:
-            - Element Description: "the search button"
-            - JSON Response: {{"locator": "css=button[aria-label='Google Search']"}}
+<locator_strategy>
+When creating locators, follow this priority order:
+1. **ID attributes** - Most stable (e.g., `id=submit-button`)
+2. **Name attributes** - Very stable (e.g., `name=username`)
+3. **Data attributes** - Stable (e.g., `css=[data-testid="login-btn"]`)
+4. **ARIA labels** - Accessible and stable (e.g., `css=[aria-label="Submit form"]`)
+5. **Class combinations** - Moderately stable (e.g., `css=.btn.btn-primary`)
+6. **Text content** - Fallback for buttons/links (e.g., `xpath=//button[text()="Submit"]`)
+7. **Partial text** - For dynamic content (e.g., `xpath=//button[contains(text(),"Submit")]`)
+8. **Structural position** - Last resort (e.g., `xpath=(//button)[1]`)
+</locator_strategy>
 
-            Example 2:
-            - Element Description: "the first video in the search results"
-            - JSON Response: {{"locator": "xpath=(//ytd-video-renderer)[1]"}}
+<locator_rules>
+- Always prefer CSS selectors over XPath when possible (faster execution)
+- Use XPath only when CSS cannot achieve the requirement
+- Avoid fragile locators like absolute positions or multiple nested classes
+- For input fields, prefer `name`, `id`, or `data-testid` attributes
+- For buttons, prefer `id`, `aria-label`, or stable text content
+- For links, prefer `id`, `href` patterns, or link text
+- Make locators as specific as needed but not overly complex
+- Consider element hierarchy only when necessary for uniqueness
+</locator_rules>
 
-            Example 3:
-            - Element Description: "the search input field"
-            - JSON Response: {{"locator": "name=search_query"}}
+<element_patterns>
+Common element patterns and their best locator strategies:
 
-            Now, provide the JSON response for the element described above.
-            """
+**Search boxes/Input fields:**
+- `id=search`, `name=q`, `css=[placeholder*="search"]`
+- `css=input[type="search"]`, `css=[data-testid="search-input"]`
+
+**Buttons:**
+- `id=submit`, `css=button[type="submit"]`, `css=[aria-label="Submit"]`
+- `xpath=//button[text()="Submit"]`, `css=.submit-btn`
+
+**Links:**
+- `id=login-link`, `css=a[href*="/login"]`, `link=Login`
+- `xpath=//a[contains(text(),"Login")]`
+
+**Form elements:**
+- `name=username`, `id=password`, `css=[data-field="email"]`
+- `css=input[type="email"]`, `css=select[name="country"]`
+
+**List items/Results:**
+- `css=.result-item:first-child`, `xpath=(//div[@class="result"])[1]`
+- `css=[data-index="0"]`, `xpath=//li[position()=1]`
+
+**Navigation elements:**
+- `css=nav a[href="/home"]`, `css=.navbar .menu-item`
+- `xpath=//nav//a[text()="Home"]`
+</element_patterns>
+
+<response_format>
+Respond with a single JSON object containing only the "locator" key.
+The locator value must be a valid Robot Framework locator string.
+
+Examples:
+{{"locator": "id=submit-button"}}
+{{"locator": "css=button[aria-label='Search']"}}
+{{"locator": "name=username"}}
+{{"locator": "xpath=//button[contains(text(),'Submit')]"}}
+{{"locator": "css=.search-input[placeholder*='Search']"}}
+</response_format>
+
+<reasoning_approach>
+1. Analyze the element description to understand the element type and purpose
+2. Consider the action being performed to ensure locator compatibility
+3. Choose the most stable locator strategy from the priority list
+4. Ensure the locator is specific enough to avoid ambiguity
+5. Verify the locator follows Robot Framework syntax
+
+For the element "{step.element_description}":
+- Element type: [Analyze what type of element this likely is]
+- Action context: {step.step_description}
+- Recommended strategy: [Choose from the priority order above]
+</reasoning_approach>
+
+Now generate the JSON response with the optimal locator for the described element."""
+
             try:
                 if model_provider == "local":
                     response = ollama.chat(
