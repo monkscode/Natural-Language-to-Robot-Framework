@@ -2,10 +2,52 @@ import os
 import json
 import logging
 import time
+import re
 from typing import List, Optional
 from pydantic import BaseModel, Field
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 import ollama
+
+
+# --- Gemini API Wrapper with Dynamic Retry Logic ---
+def call_gemini_with_retry(model, prompt: str, max_retries: int = 2):
+    """
+    Calls the Gemini API with a dynamic retry mechanism based on the API's feedback.
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            response = model.generate_content(prompt)
+            return response
+        except ResourceExhausted as e:
+            attempt += 1
+            error_message = str(e)
+
+            # Use regex to find the retry delay in the error message
+            match = re.search(r"retry_delay {\s*seconds: (\d+)\s*}", error_message)
+
+            if match:
+                wait_time = int(match.group(1)) + 1 # Add a 1-second buffer
+                logging.warning(
+                    f"Gemini API quota exceeded. Retrying after {wait_time} seconds (attempt {attempt}/{max_retries})."
+                )
+                time.sleep(wait_time)
+            else:
+                # If no specific delay is found, wait a default time or re-raise
+                logging.warning(
+                    f"Gemini API quota exceeded, but no retry_delay found. "
+                    f"Waiting 60 seconds before attempt {attempt}/{max_retries}."
+                )
+                time.sleep(60) # Fallback wait time
+
+        except Exception as e:
+            logging.error(f"An unexpected error occurred calling Gemini API: {e}")
+            raise e # Re-raise other exceptions immediately
+
+    logging.error(f"Gemini API call failed after {max_retries} attempts.")
+    raise Exception("Gemini API call failed after multiple retries.")
+
 
 # --- Pydantic Models for Agent Communication ---
 # These models define the "contracts" for data passed between agents.
@@ -92,7 +134,7 @@ def agent_step_planner(query: str, model_provider: str, model_name: str) -> List
             cleaned_response = response['message']['content']
         else: # Default to online
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = call_gemini_with_retry(model, prompt)
             cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
 
         planned_steps_data = json.loads(cleaned_response)
@@ -157,7 +199,7 @@ def agent_element_identifier(steps: List[PlannedStep], model_provider: str, mode
                     cleaned_response = response['message']['content']
                 else: # Default to online
                     model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(prompt)
+                    response = call_gemini_with_retry(model, prompt)
                     cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
 
                 locator_data = json.loads(cleaned_response)
@@ -271,7 +313,7 @@ def agent_code_validator(code: str, model_provider: str, model_name: str) -> Val
             cleaned_response = response['message']['content']
         else: # Default to online
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = call_gemini_with_retry(model, prompt)
             cleaned_response = response.text.strip().lstrip("```json").rstrip("```").strip()
 
         validation_data = json.loads(cleaned_response)

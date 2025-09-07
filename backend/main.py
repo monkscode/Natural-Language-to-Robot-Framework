@@ -26,7 +26,6 @@ logging.info("Environment variables loaded.")
 # --- Pydantic Models ---
 class Query(BaseModel):
     query: str
-    model: str = "gemini-1.5-pro-latest"
 
 # --- FastAPI App ---
 app = FastAPI()
@@ -169,11 +168,14 @@ async def generate_and_run_streaming(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = os.getenv("MODEL_PROVIDER", "online").lower()
+    model_name = "" # initialize
     if model_provider == "local":
-        model_name = os.getenv("LOCAL_MODEL", "llama3")
+        model_name = os.getenv("LOCAL_MODEL", "qwen2.5-coder:14b")
         logging.info(f"Using local model provider: {model_name}")
     else:
-        model_name = os.getenv("ONLINE_MODEL", query.model)
+        model_name = os.getenv("ONLINE_MODEL")
+        if not model_name:
+            raise HTTPException(status_code=500, detail="ONLINE_MODEL environment variable is not set.")
         logging.info(f"Using online model provider: {model_name}")
 
     return StreamingResponse(stream_generate_and_run(user_query, model_name), media_type="text/event-stream")
