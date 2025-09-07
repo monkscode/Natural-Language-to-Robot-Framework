@@ -244,9 +244,6 @@ def agent_code_assembler(steps: List[LocatedStep], query: str) -> str:
         # If the browser is opened, automatically maximize and handle consent pop-up
         if step.keyword == "Open Browser":
             lines.append("    Maximize Browser Window")
-            # This keyword will click the "Accept all" button on Google's consent form if it appears.
-            # If it does not appear, the test will continue without error.
-            lines.append("    Run Keyword And Ignore Error    Click Element    id=L2AGLb")
 
     lines.append("    [Teardown]    Close Browser")
     return "\n".join(lines)
