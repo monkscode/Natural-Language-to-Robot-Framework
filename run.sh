@@ -28,7 +28,8 @@ else
     python -m venv "$VENV_DIR"
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
-    pip install -r backend/requirements.txt
+    pip install uv
+    uv pip install -r backend/requirements.txt
 fi
 
 # Run the application
