@@ -298,10 +298,11 @@ async def docker_status():
             "error": str(e)
         }
     except Exception as e:
+        logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
         return {
             "status": "error",
             "docker_available": False,
-            "error": f"Unexpected error: {e}"
+            "error": "An unexpected error occurred."
         }
 
 # --- Static Files and Root Endpoint ---
