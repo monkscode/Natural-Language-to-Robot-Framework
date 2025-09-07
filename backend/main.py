@@ -114,7 +114,23 @@ async def stream_generate_and_run(user_query: str, model_name: str):
         f.write(robot_code)
 
     try:
-        client = docker.from_env()
+        # Check if Docker is available before proceeding
+        try:
+            client = docker.from_env()
+            # Test if Docker daemon is responsive
+            client.ping()
+        except docker.errors.DockerException as docker_err:
+            error_message = "Docker is not available. Please ensure Docker Desktop is installed and running."
+            if "CreateFile" in str(docker_err) or "file specified" in str(docker_err):
+                error_message += "\n\nWindows Error: Docker daemon is not accessible. This usually means:\n"
+                error_message += "1. Docker Desktop is not installed\n"
+                error_message += "2. Docker Desktop is not running\n"
+                error_message += "3. Docker service is not started\n\n"
+                error_message += "Please start Docker Desktop and try again."
+            logging.error(f"Docker connection failed: {docker_err}")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
+            return
+        
         image_tag = "robot-test-runner:latest"
         dockerfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
 
@@ -170,9 +186,18 @@ async def stream_generate_and_run(user_query: str, model_name: str):
     except docker.errors.BuildError as e:
         logging.error(f"Docker build failed: {e}")
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Docker build failed: {e}'})}\n\n"
+    except docker.errors.DockerException as e:
+        error_message = f"Docker error: {e}"
+        if "CreateFile" in str(e) or "file specified" in str(e):
+            error_message = "Docker connection lost during execution. Please ensure Docker Desktop is running and try again."
+        logging.error(f"Docker error during execution: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
     except Exception as e:
+        error_message = str(e)
+        if "CreateFile" in str(e) or "file specified" in str(e):
+            error_message = "System error: Docker is not accessible. Please ensure Docker Desktop is installed and running."
         logging.error(f"An unexpected error occurred during execution: {e}")
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
 
 
 @app.post('/generate-and-run')
