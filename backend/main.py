@@ -134,9 +134,24 @@ async def stream_generate_and_run(user_query: str, model_name: str):
         image_tag = "robot-test-runner:latest"
         dockerfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
 
-        # Stage 2a: Building Docker Image
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Building container image for test execution...'})}\n\n"
-        client.images.build(path=dockerfile_path, tag=image_tag, rm=True)
+        # Stage 2a: Check and Build Docker Image (only if needed)
+        try:
+            # Check if the image already exists
+            existing_image = client.images.get(image_tag)
+            logging.info(f"Docker image '{image_tag}' already exists. Skipping build.")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Using existing container image for test execution...'})}\n\n"
+        except docker.errors.ImageNotFound:
+            # Image doesn't exist, need to build it
+            logging.info(f"Docker image '{image_tag}' not found. Building new image.")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Building container image for test execution (first time only)...'})}\n\n"
+            try:
+                client.images.build(path=dockerfile_path, tag=image_tag, rm=True)
+                logging.info(f"Successfully built Docker image '{image_tag}'.")
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Container image built successfully!'})}\n\n"
+            except docker.errors.BuildError as build_err:
+                logging.error(f"Failed to build Docker image: {build_err}")
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Docker image build failed: {build_err}'})}\n\n"
+                return
 
         # Stage 2b: Running Docker Container
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Executing test inside the container...'})}\n\n"
@@ -218,6 +233,76 @@ async def generate_and_run_streaming(query: Query):
         logging.info(f"Using online model provider: {model_name}")
 
     return StreamingResponse(stream_generate_and_run(user_query, model_name), media_type="text/event-stream")
+
+@app.post('/rebuild-docker-image')
+async def rebuild_docker_image():
+    """Endpoint to force rebuild the Docker image when needed."""
+    try:
+        client = docker.from_env()
+        image_tag = "robot-test-runner:latest"
+        dockerfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'robot_tests')
+        
+        # Remove existing image if it exists
+        try:
+            existing_image = client.images.get(image_tag)
+            client.images.remove(image=image_tag, force=True)
+            logging.info(f"Removed existing Docker image '{image_tag}'.")
+        except docker.errors.ImageNotFound:
+            logging.info(f"No existing Docker image '{image_tag}' to remove.")
+        
+        # Build new image
+        logging.info(f"Building new Docker image '{image_tag}'.")
+        client.images.build(path=dockerfile_path, tag=image_tag, rm=True)
+        logging.info(f"Successfully rebuilt Docker image '{image_tag}'.")
+        
+        return {"status": "success", "message": f"Docker image '{image_tag}' rebuilt successfully."}
+        
+    except docker.errors.DockerException as e:
+        error_message = f"Docker error: {e}"
+        logging.error(f"Failed to rebuild Docker image: {e}")
+        raise HTTPException(status_code=500, detail=error_message)
+    except Exception as e:
+        error_message = f"Unexpected error: {e}"
+        logging.error(f"Unexpected error during Docker image rebuild: {e}")
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get('/docker-status')
+async def docker_status():
+    """Endpoint to check Docker status and image availability."""
+    try:
+        client = docker.from_env()
+        client.ping()
+        
+        image_tag = "robot-test-runner:latest"
+        try:
+            image = client.images.get(image_tag)
+            image_info = {
+                "exists": True,
+                "id": image.id,
+                "created": image.attrs.get('Created', 'Unknown'),
+                "size": f"{image.attrs.get('Size', 0) / (1024*1024):.1f} MB"
+            }
+        except docker.errors.ImageNotFound:
+            image_info = {"exists": False}
+        
+        return {
+            "status": "success",
+            "docker_available": True,
+            "image": image_info
+        }
+        
+    except docker.errors.DockerException as e:
+        return {
+            "status": "error",
+            "docker_available": False,
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "docker_available": False,
+            "error": f"Unexpected error: {e}"
+        }
 
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
