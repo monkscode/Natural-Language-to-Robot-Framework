@@ -165,29 +165,92 @@ def agent_element_identifier(steps: List[PlannedStep], model_provider: str, mode
                 logging.info(f"Element Identifier: Waiting for {delay_seconds} second(s).")
                 time.sleep(delay_seconds)
 
-            prompt = f"""
-            You are an expert in Selenium and Robot Framework locators. Your task is to find the best, most stable locator for a given web element based on its description.
-            The element is described as: "{step.element_description}"
-            The action to be performed is: "{step.step_description}"
-            The value associated with the action is: "{step.value or 'N/A'}"
+            prompt = f"""You are an expert web element locator specialist for Robot Framework automation. Your task is to generate the most reliable and stable locator for web elements based on their description.
 
-            Respond with a single JSON object with one key: "locator".
-            The value must be a valid Robot Framework locator string.
+<task_description>
+Your goal is to identify the best locator for a web element described as: "{step.element_description}"
+The action to be performed is: "{step.step_description}"
+The value/data to be used: "{step.value or 'N/A'}"
+</task_description>
 
-            Example 1:
-            - Element Description: "the search button"
-            - JSON Response: {{"locator": "css=button[aria-label='Google Search']"}}
+<locator_strategy>
+When creating locators, follow this priority order:
+1. **ID attributes** - Most stable (e.g., `id=submit-button`)
+2. **Name attributes** - Very stable (e.g., `name=username`)
+3. **Data attributes** - Stable (e.g., `css=[data-testid="login-btn"]`)
+4. **ARIA labels** - Accessible and stable (e.g., `css=[aria-label="Submit form"]`)
+5. **Class combinations** - Moderately stable (e.g., `css=.btn.btn-primary`)
+6. **Text content** - Fallback for buttons/links (e.g., `xpath=//button[text()="Submit"]`)
+7. **Partial text** - For dynamic content (e.g., `xpath=//button[contains(text(),"Submit")]`)
+8. **Structural position** - Last resort (e.g., `xpath=(//button)[1]`)
+</locator_strategy>
 
-            Example 2:
-            - Element Description: "the first video in the search results"
-            - JSON Response: {{"locator": "xpath=(//ytd-video-renderer)[1]"}}
+<locator_rules>
+- Always prefer CSS selectors over XPath when possible (faster execution)
+- Use XPath only when CSS cannot achieve the requirement
+- Avoid fragile locators like absolute positions or multiple nested classes
+- For input fields, prefer `name`, `id`, or `data-testid` attributes
+- For buttons, prefer `id`, `aria-label`, or stable text content
+- For links, prefer `id`, `href` patterns, or link text
+- Make locators as specific as needed but not overly complex
+- Consider element hierarchy only when necessary for uniqueness
+</locator_rules>
 
-            Example 3:
-            - Element Description: "the search input field"
-            - JSON Response: {{"locator": "name=search_query"}}
+<element_patterns>
+Common element patterns and their best locator strategies:
 
-            Now, provide the JSON response for the element described above.
-            """
+**Search boxes/Input fields:**
+- `id=search`, `name=q`, `css=[placeholder*="search"]`
+- `css=input[type="search"]`, `css=[data-testid="search-input"]`
+
+**Buttons:**
+- `id=submit`, `css=button[type="submit"]`, `css=[aria-label="Submit"]`
+- `xpath=//button[text()="Submit"]`, `css=.submit-btn`
+
+**Links:**
+- `id=login-link`, `css=a[href*="/login"]`, `link=Login`
+- `xpath=//a[contains(text(),"Login")]`
+
+**Form elements:**
+- `name=username`, `id=password`, `css=[data-field="email"]`
+- `css=input[type="email"]`, `css=select[name="country"]`
+
+**List items/Results:**
+- `css=.result-item:first-child`, `xpath=(//div[@class="result"])[1]`
+- `css=[data-index="0"]`, `xpath=//li[position()=1]`
+
+**Navigation elements:**
+- `css=nav a[href="/home"]`, `css=.navbar .menu-item`
+- `xpath=//nav//a[text()="Home"]`
+</element_patterns>
+
+<response_format>
+Respond with a single JSON object containing only the "locator" key.
+The locator value must be a valid Robot Framework locator string.
+
+Examples:
+{{"locator": "id=submit-button"}}
+{{"locator": "css=button[aria-label='Search']"}}
+{{"locator": "name=username"}}
+{{"locator": "xpath=//button[contains(text(),'Submit')]"}}
+{{"locator": "css=.search-input[placeholder*='Search']"}}
+</response_format>
+
+<reasoning_approach>
+1. Analyze the element description to understand the element type and purpose
+2. Consider the action being performed to ensure locator compatibility
+3. Choose the most stable locator strategy from the priority list
+4. Ensure the locator is specific enough to avoid ambiguity
+5. Verify the locator follows Robot Framework syntax
+
+For the element "{step.element_description}":
+- Element type: [Analyze what type of element this likely is]
+- Action context: {step.step_description}
+- Recommended strategy: [Choose from the priority order above]
+</reasoning_approach>
+
+Now generate the JSON response with the optimal locator for the described element."""
+
             try:
                 if model_provider == "local":
                     response = ollama.chat(
@@ -343,6 +406,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     logging.info("--- Starting Multi-Agent Workflow ---")
     yield {"status": "running", "message": "Starting agentic workflow..."}
     MAX_ATTEMPTS = 3
+    MAX_STEP_RETRIES = 2
 
     # Configure online provider if used
     if model_provider == "online":
@@ -354,35 +418,56 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         genai.configure(api_key=api_key)
 
     current_query = natural_language_query
+    planned_steps = None
+    located_steps = None
+    robot_code = None
 
     for attempt in range(MAX_ATTEMPTS):
         logging.info(f"--- Attempt {attempt + 1} of {MAX_ATTEMPTS} ---")
         yield {"status": "running", "message": f"Starting attempt {attempt + 1}/{MAX_ATTEMPTS}..."}
 
-        # Agent 1: Plan
-        yield {"status": "running", "message": "Agent 1/4: Planning test steps..."}
-        planned_steps = agent_step_planner(current_query, model_provider, model_name)
+        # Agent 1: Plan (with retries, only if not already successful)
         if not planned_steps:
-            logging.error("Orchestrator: Step Planner failed. Aborting.")
-            yield {"status": "error", "message": "Failed to generate a test plan."}
-            return
-        yield {"status": "running", "message": "Agent 1/4: Test step planning complete."}
+            for step_retry in range(MAX_STEP_RETRIES):
+                yield {"status": "running", "message": f"Agent 1/4: Planning test steps... (retry {step_retry + 1}/{MAX_STEP_RETRIES})"}
+                planned_steps = agent_step_planner(current_query, model_provider, model_name)
+                if planned_steps:
+                    yield {"status": "running", "message": "Agent 1/4: Test step planning complete."}
+                    break
+                else:
+                    logging.warning(f"Step Planner failed on retry {step_retry + 1}")
+                    if step_retry < MAX_STEP_RETRIES - 1:
+                        yield {"status": "running", "message": f"Step planning failed, retrying... ({step_retry + 2}/{MAX_STEP_RETRIES})"}
+            
+            if not planned_steps:
+                logging.error("Orchestrator: Step Planner failed after all retries. Aborting.")
+                yield {"status": "error", "message": "Failed to generate a test plan after multiple retries."}
+                return
 
-        # Agent 2: Identify Locators
-        yield {"status": "running", "message": "Agent 2/4: Identifying UI element locators..."}
-        located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
+        # Agent 2: Identify Locators (with retries, only if not already successful)
         if not located_steps:
-            logging.error("Orchestrator: Element Identifier failed. Aborting.")
-            yield {"status": "error", "message": "Failed to identify UI element locators."}
-            return
-        yield {"status": "running", "message": "Agent 2/4: UI element locator identification complete."}
+            for step_retry in range(MAX_STEP_RETRIES):
+                yield {"status": "running", "message": f"Agent 2/4: Identifying UI element locators... (retry {step_retry + 1}/{MAX_STEP_RETRIES})"}
+                located_steps = agent_element_identifier(planned_steps, model_provider, model_name)
+                if located_steps:
+                    yield {"status": "running", "message": "Agent 2/4: UI element locator identification complete."}
+                    break
+                else:
+                    logging.warning(f"Element Identifier failed on retry {step_retry + 1}")
+                    if step_retry < MAX_STEP_RETRIES - 1:
+                        yield {"status": "running", "message": f"Element identification failed, retrying... ({step_retry + 2}/{MAX_STEP_RETRIES})"}
+            
+            if not located_steps:
+                logging.error("Orchestrator: Element Identifier failed after all retries. Aborting.")
+                yield {"status": "error", "message": "Failed to identify UI element locators after multiple retries."}
+                return
 
-        # Agent 3: Assemble Code
+        # Agent 3: Assemble Code (deterministic, doesn't need retries)
         yield {"status": "running", "message": "Agent 3/4: Assembling Robot Framework code..."}
         robot_code = agent_code_assembler(located_steps, natural_language_query)
         yield {"status": "running", "message": "Agent 3/4: Code assembly complete."}
 
-        # Agent 4: Validate
+        # Agent 4: Validate (this is what might fail and trigger a retry)
         yield {"status": "running", "message": "Agent 4/4: Validating generated code..."}
         validation = agent_code_validator(robot_code, model_provider, model_name)
         yield {"status": "running", "message": "Agent 4/4: Code validation complete."}
@@ -392,20 +477,45 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             yield {"status": "complete", "robot_code": robot_code, "message": "Code generation successful."}
             return
         else:
-            logging.warning(f"Code validation failed. Reason: {validation.reason}")
+            logging.warning(f"Code validation failed on attempt {attempt + 1}. Reason: {validation.reason}")
             yield {"status": "running", "message": f"Validation failed: {validation.reason}. Attempting self-correction..."}
-            current_query = f"""
-            The previous attempt to generate a test plan failed validation.
-            The user's original query was: "{natural_language_query}"
-            The generated code was:
-            ```robotframework
-            {robot_code}
-            ```
-            The validation error was: "{validation.reason}"
+            
+            # Reset only the specific steps that might need correction based on validation failure
+            if "syntax" in validation.reason.lower() or "keyword" in validation.reason.lower():
+                # Syntax/keyword issues might be due to step planning or element identification
+                logging.info("Validation error suggests step planning issue. Resetting step planner.")
+                planned_steps = None
+                located_steps = None
+                current_query = f"""
+                The previous attempt to generate a test plan failed validation due to syntax/keyword issues.
+                The user's original query was: "{natural_language_query}"
+                The validation error was: "{validation.reason}"
 
-            Please analyze the error and the original query, then generate a new, corrected plan.
-            """
-            logging.info("Attempting self-correction...")
+                Please analyze the error and generate a new, corrected plan with proper Robot Framework syntax.
+                """
+            elif "locator" in validation.reason.lower() or "element" in validation.reason.lower():
+                # Locator issues are specific to element identification
+                logging.info("Validation error suggests element identification issue. Resetting element identifier only.")
+                located_steps = None
+                current_query = natural_language_query  # Keep original query for step planner
+            else:
+                # General validation failure - reset everything
+                logging.info("General validation failure. Resetting all steps.")
+                planned_steps = None
+                located_steps = None
+                current_query = f"""
+                The previous attempt to generate a test plan failed validation.
+                The user's original query was: "{natural_language_query}"
+                The generated code was:
+                ```robotframework
+                {robot_code}
+                ```
+                The validation error was: "{validation.reason}"
+
+                Please analyze the error and the original query, then generate a new, corrected plan.
+                """
+            
+            logging.info("Attempting self-correction with targeted approach...")
 
     logging.error("Orchestrator: Failed to generate valid code after multiple attempts.")
     yield {"status": "error", "message": "Failed to generate valid code after multiple attempts."}

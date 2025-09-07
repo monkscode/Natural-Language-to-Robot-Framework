@@ -1,0 +1,181 @@
+@startuml Natural Language to Robot Framework - Sequence Diagram
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam maxMessageSize 150
+
+title Natural Language to Robot Framework Tool - Working Sequence Diagram
+
+actor User as U
+participant "Frontend (HTML/JS)" as FE
+participant "FastAPI Backend" as API
+participant "Robot Generator\nOrchestrator" as RG
+participant "Step Planner Agent\n(AI)" as SPA
+participant "Element Identifier Agent\n(AI)" as EIA
+participant "Code Assembler Agent\n(Logic)" as CAA
+participant "Code Validator Agent\n(AI)" as CVA
+participant "Docker Engine" as DE
+participant "Robot Framework\nContainer" as RFC
+database "File System" as FS
+
+== User Interaction ==
+U -> FE: Enter natural language query\n"search for Robot Framework"
+U -> FE: Click "Generate & Run" button
+
+== Initial Request Processing ==
+FE -> API: POST /generate-and-run\nContent-Type: application/json\n{"query": "search for Robot Framework"}
+API -> API: Validate query\nLoad environment variables\n(MODEL_PROVIDER, GEMINI_API_KEY, etc.)
+API -> RG: run_agentic_workflow(query, model_provider, model_name)
+API -> FE: StreamingResponse\nContent-Type: text/event-stream
+
+== Multi-Agent Code Generation Workflow ==
+note over RG: Max 3 attempts for code generation\nwith self-correction capability
+
+loop for each attempt (max 3)
+    
+    RG -> API: yield {"status": "running", "message": "Starting attempt X/3"}
+    API -> FE: Server-Sent Event (SSE)\ndata: {"stage": "generation", "status": "running"}
+    
+    == Agent 1: Step Planning ==
+    RG -> SPA: agent_step_planner(query, model_provider, model_name)
+    
+    alt if model_provider == "online"
+        SPA -> SPA: Configure Gemini API\nwith GEMINI_API_KEY
+        SPA -> SPA: call_gemini_with_retry()\nwith dynamic retry logic
+        note right: Handles ResourceExhausted exceptions\nwith retry_delay parsing
+    else model_provider == "local"
+        SPA -> SPA: ollama.chat(model_name)\nwith JSON format
+    end
+    
+    SPA -> SPA: Parse response to List[PlannedStep]\nValidate JSON structure
+    SPA -> RG: Return planned_steps:\n[{"step_description": "Navigate to search engine",\n"keyword": "Open Browser", "value": "https://www.google.com"}]
+    
+    RG -> API: yield {"status": "running", "message": "Agent 1/4: Test step planning complete"}
+    API -> FE: SSE update
+    
+    == Agent 2: Element Identification ==
+    RG -> EIA: agent_element_identifier(planned_steps, model_provider, model_name)
+    
+    loop for each step with element_description
+        alt if SECONDS_BETWEEN_API_CALLS > 0
+            EIA -> EIA: time.sleep(delay_seconds)
+        end
+        
+        alt if model_provider == "online"
+            EIA -> EIA: call_gemini_with_retry()\nfor locator generation
+        else model_provider == "local"
+            EIA -> EIA: ollama.chat()\nfor locator generation
+        end
+        
+        EIA -> EIA: Parse response to get locator\ne.g., "css=input[name='q']"
+    end
+    
+    EIA -> RG: Return located_steps:\n[{"locator": "css=input[name='q']", ...}]
+    
+    RG -> API: yield {"status": "running", "message": "Agent 2/4: UI element locator identification complete"}
+    API -> FE: SSE update
+    
+    == Agent 3: Code Assembly ==
+    RG -> CAA: agent_code_assembler(located_steps, query)
+    CAA -> CAA: Build Robot Framework code:\n- Add *** Settings *** section\n- Add SeleniumLibrary import\n- Add *** Test Cases *** section\n- Assemble keywords with locators/values\n- Add browser maximization\n- Add consent handling\n- Add [Teardown] Close Browser
+    CAA -> RG: Return robot_code (string)
+    
+    RG -> API: yield {"status": "running", "message": "Agent 3/4: Code assembly complete"}
+    API -> FE: SSE update
+    
+    == Agent 4: Code Validation ==
+    RG -> CVA: agent_code_validator(robot_code, model_provider, model_name)
+    
+    alt if model_provider == "online"
+        CVA -> CVA: call_gemini_with_retry()\nfor code validation
+    else model_provider == "local"
+        CVA -> CVA: ollama.chat()\nfor code validation
+    end
+    
+    CVA -> CVA: Validate code:\n- Check syntax\n- Verify Open Browser has browser=chrome\n- Verify headless options present\n- Check argument counts
+    CVA -> RG: Return ValidationResult:\n{"valid": true/false, "reason": "..."}
+    
+    RG -> API: yield {"status": "running", "message": "Agent 4/4: Code validation complete"}
+    API -> FE: SSE update
+    
+    alt if validation.valid == true
+        RG -> API: yield {"status": "complete", "robot_code": robot_code}
+        API -> FE: SSE: {"stage": "generation", "status": "complete"}
+        note over RG: Exit workflow - code generation successful
+    else validation.valid == false
+        RG -> RG: Prepare self-correction query\nwith error details
+        RG -> API: yield {"status": "running", "message": "Validation failed. Attempting self-correction..."}
+        API -> FE: SSE update
+        note over RG: Continue to next attempt
+    end
+end
+
+alt if max attempts reached without success
+    RG -> API: yield {"status": "error", "message": "Failed to generate valid code"}
+    API -> FE: SSE: {"stage": "generation", "status": "error"}
+    note over API: End workflow with error
+end
+
+== Robot Framework Test Execution ==
+API -> API: Generate unique run_id (UUID)
+API -> FS: Create directory: robot_tests/{run_id}/
+API -> FS: Write robot_code to test.robot file
+
+API -> FE: SSE: {"stage": "execution", "status": "running", "message": "Building container image"}
+
+== Docker Image Building ==
+API -> DE: client.images.build()\npath: robot_tests/\ntag: robot-test-runner:latest
+DE -> DE: Build Docker image from Dockerfile\nInstall Robot Framework\nInstall SeleniumLibrary\nInstall Chrome dependencies
+DE -> API: Image build complete
+
+API -> FE: SSE: {"stage": "execution", "status": "running", "message": "Executing test inside container"}
+
+== Docker Container Execution ==
+API -> DE: client.containers.run()\nimage: robot-test-runner:latest\ncommand: ["robot", "--outputdir", "/app/robot_tests/{run_id}", "robot_tests/{run_id}/test.robot"]\nvolumes: {robot_tests_dir: '/app/robot_tests'}\nauto_remove: True
+
+DE -> RFC: Start container with Robot Framework
+RFC -> RFC: Execute robot command:\n- Parse test.robot file\n- Start Chrome browser (headless)\n- Execute test steps\n- Generate reports (log.html, report.html, output.xml)
+
+alt if tests pass (exit code 0)
+    RFC -> DE: Container exits with code 0
+    DE -> API: Return stdout/stderr logs
+    API -> FS: Check for generated reports
+    API -> FE: SSE: {"stage": "execution", "status": "complete",\n"result": {"logs": "...", "log_html": "/reports/{run_id}/log.html"}}
+    
+else if tests fail (exit code != 0) but reports generated
+    RFC -> DE: Container exits with non-zero code
+    DE -> API: ContainerError with exit status
+    API -> FS: Check if log.html exists
+    API -> FE: SSE: {"stage": "execution", "status": "complete",\n"message": "Some tests failed", "result": {...}}
+    
+else if system error (no reports generated)
+    RFC -> DE: Container exits with error
+    DE -> API: ContainerError
+    API -> FS: Check if log.html exists (doesn't exist)
+    API -> FE: SSE: {"stage": "execution", "status": "error",\n"message": "Docker container failed before Robot Framework could generate reports"}
+end
+
+== Frontend Response Handling ==
+FE -> FE: Process SSE events:\n- Update progress indicators\n- Display generated robot code\n- Show execution logs\n- Enable download button
+
+== Static File Serving ==
+alt if user requests reports
+    FE -> API: GET /reports/{run_id}/log.html
+    API -> FS: Serve static file from robot_tests directory
+    FS -> API: Return HTML report
+    API -> FE: Serve report file
+end
+
+== Download Functionality ==
+alt if user clicks download
+    FE -> FE: Create blob from robot_code
+    FE -> FE: Trigger download as test.robot
+end
+
+== Error Handling Throughout ==
+note over API: All API errors are caught and returned as:\n{"stage": "generation/execution", "status": "error", "message": "..."}
+note over FE: Frontend displays errors in execution logs section
+note over RG: Self-correction mechanism attempts up to 3 times\nbefore giving up on code generation
+
+@enduml
