@@ -125,6 +125,7 @@ async def stream_generate_and_run(user_query: str, model_name: str):
         # Stage 2b: Running Docker Container
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Executing test inside the container...'})}\n\n"
         robot_command = ["robot", "--outputdir", f"/app/robot_tests/{run_id}", f"robot_tests/{run_id}/{test_filename}"]
+
         container_logs = client.containers.run(
             image=image_tag,
             command=robot_command,
@@ -135,27 +136,40 @@ async def stream_generate_and_run(user_query: str, model_name: str):
             detach=False,
             auto_remove=True
         )
-        logs = container_logs.decode('utf-8')
 
+        # This block handles the case where all tests pass (exit code 0)
+        logs = container_logs.decode('utf-8')
+        message = "Test execution finished: All tests passed."
         log_html_path = f"/reports/{run_id}/log.html"
         report_html_path = f"/reports/{run_id}/report.html"
+        final_result = { 'logs': logs, 'log_html': log_html_path, 'report_html': report_html_path }
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'complete', 'message': message, 'result': final_result})}\n\n"
 
-        final_result = {
-            'logs': logs,
-            'log_html': log_html_path,
-            'report_html': report_html_path
-        }
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'complete', 'message': 'Test execution finished.', 'result': final_result})}\n\n"
+    except docker.errors.ContainerError as e:
+        # A non-zero exit code from the container. We must check if it was a test failure or a system error.
+        log_file_path = os.path.join(robot_tests_dir, "log.html")
+
+        # If log.html exists, Robot Framework ran and produced a report. This is a TEST failure.
+        if os.path.exists(log_file_path):
+            logging.warning(f"Robot test execution finished with failures (exit code {e.exit_status}). This is a test failure, not a system error.")
+            logs = e.container.logs().decode('utf-8', errors='ignore')
+            report_html_url = f"/reports/{run_id}/report.html"
+            log_html_url = f"/reports/{run_id}/log.html"
+            final_result = { 'logs': logs, 'log_html': log_html_url, 'report_html': report_html_url }
+            message = f"Test execution finished: Some tests failed (exit code {e.exit_status})."
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'complete', 'message': message, 'result': final_result})}\n\n"
+
+        # If log.html does NOT exist, the test runner itself failed. This is a SYSTEM error.
+        else:
+            logging.error(f"Docker container failed before Robot Framework could generate a report (exit code {e.exit_status}).")
+            error_logs = f"Docker container exited with a system error (exit code {e.exit_status}).\n"
+            error_logs += "Robot Framework reports were not generated, indicating a problem with the test runner itself.\n\n"
+            error_logs += f"Container Logs:\n{e.container.logs().decode('utf-8', errors='ignore')}"
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_logs})}\n\n"
 
     except docker.errors.BuildError as e:
         logging.error(f"Docker build failed: {e}")
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Docker build failed: {e}'})}\n\n"
-    except docker.errors.ContainerError as e:
-        logging.error(f"Docker container failed: {e}")
-        error_logs = f"Docker container exited with error code {e.exit_status}.\n"
-        if hasattr(e, 'logs') and e.logs:
-            error_logs += f"Container Logs:\n{e.logs.decode('utf-8', errors='ignore')}"
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_logs})}\n\n"
     except Exception as e:
         logging.error(f"An unexpected error occurred during execution: {e}")
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
