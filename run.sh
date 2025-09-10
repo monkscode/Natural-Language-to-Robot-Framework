@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Check for .env file
-if [ ! -f "backend/.env" ]; then
-    echo "Error: backend/.env file not found."
-    echo "Please copy backend/.env.example to backend/.env and fill in your API key."
+if [ ! -f "src/backend/.env" ]; then
+    echo "Error: src/backend/.env file not found."
+    echo "Please copy src/backend/.env.example to src/backend/.env and fill in your API key."
     exit 1
 fi
 
@@ -29,10 +29,10 @@ else
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install uv
-    uv pip install -r backend/requirements.txt
+    uv pip install -r src/backend/requirements.txt
 fi
 
 # Run the application
 echo "Starting the application..."
 echo "You can access it at http://localhost:5000"
-uvicorn backend.main:app --host 0.0.0.0 --port 5000
+python -m uvicorn src.backend.main:app --host 0.0.0.0 --port 5000

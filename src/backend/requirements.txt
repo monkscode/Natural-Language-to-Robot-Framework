@@ -4,5 +4,7 @@ python-dotenv
 robotframework-seleniumlibrary
 docker
 pydantic
-google-generativeai
 ollama
+crewai
+crewai-tools
+langchain-google-genai

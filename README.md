@@ -46,7 +46,7 @@ Mark 1 employs a sophisticated multi-agent workflow:
 
 2. **Configure your AI model**
    ```bash
-   cp backend/.env.example backend/.env
+   cp src/backend/.env.example src/backend/.env
    ```
 
    **For Google Gemini (Recommended)**:
@@ -129,15 +129,16 @@ curl -X POST \
 ## 📁 Project Structure
 
 ```
-├── backend/
-│   ├── main.py              # FastAPI application
-│   ├── robot_generator.py   # Multi-agent AI system
-│   ├── requirements.txt     # Python dependencies
-│   └── .env                # Configuration
-├── frontend/
-│   ├── index.html          # Web interface
-│   ├── script.js           # Frontend logic
-│   └── style.css           # Styling
+├── src/
+│   ├── backend/
+│   │   ├── main.py              # FastAPI application
+│   │   ├── robot_generator.py   # Multi-agent AI system
+│   │   ├── requirements.txt     # Python dependencies
+│   │   └── .env                # Configuration
+│   └── frontend/
+│       ├── index.html          # Web interface
+│       ├── script.js           # Frontend logic
+│       └── style.css           # Styling
 ├── robot_tests/            # Generated test files and reports
 ├── run.sh                  # Startup script
 └── test.sh                 # Testing script

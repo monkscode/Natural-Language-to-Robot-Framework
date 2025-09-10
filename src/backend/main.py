@@ -14,7 +14,7 @@ from queue import Queue, Empty
 from threading import Thread
 
 # Import the new agentic workflow orchestrator
-from backend.robot_generator import run_agentic_workflow
+from src.backend.robot_generator import run_agentic_workflow
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -307,6 +307,6 @@ async def docker_status():
 
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
-ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "robot_tests")
+ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")
 app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
