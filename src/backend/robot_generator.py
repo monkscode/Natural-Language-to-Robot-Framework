@@ -23,10 +23,16 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         validation_output, crew_with_results = crew_instance.run()
 
         # The assembled code is the output of the third task
-        robot_code = crew_with_results.tasks[2].output.raw_output
+        robot_code = crew_with_results.tasks[2].output.raw
 
         try:
-            validation_data = json.loads(validation_output)
+            raw_validation_output = crew_with_results.tasks[3].output.raw
+            # Find the start of the JSON string
+            json_start_index = raw_validation_output.find('{')
+            # Find the end of the JSON string
+            json_end_index = raw_validation_output.rfind('}') + 1
+            json_string = raw_validation_output[json_start_index:json_end_index]
+            validation_data = json.loads(json_string)
             if validation_data.get("valid"):
                 logging.info("CrewAI workflow complete. Code validation successful.")
                 yield {"status": "complete", "robot_code": robot_code, "message": "Code generation successful."}

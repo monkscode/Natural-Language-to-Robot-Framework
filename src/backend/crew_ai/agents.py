@@ -1,17 +1,17 @@
 import os
 from crewai import Agent
+from crewai.llm import LLM
 from langchain_community.llms import Ollama
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Initialize the LLMs
 def get_llm(model_provider, model_name):
     if model_provider == "local":
         return Ollama(model=model_name)
     else:
-        return ChatGoogleGenerativeAI(model=model_name,
-                                      verbose=True,
-                                      temperature=0.1,
-                                      google_api_key=os.getenv("GEMINI_API_KEY"))
+        return LLM(
+            api_key=os.getenv("GEMINI_API_KEY"),
+            model=f"gemini/{model_name}"
+        )
 
 class RobotAgents:
     def __init__(self, model_provider, model_name):
