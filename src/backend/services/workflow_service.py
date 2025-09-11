@@ -109,7 +109,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             return
 
     run_id = str(uuid.uuid4())
-    robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'robot_tests')
+    robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
     run_dir = os.path.join(robot_tests_dir, run_id)
     os.makedirs(run_dir, exist_ok=True)
     test_filename = "test.robot"
