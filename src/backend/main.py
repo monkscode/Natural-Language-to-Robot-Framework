@@ -2,7 +2,7 @@ import os
 import uuid
 import logging
 import docker
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -48,98 +48,6 @@ def run_workflow_in_thread(queue, user_query, model_provider, model_name):
         logging.error(f"Exception in workflow thread: {e}")
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
-def run_docker_in_thread(queue, robot_code, run_id):
-    """
-    Runs the entire Docker build and execution process in a separate thread
-    to avoid blocking the main FastAPI event loop.
-    Communicates progress and logs back via a queue.
-    """
-    try:
-        robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'robot_tests')
-        run_dir = os.path.join(robot_tests_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        test_filename = "test.robot"
-        test_filepath = os.path.join(run_dir, test_filename)
-        with open(test_filepath, 'w') as f:
-            f.write(robot_code)
-
-        try:
-            client = docker.from_env()
-            client.ping()
-        except docker.errors.DockerException as docker_err:
-            error_message = "Docker is not available. Please ensure Docker Desktop is installed and running."
-            # ... (rest of the error message generation)
-            logging.error(f"Docker connection failed: {docker_err}")
-            queue.put({"stage": "execution", "status": "error", "message": error_message})
-            return
-
-        image_tag = "robot-test-runner:latest"
-        dockerfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-
-        try:
-            existing_image = client.images.get(image_tag)
-            logging.info(f"Docker image '{image_tag}' already exists. Skipping build.")
-            queue.put({"stage": "execution", "status": "running", "message": "Using existing container image for test execution..."})
-        except docker.errors.ImageNotFound:
-            logging.info(f"Docker image '{image_tag}' not found. Building new image.")
-            queue.put({"stage": "execution", "status": "running", "message": "Building container image for test execution (first time only)..."})
-            try:
-                build_logs = client.api.build(path=dockerfile_path, tag=image_tag, rm=True, decode=True)
-                for log in build_logs:
-                    if 'stream' in log:
-                        log_message = log['stream'].strip()
-                        if log_message:
-                            queue.put({"stage": "execution", "status": "running", "log": log_message})
-                    if 'error' in log:
-                        logging.error(f"Docker build error: {log['error']}")
-                        queue.put({"stage": "execution", "status": "error", "message": log['error']})
-                        return
-                logging.info(f"Successfully built Docker image '{image_tag}'.")
-                queue.put({"stage": "execution", "status": "running", "message": "Container image built successfully!"})
-            except docker.errors.BuildError as build_err:
-                logging.error(f"Failed to build Docker image: {build_err}")
-                queue.put({"stage": "execution", "status": "error", "message": f"Docker image build failed: {build_err}"})
-                return
-
-        queue.put({"stage": "execution", "status": "running", "message": "Executing test inside the container..."})
-        robot_command = ["robot", "--outputdir", f"/app/robot_tests/{run_id}", f"/app/robot_tests/{run_id}/{test_filename}"]
-
-        try:
-            container = client.containers.run(
-                image=image_tag,
-                command=robot_command,
-                volumes={os.path.abspath(robot_tests_dir): {'bind': '/app/robot_tests', 'mode': 'rw'}},
-                working_dir="/app",
-                stderr=True,
-                stdout=True,
-                detach=False, # Run in blocking mode
-                auto_remove=True
-            )
-            # This code runs after the container has finished
-            all_logs = container.decode('utf-8')
-            exit_code = 0 # If run() succeeds without ContainerError, exit code is 0
-            message = "Test execution finished: All tests passed."
-            status = "complete"
-
-        except docker.errors.ContainerError as e:
-            # This block runs if the container exits with a non-zero status code
-            all_logs = e.container.logs().decode('utf-8', errors='ignore')
-            exit_code = e.exit_status
-            message = f"Test execution finished: Some tests failed (exit code {exit_code})."
-            status = "complete" # It's a test failure, but the process is complete
-
-        log_html_path = f"/reports/{run_id}/log.html"
-        report_html_path = f"/reports/{run_id}/report.html"
-        final_result = { 'logs': all_logs, 'log_html': log_html_path, 'report_html': report_html_path }
-
-        # Final event
-        queue.put({"stage": "execution", "status": status, "message": message, "result": final_result})
-
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during Docker execution: {e}", exc_info=True)
-        queue.put({"stage": "execution", "status": "error", "message": f"An unexpected error occurred during Docker execution: {e}"})
-
-
 async def stream_generate_and_run(user_query: str, model_name: str):
     """
     Generator function that streams logs and results, with a heartbeat
@@ -157,7 +65,7 @@ async def stream_generate_and_run(user_query: str, model_name: str):
     workflow_thread.start()
 
     # --- Stage 1: Generating Code ---
-    while workflow_thread.is_alive() or not q.empty():
+    while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
             event_data = {'stage': 'generation', **event}
@@ -165,44 +73,161 @@ async def stream_generate_and_run(user_query: str, model_name: str):
 
             if event.get("status") == "complete" and "robot_code" in event:
                 robot_code = event["robot_code"]
-                workflow_thread.join()
+                # Generation is done, we can break this loop and move to execution
+                workflow_thread.join() # Ensure thread is cleaned up
                 break
             elif event.get("status") == "error":
                 logging.error(f"Error during code generation: {event.get('message')}")
                 workflow_thread.join()
                 return
         except Empty:
+            # Send a heartbeat comment to keep the connection open
             yield ": heartbeat\n\n"
             await asyncio.sleep(1)
 
+    # In case the thread finished but we didn't get the code
     if not robot_code:
-        logging.error("Agentic workflow finished without generating code.")
-        # Any final error messages in the queue should have been processed already.
-        return
+        # Check the queue one last time
+        while not q.empty():
+            event = q.get_nowait()
+            event_data = {'stage': 'generation', **event}
+            yield f"data: {json.dumps(event_data)}\n\n"
+            if event.get("status") == "complete" and "robot_code" in event:
+                robot_code = event["robot_code"]
+            elif event.get("status") == "error":
+                return # Error was already sent
+
+        if not robot_code:
+            final_error_message = "Agentic workflow finished without generating code."
+            logging.error(final_error_message)
+            yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
+            return
+
 
     # --- Stage 2: Docker Execution ---
-    # Use a new queue for the Docker thread to ensure clean separation
-    docker_q = Queue()
     run_id = str(uuid.uuid4())
-    docker_thread = Thread(
-        target=run_docker_in_thread,
-        args=(docker_q, robot_code, run_id)
-    )
-    docker_thread.start()
+    # Corrected path to point to the root robot_tests directory
+    robot_tests_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'robot_tests')
+    run_dir = os.path.join(robot_tests_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    test_filename = "test.robot"
+    test_filepath = os.path.join(run_dir, test_filename)
+    with open(test_filepath, 'w') as f:
+        f.write(robot_code)
 
-    while docker_thread.is_alive() or not docker_q.empty():
+    try:
+        # Check if Docker is available before proceeding
         try:
-            event = docker_q.get_nowait()
-            logging.info(f"Yielding event: {event.get('status', 'log')}")
-            yield f"data: {json.dumps(event)}\n\n"
-            if event.get("status") in ["complete", "error"]:
-                docker_thread.join()
-                logging.info("Docker thread finished.")
-                break
-        except Empty:
-            # logging.info("Queue empty, sending heartbeat.")
-            yield ": heartbeat\n\n"
-            await asyncio.sleep(1)
+            client = docker.from_env()
+            # Test if Docker daemon is responsive
+            client.ping()
+        except docker.errors.DockerException as docker_err:
+            error_message = "Docker is not available. Please ensure Docker Desktop is installed and running."
+            if "CreateFile" in str(docker_err) or "file specified" in str(docker_err):
+                error_message += "\n\nWindows Error: Docker daemon is not accessible. This usually means:\n"
+                error_message += "1. Docker Desktop is not installed\n"
+                error_message += "2. Docker Desktop is not running\n"
+                error_message += "3. Docker service is not started\n\n"
+                error_message += "Please start Docker Desktop and try again."
+            logging.error(f"Docker connection failed: {docker_err}")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
+            return
+
+        image_tag = "robot-test-runner:latest"
+        # Corrected path to point to the project root for the Dockerfile
+        dockerfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+
+        # Stage 2a: Check and Build Docker Image (only if needed)
+        try:
+            # Check if the image already exists
+            existing_image = client.images.get(image_tag)
+            logging.info(f"Docker image '{image_tag}' already exists. Skipping build.")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Using existing container image for test execution...'})}\n\n"
+        except docker.errors.ImageNotFound:
+            # Image doesn't exist, need to build it
+            logging.info(f"Docker image '{image_tag}' not found. Building new image.")
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Building container image for test execution (first time only)...'})}\n\n"
+            try:
+                # Use the streaming build to provide feedback
+                build_logs = client.api.build(path=dockerfile_path, tag=image_tag, rm=True, decode=True)
+                for log in build_logs:
+                    if 'stream' in log:
+                        log_message = log['stream'].strip()
+                        if log_message:
+                            yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'log': log_message})}\n\n"
+                    if 'error' in log:
+                        logging.error(f"Docker build error: {log['error']}")
+                        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': log['error']})}\n\n"
+                        return
+                logging.info(f"Successfully built Docker image '{image_tag}'.")
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Container image built successfully!'})}\n\n"
+            except docker.errors.BuildError as build_err:
+                logging.error(f"Failed to build Docker image: {build_err}")
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Docker image build failed: {build_err}'})}\n\n"
+                return
+
+        # Stage 2b: Running Docker Container
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Executing test inside the container...'})}\n\n"
+        # Corrected command to use absolute path inside the container
+        robot_command = ["robot", "--outputdir", f"/app/robot_tests/{run_id}", f"/app/robot_tests/{run_id}/{test_filename}"]
+
+        container_logs = client.containers.run(
+            image=image_tag,
+            command=robot_command,
+            # Corrected volume mount to map the root robot_tests directory
+            volumes={os.path.abspath(robot_tests_dir): {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            working_dir="/app",
+            stderr=True,
+            stdout=True,
+            detach=False,
+            auto_remove=True
+        )
+
+        # This block handles the case where all tests pass (exit code 0)
+        logs = container_logs.decode('utf-8')
+        message = "Test execution finished: All tests passed."
+        log_html_path = f"/reports/{run_id}/log.html"
+        report_html_path = f"/reports/{run_id}/report.html"
+        final_result = { 'logs': logs, 'log_html': log_html_path, 'report_html': report_html_path }
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'complete', 'message': message, 'result': final_result})}\n\n"
+
+    except docker.errors.ContainerError as e:
+        # A non-zero exit code from the container. We must check if it was a test failure or a system error.
+        log_file_path = os.path.join(robot_tests_dir, "log.html")
+
+        # If log.html exists, Robot Framework ran and produced a report. This is a TEST failure.
+        if os.path.exists(log_file_path):
+            logging.warning(f"Robot test execution finished with failures (exit code {e.exit_status}). This is a test failure, not a system error.")
+            logs = e.container.logs().decode('utf-8', errors='ignore')
+            report_html_url = f"/reports/{run_id}/report.html"
+            log_html_url = f"/reports/{run_id}/log.html"
+            final_result = { 'logs': logs, 'log_html': log_html_url, 'report_html': report_html_url }
+            message = f"Test execution finished: Some tests failed (exit code {e.exit_status})."
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'complete', 'message': message, 'result': final_result})}\n\n"
+
+        # If log.html does NOT exist, the test runner itself failed. This is a SYSTEM error.
+        else:
+            logging.error(f"Docker container failed before Robot Framework could generate a report (exit code {e.exit_status}).")
+            error_logs = f"Docker container exited with a system error (exit code {e.exit_status}).\n"
+            error_logs += "Robot Framework reports were not generated, indicating a problem with the test runner itself.\n\n"
+            error_logs += f"Container Logs:\n{e.container.logs().decode('utf-8', errors='ignore')}"
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_logs})}\n\n"
+
+    except docker.errors.BuildError as e:
+        logging.error(f"Docker build failed: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Docker build failed: {e}'})}\n\n"
+    except docker.errors.DockerException as e:
+        error_message = f"Docker error: {e}"
+        if "CreateFile" in str(e) or "file specified" in str(e):
+            error_message = "Docker connection lost during execution. Please ensure Docker Desktop is running and try again."
+        logging.error(f"Docker error during execution: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
+    except Exception as e:
+        error_message = str(e)
+        if "CreateFile" in str(e) or "file specified" in str(e):
+            error_message = "System error: Docker is not accessible. Please ensure Docker Desktop is installed and running."
+        logging.error(f"An unexpected error occurred during execution: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': error_message})}\n\n"
 
 
 @app.post('/generate-and-run')
@@ -224,8 +249,9 @@ async def generate_and_run_streaming(query: Query):
 
     return StreamingResponse(stream_generate_and_run(user_query, model_name), media_type="text/event-stream")
 
-def rebuild_image_task():
-    """Synchronous function to rebuild the Docker image."""
+@app.post('/rebuild-docker-image')
+async def rebuild_docker_image():
+    """Endpoint to force rebuild the Docker image when needed."""
     try:
         client = docker.from_env()
         image_tag = "robot-test-runner:latest"
@@ -241,23 +267,19 @@ def rebuild_image_task():
         
         # Build new image
         logging.info(f"Building new Docker image '{image_tag}'.")
-        # Using the low-level API to stream logs, though we don't use them here.
-        # Could be adapted to log to a file.
-        for _ in client.api.build(path=dockerfile_path, tag=image_tag, rm=True, decode=True):
-            pass
+        client.images.build(path=dockerfile_path, tag=image_tag, rm=True)
         logging.info(f"Successfully rebuilt Docker image '{image_tag}'.")
         
-    except Exception as e:
-        logging.error(f"Failed to rebuild Docker image in background task: {e}", exc_info=True)
+        return {"status": "success", "message": f"Docker image '{image_tag}' rebuilt successfully."}
 
-@app.post('/rebuild-docker-image')
-async def rebuild_docker_image(background_tasks: BackgroundTasks):
-    """
-    Endpoint to force rebuild the Docker image in the background.
-    Returns immediately.
-    """
-    background_tasks.add_task(rebuild_image_task)
-    return {"status": "success", "message": "Docker image rebuild process started in the background."}
+    except docker.errors.DockerException as e:
+        error_message = f"Docker error: {e}"
+        logging.error(f"Failed to rebuild Docker image: {e}")
+        raise HTTPException(status_code=500, detail=error_message)
+    except Exception as e:
+        error_message = f"Unexpected error: {e}"
+        logging.error(f"Unexpected error during Docker image rebuild: {e}")
+        raise HTTPException(status_code=500, detail=error_message)
 
 @app.get('/docker-status')
 async def docker_status():
