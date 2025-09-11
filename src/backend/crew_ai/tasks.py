@@ -21,7 +21,18 @@ class RobotTasks:
         return Task(
             description=(
                 "For each step provided in the context, identify the best locator for the described element. "
-                "The context will be the output of the 'plan_steps_task'."
+                "The context will be the output of the 'plan_steps_task'.\n\n"
+                "--- LOCATOR STRATEGY PRIORITY ---\n"
+                "1.  **ID**: `id=element_id`\n"
+                "2.  **Name**: `name=element_name`\n"
+                "3.  **CSS Selector**: `css=css_selector` (e.g., `css=input[name='q']`, `css=button#submit`)\n"
+                "4.  **XPath**: `xpath=//tag[@attribute='value']` (e.g., `xpath=//button[text()='Search']`)\n"
+                "5.  **Link Text**: `link=Link Text`\n\n"
+                "--- RULES ---\n"
+                "1.  You MUST add a 'locator' key to each JSON object in the array.\n"
+                "2.  The value of the 'locator' key MUST be a valid Robot Framework locator string.\n"
+                "3.  If no specific element is described, the locator can be an empty string `''`.\n"
+                "4.  Choose the most specific and robust locator possible based on the priority."
             ),
             expected_output="A JSON array of objects, where each object represents a single test step with the added 'locator' key.",
             agent=agent,

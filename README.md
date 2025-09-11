@@ -131,17 +131,24 @@ curl -X POST \
 ```
 ├── src/
 │   ├── backend/
-│   │   ├── main.py              # FastAPI application
-│   │   ├── robot_generator.py   # Multi-agent AI system
-│   │   ├── requirements.txt     # Python dependencies
-│   │   └── .env                # Configuration
+│   │   ├── api/
+│   │   │   └── endpoints.py       # API endpoints
+│   │   ├── core/
+│   │   │   └── config.py          # Configuration management
+│   │   ├── services/
+│   │   │   ├── docker_service.py  # Docker-related services
+│   │   │   └── workflow_service.py# Agentic workflow services
+│   │   ├── crew_ai/               # CrewAI agents and tasks
+│   │   ├── main.py                # FastAPI application entry point
+│   │   └── requirements.txt       # Python dependencies
 │   └── frontend/
-│       ├── index.html          # Web interface
-│       ├── script.js           # Frontend logic
-│       └── style.css           # Styling
-├── robot_tests/            # Generated test files and reports
-├── run.sh                  # Startup script
-└── test.sh                 # Testing script
+│       ├── index.html             # Web interface
+│       ├── script.js              # Frontend logic
+│       └── style.css              # Styling
+├── robot_tests/                   # Generated test files and reports
+├── tests/                         # Backend unit tests
+├── run.sh                         # Startup script
+└── test.sh                        # Testing script
 ```
 
 ## 🐛 Debugging
