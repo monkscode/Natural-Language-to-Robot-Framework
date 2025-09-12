@@ -23,7 +23,7 @@ def test_plan_steps_task_with_advanced_prompt(mock_execute_sync):
     planner_agent = agents.step_planner_agent()
 
     # 2. Act
-    task = tasks.plan_steps_task(planner_agent, "Log in to GitHub with username 'testuser' and password 'password123'")
+    task = tasks.plan_steps_task(planner_agent, "Log in to the application with username 'myuser' and password 'mypassword'")
     result = task.execute_sync()
 
     # 3. Assert
@@ -33,9 +33,9 @@ def test_plan_steps_task_with_advanced_prompt(mock_execute_sync):
     assert len(parsed_result) == 4
     assert parsed_result[0]['keyword'] == 'Open Browser'
     assert parsed_result[1]['keyword'] == 'Input Text'
-    assert parsed_result[1]['value'] == 'testuser'
+    assert parsed_result[1]['value'] == 'myuser'
     assert parsed_result[2]['keyword'] == 'Input Text'
-    assert parsed_result[2]['value'] == 'password123'
+    assert parsed_result[2]['value'] == 'mypassword'
     assert parsed_result[3]['keyword'] == 'Click Element'
     mock_execute_sync.assert_called_once()
 

@@ -7,26 +7,26 @@ IDENTIFY_ELEMENTS_TASK_MOCKED_OUTPUT = "{\"locator\": \"xpath=//button[contains(
 PLAN_STEPS_TASK_MOCKED_OUTPUT = """
 [
     {
-        "step_description": "Open Browser to https://github.com/login",
-        "element_description": "",
-        "value": "https://github.com/login",
+        "step_description": "Open Browser to the application's login page",
+        "element_description": "the application's login page",
+        "value": "https://example.com/login",
         "keyword": "Open Browser"
     },
     {
-        "step_description": "Input Text into the username field with value 'testuser'",
-        "element_description": "the username field",
-        "value": "testuser",
+        "step_description": "Input Text into the username or email field with value 'myuser'",
+        "element_description": "the username or email field",
+        "value": "myuser",
         "keyword": "Input Text"
     },
     {
-        "step_description": "Input Text into the password field with value 'password123'",
+        "step_description": "Input Text into the password field with value 'mypassword'",
         "element_description": "the password field",
-        "value": "password123",
+        "value": "mypassword",
         "keyword": "Input Text"
     },
     {
-        "step_description": "Click Element on the 'Sign in' button",
-        "element_description": "the 'Sign in' button",
+        "step_description": "Click Element on the 'Login' or 'Sign In' button",
+        "element_description": "the 'Login' or 'Sign In' button",
         "value": "",
         "keyword": "Click Element"
     }

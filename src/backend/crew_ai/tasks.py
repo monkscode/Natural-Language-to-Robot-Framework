@@ -4,12 +4,47 @@ class RobotTasks:
     def plan_steps_task(self, agent, query) -> Task:
         return Task(
             description=f"""
-            Analyze the user's query and break it down into a structured series of high-level test steps.
+            Your mission is to act as an expert Test Automation Planner. You must analyze a user's natural language query and decompose it into a comprehensive, step-by-step test plan that a junior test engineer could follow.
+
             The user query is: "{query}"
 
-            --- RULES ---
-            1.  Respond with a JSON array of objects. Each object represents a single test step.
-            2.  Each object must have keys: "step_description", "element_description", "value", and "keyword".
+            --- CORE PRINCIPLES ---
+            1.  **Explicitness:** Your plan must be explicit. Do not assume any prior context. If a user says "log in", you must include steps for navigating to the login page, entering the username, entering the password, and clicking the submit button.
+            2.  **Decomposition:** Break down complex actions into smaller, single-action steps. For example, "search for a product and add it to the cart" should be multiple steps: "Input text into search bar", "Click search button", "Click product link", "Click add to cart button".
+            3.  **Keyword Precision:** Use the most appropriate Robot Framework keyword for each action.
+
+            --- KEYWORD GUIDELINES ---
+            *   `Open Browser`: For starting a new browser session.
+            *   `Input Text`: For typing text into input fields.
+            *   `Click Element`: For clicking buttons, links, etc.
+            *   `Get Text`: For retrieving text from an element to be stored or validated.
+            *   `Select From List By Value`: For selecting an option from a dropdown menu.
+            *   `Wait Until Element Is Visible`: For waiting for dynamic content to appear.
+            *   `Close Browser`: For ending the test session.
+
+            --- EXAMPLE SCENARIOS ---
+
+            **Example 1: Generic Login**
+            *Query:* "Log in to the application with username 'myuser' and password 'mypassword'"
+            *Output Steps:*
+            1. Open Browser to the application's login page
+            2. Input Text into the username or email field with value 'myuser'
+            3. Input Text into the password field with value 'mypassword'
+            4. Click Element on the 'Login' or 'Sign In' button
+
+            **Example 2: Generic E-commerce Search**
+            *Query:* "Go to the e-commerce site, search for 'product name', apply the 'high-rating' filter, and add the first item to the basket."
+            *Output Steps:*
+            1. Open Browser to the e-commerce site
+            2. Input Text into the main search bar with value 'product name'
+            3. Click Element on the search button
+            4. Click Element on the filter for 'high-rating'
+            5. Click Element on the first item in the search results
+            6. Click Element on the 'Add to Basket' or 'Add to Cart' button
+
+            --- FINAL OUTPUT RULES ---
+            1.  You MUST respond with ONLY a valid JSON array of objects.
+            2.  Each object in the array represents a single test step and MUST have the following keys: "step_description", "element_description", "value", and "keyword".
             3.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
             4.  When generating an "Open Browser" step, you MUST also include the `browser=chrome` argument and options to ensure a clean session. Use `options=add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")`.
             """,
