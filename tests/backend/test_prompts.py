@@ -32,3 +32,49 @@ PLAN_STEPS_TASK_MOCKED_OUTPUT = """
     }
 ]
 """
+
+# For loop test
+LOOP_PLAN_STEPS_MOCKED_OUTPUT = """
+[
+    {
+        "step_description": "Get Webelements from the main menu and store them in a variable named 'links'",
+        "element_description": "the main menu",
+        "value": "",
+        "keyword": "Get Webelements"
+    },
+    {
+        "step_description": "For each 'link' in 'links', click the 'link'",
+        "element_description": "the link",
+        "value": "",
+        "keyword": "Click Element",
+        "loop_type": "FOR",
+        "loop_source": "@{links}"
+    }
+]
+"""
+
+# For conditional logic test
+CONDITIONAL_PLAN_STEPS_MOCKED_OUTPUT = """
+[
+    {
+        "step_description": "Go to the cart page",
+        "element_description": "the cart page link",
+        "value": "https://example.com/cart",
+        "keyword": "Go To"
+    },
+    {
+        "step_description": "Get Text from the total amount element and store it in a variable named 'total'",
+        "element_description": "the total amount element",
+        "value": "",
+        "keyword": "Get Text"
+    },
+    {
+        "step_description": "Input Text into the discount code field with value 'SAVE10'",
+        "element_description": "the discount code field",
+        "value": "SAVE10",
+        "keyword": "Input Text",
+        "condition_type": "IF",
+        "condition_value": "${{total}} > 100"
+    }
+]
+"""

@@ -72,3 +72,69 @@ def test_identify_elements_task_with_advanced_prompt(mock_execute_sync):
     assert result is not None
     assert result.raw == IDENTIFY_ELEMENTS_TASK_MOCKED_OUTPUT
     mock_execute_sync.assert_called_once()
+
+
+@patch('crewai.Task.execute_sync')
+def test_assemble_code_task_with_conditional_logic(mock_execute_sync):
+    # 1. Arrange
+    from tests.backend.test_prompts import CONDITIONAL_PLAN_STEPS_MOCKED_OUTPUT
+    mock_execute_sync.return_value = TaskOutput(
+        description="Mocked task description",
+        raw="""
+*** Test Cases ***
+Conditional Test
+    Go To    https://example.com/cart
+    ${total}=    Get Text    id=total-amount
+    Run Keyword If    ${total} > 100    Input Text    id=discount-code    SAVE10
+        """,
+        agent="Mocked Agent"
+    )
+
+    agents = RobotAgents(model_provider="local", model_name="llama3")
+    tasks = RobotTasks()
+    code_assembler_agent = agents.code_assembler_agent()
+
+    # 2. Act
+    task = tasks.assemble_code_task(code_assembler_agent)
+    task.context = CONDITIONAL_PLAN_STEPS_MOCKED_OUTPUT
+    result = task.execute_sync()
+
+    # 3. Assert
+    assert result is not None
+    assert "Run Keyword If" in result.raw
+    assert "${total} > 100" in result.raw
+    mock_execute_sync.assert_called_once()
+
+
+@patch('crewai.Task.execute_sync')
+def test_assemble_code_task_with_loop(mock_execute_sync):
+    # 1. Arrange
+    from tests.backend.test_prompts import LOOP_PLAN_STEPS_MOCKED_OUTPUT
+    mock_execute_sync.return_value = TaskOutput(
+        description="Mocked task description",
+        raw="""
+*** Test Cases ***
+Loop Test
+    @{links}=    Get Webelements    css=nav a
+    FOR    ${link}    IN    @{links}
+        Click Element    ${link}
+    END
+        """,
+        agent="Mocked Agent"
+    )
+
+    agents = RobotAgents(model_provider="local", model_name="llama3")
+    tasks = RobotTasks()
+    code_assembler_agent = agents.code_assembler_agent()
+
+    # 2. Act
+    task = tasks.assemble_code_task(code_assembler_agent)
+    task.context = LOOP_PLAN_STEPS_MOCKED_OUTPUT
+    result = task.execute_sync()
+
+    # 3. Assert
+    assert result is not None
+    assert "FOR" in result.raw
+    assert "IN" in result.raw
+    assert "@{links}" in result.raw
+    mock_execute_sync.assert_called_once()
