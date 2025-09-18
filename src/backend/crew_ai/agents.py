@@ -10,7 +10,7 @@ def get_llm(model_provider, model_name):
     else:
         return LLM(
             api_key=os.getenv("GEMINI_API_KEY"),
-            model=f"gemini/{model_name}",
+            model=f"{model_name}",
             num_retries=5,
         )
 

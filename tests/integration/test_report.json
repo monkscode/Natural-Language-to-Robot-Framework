@@ -1,0 +1,32 @@
+{
+  "summary": {
+    "total_test_suites": 1,
+    "successful_suites": 1,
+    "failed_suites": 0,
+    "suite_success_rate": 100.0,
+    "total_tests": 5,
+    "total_duration": 1.630967617034912,
+    "overall_duration": 5.753085613250732
+  },
+  "environment": {
+    "python_version": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+    "virtual_env": false,
+    "dependencies": {
+      "pytest": true,
+      "pytest-asyncio": true,
+      "robotframework": false,
+      "selenium": true,
+      "fastapi": true,
+      "pydantic": true
+    }
+  },
+  "test_suites": {
+    "simple_tests": {
+      "success": true,
+      "duration": 1.630967617034912,
+      "exit_code": 0,
+      "test_count": 5
+    }
+  },
+  "timestamp": "2025-09-17T23:46:12.626097"
+}

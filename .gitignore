@@ -15,3 +15,6 @@ __pycache__/
 
 # Virtual environment
 venv/
+
+# Robot Test Files
+robot_tests/

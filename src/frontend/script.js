@@ -7,7 +7,44 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
 
+    // Healing UI elements
+    const healingProgress = document.getElementById('healing-progress');
+    const healingStatus = document.getElementById('healing-status');
+    const healingProgressFill = document.getElementById('healing-progress-fill');
+    const healingDetails = document.getElementById('healing-details');
+
+    // Navigation and sections
+    const navTabs = document.querySelectorAll('.nav-tab');
+    const workspaceSection = document.querySelector('.workspace');
+    const executionSection = workspaceSection.nextElementSibling;
+    const healingConfigSection = document.getElementById('healing-config-section');
+    const healingDashboardSection = document.getElementById('healing-dashboard-section');
+
+    // Configuration elements
+    const healingEnabledCheckbox = document.getElementById('healing-enabled');
+    const maxAttemptsInput = document.getElementById('max-attempts');
+    const sessionTimeoutInput = document.getElementById('session-timeout');
+    const healingTimeoutInput = document.getElementById('healing-timeout');
+    const confidenceThresholdSlider = document.getElementById('confidence-threshold');
+    const confidenceValue = document.getElementById('confidence-value');
+    const saveConfigBtn = document.getElementById('save-config-btn');
+    const resetConfigBtn = document.getElementById('reset-config-btn');
+
+    // Dashboard elements
+    const totalAttemptsEl = document.getElementById('total-attempts');
+    const successRateEl = document.getElementById('success-rate');
+    const avgHealingTimeEl = document.getElementById('avg-healing-time');
+    const last24hAttemptsEl = document.getElementById('last-24h-attempts');
+    const refreshReportsBtn = document.getElementById('refresh-reports-btn');
+    const reportsTableBody = document.getElementById('reports-table-body');
+
+    // Modal elements
+    const healingReportModal = document.getElementById('healing-report-modal');
+    const closeReportModal = document.getElementById('close-report-modal');
+    const healingReportContent = document.getElementById('healing-report-content');
+
     let robotCodeContent = '';
+    let currentHealingSession = null;
 
     function updateStatus(status, text) {
         statusBadge.style.display = 'flex';
@@ -163,7 +200,112 @@ document.addEventListener('DOMContentLoaded', () => {
                 executionLogsEl.appendChild(errorEntry);
                 hideStatus();
             }
+        } else if (data.stage === 'healing') {
+            // Handle healing progress updates
+            handleHealingProgress(data);
         }
+    }
+
+    function handleHealingProgress(data) {
+        if (data.status === 'running') {
+            // Show healing progress indicator
+            healingProgress.style.display = 'block';
+            healingStatus.textContent = data.message;
+
+            // Update progress based on message content
+            let progress = 0;
+            if (data.message.includes('Analyzing')) {
+                progress = 25;
+                updateHealingStep('step-detection', 'active');
+            } else if (data.message.includes('Generating')) {
+                progress = 50;
+                updateHealingStep('step-detection', 'complete');
+                updateHealingStep('step-generation', 'active');
+            } else if (data.message.includes('Validating')) {
+                progress = 75;
+                updateHealingStep('step-generation', 'complete');
+                updateHealingStep('step-validation', 'active');
+            } else if (data.message.includes('Updating')) {
+                progress = 90;
+                updateHealingStep('step-validation', 'complete');
+                updateHealingStep('step-update', 'active');
+            }
+
+            healingProgressFill.style.width = `${progress}%`;
+
+            // Add healing log entry
+            const logEntry = document.createElement('div');
+            logEntry.style.color = 'var(--primary)';
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING: ${data.message}`;
+            executionLogsEl.appendChild(logEntry);
+            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+
+        } else if (data.status === 'complete') {
+            // Healing completed successfully
+            healingProgressFill.style.width = '100%';
+            updateHealingStep('step-update', 'complete');
+            healingStatus.textContent = 'Healing completed successfully!';
+
+            setTimeout(() => {
+                healingProgress.style.display = 'none';
+                resetHealingSteps();
+            }, 3000);
+
+            const logEntry = document.createElement('div');
+            logEntry.style.color = 'var(--success)';
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING: Successfully healed locators`;
+            executionLogsEl.appendChild(logEntry);
+            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+
+        } else if (data.status === 'error') {
+            // Healing failed
+            healingStatus.textContent = 'Healing failed: ' + data.message;
+            updateAllHealingSteps('error');
+
+            setTimeout(() => {
+                healingProgress.style.display = 'none';
+                resetHealingSteps();
+            }, 5000);
+
+            const logEntry = document.createElement('div');
+            logEntry.style.color = 'var(--error)';
+            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING ERROR: ${data.message}`;
+            executionLogsEl.appendChild(logEntry);
+            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+        }
+    }
+
+    function updateHealingStep(stepId, status) {
+        const stepElement = document.getElementById(stepId);
+        if (stepElement) {
+            stepElement.className = `step-status ${status}`;
+            switch (status) {
+                case 'active':
+                    stepElement.textContent = '🔄';
+                    break;
+                case 'complete':
+                    stepElement.textContent = '✅';
+                    break;
+                case 'error':
+                    stepElement.textContent = '❌';
+                    break;
+                default:
+                    stepElement.textContent = '⏳';
+            }
+        }
+    }
+
+    function updateAllHealingSteps(status) {
+        ['step-detection', 'step-generation', 'step-validation', 'step-update'].forEach(stepId => {
+            updateHealingStep(stepId, status);
+        });
+    }
+
+    function resetHealingSteps() {
+        ['step-detection', 'step-generation', 'step-validation', 'step-update'].forEach(stepId => {
+            updateHealingStep(stepId, 'pending');
+        });
+        healingProgressFill.style.width = '0%';
     }
 
     downloadBtn.addEventListener('click', () => {
@@ -200,4 +342,302 @@ document.addEventListener('DOMContentLoaded', () => {
             generateBtn.click();
         }
     });
+
+    // Navigation tabs functionality
+    navTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const targetSection = tab.dataset.section;
+            
+            // Update active tab
+            navTabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            
+            // Show/hide sections
+            if (targetSection === 'workspace') {
+                workspaceSection.style.display = 'grid';
+                executionSection.style.display = 'block';
+                healingConfigSection.style.display = 'none';
+                healingDashboardSection.style.display = 'none';
+            } else if (targetSection === 'healing-config') {
+                workspaceSection.style.display = 'none';
+                executionSection.style.display = 'none';
+                healingConfigSection.style.display = 'block';
+                healingDashboardSection.style.display = 'none';
+                loadHealingConfig();
+            } else if (targetSection === 'healing-dashboard') {
+                workspaceSection.style.display = 'none';
+                executionSection.style.display = 'none';
+                healingConfigSection.style.display = 'none';
+                healingDashboardSection.style.display = 'block';
+                loadHealingDashboard();
+            }
+        });
+    });
+
+    // Configuration panel functionality
+    confidenceThresholdSlider.addEventListener('input', (e) => {
+        confidenceValue.textContent = e.target.value;
+    });
+
+    saveConfigBtn.addEventListener('click', async () => {
+        try {
+            const config = {
+                enabled: healingEnabledCheckbox.checked,
+                max_attempts_per_locator: parseInt(maxAttemptsInput.value),
+                chrome_session_timeout: parseInt(sessionTimeoutInput.value),
+                healing_timeout: parseInt(healingTimeoutInput.value) * 60, // Convert to seconds
+                confidence_threshold: parseFloat(confidenceThresholdSlider.value)
+            };
+
+            const response = await fetch('/api/healing/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(config)
+            });
+
+            if (response.ok) {
+                showNotification('Configuration saved successfully!', 'success');
+            } else {
+                throw new Error('Failed to save configuration');
+            }
+        } catch (error) {
+            showNotification('Failed to save configuration: ' + error.message, 'error');
+        }
+    });
+
+    resetConfigBtn.addEventListener('click', () => {
+        // Reset to default values
+        healingEnabledCheckbox.checked = true;
+        maxAttemptsInput.value = '3';
+        sessionTimeoutInput.value = '30';
+        healingTimeoutInput.value = '5';
+        confidenceThresholdSlider.value = '0.7';
+        confidenceValue.textContent = '0.7';
+    });
+
+    // Dashboard functionality
+    refreshReportsBtn.addEventListener('click', () => {
+        loadHealingReports();
+    });
+
+    // Modal functionality
+    closeReportModal.addEventListener('click', () => {
+        healingReportModal.style.display = 'none';
+    });
+
+    healingReportModal.addEventListener('click', (e) => {
+        if (e.target === healingReportModal) {
+            healingReportModal.style.display = 'none';
+        }
+    });
+
+    // Load healing configuration
+    async function loadHealingConfig() {
+        try {
+            const response = await fetch('/api/healing/status');
+            if (response.ok) {
+                const data = await response.json();
+                const config = data.configuration;
+                
+                healingEnabledCheckbox.checked = data.healing_enabled;
+                maxAttemptsInput.value = config.max_attempts_per_locator;
+                sessionTimeoutInput.value = config.chrome_session_timeout;
+                healingTimeoutInput.value = Math.round(config.healing_timeout / 60); // Convert to minutes
+                confidenceThresholdSlider.value = config.confidence_threshold;
+                confidenceValue.textContent = config.confidence_threshold;
+            }
+        } catch (error) {
+            console.error('Failed to load healing config:', error);
+        }
+    }
+
+    // Load healing dashboard data
+    async function loadHealingDashboard() {
+        await Promise.all([
+            loadHealingStatistics(),
+            loadHealingReports()
+        ]);
+    }
+
+    async function loadHealingStatistics() {
+        try {
+            const response = await fetch('/api/healing/statistics');
+            if (response.ok) {
+                const data = await response.json();
+                const stats = data.statistics;
+                
+                totalAttemptsEl.textContent = stats.total_attempts;
+                successRateEl.textContent = `${stats.success_rate.toFixed(1)}%`;
+                avgHealingTimeEl.textContent = `${stats.average_healing_time.toFixed(1)}s`;
+                last24hAttemptsEl.textContent = stats.last_24h_attempts;
+            }
+        } catch (error) {
+            console.error('Failed to load healing statistics:', error);
+        }
+    }
+
+    async function loadHealingReports() {
+        try {
+            const response = await fetch('/api/healing/reports');
+            if (response.ok) {
+                const data = await response.json();
+                displayHealingReports(data.reports);
+            }
+        } catch (error) {
+            console.error('Failed to load healing reports:', error);
+        }
+    }
+
+    function displayHealingReports(reports) {
+        if (reports.length === 0) {
+            reportsTableBody.innerHTML = `
+                <tr class="empty-row">
+                    <td colspan="7">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📋</div>
+                            <p>No healing reports available</p>
+                        </div>
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        reportsTableBody.innerHTML = reports.map(report => `
+            <tr>
+                <td>${report.run_id}</td>
+                <td>${report.test_file}</td>
+                <td>${report.total_attempts}</td>
+                <td>${report.successful_healings}</td>
+                <td>${report.failed_healings}</td>
+                <td>${new Date(report.generated_at).toLocaleDateString()}</td>
+                <td>
+                    <button class="btn btn-secondary btn-small" onclick="viewHealingReport('${report.run_id}')">
+                        View Report
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    // Global function for viewing healing reports
+    window.viewHealingReport = async function(runId) {
+        try {
+            const response = await fetch(`/api/healing/reports/${runId}`);
+            if (response.ok) {
+                const data = await response.json();
+                displayHealingReportModal(data.report);
+            } else {
+                throw new Error('Failed to load report');
+            }
+        } catch (error) {
+            showNotification('Failed to load healing report: ' + error.message, 'error');
+        }
+    };
+
+    function displayHealingReportModal(report) {
+        const content = `
+            <div class="report-section">
+                <h3>Report Summary</h3>
+                <div class="report-grid">
+                    <div class="report-card">
+                        <div class="report-card-title">Total Attempts</div>
+                        <div class="report-card-value">${report.total_attempts}</div>
+                    </div>
+                    <div class="report-card">
+                        <div class="report-card-title">Successful</div>
+                        <div class="report-card-value">${report.successful_healings}</div>
+                    </div>
+                    <div class="report-card">
+                        <div class="report-card-title">Failed</div>
+                        <div class="report-card-value">${report.failed_healings}</div>
+                    </div>
+                    <div class="report-card">
+                        <div class="report-card-title">Total Time</div>
+                        <div class="report-card-value">${report.total_time.toFixed(1)}s</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="report-section">
+                <h3>Healing Attempts</h3>
+                ${report.healing_attempts.map(attempt => `
+                    <div class="healing-attempt">
+                        <div class="attempt-header">
+                            <div class="attempt-title">${attempt.test_case}</div>
+                            <div class="attempt-status ${attempt.status}">${attempt.status}</div>
+                        </div>
+                        <div class="locator-comparison">
+                            <div class="locator-box">
+                                <div class="locator-label">Original Locator</div>
+                                <div class="locator-value">${attempt.original_locator}</div>
+                            </div>
+                            <div class="locator-box">
+                                <div class="locator-label">Healed Locator</div>
+                                <div class="locator-value">${attempt.healed_locator || 'N/A'}</div>
+                            </div>
+                        </div>
+                        ${attempt.error_message ? `<div style="margin-top: 0.75rem; color: var(--error); font-size: 0.875rem;">${attempt.error_message}</div>` : ''}
+                    </div>
+                `).join('')}
+            </div>
+        `;
+        
+        healingReportContent.innerHTML = content;
+        healingReportModal.style.display = 'flex';
+    }
+
+    function showNotification(message, type = 'info') {
+        // Create notification element
+        const notification = document.createElement('div');
+        notification.className = `notification notification-${type}`;
+        notification.textContent = message;
+        
+        // Add styles
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            z-index: 1001;
+            animation: slideIn 0.3s ease;
+        `;
+        
+        if (type === 'success') {
+            notification.style.background = 'var(--success)';
+        } else if (type === 'error') {
+            notification.style.background = 'var(--error)';
+        } else {
+            notification.style.background = 'var(--primary)';
+        }
+        
+        document.body.appendChild(notification);
+        
+        // Remove after 3 seconds
+        setTimeout(() => {
+            notification.style.animation = 'slideOut 0.3s ease';
+            setTimeout(() => {
+                document.body.removeChild(notification);
+            }, 300);
+        }, 3000);
+    }
+
+    // Add CSS animations for notifications
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(100%); opacity: 0; }
+        }
+    `;
+    document.head.appendChild(style);
 });

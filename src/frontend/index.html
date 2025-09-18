@@ -129,6 +129,43 @@
                 <div class="section-subtitle">Real-time test execution logs and results</div>
             </div>
             <div class="section-content">
+                <!-- Healing Progress Indicator -->
+                <div id="healing-progress" class="healing-progress" style="display: none;">
+                    <div class="healing-header">
+                        <div class="healing-icon">🔧</div>
+                        <div class="healing-info">
+                            <div class="healing-title">Self-Healing in Progress</div>
+                            <div class="healing-subtitle" id="healing-status">Analyzing test failures...</div>
+                        </div>
+                        <div class="healing-spinner"></div>
+                    </div>
+                    <div class="healing-progress-bar">
+                        <div class="healing-progress-fill" id="healing-progress-fill"></div>
+                    </div>
+                    <div class="healing-details" id="healing-details">
+                        <div class="healing-step">
+                            <span class="step-icon">🔍</span>
+                            <span class="step-text">Detecting locator failures...</span>
+                            <span class="step-status pending" id="step-detection">⏳</span>
+                        </div>
+                        <div class="healing-step">
+                            <span class="step-icon">🧠</span>
+                            <span class="step-text">Generating alternative locators...</span>
+                            <span class="step-status pending" id="step-generation">⏳</span>
+                        </div>
+                        <div class="healing-step">
+                            <span class="step-icon">✅</span>
+                            <span class="step-text">Validating new locators...</span>
+                            <span class="step-status pending" id="step-validation">⏳</span>
+                        </div>
+                        <div class="healing-step">
+                            <span class="step-icon">📝</span>
+                            <span class="step-text">Updating test code...</span>
+                            <span class="step-status pending" id="step-update">⏳</span>
+                        </div>
+                    </div>
+                </div>
+
                 <div id="execution-logs" class="logs-block">
                     <div class="empty-state">
                         <div class="empty-state-icon">📋</div>
@@ -137,7 +174,155 @@
                 </div>
             </div>
         </div>
+        <!-- Healing Configuration Panel -->
+        <div class="section" id="healing-config-section" style="display: none;">
+            <div class="section-header">
+                <div class="section-title">Self-Healing Configuration</div>
+                <div class="section-subtitle">Configure automatic test healing behavior</div>
+            </div>
+            <div class="section-content">
+                <div class="config-grid">
+                    <div class="config-group">
+                        <label class="config-label">
+                            <input type="checkbox" id="healing-enabled" class="config-checkbox">
+                            <span class="config-text">Enable Self-Healing</span>
+                        </label>
+                        <div class="config-description">Automatically attempt to fix failing locators</div>
+                    </div>
+                    
+                    <div class="config-group">
+                        <label class="config-label">Max Attempts per Locator</label>
+                        <input type="number" id="max-attempts" class="config-input" min="1" max="10" value="3">
+                        <div class="config-description">Maximum healing attempts for each failing locator</div>
+                    </div>
+                    
+                    <div class="config-group">
+                        <label class="config-label">Session Timeout (seconds)</label>
+                        <input type="number" id="session-timeout" class="config-input" min="10" max="300" value="30">
+                        <div class="config-description">Chrome session timeout for locator validation</div>
+                    </div>
+                    
+                    <div class="config-group">
+                        <label class="config-label">Healing Timeout (minutes)</label>
+                        <input type="number" id="healing-timeout" class="config-input" min="1" max="30" value="5">
+                        <div class="config-description">Maximum time allowed for healing process</div>
+                    </div>
+                    
+                    <div class="config-group">
+                        <label class="config-label">Confidence Threshold</label>
+                        <input type="range" id="confidence-threshold" class="config-slider" min="0" max="1" step="0.1" value="0.7">
+                        <div class="config-value" id="confidence-value">0.7</div>
+                        <div class="config-description">Minimum confidence score for accepting healed locators</div>
+                    </div>
+                </div>
+                
+                <div class="config-actions">
+                    <button id="save-config-btn" class="btn btn-primary">Save Configuration</button>
+                    <button id="reset-config-btn" class="btn btn-secondary">Reset to Defaults</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Healing History and Statistics Dashboard -->
+        <div class="section" id="healing-dashboard-section" style="display: none;">
+            <div class="section-header">
+                <div class="section-title">Healing Dashboard</div>
+                <div class="section-subtitle">View healing history, statistics, and reports</div>
+            </div>
+            <div class="section-content">
+                <!-- Statistics Cards -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="total-attempts">0</div>
+                            <div class="stat-label">Total Attempts</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">✅</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="success-rate">0%</div>
+                            <div class="stat-label">Success Rate</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⏱️</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="avg-healing-time">0s</div>
+                            <div class="stat-label">Avg Healing Time</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔥</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="last-24h-attempts">0</div>
+                            <div class="stat-label">Last 24h</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Healing Reports Table -->
+                <div class="reports-section">
+                    <div class="reports-header">
+                        <h3>Recent Healing Reports</h3>
+                        <button id="refresh-reports-btn" class="btn btn-secondary btn-small">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div class="reports-table-container">
+                        <table class="reports-table" id="healing-reports-table">
+                            <thead>
+                                <tr>
+                                    <th>Run ID</th>
+                                    <th>Test File</th>
+                                    <th>Attempts</th>
+                                    <th>Success</th>
+                                    <th>Failed</th>
+                                    <th>Date</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reports-table-body">
+                                <tr class="empty-row">
+                                    <td colspan="7">
+                                        <div class="empty-state">
+                                            <div class="empty-state-icon">📋</div>
+                                            <p>No healing reports available</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-section="workspace">Test Generation</button>
+            <button class="nav-tab" data-section="healing-config">Healing Config</button>
+            <button class="nav-tab" data-section="healing-dashboard">Healing Dashboard</button>
+        </div>
     </main>
+
+    <!-- Healing Report Modal -->
+    <div id="healing-report-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Healing Report</h2>
+                <button class="modal-close" id="close-report-modal">&times;</button>
+            </div>
+            <div class="modal-body" id="healing-report-content">
+                <!-- Report content will be loaded here -->
+            </div>
+        </div>
+    </div>
+
     <script src="script.js"></script>
 </body>
 </html>
