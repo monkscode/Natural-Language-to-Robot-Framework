@@ -9,10 +9,12 @@ pydantic-settings
 PyYAML
 ollama
 crewai
-crewai-tools
+crewai[tools]
 langchain-google-genai
+langchain_community
 beautifulsoup4
 selenium
 webdriver-manager
 sse-starlette
 aiohttp
+requests
