@@ -2,6 +2,7 @@ import os
 from crewai import Agent
 from crewai.llm import LLM
 from langchain_community.llms import Ollama
+from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
 
 # Initialize the LLMs
 def get_llm(model_provider, model_name):
@@ -13,6 +14,10 @@ def get_llm(model_provider, model_name):
             model=f"{model_name}",
             num_retries=5,
         )
+
+# Initialize the tool
+selenium_tool = SeleniumScrapingTool()
+scrape_tool = ScrapeElementFromWebsiteTool()
 
 class RobotAgents:
     def __init__(self, model_provider, model_name):
@@ -32,7 +37,8 @@ class RobotAgents:
         return Agent(
             role="Web Element Locator Specialist",
             goal="Generate the most reliable and stable locator for web elements based on their description.",
-            backstory="You are an expert in web element identification for Robot Framework automation. Your task is to find the best locator for a given web element description, following a strict priority order of locator strategies. You must be precise and provide only valid Robot Framework locators.",
+            backstory="You are an expert in web element identification for Robot Framework automation. Your task is to find the best locator for a given web element description, following a strict priority order of locator strategies. You must be precise and provide only valid Robot Framework locators. You may use the provided tools to assist in locating elements on web pages.",
+            tools=[selenium_tool, scrape_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=False,
