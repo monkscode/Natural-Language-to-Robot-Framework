@@ -3,14 +3,14 @@
 import os
 from crewai import Agent
 from crewai.llm import LLM
-from langchain_community.llms import Ollama
+# from langchain_community.llms import Ollama
 from typing import Dict, Any
-
+from langchain_ollama import OllamaLLM
 
 def get_llm(model_provider: str, model_name: str):
     """Get LLM instance based on provider and model name."""
     if model_provider == "local":
-        return Ollama(model=model_name)
+        return OllamaLLM(model=model_name)
     else:
         return LLM(
             api_key=os.getenv("GEMINI_API_KEY"),

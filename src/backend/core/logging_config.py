@@ -325,7 +325,7 @@ def _configure_external_library_logging():
     try:
         import litellm
         # Enable LiteLLM logging
-        litellm.set_verbose = True
+        # litellm.set_verbose = True
         litellm.log_level = os.getenv("LITELLM_LOG_LEVEL", "DEBUG")
     except ImportError:
         pass

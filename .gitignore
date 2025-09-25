@@ -12,9 +12,13 @@ __pycache__/
 
 # Logs
 *.log
+logs/audit
 
 # Virtual environment
 venv/
 
 # Robot Test Files
 robot_tests/
+
+# Test files
+test.py

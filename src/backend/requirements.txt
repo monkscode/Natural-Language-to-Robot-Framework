@@ -18,3 +18,5 @@ webdriver-manager
 sse-starlette
 aiohttp
 requests
+flask
+langchain-ollama

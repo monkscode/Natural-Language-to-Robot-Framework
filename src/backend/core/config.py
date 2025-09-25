@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from .models.healing_models import HealingConfiguration, LocatorStrategy
 
-load_dotenv()
+load_dotenv("src/backend/.env")
 
 class Settings(BaseSettings):
     MODEL_PROVIDER: str = "online"
@@ -24,5 +24,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'
+        extra = 'allow'  # Allow extra fields from .env file
 
 settings = Settings()

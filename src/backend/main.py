@@ -11,6 +11,10 @@ from src.backend.core.audit_trail import initialize_audit_trail
 from src.backend.core.alerting import initialize_alerting, get_alerting_system
 
 # --- Logging Configuration ---
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+os.makedirs("logs/audit", exist_ok=True)
+
 # Initialize structured logging for healing system
 setup_healing_logging(log_level="INFO", log_dir="logs")
 
@@ -20,7 +24,7 @@ initialize_audit_trail(storage_path="logs/audit")
 initialize_alerting()
 
 # Keep basic logging for non-healing components
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', encoding="utf-8")
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -48,6 +52,10 @@ app.include_router(monitoring_router, prefix="/api")
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")
 
+# Create robot_tests directory if it doesn't exist
+os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
+
+# Mount static files
 app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 

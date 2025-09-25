@@ -1,13 +1,19 @@
 import os
 from crewai import Agent
 from crewai.llm import LLM
-from langchain_community.llms import Ollama
+# from langchain_community.llms import Ollama
 from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
+# Import browser_use_tool to ensure it's included in the package
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+from tools.browser_use_tool import BrowserUseTool
+from langchain_ollama import OllamaLLM
 
 # Initialize the LLMs
 def get_llm(model_provider, model_name):
     if model_provider == "local":
-        return Ollama(model=model_name)
+        return OllamaLLM(model=model_name)
     else:
         return LLM(
             api_key=os.getenv("GEMINI_API_KEY"),
@@ -15,9 +21,10 @@ def get_llm(model_provider, model_name):
             num_retries=5,
         )
 
-# Initialize the tool
+# Initialize the tools (FIXED: Create instances instead of passing classes)
 selenium_tool = SeleniumScrapingTool()
 scrape_tool = ScrapeElementFromWebsiteTool()
+browser_use_tool = BrowserUseTool()  # Create instance here
 
 class RobotAgents:
     def __init__(self, model_provider, model_name):
@@ -37,8 +44,8 @@ class RobotAgents:
         return Agent(
             role="Web Element Locator Specialist",
             goal="Generate the most reliable and stable locator for web elements based on their description.",
-            backstory="You are an expert in web element identification for Robot Framework automation. Your task is to find the best locator for a given web element description, following a strict priority order of locator strategies. You must be precise and provide only valid Robot Framework locators. You may use the provided tools to assist in locating elements on web pages.",
-            tools=[selenium_tool, scrape_tool],
+            backstory="You are an expert in web element identification for Robot Framework automation. Your task is to find the best locator for a given web element description, following a strict priority order of locator strategies. You must be precise and provide only valid Robot Framework locators. You must use the provided tools to assist in locating elements on web pages.",
+            tools=[browser_use_tool],  # FIXED: Use instance instead of class
             llm=self.llm,
             verbose=True,
             allow_delegation=False,

@@ -15,6 +15,13 @@ from src.backend.core.config_loader import get_healing_config
 from src.backend.core.models import FailureContext
 
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
+
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
@@ -50,6 +57,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         validation_data = json.loads(json_string)
 
         if validation_data.get("valid"):
+            logging.info("Generated Robot Framework code is here:\n%s", robot_code)
             logging.info(
                 "CrewAI workflow complete. Code validation successful.")
             yield {"status": "complete", "robot_code": robot_code, "message": "Code generation successful."}
@@ -58,6 +66,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 f"CrewAI workflow finished, but code validation failed. Reason: {validation_data.get('reason')}")
             yield {"status": "error", "message": f"Code validation failed: {validation_data.get('reason')}"}
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
+        logging.error("Failed to generate valid Robot Framework code." + str(e))
         logging.error(
             f"Failed to parse validation output from crew: {e}\nRaw output was:\n{raw_validation_output}")
         yield {"status": "error", "message": "Failed to parse validation output from the crew.", "robot_code": robot_code}
