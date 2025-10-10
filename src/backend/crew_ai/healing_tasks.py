@@ -69,7 +69,7 @@ class HealingTasks:
         """Task for generating alternative locators based on failure analysis."""
         return Task(
             description=f"""
-            Generate multiple alternative locators for the failed element based on the failure analysis and DOM context.
+            Generate multiple alternative locators for the failed element using comprehensive element fingerprinting.
             
             Failure Analysis:
             {failure_analysis}
@@ -77,37 +77,43 @@ class HealingTasks:
             DOM Context (if available):
             {dom_context or "No DOM context provided - generate locators based on analysis"}
             
-            --- LOCATOR GENERATION STRATEGY ---
+            --- ENHANCED LOCATOR GENERATION STRATEGY ---
             
-            **Priority Order:**
-            1. ID-based locators (most stable)
-            2. Name-based locators
-            3. CSS selectors (class, attribute combinations)
-            4. XPath expressions (relative and absolute)
-            5. Link text (for links)
-            6. Partial link text
-            7. Tag name with attributes
+            **Use the Enhanced Locator Tool** with these operations:
+            
+            1. **extract_properties**: Extract 17+ properties from the target element
+               - Input: {{"dom_content": "<html>...</html>", "locator": "id=original-locator"}}
+               - Returns: Comprehensive ElementProperties with tag, id, name, type, aria_label, visible_text, 
+                 location, dimensions, neighbor_texts, parent_tag, sibling_tags, is_button, etc.
+            
+            2. **generate_locators**: Generate 8 alternative locators ranked by stability
+               - Input: {{"dom_content": "<html>...</html>", "target_element_description": "Submit button"}}
+               - Returns: 8 locators following BrowserStack hierarchy:
+                 * Priority 1: ID locator (95% stability)
+                 * Priority 2: Name locator (90% stability)
+                 * Priority 3: Aria-label CSS (92% stability)
+                 * Priority 4: Data-attribute CSS (88% stability)
+                 * Priority 5: Class CSS (70% stability)
+                 * Priority 6: Text-based XPath (85% stability)
+                 * Priority 7: Relative XPath (65% stability)
+                 * Priority 8: Absolute XPath (50% stability)
+            
+            3. **find_by_similarity**: Use Similo algorithm when direct locators fail
+               - Input: {{"target_properties": {{...}}, "current_dom": "<html>...</html>", "threshold": 0.7}}
+               - Returns: Best matching element with similarity score and recommended locator
+               - Threshold guide: 0.85+ (strict), 0.7 (balanced), 0.55 (lenient)
+            
+            **Property Stability Weights (from research):**
+            - Highly stable (2.70-2.95): id, name, aria_label, visible_text, is_button
+            - Moderately stable (1.30-2.20): attributes, location, alt, area
+            - Less stable (0.50-1.00): class_name, xpath, neighbor_texts
             
             **Generation Rules:**
-            1. Generate at least 3-5 alternative locators
-            2. Use different strategies for each alternative
-            3. Consider element context and surrounding elements
-            4. Prioritize stability over specificity
-            5. Include both strict and flexible matching approaches
-            
-            **Locator Patterns:**
-            - For buttons: Look for text content, aria-labels, data attributes
-            - For inputs: Look for name, placeholder, labels, surrounding text
-            - For links: Look for href patterns, text content, title attributes
-            - For containers: Look for class combinations, data attributes, structure
-            
-            **Robot Framework Syntax:**
-            - ID: `id=element_id`
-            - Name: `name=element_name`
-            - CSS: `css=.class-name` or `css=input[type='submit']`
-            - XPath: `xpath=//button[text()='Submit']` or `xpath=//input[@placeholder='Search']`
-            - Link: `link=Link Text`
-            - Partial Link: `partial link=Partial Text`
+            1. Start with extract_properties if original locator available
+            2. Generate all 8 alternative locators using generate_locators
+            3. If all alternatives fail, use find_by_similarity with threshold 0.7
+            4. Return locators in priority order (1-8) for intelligent fallback
+            5. Include stability scores and confidence levels for each
             
             --- OUTPUT FORMAT ---
             
@@ -115,20 +121,34 @@ class HealingTasks:
             {{
                 "alternatives": [
                     {{
-                        "locator": "robot framework locator string",
-                        "strategy": "id|name|css|xpath|link_text|partial_link_text|tag_name",
+                        "locator": "robot framework locator string (e.g., 'id=submit-btn')",
+                        "strategy": "id|name|css|xpath|link_text",
+                        "priority": int (1-8, lower = try first),
+                        "stability": float (0.0-1.0, higher = more stable),
                         "confidence": float (0.0 to 1.0),
                         "reasoning": "why this locator should work",
-                        "stability_score": float (0.0 to 1.0),
                         "fallback_level": "primary|secondary|tertiary"
                     }}
                 ],
-                "generation_strategy": "description of overall approach used",
-                "dom_analysis": "key insights from DOM analysis if available",
-                "recommendations": ["additional", "healing", "suggestions"]
+                "properties_extracted": {{
+                    "tag": "element tag name",
+                    "id": "element id if available",
+                    "name": "element name if available",
+                    "aria_label": "aria-label if available",
+                    "visible_text": "element text content",
+                    "total_properties": int
+                }},
+                "generation_strategy": "comprehensive_fingerprinting_with_similo",
+                "similarity_matching_used": boolean,
+                "best_match_score": float (if similarity matching used),
+                "recommendations": [
+                    "Try locators in priority order (1-8)",
+                    "Primary locator has 95% stability",
+                    "If all fail, adjust similarity threshold to 0.6"
+                ]
             }}
             """,
-            expected_output="A JSON object with multiple alternative locators and their metadata.",
+            expected_output="A JSON object with 8 alternative locators ranked by priority and stability.",
             agent=agent,
         )
 

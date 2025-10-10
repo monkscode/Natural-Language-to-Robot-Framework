@@ -1,11 +1,25 @@
 #!/bin/bash
 
+# Force UTF-8 encoding for all Python operations (fixes emoji/Unicode issues on Windows)
+export PYTHONIOENCODING=utf-8
+export PYTHONUTF8=1
+
 # Check for .env file
 if [ ! -f "src/backend/.env" ]; then
     echo "Error: src/backend/.env file not found."
     echo "Please copy src/backend/.env.example to src/backend/.env and fill in your API key."
     exit 1
 fi
+
+# Load environment variables, including the application port
+set -a
+source src/backend/.env
+set +a
+
+# Support both APP_PORT (new) and PORT (legacy) variables with a sane default
+APP_PORT="${APP_PORT:-${PORT:-5000}}"
+export APP_PORT
+export PORT="$APP_PORT"
 
 # Cross-platform venv activation and path handling
 VENV_DIR="venv"
@@ -34,5 +48,5 @@ fi
 
 # Run the application
 echo "Starting the application..."
-echo "You can access it at http://localhost:5000"
-python -m uvicorn src.backend.main:app --host 0.0.0.0 --port 5000
+echo "You can access it at http://localhost:${APP_PORT}"
+python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}"

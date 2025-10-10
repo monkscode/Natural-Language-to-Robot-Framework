@@ -11,11 +11,20 @@ from .models.healing_models import HealingConfiguration, LocatorStrategy
 load_dotenv("src/backend/.env")
 
 class Settings(BaseSettings):
-    MODEL_PROVIDER: str = "online"
+    # LLM Configuration
+    MODEL_PROVIDER: str = "online"  # "online" for Gemini, "local" for Ollama
     GEMINI_API_KEY: str | None = None
-    ONLINE_MODEL: str = "gemini-1.5-pro-latest"
+    ONLINE_MODEL: str = "gemini/gemini-2.5-flash"
     LOCAL_MODEL: str = "llama3"
-    SECONDS_BETWEEN_API_CALLS: int = 0
+    
+    # Note: SECONDS_BETWEEN_API_CALLS was removed during Phase 2 of codebase cleanup.
+    # Rate limiting is no longer implemented as Google Gemini API has sufficient
+    # rate limits (1500 RPM) for our use case. If rate limiting becomes necessary,
+    # implement it at the API gateway level rather than wrapping individual LLM calls.
+    
+    # Service Configuration
+    APP_PORT: int = Field(default=5000, description="Port for FastAPI service")
+    BROWSER_USE_SERVICE_URL: str = Field(default="http://localhost:4999", description="URL for BrowserUse service")
     
     # Self-healing configuration
     SELF_HEALING_ENABLED: bool = Field(default=True, description="Enable/disable self-healing globally")

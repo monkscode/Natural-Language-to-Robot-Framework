@@ -2,6 +2,7 @@ import os
 import docker
 import logging
 import traceback
+import xml.etree.ElementTree as ET
 from typing import Generator, Dict, Any
 
 IMAGE_TAG = "robot-test-runner:latest"
@@ -215,31 +216,43 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             logging.info(
                 f"✅ DOCKER SERVICE: Found output.xml file, parsing test results")
             try:
-                # Parse XML to determine actual test results
-                with open(output_xml_path, 'r') as f:
-                    xml_content = f.read()
-                    # Check if tests actually passed by looking at the XML
-                    tests_passed = 'fail="0"' in xml_content and 'status="FAIL"' not in xml_content
-
+                # Parse XML properly to determine actual test results
+                # We need to check the TOP-LEVEL test status, not grep for "FAIL" strings
+                # because "Run Keyword And Ignore Error" can have FAIL status inside but test still passes
+                tree = ET.parse(output_xml_path)
+                root = tree.getroot()
+                
+                # Check statistics section for overall pass/fail count
+                stats = root.find('.//statistics/total/stat')
+                if stats is not None:
+                    fail_count = int(stats.get('fail', '0'))
+                    pass_count = int(stats.get('pass', '0'))
+                    tests_passed = fail_count == 0 and pass_count > 0
                     logging.info(
-                        f"📊 DOCKER SERVICE: Test analysis results: tests_passed={tests_passed}")
+                        f"📊 DOCKER SERVICE: Test statistics: pass={pass_count}, fail={fail_count}, tests_passed={tests_passed}")
+                else:
+                    # Fallback to old method if statistics section not found
+                    with open(output_xml_path, 'r') as f:
+                        xml_content = f.read()
+                        tests_passed = 'fail="0"' in xml_content
+                    logging.warning(f"⚠️  DOCKER SERVICE: Statistics section not found in output.xml, using fallback method")
 
-                    if tests_passed:
-                        message = "Test execution finished: All tests passed."
-                        logging.info(f"🎉 DOCKER SERVICE: {message}")
-                        return {"status": "complete", "message": message, "result": {
-                            'logs': robot_logs,
-                            'log_html': f"/reports/{run_id}/log.html",
-                            'report_html': f"/reports/{run_id}/report.html"
-                        }}
-                    else:
-                        message = f"Test execution finished: Some tests failed (exit code {exit_code})."
-                        logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                        return {"status": "complete", "message": message, "result": {
-                            'logs': robot_logs,
-                            'log_html': f"/reports/{run_id}/log.html",
-                            'report_html': f"/reports/{run_id}/report.html"
-                        }}
+                if tests_passed:
+                    message = "Test execution finished: All tests passed."
+                    logging.info(f"🎉 DOCKER SERVICE: {message}")
+                    return {"status": "complete", "message": message, "result": {
+                        'logs': robot_logs,
+                        'log_html': f"/reports/{run_id}/log.html",
+                        'report_html': f"/reports/{run_id}/report.html"
+                    }}
+                else:
+                    message = f"Test execution finished: Some tests failed (exit code {exit_code})."
+                    logging.info(f"⚠️  DOCKER SERVICE: {message}")
+                    return {"status": "complete", "message": message, "result": {
+                        'logs': robot_logs,
+                        'log_html': f"/reports/{run_id}/log.html",
+                        'report_html': f"/reports/{run_id}/report.html"
+                    }}
 
             except Exception as e:
                 logging.error(

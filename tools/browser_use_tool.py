@@ -8,6 +8,8 @@ from typing import Any, Type, Optional, Dict
 from dotenv import load_dotenv
 load_dotenv("src/backend/.env")
 
+from src.backend.core.config import settings
+
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -101,41 +103,42 @@ class BrowserUseToolInput(BaseModel):
     browser_use_objective: str = Field(
         ..., 
         description=(
-            "Detailed objective for browser automation. Be specific about what data to extract. "
-            "For e-commerce sites, focus on extracting actual data rather than finding CSS selectors. "
+            "Detailed objective for browser automation with vision-based locator generation. "
+            "The tool will use vision AI to identify elements and return structured locator data. "
             "Examples:\n"
-            "- 'Open Amazon and search for laptops, get the first 3 product names and prices'\n"
-            "- 'Navigate to eBay, search for shoes, extract the first product title and cost'\n"
-            "- 'Go to Flipkart, search for phones, get product details from first item'\n"
-            "\nTips for better results:\n"
-            "- Be specific about the website URL\n"
-            "- Mention what data you want extracted\n"
-            "- For locators, ask for 'flexible selectors' or 'data extraction' instead of exact CSS\n"
-            "- Include fallback instructions for dynamic sites"
+            "- 'Find the search input box on Amazon homepage and return robust locators'\n"
+            "- 'Locate the Add to Cart button for the first product on Flipkart search results'\n"
+            "- 'Identify the price element of the first product on eBay'\n"
+            "\nThe tool will return:\n"
+            "- Multiple locator strategies (ID, name, data-*, aria-*, CSS, XPath)\n"
+            "- Stability score for each locator\n"
+            "- Validation data (uniqueness, visibility)\n"
+            "- Best locator recommendation"
         )
     )
 
 
 class BrowserUseTool(BaseTool):
-    """Enhanced Browser automation tool for CrewAI with better error handling."""
+    """Vision-enhanced browser automation tool with structured locator generation."""
     
-    name: str = "enhanced_browser_automation"
+    name: str = "vision_browser_automation"
     description: str = (
-        "Perform advanced web browser automation with enhanced error handling and data extraction. "
-        "This tool can navigate websites, extract product information, fill forms, and handle "
-        "dynamic content on modern e-commerce sites. It's particularly good at extracting "
-        "product data from sites like Flipkart, Amazon, eBay even when CSS classes are dynamic. "
-        "Use this when you need to automate complex web interactions or extract structured data "
-        "from websites that change their layouts frequently."
+        "Perform vision-based web element identification with structured locator generation. "
+        "This tool uses AI vision to identify elements on web pages and generates multiple "
+        "robust locator strategies (ID, name, data-*, aria-*, XPath, CSS). "
+        "Returns JSON with: best_locator, all_locators (ranked by stability), validation data. "
+        "Ideal for dynamic websites where CSS classes change frequently. "
+        "Works exceptionally well on e-commerce sites (Flipkart, Amazon, eBay). "
+        "Use this when you need reliable, maintainable locators for test automation."
     )
     args_schema: Type[BaseModel] = BrowserUseToolInput
 
     def _run(self, browser_use_objective: str) -> Dict[str, Any]:
-        """Execute the enhanced browser automation task."""
+        """Execute the enhanced browser automation task with optional popup handling."""
         logger.info(f"Starting enhanced browser automation: {browser_use_objective[:200]}...")
         
         # Configuration from environment variables
-        api_url = os.environ.get("BROWSER_USE_API_URL", "http://localhost:4999")
+        api_url = os.environ.get("BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
         timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))  # 15 minutes for complex tasks
         check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))  # Check every 5 seconds
         max_retries = int(os.environ.get("BROWSER_USE_MAX_RETRIES", "3"))
@@ -143,20 +146,19 @@ class BrowserUseTool(BaseTool):
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
         
-        # Enhanced objective with better guidance
-        enhanced_objective = f"""
-        {browser_use_objective}
+        # NOTE: Popup handling is managed by browser-use's system prompt
+        # Explicitly mentioning "close popup BEFORE task" makes browser-use think popup closure IS the main task
+        # Browser-use is a single-goal agent - it focuses on ONE objective at a time
+        # The system prompt already has "IGNORE NON-ESSENTIAL POPUPS" guidance which works better
         
-        ENHANCED AUTOMATION GUIDANCE:
-        - If you encounter dynamic CSS classes or changing selectors, focus on extracting the actual data instead
-        - For product listings, look for patterns like: product names in titles/links, prices with currency symbols
-        - Use flexible selectors: [title], [class*="product"], [class*="price"], etc.
-        - If exact selectors fail, extract visible text content and identify products by patterns
-        - Return the actual data found (names, prices, details) even if you can't provide exact selectors
-        - Handle encoding issues gracefully (currency symbols, special characters)
-        - Be persistent but efficient - try different approaches if initial methods fail
-        - Don't add any name of the product or anything which is specific in the locators. Always provide the generic locators so that if the product is changed, the locators should still work.
-        """
+        # Concise objective to minimize token usage
+        enhanced_objective = f"""{browser_use_objective}
+
+TASK: Use vision AI to locate element, extract DOM attributes, return JSON:
+{{"best_locator": "name=q", "all_locators": [{{"locator": "name=q", "type": "name"}}, {{"locator": "css=[placeholder='...']", "type": "placeholder"}}]}}
+
+Priority: id > data-* > aria-* > name > placeholder > text > CSS > XPath
+Avoid: dynamic classes, product names, non-unique selectors"""
         
         # Health check with detailed feedback
         logger.info("Performing enhanced health check...")
@@ -169,7 +171,7 @@ class BrowserUseTool(BaseTool):
                 "success": False,
                 "suggestions": [
                     "Check if service is running: python browser_use_service.py",
-                    "Verify API URL in environment: BROWSER_USE_API_URL=" + api_url,
+                    "Verify API URL in environment: BROWSER_USE_SERVICE_URL=" + api_url,
                     "Test service health: curl " + api_url + "/health"
                 ]
             }
@@ -228,34 +230,60 @@ class BrowserUseTool(BaseTool):
                 data = status_response.get("data", {})
                 results = data.get("results", {})
                 
-                # Enhanced result processing
+                # Extract locator data if available
+                locator_data = results.get("locator_data")
+                result_text = results.get("result", "")
                 success = results.get('success', False)
-                result_data = results.get("result", "")
                 execution_time = results.get("execution_time", 0)
                 steps_taken = results.get("steps_taken", 0)
                 
                 logger.info(f"Task {task_id} completed! Success: {success}, Steps: {steps_taken}, Time: {execution_time:.1f}s")
                 
-                # Provide detailed feedback
-                feedback_message = data.get("message", "Task completed")
-                if not success and result_data:
-                    # Even if marked as unsuccessful, if we got data, consider it partially successful
-                    if len(str(result_data).strip()) > 20:
-                        success = True
-                        feedback_message = "Task completed with data extracted (marked as successful despite automation challenges)"
+                # Parse JSON from result text if locator_data not directly available
+                if not locator_data and result_text:
+                    try:
+                        import re
+                        json_match = re.search(r'\{[\s\S]*"success"[\s\S]*\}', str(result_text))
+                        if json_match:
+                            locator_data = json.loads(json_match.group(0))
+                            logger.info("Extracted locator JSON from result text")
+                    except (json.JSONDecodeError, AttributeError) as e:
+                        logger.warning(f"Could not parse JSON from result: {e}")
                 
-                return {
+                # Build response with structured locator data
+                response = {
                     "status": "success" if success else "partial_success",
                     "browser_use_objective": browser_use_objective,
-                    "result": result_data,
-                    "message": feedback_message,
                     "success": success,
                     "execution_time": execution_time,
                     "steps_taken": steps_taken,
                     "task_id": task_id,
-                    "status_changes": status_changes,
                     "total_time": time.time() - start_time
                 }
+                
+                # Include structured locator data if available
+                if locator_data:
+                    response.update({
+                        "best_locator": locator_data.get("best_locator"),
+                        "locator_type": locator_data.get("locator_type"),
+                        "all_locators": locator_data.get("all_locators", []),
+                        "element_info": locator_data.get("element_info", {}),
+                        "confidence": locator_data.get("confidence", "unknown"),
+                        "validation": locator_data.get("validation", {}),
+                        "message": f"Found element with {len(locator_data.get('all_locators', []))} locator strategies",
+                        "result": result_text  # Include raw result as well
+                    })
+                    logger.info(f"Returning structured response with best_locator: {response['best_locator']}")
+                else:
+                    # Fallback to text-based response
+                    response.update({
+                        "result": result_text,
+                        "message": data.get("message", "Task completed but no structured locator data available"),
+                        "note": "Vision-based locator generation may not have produced structured output"
+                    })
+                    logger.warning("No structured locator data found in response")
+                
+                return response
                 
             elif current_status in ["processing", "running"]:
                 # Enhanced progress reporting
@@ -292,6 +320,259 @@ class BrowserUseTool(BaseTool):
             "message": f"Task timed out after {timeout} seconds. The task may still be running on the server.",
             "success": False,
             "task_id": task_id
+        }
+    
+    def _health_check_with_retry(self, api_client: BrowserUseAPI) -> bool:
+        """Perform health check with retries."""
+        for attempt in range(3):
+            if api_client.health_check():
+                return True
+            if attempt < 2:
+                logger.warning(f"Health check attempt {attempt + 1} failed, retrying...")
+                time.sleep(2)
+        
+        logger.error("Browser Use Service health check failed after multiple attempts")
+        return False
+
+
+# ============================================================================
+# BATCH BROWSER USE TOOL - NEW FOR MULTI-ELEMENT PROCESSING
+# ============================================================================
+
+class BatchBrowserUseToolInput(BaseModel):
+    """Input schema for BatchBrowserUseTool."""
+    
+    elements: list = Field(
+        ...,
+        description=(
+            "List of element specifications to find in one browser session. "
+            "Each element should be a dict with keys: 'id' (unique identifier), "
+            "'description' (what to find), 'action' (optional: input/click/get_text). "
+            "Example: [{'id': 'elem_1', 'description': 'search box in header', 'action': 'input'}, "
+            "{'id': 'elem_2', 'description': 'first product card', 'action': 'click'}]"
+        )
+    )
+    
+    url: str = Field(
+        ...,
+        description=(
+            "Target URL to navigate to. The browser will open this page once and "
+            "find all elements in the same session. Example: 'https://www.flipkart.com'"
+        )
+    )
+    
+    user_query: str = Field(
+        default="",
+        description=(
+            "Full user query for context. Helps BrowserUse understand the workflow. "
+            "Example: 'Search for shoes on Flipkart and get the first product price'"
+        )
+    )
+
+
+class BatchBrowserUseTool(BaseTool):
+    """
+    Batch browser automation tool for finding multiple elements in one persistent browser session.
+    
+    This tool is optimized for multi-step workflows where you need to find several elements
+    on the same page or across multiple pages in a single user flow. Benefits:
+    - Opens browser once, keeps session alive for all elements
+    - BrowserUse sees full context and can handle popups intelligently
+    - F12 validation for each locator (uniqueness, correctness)
+    - Returns partial results if some elements fail
+    - Much faster than multiple single calls
+    """
+    
+    name: str = "batch_browser_automation"
+    description: str = (
+        "Find multiple web elements in one browser session with full context. "
+        "Use this when you have 3+ elements to find in a workflow (e.g., search box, "
+        "product card, price, name). The browser stays open across all lookups, "
+        "BrowserUse understands the full task context, and popups are handled naturally. "
+        "Returns validated locators for all elements (or partial results if some fail). "
+        "Ideal for: multi-page workflows, e-commerce flows, form filling. "
+        "Input: list of elements with descriptions + target URL + user query for context."
+    )
+    args_schema: Type[BaseModel] = BatchBrowserUseToolInput
+
+    def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
+        """Execute batch browser automation to find multiple elements in one session."""
+        logger.info(f"Starting batch browser automation for {len(elements)} elements")
+        logger.info(f"Target URL: {url}")
+        logger.info(f"User query context: {user_query[:100]}...")
+        
+        # Configuration
+        api_url = os.environ.get("BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
+        timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))  # 15 minutes for batch
+        check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))
+        max_retries = int(os.environ.get("BROWSER_USE_MAX_RETRIES", "3"))
+        
+        # Initialize API client
+        api_client = BrowserUseAPI(api_url)
+        
+        # Health check
+        logger.info("Performing health check for batch processing...")
+        if not self._health_check_with_retry(api_client):
+            return {
+                "status": "error",
+                "message": f"Browser Use Service not available at {api_url}",
+                "success": False,
+                "elements_processed": 0,
+                "results": []
+            }
+        
+        # Submit workflow task (renamed from /batch to /workflow)
+        logger.info("Submitting workflow task...")
+        try:
+            response = requests.post(
+                f"{api_url}/workflow",
+                json={
+                    "elements": elements,
+                    "url": url,
+                    "user_query": user_query,
+                    "session_config": {
+                        "headless": True,
+                        "timeout": timeout
+                    }
+                },
+                timeout=15,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code == 202:
+                result = response.json()
+                task_id = result.get("task_id")
+                logger.info(f"Workflow task submitted successfully with ID: {task_id}")
+                logger.info(f"Processing {result.get('elements_count', len(elements))} elements in unified session...")
+            elif response.status_code == 429:
+                logger.warning("Service is busy")
+                return {
+                    "status": "error",
+                    "message": "Service is busy processing another task. Please try again later.",
+                    "success": False,
+                    "elements_processed": 0,
+                    "results": []
+                }
+            else:
+                logger.error(f"Batch task submission failed: {response.status_code}")
+                return {
+                    "status": "error",
+                    "message": f"Task submission failed with status {response.status_code}",
+                    "success": False,
+                    "elements_processed": 0,
+                    "results": []
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error submitting batch task: {e}")
+            return {
+                "status": "error",
+                "message": f"Network error: {str(e)}",
+                "success": False,
+                "elements_processed": 0,
+                "results": []
+            }
+        
+        # Poll for results
+        logger.info(f"Polling for batch task {task_id} results...")
+        start_time = time.time()
+        last_status = None
+        
+        while time.time() - start_time < timeout:
+            status_response = api_client.query_task_status(task_id)
+            current_status = status_response.get("status")
+            
+            # Log status changes
+            if current_status != last_status:
+                if current_status == "running":
+                    logger.info(f"Batch task {task_id} is now running...")
+                elif current_status == "processing":
+                    logger.info(f"Batch task {task_id} is being processed...")
+                last_status = current_status
+            
+            if current_status == "completed":
+                data = status_response.get("data", {})
+                results = data.get("results", {})
+                
+                # Extract batch results
+                element_results = results.get("results", [])
+                summary = results.get("summary", {})
+                success = results.get("success", False)
+                execution_time = results.get("execution_time", 0)
+                
+                logger.info(f"Batch task completed! Success: {success}")
+                logger.info(f"Summary: {summary}")
+                logger.info(f"Execution time: {execution_time:.1f}s")
+                
+                # Build element_id -> locator mapping
+                locator_mapping = {}
+                for elem_result in element_results:
+                    element_id = elem_result.get("element_id")
+                    if elem_result.get("found"):
+                        locator_mapping[element_id] = {
+                            "best_locator": elem_result.get("best_locator"),
+                            "all_locators": elem_result.get("all_locators", []),
+                            "validation": elem_result.get("validation", {}),
+                            "element_info": elem_result.get("element_info", {}),
+                            "found": True
+                        }
+                    else:
+                        locator_mapping[element_id] = {
+                            "found": False,
+                            "error": elem_result.get("error", "Element not found")
+                        }
+                
+                return {
+                    "status": "success",
+                    "success": success,
+                    "locator_mapping": locator_mapping,
+                    "results": element_results,
+                    "summary": summary,
+                    "execution_time": execution_time,
+                    "total_time": time.time() - start_time,
+                    "session_id": results.get("session_id"),
+                    "pages_visited": results.get("pages_visited", []),
+                    "popups_handled": results.get("popups_handled", []),
+                    "message": f"Batch completed: {summary.get('successful', 0)}/{summary.get('total_elements', 0)} elements found"
+                }
+                
+            elif current_status in ["processing", "running"]:
+                elapsed = time.time() - start_time
+                
+                # Log progress every 30 seconds
+                if elapsed > 30 and int(elapsed) % 30 == 0:
+                    logger.info(f"Batch task still {current_status}... Elapsed: {elapsed:.1f}s")
+                
+                time.sleep(check_interval)
+                
+            elif current_status == "error":
+                error_message = status_response.get("message", "Unknown error")
+                logger.error(f"Batch task failed: {error_message}")
+                
+                # Try to return partial results if available
+                data = status_response.get("data", {})
+                results = data.get("results", {})
+                element_results = results.get("results", [])
+                
+                return {
+                    "status": "error",
+                    "success": False,
+                    "message": f"Batch task failed: {error_message}",
+                    "results": element_results,  # Partial results if any
+                    "task_id": task_id
+                }
+            else:
+                time.sleep(check_interval)
+        
+        # Timeout
+        logger.error(f"Batch task {task_id} timed out after {timeout} seconds")
+        return {
+            "status": "error",
+            "success": False,
+            "message": f"Batch task timed out after {timeout} seconds",
+            "task_id": task_id,
+            "elements_processed": 0,
+            "results": []
         }
     
     def _health_check_with_retry(self, api_client: BrowserUseAPI) -> bool:

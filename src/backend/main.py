@@ -1,8 +1,20 @@
 import os
+import sys
 import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
+# ========================================
+# FIX: Unicode/Emoji Encoding on Windows
+# ========================================
+# Reconfigure stdout/stderr to use UTF-8 encoding
+# This fixes UnicodeEncodeError for emojis (🚀, 🐳, etc.) in logs
+if sys.platform.startswith('win'):
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 from src.backend.api.endpoints import router as api_router
 from src.backend.core.logging_config import setup_healing_logging

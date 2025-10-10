@@ -20,3 +20,4 @@ aiohttp
 requests
 flask
 langchain-ollama
+browser_use

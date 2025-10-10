@@ -1,4 +1,9 @@
 from crewai import Task
+import os
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RobotTasks:
     def plan_steps_task(self, agent, query) -> Task:
@@ -8,20 +13,63 @@ class RobotTasks:
 
             The user query is: "{query}"
 
+            --- CRITICAL: ONLY EXPLICIT ELEMENTS ---
+            ⚠️ **MOST IMPORTANT RULE**: ONLY create steps for elements and actions EXPLICITLY mentioned in the user's query.
+            
+            ❌ DO NOT ADD:
+            - Popup dismissal steps (login popups, cookie consent, promotional popups)
+            - Cookie consent handling
+            - Newsletter dismissals
+            - Chat widget closures
+            - Any "smart" anticipatory steps
+            - Common website pattern handling
+            
+            ✅ ONLY ADD:
+            - Steps for elements the user explicitly mentions
+            - Actions the user explicitly requests
+            - Nothing else
+            
+            **WHY**: The browser automation (BrowserUse Agent) handles popups contextually and intelligently. 
+            Adding popup handling steps wastes time and confuses the workflow.
+            
+            **EXAMPLE**:
+            User query: "search for shoes on Flipkart and get first product name and price"
+            
+            ✅ CORRECT steps:
+            1. Open Browser → Flipkart
+            2. Input Text → search box → "shoes"
+            3. Press Keys → RETURN
+            4. Get Text → first product name
+            5. Get Text → first product price
+            
+            ❌ WRONG (DO NOT DO THIS):
+            1. Open Browser → Flipkart
+            2. Click Element → login popup close button  ← USER NEVER MENTIONED THIS!
+            3. Click Element → cookie consent accept  ← USER NEVER MENTIONED THIS!
+            4. Input Text → search box → "shoes"
+            5. ...
+            
             --- CORE PRINCIPLES ---
             1.  **Explicitness:** Your plan must be explicit. Do not assume any prior context. If a user says "log in", you must include steps for navigating to the login page, entering the username, entering the password, and clicking the submit button.
             2.  **Decomposition:** Break down complex actions into smaller, single-action steps. For example, "search for a product and add it to the cart" should be multiple steps: "Input text into search bar", "Click search button", "Click product link", "Click add to cart button".
             3.  **Keyword Precision:** Use the most appropriate Robot Framework keyword for each action.
+            4.  **User Intent Only:** ONLY create steps for what the user explicitly asked for.
 
             --- KEYWORD GUIDELINES ---
             *   `Open Browser`: For starting a new browser session.
             *   `Input Text`: For typing text into input fields.
-            *   `Click Element`: For clicking buttons, links, etc.
+            *   `Press Keys`: For pressing keyboard keys (e.g., ENTER, TAB, ESC). Use this for search boxes instead of clicking buttons.
+            *   `Click Element`: For clicking buttons, links, etc. Only use if keyboard action won't work.
             *   `Get Text`: For retrieving text from an element to be stored or validated.
             *   `Select From List By Value`: For selecting an option from a dropdown menu.
             *   `Wait Until Element Is Visible`: For waiting for dynamic content to appear.
             *   `Close Browser`: For ending the test session.
             *   `Should Be True`: For validation assertions with conditions.
+            
+            --- SEARCH OPTIMIZATION RULES ---
+            *   For search operations: After `Input Text` into search box, use `Press Keys` with `RETURN` (Enter key) instead of finding/clicking a search button.
+            *   Modern websites (Flipkart, Amazon, Google, etc.) trigger search on Enter press.
+            *   This is faster, more reliable, and reduces element identification overhead.
 
             --- HANDLING CONDITIONAL LOGIC ---
             For validation steps that require comparison (like price checks), structure the step as:
@@ -38,21 +86,6 @@ class RobotTasks:
             *   `loop_type`: Should be "FOR".
             *   `loop_source`: Should be the element that contains the items to loop over (e.g., "the main menu").
 
-            --- EXAMPLE SCENARIOS ---
-
-            **Example 1: Price Validation**
-            *Query:* "Check if product price is less than 100"
-            *Output Steps:*
-            1. Get Text from the price element and store it in a variable named 'product_price'
-            2. Validate that the price is less than 100 using Should Be True with condition_expression
-
-            **Example 2: Conditional Action**
-            *Query:* "Go to the cart, and if the total is over $100, apply the 'SAVE10' discount code."
-            *Output Steps:*
-            1. Go to the cart page
-            2. Get Text from the total amount element and store it in a variable named 'total'
-            3. Input Text into the discount code field with value 'SAVE10', with condition_type 'IF' and condition_value '${{float(total.replace("$", "")) > 100}}'
-
             --- FINAL OUTPUT RULES ---
             1.  You MUST respond with ONLY a valid JSON array of objects.
             2.  Each object in the array represents a single test step and MUST have the following keys: "step_description", "element_description", "value", and "keyword".
@@ -60,40 +93,306 @@ class RobotTasks:
             4.  The keys `condition_type`, `condition_value`, `loop_type`, and `loop_source` are OPTIONAL and should only be included for steps with conditional logic or loops.
             5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
             6.  When generating an "Open Browser" step, you MUST also include the `browser=chrome` argument and options to ensure a clean session. Use `options=add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")`.
-            7.  If the query says to input text in google search bar, then after entering the text, you MUST press Enter and not the search button.
+            7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "RETURN" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
+            8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 
             """,
-            expected_output="A JSON array of objects, where each object represents a single test step with the keys: 'step_description', 'element_description', 'value', and 'keyword', and optional keys for conditions and loops.",
+            expected_output="A JSON array of objects, where each object represents a single test step with the keys: 'step_description', 'element_description', 'value', and 'keyword', and optional keys for conditions and loops. ONLY steps for elements explicitly mentioned in user query.",
             agent=agent,
         )
 
     def identify_elements_task(self, agent) -> Task:
+        # Check if vision locators are available from environment (for pre-identified elements)
+        vision_locators_json = os.getenv('VISION_LOCATORS_JSON')
+        vision_locators = {}
+        if vision_locators_json:
+            try:
+                vision_locators = json.loads(vision_locators_json)
+                logger.info(f"✅ Vision locators available for {len(vision_locators)} elements: {list(vision_locators.keys())}")
+            except json.JSONDecodeError:
+                logger.warning("⚠️ Could not parse VISION_LOCATORS_JSON from environment")
+        
+        # Build vision locator instructions (for pre-identified elements, if any)
+        if vision_locators:
+            vision_instructions = (
+                "\n\n"
+                "🎯 **VISION LOCATORS AVAILABLE (PRE-IDENTIFIED)** 🎯\n"
+                "The following elements have been PRE-IDENTIFIED:\n"
+                "\n"
+            )
+            for element_name, locator in vision_locators.items():
+                vision_instructions += f"- **{element_name}**: `{locator}`\n"
+            
+            vision_instructions += (
+                "\n"
+                "--- USING PRE-IDENTIFIED LOCATORS ---\n"
+                "1. Check if element matches a pre-identified locator\n"
+                "2. If YES: Use it directly (no tool call needed)\n"
+                "3. If NO: Include it in the batch_browser_automation call\n"
+                "\n"
+            )
+        else:
+            vision_instructions = (
+                "\n\n"
+                "ℹ️ **NO PRE-IDENTIFIED LOCATORS AVAILABLE**\n"
+                "All elements will be found using batch_browser_automation.\n"
+                "\n"
+            )
+        
         return Task(
             description=(
-                "For each step provided in the context, identify the best locator for the described element. "
-                "The context will be the output of the 'plan_steps_task'.\n\n"
-                "--- LOCATOR STRATEGY PRIORITY ---\n"
-                "1.  **ID**: `id=element_id`\n"
-                "2.  **Name**: `name=element_name`\n"
-                "3.  **CSS Selector**: `css=css_selector` (e.g., `css=input[name='q']`, `css=button#submit`)\n"
-                "4.  **XPath**: `xpath=//tag[@attribute='value']` (e.g., `xpath=//button[text()='Search']`)\n"
-                "5.  **Link Text**: `link=Link Text`\n\n"
-                "--- RULES ---\n"
-                "1.  You MUST add a 'locator' key to each JSON object in the array.\n"
-                "2.  The value of the 'locator' key MUST be a valid Robot Framework locator string.\n"
-                "3.  If no specific element is described, the locator can be an empty string `''`.\n"
-                "4.  Choose the most specific and robust locator possible based on the priority.\n"
-                "5.  For validation steps using 'Should Be True', no locator is needed."
+                "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
+                "Your mission: Find locators for ALL elements in ONE batch operation.\n"
+                "The context will be the output of the 'plan_steps_task' (array of test steps).\n\n"
+                f"{vision_instructions}"
+                "--- MANDATORY BATCH WORKFLOW ---\n"
+                "\n"
+                "**STEP 1: ANALYZE THE PLAN**\n"
+                "- Read ALL test steps from context\n"
+                "- Identify which steps need element locators\n"
+                "- Note: 'Open Browser', 'Close Browser', 'Should Be True' steps DON'T need locators\n"
+                "- Note: 'Input Text', 'Click Element', 'Get Text', 'Select From List' steps NEED locators\n"
+                "\n"
+                "**STEP 2: EXTRACT URL**\n"
+                "- Find the 'Open Browser' step in the plan\n"
+                "- Extract the URL from its 'value' field\n"
+                "- Example: If step says {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"}\n"
+                "  → URL is \"https://www.flipkart.com\"\n"
+                "\n"
+                "**STEP 3: COLLECT ELEMENTS**\n"
+                "- For each step that needs a locator, extract:\n"
+                "  * Unique ID (e.g., \"elem_1\", \"elem_2\")\n"
+                "  * Element description (from 'element_description' field)\n"
+                "  * Action keyword (from 'keyword' field: input, click, get_text, etc.)\n"
+                "\n"
+                "Example elements list:\n"
+                "```json\n"
+                "[\n"
+                "    {\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"},\n"
+                "    {\"id\": \"elem_2\", \"description\": \"first product name in search results\", \"action\": \"get_text\"},\n"
+                "    {\"id\": \"elem_3\", \"description\": \"first product price in search results\", \"action\": \"get_text\"}\n"
+                "]\n"
+                "```\n"
+                "\n"
+                "**STEP 4: BUILD USER QUERY CONTEXT**\n"
+                "- Summarize what the test is trying to accomplish\n"
+                "- Example: \"Search for shoes on Flipkart and extract first product name and price\"\n"
+                "- This helps BrowserUse understand the workflow and handle popups intelligently\n"
+                "\n"
+                "**STEP 5: CALL BATCH TOOL (ONCE!)**\n"
+                "\n"
+                "```\n"
+                "Action: batch_browser_automation\n"
+                "Action Input: {\n"
+                "    \"elements\": [\n"
+                "        {\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"},\n"
+                "        {\"id\": \"elem_2\", \"description\": \"first product name in search results\", \"action\": \"get_text\"},\n"
+                "        {\"id\": \"elem_3\", \"description\": \"first product price in search results\", \"action\": \"get_text\"}\n"
+                "    ],\n"
+                "    \"url\": \"https://www.flipkart.com\",\n"
+                "    \"user_query\": \"Search for shoes and get first product name and price\"\n"
+                "}\n"
+                "```\n"
+                "\n"
+                "**STEP 6: RECEIVE BATCH RESPONSE**\n"
+                "\n"
+                "The tool will return:\n"
+                "```json\n"
+                "{\n"
+                "    \"success\": true,\n"
+                "    \"locator_mapping\": {\n"
+                "        \"elem_1\": {\n"
+                "            \"best_locator\": \"name=q\",\n"
+                "            \"found\": true,\n"
+                "            \"all_locators\": [...],\n"
+                "            \"validation\": {\"unique\": true, \"validated\": 3}\n"
+                "        },\n"
+                "        \"elem_2\": {\n"
+                "            \"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='name']\",\n"
+                "            \"found\": true,\n"
+                "            \"all_locators\": [...]\n"
+                "        },\n"
+                "        \"elem_3\": {\n"
+                "            \"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='price']\",\n"
+                "            \"found\": true,\n"
+                "            \"all_locators\": [...]\n"
+                "        }\n"
+                "    },\n"
+                "    \"summary\": {\"total_elements\": 3, \"successful\": 3, \"failed\": 0}\n"
+                "}\n"
+                "```\n"
+                "\n"
+                "**STEP 7: MAP LOCATORS TO STEPS**\n"
+                "\n"
+                "- Go through each test step again\n"
+                "- If step needed a locator (e.g., elem_1, elem_2, elem_3):\n"
+                "  * Add 'locator' key to that step's JSON\n"
+                "  * Use the 'best_locator' value from locator_mapping\n"
+                "- If step didn't need a locator (Open Browser, Close Browser):\n"
+                "  * Leave it as-is (no locator key needed)\n"
+                "\n"
+                "Example output:\n"
+                "```json\n"
+                "[\n"
+                "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
+                "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\"},\n"
+                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\", \"locator\": \"name=q\"},\n"
+                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product name\", \"locator\": \"xpath=(//div[@class='product'])[1]//span[@class='name']\"},\n"
+                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product price\", \"locator\": \"xpath=(//div[@class='product'])[1]//span[@class='price']\"}\n"
+                "]\n"
+                "```\n"
+                "\n"
+                "--- COMPLETE EXAMPLE ---\n"
+                "\n"
+                "**Input Context (from plan_steps_task):**\n"
+                "```json\n"
+                "[\n"
+                "    {\"step_description\": \"Open browser to Flipkart\", \"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
+                "    {\"step_description\": \"Input shoes in search\", \"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\"},\n"
+                "    {\"step_description\": \"Press Enter\", \"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\"},\n"
+                "    {\"step_description\": \"Get first product name\", \"keyword\": \"Get Text\", \"element_description\": \"first product name\"},\n"
+                "    {\"step_description\": \"Get first product price\", \"keyword\": \"Get Text\", \"element_description\": \"first product price\"}\n"
+                "]\n"
+                "```\n"
+                "\n"
+                "**What You Do:**\n"
+                "\n"
+                "1. Analyze: 5 steps, 3 need locators (steps 2, 3, 4, 5 exclude step 1 Open Browser)\n"
+                "2. Extract URL: https://www.flipkart.com\n"
+                "3. Collect elements:\n"
+                "   - elem_1: search box (steps 2 & 3 use same element)\n"
+                "   - elem_2: first product name (step 4)\n"
+                "   - elem_3: first product price (step 5)\n"
+                "4. User query: \"Search for shoes and get first product name and price\"\n"
+                "5. Call batch tool (see format above)\n"
+                "6. Receive locator_mapping\n"
+                "7. Add locators to steps:\n"
+                "   - Step 2: locator = elem_1's best_locator\n"
+                "   - Step 3: locator = elem_1's best_locator (same element)\n"
+                "   - Step 4: locator = elem_2's best_locator\n"
+                "   - Step 5: locator = elem_3's best_locator\n"
+                "\n"
+                "--- CRITICAL RULES ---\n"
+                "\n"
+                "1. ✅ ALWAYS use batch_browser_automation (NEVER use vision_browser_automation)\n"
+                "2. ✅ Call the tool ONLY ONCE with ALL elements\n"
+                "3. ✅ Include full URL from 'Open Browser' step\n"
+                "4. ✅ Include user_query for context (helps with popup handling)\n"
+                "5. ✅ Use descriptive element descriptions (\"first product card\" not just \"product\")\n"
+                "6. ✅ Map same locator to multiple steps if they use the same element\n"
+                "7. ✅ Handle partial failures gracefully (if elem_2 fails, still use elem_1 and elem_3)\n"
+                "\n"
+                "--- FORBIDDEN ACTIONS ---\n"
+                "\n"
+                "❌ NEVER call vision_browser_automation (use batch mode)\n"
+                "❌ NEVER make multiple batch calls (collect all, call once)\n"
+                "❌ NEVER generate locators from your knowledge\n"
+                "❌ NEVER skip steps that need locators\n"
+                "❌ NEVER pass invalid JSON to batch_browser_automation\n"
+                "\n"
+                "--- WHY BATCH MODE IS BETTER ---\n"
+                "\n"
+                "✅ Browser opens ONCE (3-5x faster)\n"
+                "✅ BrowserUse sees FULL CONTEXT (understands workflow)\n"
+                "✅ Popups handled INTELLIGENTLY (knows they're obstacles)\n"
+                "✅ Multi-page flows work (search → results preserved)\n"
+                "✅ F12 validation for EACH locator\n"
+                "✅ Partial results supported\n"
+                "\n"
+                "--- OUTPUT FORMAT ---\n"
+                "\n"
+                "Return the same JSON array from context, but with 'locator' keys added to steps that need them.\n"
+                "\n"
+                "--- CRITICAL OUTPUT RULE ---\n"
+                "\n"
+                "When calling batch_browser_automation, output ONLY:\n"
+                "```\n"
+                "Action: batch_browser_automation\n"
+                "Action Input: {json}\n"
+                "```\n"
+                "\n"
+                "DO NOT include ANY explanatory text before the Action line.\n"
+                "DO NOT include ANY thinking process or analysis.\n"
+                "Just the Action and Action Input, nothing else.\n"
             ),
-            expected_output="A JSON array of objects, where each object represents a single test step with the added 'locator' key.",
+            expected_output="A JSON array of objects, where each object represents a single test step with the added 'locator' key obtained from the batch_browser_automation tool.",
             agent=agent,
         )
 
     def assemble_code_task(self, agent) -> Task:
+        # Check if popup strategy is available
+        popup_strategy_json = os.getenv('POPUP_STRATEGY_JSON')
+        popup_instructions = ""
+        
+        if popup_strategy_json:
+            try:
+                popup_strategy = json.loads(popup_strategy_json)
+                dismiss_login = popup_strategy.get('dismiss_login_popup', True)
+                dismiss_cookies = popup_strategy.get('dismiss_cookie_consent', False)
+                dismiss_promo = popup_strategy.get('dismiss_promotional_popups', True)
+                
+                popup_instructions = (
+                    "\n\n"
+                    "--- POPUP HANDLING STRATEGY ---\n"
+                    "Based on popup strategy analysis, you MUST add popup dismissal steps:\n"
+                    "\n"
+                )
+                
+                if dismiss_login or dismiss_cookies or dismiss_promo:
+                    popup_instructions += (
+                        "**ADD THESE LINES IMMEDIATELY AFTER 'Open Browser':**\n"
+                        "\n"
+                    )
+                    
+                    if dismiss_login:
+                        popup_instructions += (
+                            "    # Dismiss login popup if present (non-blocking)\n"
+                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[@aria-label='Close' or contains(text(), '✕') or contains(text(), '×')]    timeout=2s\n"
+                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕') or contains(text(), '×')]\n"
+                            "\n"
+                        )
+                    
+                    if dismiss_cookies:
+                        popup_instructions += (
+                            "    # Accept cookie consent if present\n"
+                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[contains(text(), 'Accept') or contains(text(), 'OK') or contains(text(), 'Agree')]    timeout=2s\n"
+                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[contains(text(), 'Accept') or contains(text(), 'OK') or contains(text(), 'Agree')]\n"
+                            "\n"
+                        )
+                    
+                    if dismiss_promo:
+                        popup_instructions += (
+                            "    # Dismiss promotional popups (newsletters, app installs)\n"
+                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[contains(@class, 'close') or @data-dismiss='modal']    timeout=2s\n"
+                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[contains(@class, 'close') or @data-dismiss='modal']\n"
+                            "\n"
+                        )
+                else:
+                    popup_instructions += "No popup dismissal needed for this task.\n\n"
+                    
+            except json.JSONDecodeError:
+                logger.warning("⚠️ Could not parse POPUP_STRATEGY_JSON")
+                popup_instructions = (
+                    "\n\n"
+                    "--- DEFAULT POPUP HANDLING ---\n"
+                    "Add standard popup dismissal after 'Open Browser':\n"
+                    "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕')]\n"
+                    "\n"
+                )
+        else:
+            popup_instructions = (
+                "\n\n"
+                "--- DEFAULT POPUP HANDLING ---\n"
+                "Add standard popup dismissal after 'Open Browser':\n"
+                "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕')]\n"
+                "\n"
+            )
+        
         return Task(
             description=(
                 "Assemble the final Robot Framework code from the structured steps provided in the context. "
                 "The context will be the output of the 'identify_elements_task'.\n\n"
+                f"{popup_instructions}"
                 "--- CRITICAL RULES FOR VALIDATION ---\n"
                 "When you encounter a step with keyword 'Should Be True' and a 'condition_expression' key:\n"
                 "1. Generate a proper Should Be True statement with the expression\n"
@@ -131,7 +430,8 @@ class RobotTasks:
                 "1. You MUST respond with ONLY the raw Robot Framework code.\n"
                 "2. The code should start with '*** Settings ***' or '*** Test Cases ***'.\n"
                 "3. Do NOT include any introductory text, natural language explanations, or markdown formatting like ``` or ```robotframework.\n"
-                "4. For price or numeric validations, always use Evaluate to convert strings to numbers properly."
+                "4. For price or numeric validations, always use Evaluate to convert strings to numbers properly.\n"
+                "5. ALWAYS include popup dismissal steps as specified above."
             ),
             expected_output="A raw string containing only the complete and syntactically correct Robot Framework code. The output MUST NOT contain any markdown fences or other explanatory text.",
             agent=agent,
@@ -162,5 +462,99 @@ class RobotTasks:
                 "5. If the code is invalid, set 'valid' to false and provide a brief, clear explanation in the 'reason' key."
             ),
             expected_output="A single, raw JSON object with two keys: 'valid' (boolean) and 'reason' (string). For example: {\"valid\": true, \"reason\": \"The code is valid.\"}",
+            agent=agent,
+        )
+
+    def analyze_popup_strategy_task(self, agent, user_query, target_url) -> Task:
+        return Task(
+            description=f"""
+            You are analyzing a web automation task to determine the optimal popup handling strategy.
+            
+            **USER'S QUERY:** "{user_query}"
+            **TARGET WEBSITE:** {target_url}
+            
+            --- YOUR MISSION ---
+            Analyze the user's intent and determine:
+            1. Does completing this task REQUIRE user login?
+            2. Does completing this task REQUIRE accepting cookies?
+            3. Which popups should be dismissed vs. ignored?
+            
+            --- ANALYSIS GUIDELINES ---
+            
+            **Tasks that REQUIRE LOGIN:**
+            - Adding items to cart
+            - Checkout/payment
+            - Viewing order history
+            - Account settings
+            - Wishlists/favorites
+            - Writing reviews
+            
+            **Tasks that DO NOT require login:**
+            - Searching for products
+            - Viewing product details
+            - Reading product reviews
+            - Comparing prices
+            - Browsing categories
+            - Getting product information (name, price, etc.)
+            
+            **Cookie Consent Guidelines:**
+            - Required for: Form submissions, account actions, tracking
+            - Not required for: Reading public data, viewing products, searching
+            
+            **Popup Dismissal Strategy:**
+            - Login popups: Dismiss if task doesn't require login
+            - Cookie consent: Dismiss if task is read-only
+            - Promotional popups: ALWAYS dismiss (newsletters, offers, app installs)
+            - Chat widgets: ALWAYS dismiss
+            - Location requests: ALWAYS dismiss unless task is location-based
+            
+            --- EXAMPLE ANALYSIS ---
+            
+            **Example 1:**
+            Query: "Search for shoes on Flipkart and get the name and price of the first product"
+            Analysis:
+            - Intent: Public search + data extraction
+            - Login needed: NO (search is public functionality)
+            - Cookies needed: NO (just reading data)
+            - Login popup: DISMISS (blocks search interface)
+            - Cookie consent: DISMISS (not needed for reading)
+            - Promotional: DISMISS (distraction)
+            
+            **Example 2:**
+            Query: "Add iPhone 15 to cart and proceed to checkout"
+            Analysis:
+            - Intent: Cart management + purchase flow
+            - Login needed: YES (cart requires account)
+            - Cookies needed: YES (session management)
+            - Login popup: KEEP (user must login)
+            - Cookie consent: ACCEPT (needed for session)
+            - Promotional: DISMISS (distraction)
+            
+            --- REQUIRED OUTPUT FORMAT ---
+            You MUST return ONLY a valid JSON object (no markdown, no explanation):
+            
+            {{
+                "task_requires_login": boolean,
+                "task_requires_cookies": boolean,
+                "dismiss_login_popup": boolean,
+                "dismiss_cookie_consent": boolean,
+                "dismiss_promotional_popups": boolean,
+                "popup_handling_instructions": "Brief instruction for browser-use",
+                "reasoning": "One-sentence explanation of your decision"
+            }}
+            
+            **popup_handling_instructions examples:**
+            - "Close login modal by clicking X button or 'Maybe Later'"
+            - "Accept cookie consent and close promotional popups"
+            - "No popup dismissal needed"
+            
+            --- CRITICAL RULES ---
+            1. Return ONLY raw JSON (no ```json markers, no explanatory text)
+            2. Be conservative: When unsure, set dismiss flags to true
+            3. Focus on user's goal: What are they trying to accomplish?
+            4. Keep popup_handling_instructions SHORT and ACTIONABLE
+            5. Avoid URL-like text in instructions (e.g., don't write "button.cookie-accept")
+            """,
+            expected_output="A raw JSON object with popup handling strategy",
             agent=agent,
         )

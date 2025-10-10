@@ -136,6 +136,14 @@ class HealingSession:
     backup_file_path: Optional[str] = None
     chrome_session_id: Optional[str] = None
     error_message: Optional[str] = None
+    progress: float = 0.0
+    current_phase: str = "pending"
+    confidence_score: float = 0.0
+    
+    @property
+    def healed_locator(self) -> Optional[str]:
+        """Alias for successful_locator for backward compatibility."""
+        return self.successful_locator
     
     @property
     def duration(self) -> Optional[float]:

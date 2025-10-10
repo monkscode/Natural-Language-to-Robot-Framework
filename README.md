@@ -19,13 +19,27 @@ Transform natural language test descriptions into executable Robot Framework cod
 
 ## 🏗️ Architecture
 
-Mark 1 employs a sophisticated multi-agent workflow:
+Mark 1 employs a sophisticated multi-agent workflow powered by CrewAI:
 
+### Core Workflow Agents
 1. **Step Planner Agent** - Decomposes natural language into structured test plans
-2. **Element Identifier Agent** - Generates optimal web element locators
+2. **Element Identifier Agent** - Generates optimal web element locators using AI-powered browser automation
 3. **Code Assembler Agent** - Creates syntactically correct Robot Framework code
 4. **Validator Agent** - Ensures code quality and correctness
 5. **Self-Correction Orchestrator** - Automatically fixes validation errors
+
+### Self-Healing System
+- **Healing Orchestrator** - Coordinates automatic test repair when failures occur
+- **Failure Detection Service** - Identifies healable failures in test execution
+- **Healing Agents** - Specialized agents for locator regeneration and test repair
+- **Fingerprinting Service** - Tracks element characteristics for intelligent healing
+- **Structural Fallback System** - Provides structural similarity analysis for element matching
+
+### Supporting Services
+- **Docker Service** - Manages isolated test execution in containers
+- **Chrome Session Manager** - Handles browser sessions for element identification
+- **BrowserUse Service** - AI-powered browser automation for locator extraction
+- **Workflow Service** - Orchestrates the end-to-end test generation pipeline
 
 ## 🚀 Quick Start
 
@@ -53,7 +67,7 @@ Mark 1 employs a sophisticated multi-agent workflow:
    ```env
    MODEL_PROVIDER=online
    GEMINI_API_KEY="your-gemini-api-key-here"
-   ONLINE_MODEL=gemini-1.5-pro-latest
+   ONLINE_MODEL=gemini-2.5-pro
    ```
 
    **For Local Models (Ollama)**:
@@ -73,7 +87,7 @@ Mark 1 employs a sophisticated multi-agent workflow:
    ```
 
 4. **Access the web interface**
-   Open your browser to `http://localhost:5000`
+   Open your browser to `http://localhost:<APP_PORT>` (default `5000`)
 
 ## 💡 Usage Examples
 
@@ -97,9 +111,10 @@ Simply describe your test in natural language:
 |----------|-------------|---------|
 | `MODEL_PROVIDER` | AI model provider (`online` or `local`) | `online` |
 | `GEMINI_API_KEY` | Google Gemini API key | Required for online |
-| `ONLINE_MODEL` | Gemini model name | `gemini-1.5-pro-latest` |
+| `ONLINE_MODEL` | Gemini model name | `gemini-2.5-pro` |
 | `LOCAL_MODEL` | Ollama model name | `llama3` |
-| `SECONDS_BETWEEN_API_CALLS` | Rate limiting delay | `0` |
+| `APP_PORT` | FastAPI server port used by `run.sh` | `5000` |
+| `BROWSER_USE_SERVICE_URL` | BrowserUse service base URL for locator extraction + vision validation | `http://localhost:4999` |
 
 ### Getting API Keys
 
@@ -121,9 +136,9 @@ Or use curl:
 
 ```bash
 curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"query": "go to google.com and search for python tutorials", "model": "gemini-1.5-pro-latest"}' \
-  http://localhost:5000/generate-and-run
+   -H "Content-Type: application/json" \
+   -d '{"query": "go to google.com and search for python tutorials", "model": "gemini-1.5-pro-latest"}' \
+   http://localhost:${APP_PORT:-5000}/generate-and-run
 ```
 
 ## 📁 Project Structure
@@ -132,23 +147,47 @@ curl -X POST \
 ├── src/
 │   ├── backend/
 │   │   ├── api/
-│   │   │   └── endpoints.py       # API endpoints
+│   │   │   ├── endpoints.py           # Main API endpoints
+│   │   │   ├── healing_endpoints.py   # Self-healing API endpoints
+│   │   │   └── monitoring_endpoints.py# Monitoring and metrics API
 │   │   ├── core/
-│   │   │   └── config.py          # Configuration management
+│   │   │   ├── config.py              # Configuration management
+│   │   │   ├── config_loader.py       # Healing configuration loader
+│   │   │   ├── logging_config.py      # Logging setup
+│   │   │   ├── metrics.py             # Metrics collection
+│   │   │   └── models/                # Data models
 │   │   ├── services/
-│   │   │   ├── docker_service.py  # Docker-related services
-│   │   │   └── workflow_service.py# Agentic workflow services
-│   │   ├── crew_ai/               # CrewAI agents and tasks
-│   │   ├── main.py                # FastAPI application entry point
-│   │   └── requirements.txt       # Python dependencies
+│   │   │   ├── docker_service.py      # Docker container management
+│   │   │   ├── workflow_service.py    # Main workflow orchestration
+│   │   │   ├── healing_orchestrator.py# Self-healing coordinator
+│   │   │   ├── failure_detection_service.py # Failure detection
+│   │   │   ├── chrome_session_manager.py    # Browser session management
+│   │   │   ├── fingerprinting_service.py    # Element fingerprinting
+│   │   │   ├── structural_fallback_system.py# Structural similarity
+│   │   │   ├── test_code_updater.py   # Updates test code with healed locators
+│   │   │   ├── dom_analyzer.py        # DOM analysis utilities
+│   │   │   └── similarity_scorer.py   # Similo algorithm for element matching
+│   │   ├── crew_ai/
+│   │   │   ├── agents.py              # CrewAI agent definitions
+│   │   │   ├── tasks.py               # CrewAI task definitions
+│   │   │   ├── crew.py                # CrewAI crew orchestration
+│   │   │   ├── healing_agents.py      # Healing-specific agents
+│   │   │   └── healing_tasks.py       # Healing-specific tasks
+│   │   ├── main.py                    # FastAPI application entry point
+│   │   └── requirements.txt           # Python dependencies
 │   └── frontend/
-│       ├── index.html             # Web interface
-│       ├── script.js              # Frontend logic
-│       └── style.css              # Styling
-├── robot_tests/                   # Generated test files and reports
-├── tests/                         # Backend unit tests
-├── run.sh                         # Startup script
-└── test.sh                        # Testing script
+│       ├── index.html                 # Web interface
+│       ├── script.js                  # Frontend logic
+│       └── style.css                  # Styling
+├── tools/
+│   ├── browser_use_service.py         # BrowserUse AI service (Flask)
+│   ├── browser_use_tool.py            # Browser automation tools
+│   └── cleanup_docker_containers.py   # Docker cleanup utility
+├── robot_tests/                       # Generated test files and reports
+├── logs/                              # Application logs
+├── config/                            # Configuration files
+├── run.sh                             # Startup script
+└── test.sh                            # Testing script
 ```
 
 ## 🐛 Debugging

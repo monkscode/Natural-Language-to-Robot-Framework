@@ -102,7 +102,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 model: "gemini-1.5-pro-latest"
             };
 
-            const response = await fetch('http://localhost:5000/generate-and-run', {
+            const response = await fetch('/generate-and-run', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

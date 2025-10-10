@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..core.config_loader import get_healing_config, save_healing_config
 from ..core.models import HealingConfiguration, HealingStatus, FailureContext
 from ..services.healing_orchestrator import HealingOrchestrator
+from ..core.config import settings
 from ..services.docker_service import get_docker_client, get_healing_container_status
 from .auth import get_current_user, rate_limit_healing
 
@@ -118,8 +119,17 @@ async def get_healing_orchestrator() -> HealingOrchestrator:
     
     if _healing_orchestrator is None:
         config = get_healing_config()
-        _healing_orchestrator = HealingOrchestrator(config)
+        # Get model from settings based on provider
+        model_provider = settings.MODEL_PROVIDER
+        model_name = settings.ONLINE_MODEL if model_provider == "online" else settings.LOCAL_MODEL
+        
+        _healing_orchestrator = HealingOrchestrator(
+            config, 
+            model_provider=model_provider,
+            model_name=model_name
+        )
         await _healing_orchestrator.start()
+        logger.info(f"🚀 Healing orchestrator initialized with {model_provider}/{model_name}")
     
     return _healing_orchestrator
 

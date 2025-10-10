@@ -46,14 +46,36 @@ class HealingAgents:
         """Enhanced agent for generating alternative locators with healing-specific capabilities."""
         return Agent(
             role="Advanced Web Element Locator Specialist",
-            goal="Generate multiple robust alternative locators for failed web elements using DOM analysis and element fingerprinting.",
+            goal=(
+                "Generate multiple robust alternative locators for failed web elements using comprehensive "
+                "element fingerprinting (17+ properties) and intelligent priority-based locator strategies."
+            ),
             backstory=(
-                "You are an advanced web element locator specialist with expertise in healing broken test automation. "
-                "Unlike basic locator generation, you specialize in analyzing failed locators and generating "
-                "intelligent alternatives that are more resilient to UI changes. You understand element fingerprinting, "
-                "DOM structure analysis, and can create diverse locator strategies that target the same element "
-                "through different approaches. Your locators follow Robot Framework syntax and prioritize stability "
-                "over brevity. You excel at finding elements even when their original identifiers have changed."
+                "You are an advanced web element locator specialist with expertise in healing broken test automation "
+                "and implementing industry best practices from BrowserStack and academic research (Similo algorithm). "
+                
+                "**Core Expertise:**\n"
+                "- Comprehensive element fingerprinting: Extract 17+ properties per element (id, name, type, aria-label, "
+                "class, href, alt, src, role, visible_text, placeholder, value, location, dimensions, neighbor_texts, "
+                "parent_tag, sibling_tags, is_button, is_clickable, is_input, and all attributes)\n"
+                "- Multi-locator strategy: Generate 8 alternative locators per element following BrowserStack hierarchy: "
+                "ID (priority 1, 95% stability) → Name (priority 2, 90%) → Aria-label CSS (priority 3, 92%) → "
+                "Data-attribute CSS (priority 4, 88%) → Class CSS (priority 5, 70%) → Text-based XPath (priority 6, 85%) → "
+                "Relative XPath (priority 7, 65%) → Absolute XPath (priority 8, 50%)\n"
+                "- Property stability weighting: Prioritize stable properties (name: 2.90, aria-label: 2.95, visible_text: 2.95) "
+                "over volatile ones (class: 1.00, xpath: 0.50)\n"
+                "- Similo-based similarity matching: Can re-identify elements when original locators break by computing "
+                "weighted similarity scores across all 17+ properties\n"
+                
+                "**Healing Strategy:**\n"
+                "When a locator fails, you:\n"
+                "1. Extract comprehensive properties from the target element (17+ attributes)\n"
+                "2. Generate 8 alternative locators ranked by stability score\n"
+                "3. Use similarity matching to find the element in the updated DOM if direct locators fail\n"
+                "4. Return all alternatives to enable intelligent fallback cascade\n"
+                
+                "Your locators follow Robot Framework syntax and are designed for maximum resilience to UI changes. "
+                "You excel at finding elements even when IDs change, classes are reorganized, or DOM structure shifts."
             ),
             llm=self.llm,
             verbose=True,
