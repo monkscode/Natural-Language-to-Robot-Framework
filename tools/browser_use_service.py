@@ -1,29 +1,40 @@
+# ========================================
+# PERMANENT UNICODE FIX - MUST BE FIRST
+# ========================================
+import sys
+import os
+import io
+
+# Force UTF-8 encoding on Windows BEFORE any other imports
+if sys.platform.startswith('win'):
+    # Set environment variables
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['PYTHONUTF8'] = '1'
+
+    # Reconfigure stdout/stderr with UTF-8
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# Now safe to import everything else
+from browser_use.browser.session import BrowserSession
+from browser_use import Agent, Browser
+from dotenv import load_dotenv
 import asyncio
 import logging
-import os
 import json
 import re
 import time
 import threading
 import uuid
-import sys
 from pathlib import Path
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any
 
-# ========================================
-# FIX: Unicode/Emoji Encoding on Windows
-# ========================================
-# Reconfigure stdout/stderr to use UTF-8 encoding
-# This fixes UnicodeEncodeError for emojis and Unicode characters in logs
-if sys.platform.startswith('win'):
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
-
+# Simple logging setup
 logging.basicConfig(
     level=logging.INFO, 
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -34,17 +45,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from dotenv import load_dotenv
-from browser_use import Agent, Browser
-from browser_use.browser.session import BrowserSession
 
 # Add parent directory to path so we can import from src
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Adding this import after the directory declaration
+from src.backend.core.config import settings
 load_dotenv("src/backend/.env")
 
-from src.backend.core.config import settings
-from browser_use.llm.google import ChatGoogle
 
 # Import litellm for RateLimitError handling (optional)
 try:
@@ -58,9 +66,12 @@ app = Flask(__name__)
 # BATCH PROCESSING CONFIGURATION
 # ========================================
 BATCH_CONFIG = {
-    "max_agent_steps": int(os.getenv("MAX_AGENT_STEPS", "15")),  # Stop agent after N steps
-    "max_retries_per_element": int(os.getenv("MAX_RETRIES_PER_ELEMENT", "2")),  # Retry element N times before skipping
-    "element_timeout": int(os.getenv("ELEMENT_TIMEOUT", "120")),  # Max time per element (seconds)
+    # Stop agent after N steps
+    "max_agent_steps": int(os.getenv("MAX_AGENT_STEPS", "15")),
+    # Retry element N times before skipping
+    "max_retries_per_element": int(os.getenv("MAX_RETRIES_PER_ELEMENT", "2")),
+    # Max time per element (seconds)
+    "element_timeout": int(os.getenv("ELEMENT_TIMEOUT", "120")),
 }
 
 # ========================================
@@ -70,17 +81,21 @@ BATCH_CONFIG = {
 # These can be adjusted based on customer usage patterns and success rates
 LOCATOR_EXTRACTION_CONFIG = {
     # Content-based search (finds element by visible text)
-    "content_based_retries": int(os.getenv("CONTENT_BASED_RETRIES", "7")),  # Try content search N times
-    
+    # Try content search N times
+    "content_based_retries": int(os.getenv("CONTENT_BASED_RETRIES", "7")),
+
     # Coordinate-based search (finds element by screen position)
-    "coordinate_based_retries": int(os.getenv("COORDINATE_BASED_RETRIES", "7")),  # Higher count for coordinate fallback
-    
+    # Higher count for coordinate fallback
+    "coordinate_based_retries": int(os.getenv("COORDINATE_BASED_RETRIES", "7")),
+
     # Element type fallback (finds first visible element of type)
-    "element_type_retries": int(os.getenv("ELEMENT_TYPE_RETRIES", "5")),  # Last resort
-    
+    # Last resort
+    "element_type_retries": int(os.getenv("ELEMENT_TYPE_RETRIES", "5")),
+
     # Coordinate offset attempts (try nearby coordinates if first fails)
-    "coordinate_offset_attempts": int(os.getenv("COORDINATE_OFFSET_ATTEMPTS", "7")),  # Try N different offsets
-    
+    # Try N different offsets
+    "coordinate_offset_attempts": int(os.getenv("COORDINATE_OFFSET_ATTEMPTS", "7")),
+
     # Coordinate offsets to try (pixels)
     "coordinate_offsets": [
         {"x": 100, "y": 0, "reason": "escape sidebar/left panel"},
@@ -91,8 +106,10 @@ LOCATOR_EXTRACTION_CONFIG = {
     ]
 }
 
-logger.info(f"Batch Config: max_steps={BATCH_CONFIG['max_agent_steps']}, max_retries={BATCH_CONFIG['max_retries_per_element']}, timeout={BATCH_CONFIG['element_timeout']}s")
-logger.info(f"Locator Extraction Config: content_retries={LOCATOR_EXTRACTION_CONFIG['content_based_retries']}, coordinate_retries={LOCATOR_EXTRACTION_CONFIG['coordinate_based_retries']}, coordinate_offsets={LOCATOR_EXTRACTION_CONFIG['coordinate_offset_attempts']}")
+logger.info(
+    f"Batch Config: max_steps={BATCH_CONFIG['max_agent_steps']}, max_retries={BATCH_CONFIG['max_retries_per_element']}, timeout={BATCH_CONFIG['element_timeout']}s")
+logger.info(
+    f"Locator Extraction Config: content_retries={LOCATOR_EXTRACTION_CONFIG['content_based_retries']}, coordinate_retries={LOCATOR_EXTRACTION_CONFIG['coordinate_based_retries']}, coordinate_offsets={LOCATOR_EXTRACTION_CONFIG['coordinate_offset_attempts']}")
 
 # Task storage to keep track of tasks
 tasks: Dict[str, Dict[str, Any]] = {}
@@ -107,24 +124,23 @@ executor = ThreadPoolExecutor(max_workers=1)
 GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Get model from settings, strip "gemini/" prefix if present (ChatGoogle doesn't need it)
-GOOGLE_MODEL = settings.ONLINE_MODEL.replace("gemini/", "") if settings.ONLINE_MODEL else "gemini-2.5-flash"
+GOOGLE_MODEL = settings.ONLINE_MODEL.replace(
+    "gemini/", "") if settings.ONLINE_MODEL else "gemini-2.5-flash"
 logger.info(f"🤖 LLM Configuration:")
 logger.info(f"   Model: {GOOGLE_MODEL}")
-logger.info(f"   API Key: {'*' * 20}{GOOGLE_API_KEY[-8:] if GOOGLE_API_KEY else 'NOT SET'}")
+logger.info(
+    f"   API Key: {'*' * 20}{GOOGLE_API_KEY[-8:] if GOOGLE_API_KEY else 'NOT SET'}")
 
 # ========================================
-# LLM INTEGRATION NOTE
+# LLM USAGE: Using default ChatGoogle without rate limiting
+# Google Gemini API has sufficient rate limits (1500 RPM) for our use case
 # ========================================
-# This service uses direct ChatGoogle LLM calls without rate limiting wrappers.
-# Rate limiting was removed as it added unnecessary complexity.
-# Google Gemini API has sufficient rate limits for our use case.
-# If rate limiting becomes necessary in the future, implement it at the API gateway level.
-# ========================================
+
 
 def process_task(task_id: str, objective: str) -> None:
     """Process the browser automation task in the background."""
     logger.info(f"Starting Browser-Use agent with objective: {objective}")
-    
+
     # Update task status to running
     tasks[task_id]['status'] = 'running'
     tasks[task_id]['started_at'] = time.time()
@@ -138,14 +154,15 @@ def process_task(task_id: str, objective: str) -> None:
                 viewport={'width': 1920, 'height': 1080},
                 # Add additional browser arguments
             )
-            
+
             # Import ChatGoogle here to avoid import issues
             try:
                 from browser_use.llm.google import ChatGoogle
             except ImportError:
-                logger.error("Failed to import ChatGoogle. Make sure browser-use is properly installed.")
+                logger.error(
+                    "Failed to import ChatGoogle. Make sure browser-use is properly installed.")
                 raise ImportError("ChatGoogle not available")
-            
+
             # Enhanced JavaScript with comprehensive fallback strategies and F12-style DOM validation
             # This includes: merged generate+validate, coordinate fallbacks, text search, attribute search
             js_code = r"""
@@ -509,7 +526,7 @@ def process_task(task_id: str, objective: str) -> None:
     
 })();
 """
-            
+
             # Enhanced objective with comprehensive instructions
             enhanced_objective = f"""{objective}
 
@@ -549,18 +566,20 @@ Priority: id > data-* > aria-* > name > placeholder > css-id > css-class
 Avoid dynamic classes (active, hover, focus, selected)"""
 
             logger.info(f"Gemini Key used is: {GOOGLE_API_KEY}")
-            
-            # Initialize the agent with enhanced settings
+
+            # Initialize the agent with enhanced settings and default LLM
             agent = Agent(
                 task=enhanced_objective,
                 browser_context=session,
                 llm=ChatGoogle(
                     model=GOOGLE_MODEL,
                     api_key=GOOGLE_API_KEY,
-                    temperature=0.1  # Lower temperature for more consistent results
+                    temperature=0.1,
+                    # Lower temperature for more consistent results
                 ),
                 use_vision=True,  # Enable vision for better automation
-                max_steps=BATCH_CONFIG["max_agent_steps"],  # Configurable max steps (default 15)
+                # Configurable max steps (default 15)
+                max_steps=BATCH_CONFIG["max_agent_steps"],
                 # Add custom instructions for better performance
                 system_prompt="""You are an expert web automation agent with vision capabilities, comprehensive fallback strategies, and F12-style DOM validation.
 
@@ -640,44 +659,51 @@ IMPORTANT RULES:
 PRIORITY: id > data-testid > aria-label > name > placeholder > css-id > css-class
 Avoid dynamic classes (active, hover, focus, selected, disabled)"""
             )
-            
+
             logger.info("Agent initialized, starting execution...")
+            logger.info(
+                "🤖 Using default ChatGoogle LLM (no rate limiting needed)")
             results = await agent.run()
-            
+
             # Enhanced result extraction with JSON parsing
             final_result = ""
             success = False
             locator_data = None
-            
+
             try:
                 if hasattr(results, 'final_result'):
                     final_result = str(results.final_result())
                 else:
                     final_result = str(results)
-                
+
                 # Try to parse JSON if present
                 try:
                     # Look for JSON in the result
                     import re
-                    json_match = re.search(r'\{[\s\S]*"success"[\s\S]*\}', final_result)
+                    json_match = re.search(
+                        r'\{[\s\S]*"success"[\s\S]*\}', final_result)
                     if json_match:
                         locator_data = json.loads(json_match.group(0))
                         success = locator_data.get('success', False)
-                        logger.info(f"Parsed locator JSON successfully. Best locator: {locator_data.get('best_locator', 'N/A')}")
+                        logger.info(
+                            f"Parsed locator JSON successfully. Best locator: {locator_data.get('best_locator', 'N/A')}")
                     else:
                         # Fallback: consider it successful if we have meaningful data
-                        success = bool(final_result and len(final_result.strip()) > 10)
+                        success = bool(final_result and len(
+                            final_result.strip()) > 10)
                 except json.JSONDecodeError as je:
                     logger.warning(f"Could not parse JSON from result: {je}")
-                    success = bool(final_result and len(final_result.strip()) > 10)
-                
-                logger.info(f"Agent execution completed. Success: {success}, Result length: {len(final_result)}")
-                
+                    success = bool(final_result and len(
+                        final_result.strip()) > 10)
+
+                logger.info(
+                    f"Agent execution completed. Success: {success}, Result length: {len(final_result)}")
+
             except Exception as e:
                 logger.error(f"Error extracting final result: {e}")
                 final_result = f"Task completed but result extraction failed: {str(e)}"
                 success = False
-            
+
             return {
                 'success': success,
                 'result': final_result,
@@ -686,14 +712,15 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
                 'execution_time': time.time() - tasks[task_id]['started_at'],
                 'agent_status': 'completed'
             }
-            
+
         except Exception as e:
             error_msg = str(e)
             # Handle encoding errors specifically
             if 'charmap' in error_msg or 'codec' in error_msg:
                 error_msg = f"Encoding error occurred. This is often due to special characters like currency symbols. Error: {error_msg}"
-            
-            logger.error(f"Error in browser automation: {error_msg}", exc_info=True)
+
+            logger.error(
+                f"Error in browser automation: {error_msg}", exc_info=True)
             return {
                 'success': False,
                 'error': error_msg,
@@ -711,8 +738,9 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
                         await session.browser.close()
                     else:
                         # Fallback cleanup
-                        logger.warning("Could not find proper close method for browser session")
-                    
+                        logger.warning(
+                            "Could not find proper close method for browser session")
+
                     logger.info("Browser session closed successfully")
                 except Exception as e:
                     logger.error(f"Error closing browser session: {e}")
@@ -723,13 +751,14 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
         # Set UTF-8 encoding for the current thread
         if hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8')
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         results = loop.run_until_complete(run_browser_use(objective))
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in event loop execution: {error_msg}", exc_info=True)
+        logger.error(
+            f"Error in event loop execution: {error_msg}", exc_info=True)
         results = {
             'success': False,
             'error': f"Event loop error: {error_msg}",
@@ -744,38 +773,40 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
                 if pending:
                     for task in pending:
                         task.cancel()
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                
+                    loop.run_until_complete(asyncio.gather(
+                        *pending, return_exceptions=True))
+
                 loop.close()
             except Exception as e:
                 logger.error(f"Error closing event loop: {e}")
 
-    # Update the task status and results    
+    # Update the task status and results
     tasks[task_id].update({
         "status": "completed",
         "completed_at": time.time(),
         "message": f"Objective completed: {objective[:100]}{'...' if len(objective) > 100 else ''}",
         "results": results
     })
-    
-    logger.info(f"Task {task_id} completed. Success: {results.get('success', False)}")
+
+    logger.info(
+        f"Task {task_id} completed. Success: {results.get('success', False)}")
 
 
-def process_workflow_task(task_id: str, elements: list, url: str, user_query: str, session_config: dict):
+def process_task(task_id: str, elements: list, url: str, user_query: str, session_config: dict):
     """
     Process elements as a UNIFIED WORKFLOW in a single browser session.
-    
+
     This is the primary processing function for ALL tasks. Instead of creating separate
     Agent instances for each element, this creates ONE Agent that performs the entire
     workflow: navigate → act → extract all locators in sequence.
-    
+
     Benefits:
     - Single Agent session (optimal cost)
     - Context preserved across all actions
     - No "empty page" or navigation issues
     - Agent understands the complete workflow
     - Matches user intent naturally
-    
+
     Args:
         task_id: Unique task identifier
         elements: List of element specs [{"id": "elem_1", "description": "...", "action": "..."}]
@@ -788,19 +819,19 @@ def process_workflow_task(task_id: str, elements: list, url: str, user_query: st
         "started_at": time.time(),
         "message": f"Processing {len(elements)} elements as unified workflow"
     })
-    
+
     logger.info(f"🚀 Starting WORKFLOW MODE for task {task_id}")
     logger.info(f"   Elements: {len(elements)}")
     logger.info(f"   URL: {url}")
     logger.info(f"   Query: {user_query[:100]}...")
-    
+
     async def run_unified_workflow():
         """Execute the entire workflow in ONE Agent session."""
         from browser_use.browser.session import BrowserSession
         from browser_use.llm.google import ChatGoogle
-        
+
         session = None
-        
+
         try:
             # Initialize browser session ONCE
             logger.info("🌐 Initializing browser session...")
@@ -808,46 +839,59 @@ def process_workflow_task(task_id: str, elements: list, url: str, user_query: st
                 headless=session_config.get("headless", False),
                 viewport={'width': 1920, 'height': 1080}
             )
-            
+
             # Parse user query to extract action parameters
             import re
-            search_match = re.search(r'search for ["\'](.*?)["\']', user_query, re.IGNORECASE)
+            search_match = re.search(
+                r'search for ["\'](.*?)["\']', user_query, re.IGNORECASE)
             search_term = search_match.group(1) if search_match else None
-            
+
             # Build unified workflow objective
             workflow_steps = []
             workflow_steps.append(f"1. Navigate to {url}")
-            
+
             step_num = 2
             for idx, elem in enumerate(elements):
                 elem_id = elem.get("id", f"element_{idx}")
                 elem_desc = elem.get("description", "")
                 elem_action = elem.get("action", "")
-                
+
                 # Build step description based on action
                 if elem_action == "input" and search_term:
-                    workflow_steps.append(f"{step_num}. Find '{elem_desc}', type '{search_term}', and press Enter")
-                    workflow_steps.append(f"{step_num + 1}. Wait 5 seconds for search results to load")
+                    workflow_steps.append(
+                        f"{step_num}. Find '{elem_desc}', type '{search_term}', and press Enter")
+                    workflow_steps.append(
+                        f"{step_num + 1}. Wait 5 seconds for search results to load")
                     step_num += 2
                 elif elem_action == "click":
-                    workflow_steps.append(f"{step_num}. Find '{elem_desc}' and click it")
-                    workflow_steps.append(f"{step_num + 1}. Wait 3 seconds for page to update")
+                    workflow_steps.append(
+                        f"{step_num}. Find '{elem_desc}' and click it")
+                    workflow_steps.append(
+                        f"{step_num + 1}. Wait 3 seconds for page to update")
                     step_num += 2
                 else:
                     # Just extraction, no action
                     pass
-            
+
             # Add extraction step
-            workflow_steps.append(f"{step_num}. For EACH element below, find it and extract validated locators:")
+            workflow_steps.append(
+                f"{step_num}. For EACH element below, find it and extract validated locators:")
             for elem in elements:
-                workflow_steps.append(f"   - {elem.get('id')}: {elem.get('description')}")
-            
-            # Simplified JavaScript for locator extraction (preserves essential features)
+                workflow_steps.append(
+                    f"   - {elem.get('id')}: {elem.get('description')}")
+
+            # JavaScript validation code for locator extraction with CONTENT-BASED SEARCH
             # Config values passed from Python
+            content_retries = LOCATOR_EXTRACTION_CONFIG["content_based_retries"]
+            coord_retries = LOCATOR_EXTRACTION_CONFIG["coordinate_based_retries"]
             coord_offsets = LOCATOR_EXTRACTION_CONFIG["coordinate_offsets"]
-            
+
             js_validation_code = r"""
-(function(){();}})}}}});ent!==nullfsetPare.of,visible:slice(0,100)ntent?.xtCo,text:e.te.tagNameg:e{tament_info:{used:s,elerategy_,sts:locstortor,all_locacs[0]?.loca_locator:lo0,bestocs.length>D,found:lNT_It_id:ELEMEenngify({{elem.stri JSONturn));re?1:0&b.unique)nique&:((!a.uue)?-1uniq.unique&&!b.,b)=>(acs.sort((aex){{}}}}loh(atch}});}}}}cngtount:m.leh===1,cique:m.lengtor:loc,unat.t,loch({{type:stlocs.puss(e)){{udeth>0&&m.incl);if(m.lengrAll(sel)toecSel.querycument(doomrray.fr=A m;try{{constl)continuef(!loc||!se.s();isel=stconst .l();st{const loc=of strats){r(const st l}}];fo`:nul]}}[0' ')plit(me.ssNa{e.classe()}}.${oLowerCa{e.tagName.tme?`${sNaclasll,s:()=>e.nu')[0]}}`:me.split(' assNa)}}.${{e.clCase(e.toLower.tagNams=${{essName?`cs)=>e.claass',l:(s-clll}},{{t:'cs}"]`:nuholder}lace${{e.plder="`[placehoholder?.place=>e]`:null,s:()older}}"eh"${{e.placlder=eho[plac?`css=aceholder()=>e.pleholder',l:{{t:'plac`:null}},"]abel')}}e('aria-lbutAttri{e.get"${label=)?`[aria-abel'e('aria-lgetAttributll,s:()=>e.]`:nu')}}"labelte('aria-ibutre.getAt"${{bel==[aria-lacss)?`abel'('aria-lteburi)=>e.getAttlabel',l:(a-arinull}},{{t:'.name}}"]`:{ename="${>e.name?`[:null,s:()=e.name}}`?`name=${{.namel:()=>eme',nal}},{{t:'id}}`:nulid?`#${{e.l,s:()=>e.d}}`:nul.i{{e=>e.id?`id=$:'id',l:(){{tats=[];const strt locs=[nsound"}});coor:"Not f:false,errT_ID,foundnt_id:ELEMENy({{elemeringifON.steturn JS)r}}if(!e}}}}};break;}nate'el;s='coordiHINT)){{e=es(CONTENT_ncludtContent.iel.texDER'||_PLACEHOLONTENT_HINTHINT==='CONTENT_|CTENT_HINT|!CON'BODY'){{if(ame!==&el.tagNHTML'&Name!=='tag;if(el&&el.S.y+o.y)+o.x,COORDOORDS.xtFromPoint(Cent.elemenel=docum){{const ETS]FS}},...OF:0,y:0st o of [{{xr(con){{fo}}}if(!e='content';}lue;sngleNodeVa){{e=r.sintree.offsetPalusingleNodeVaValue&&r.eNode.singl9,null);if(rnt,null,ume]`,doc_HINT}}")CONTENT"${{(text(),*[contains(`//valuatet.eumenr=docst on{cCEHOLDER'){NT_HINT_PLA=='CONTENTENT_HINT!T_HINT&&COTENCON;if(e'null,s='nonson};let e=_offsets_joordSETS={cconst OFFNTER_Y}};X,y:CEER_RDS={{x:CENTt COOnsER";coOLD_HINT_PLACEHNT="CONTENTt CONTENT_HI";consCEHOLDERID_PLAT_EMENENT_ID="EL{const ELEM
+(function() {{
+    const ELEMENT_ID = "ELEMENT_ID_PLACEHOLDER";
+    const CONTENT_HINT = "CONTENT_HINT_PLACEHOLDER";
+    const ELEMENT_TYPE_HINT = "ELEMENT_TYPE_HINT_PLACEHOLDER";
+    const COORDINATES = {{ x: CENTER_X, y: CENTER_Y }};
     
     console.log(`\n🎯 === LOCATOR EXTRACTION FOR ${{ELEMENT_ID}} ===`);
     console.log(`   Content hint: "${{CONTENT_HINT}}"`);
@@ -1221,11 +1265,12 @@ def process_workflow_task(task_id: str, elements: list, url: str, user_query: st
     }});
 }})();
 """
-            
+
             # Replace coordinate offsets placeholder with actual JSON
             coord_offsets_json = json.dumps(coord_offsets)
-            js_validation_code = js_validation_code.replace('{coord_offsets_json}', coord_offsets_json)
-            
+            js_validation_code = js_validation_code.replace(
+                '{coord_offsets_json}', coord_offsets_json)
+
             # Build the unified objective
             unified_objective = f"""
 You are completing a web automation workflow. Follow these steps EXACTLY:
@@ -1314,11 +1359,11 @@ IMPORTANT REMINDERS:
 - For product names: Capture full name, but exclude ratings/badges
 - Content hints help the JavaScript find elements more reliably than coordinates alone
 """
-            
+
             logger.info("📝 Built unified workflow objective")
             logger.info(f"   Total workflow steps: {len(workflow_steps)}")
-            
-            # Create ONE Agent for entire workflow
+
+            # Create ONE Agent for entire workflow with default LLM
             agent = Agent(
                 task=unified_objective,
                 browser_context=session,
@@ -1328,45 +1373,53 @@ IMPORTANT REMINDERS:
                     temperature=0.1
                 ),
                 use_vision=True,
-                max_steps=BATCH_CONFIG["max_agent_steps"] * len(elements),  # More steps for full workflow
+                # More steps for full workflow
+                max_steps=BATCH_CONFIG["max_agent_steps"] * len(elements),
                 system_prompt="You are a web automation agent. Complete the ENTIRE workflow and extract ALL locators before finishing."
             )
-            
+
             # Run the unified workflow
             logger.info("🤖 Starting unified Agent...")
+            logger.info(
+                "🤖 Using default ChatGoogle LLM (no rate limiting needed)")
             start_time = time.time()
             agent_result = await agent.run()
             execution_time = time.time() - start_time
-            
+
             logger.info(f"✅ Agent completed in {execution_time:.1f}s")
-            
+
             # Parse results from agent
             results_list = []
             workflow_completed = False
-            
+
             # Try to extract JSON from agent result
             final_result = ""
             if hasattr(agent_result, 'final_result'):
                 final_result = str(agent_result.final_result())
             elif hasattr(agent_result, 'history') and agent_result.history:
                 if len(agent_result.history) > 0:
-                    final_result = str(agent_result.history[-1].result) if hasattr(agent_result.history[-1], 'result') else ""
-            
+                    final_result = str(
+                        agent_result.history[-1].result) if hasattr(agent_result.history[-1], 'result') else ""
+
             # Look for workflow completion JSON
             if final_result:
                 try:
-                    json_match = re.search(r'\{.*"workflow_completed".*"results".*\}', final_result, re.DOTALL)
+                    json_match = re.search(
+                        r'\{.*"workflow_completed".*"results".*\}', final_result, re.DOTALL)
                     if json_match:
                         workflow_data = json.loads(json_match.group(0))
-                        workflow_completed = workflow_data.get('workflow_completed', False)
+                        workflow_completed = workflow_data.get(
+                            'workflow_completed', False)
                         results_list = workflow_data.get('results', [])
-                        logger.info(f"📊 Parsed workflow results: {len(results_list)} elements")
+                        logger.info(
+                            f"📊 Parsed workflow results: {len(results_list)} elements")
                 except json.JSONDecodeError as e:
                     logger.warning(f"Could not parse workflow JSON: {e}")
-            
+
             # If no structured results, try to extract individual element results from history
             if not results_list:
-                logger.warning("No structured workflow results, attempting to extract from history...")
+                logger.warning(
+                    "No structured workflow results, attempting to extract from history...")
                 if hasattr(agent_result, 'history'):
                     for step in agent_result.history:
                         if hasattr(step, 'state') and hasattr(step.state, 'tool_results'):
@@ -1377,17 +1430,21 @@ IMPORTANT REMINDERS:
                                     elem_id = elem.get('id')
                                     if f'"element_id": "{elem_id}"' in result_str or f"'element_id': '{elem_id}'" in result_str:
                                         try:
-                                            elem_json_match = re.search(r'\{[^{}]*"element_id"[^{}]*\}', result_str)
+                                            elem_json_match = re.search(
+                                                r'\{[^{}]*"element_id"[^{}]*\}', result_str)
                                             if elem_json_match:
-                                                elem_data = json.loads(elem_json_match.group(0))
+                                                elem_data = json.loads(
+                                                    elem_json_match.group(0))
                                                 if elem_data not in results_list:
-                                                    results_list.append(elem_data)
+                                                    results_list.append(
+                                                        elem_data)
                                         except:
                                             pass
-            
+
             # If still no results, create default "not found" entries
             if not results_list:
-                logger.error("Could not extract any element results from workflow")
+                logger.error(
+                    "Could not extract any element results from workflow")
                 results_list = [
                     {
                         "element_id": elem.get('id'),
@@ -1397,7 +1454,7 @@ IMPORTANT REMINDERS:
                     }
                     for elem in elements
                 ]
-            
+
             # ========================================
             # PHASE 2: POST-PROCESS LOCATOR RE-RANKING
             # ========================================
@@ -1409,15 +1466,15 @@ IMPORTANT REMINDERS:
                 """
                 locator = locator_obj.get('locator', '')
                 locator_type = locator_obj.get('type', '')
-                
+
                 # Priority 1: ID (best)
                 if locator_type == 'id' or locator.startswith('id='):
                     return 100
-                
+
                 # Priority 2: Name attribute
                 if locator_type == 'name' or locator.startswith('name='):
                     return 95
-                
+
                 # Priority 3: Attribute-based XPath (semantic attributes)
                 if 'xpath' in locator_type or locator.startswith('//') or locator.startswith('xpath='):
                     # Check for semantic attributes
@@ -1429,59 +1486,61 @@ IMPORTANT REMINDERS:
                         return 85
                     if '@placeholder=' in locator:
                         return 82
-                    
+
                     # Text-based XPath (good for static content)
                     if 'text()=' in locator or 'contains(text()' in locator:
                         return 75
-                    
+
                     # Check if it's a simple attribute XPath (not structural)
                     attribute_count = locator.count('@')
                     if attribute_count >= 1:
                         # Has attributes, check if it's not overly structural
-                        index_count = locator.count('[1]') + locator.count('[2]') + locator.count('[3]')
+                        index_count = locator.count(
+                            '[1]') + locator.count('[2]') + locator.count('[3]')
                         if index_count == 0:
                             return 70  # Simple attribute XPath
                         elif index_count <= 2:
                             return 50  # Some structural elements
-                    
+
                     # Structural XPath (worst) - lots of [1], [2], etc.
-                    index_count = locator.count('[1]') + locator.count('[2]') + locator.count('[3]')
+                    index_count = locator.count(
+                        '[1]') + locator.count('[2]') + locator.count('[3]')
                     if index_count >= 3:
                         return 20  # Very structural (fragile)
                     elif index_count >= 2:
                         return 30  # Somewhat structural
-                    
+
                     return 40  # Default XPath
-                
+
                 # Priority 4: CSS selectors
                 if locator_type == 'css' or locator.startswith('css='):
                     css_selector = locator.replace('css=', '')
-                    
+
                     # Check for stable classes (avoid auto-generated)
                     if re.search(r'[_][0-9a-zA-Z]{5,}', css_selector):
                         return 35  # Auto-generated class (fragile)
-                    
+
                     if '#' in css_selector:
                         return 80  # ID in CSS
-                    
+
                     if '[' in css_selector:
                         return 65  # Attribute selector in CSS
-                    
+
                     return 45  # Regular CSS class
-                
+
                 return 30  # Unknown/default
-            
+
             logger.info("🔄 Re-ranking locators by quality score...")
             re_ranked_count = 0
-            
+
             for result in results_list:
                 if not result.get('found', False):
                     continue
-                
+
                 all_locators = result.get('all_locators', [])
                 if not all_locators:
                     continue
-                
+
                 # Score each locator
                 scored_locators = []
                 for loc in all_locators:
@@ -1490,30 +1549,35 @@ IMPORTANT REMINDERS:
                         **loc,
                         'quality_score': score
                     })
-                
+
                 # Sort by score (highest first)
-                scored_locators.sort(key=lambda x: x['quality_score'], reverse=True)
-                
+                scored_locators.sort(
+                    key=lambda x: x['quality_score'], reverse=True)
+
                 # Update result with re-ranked locators
                 old_best = result.get('best_locator', '')
                 new_best = scored_locators[0]['locator'] if scored_locators else old_best
-                
+
                 if old_best != new_best:
-                    logger.info(f"   ✨ {result.get('element_id')}: Upgraded locator")
-                    logger.info(f"      OLD: {old_best} (score: {score_locator({'locator': old_best})})")
-                    logger.info(f"      NEW: {new_best} (score: {scored_locators[0]['quality_score']})")
+                    logger.info(
+                        f"   ✨ {result.get('element_id')}: Upgraded locator")
+                    logger.info(
+                        f"      OLD: {old_best} (score: {score_locator({'locator': old_best})})")
+                    logger.info(
+                        f"      NEW: {new_best} (score: {scored_locators[0]['quality_score']})")
                     re_ranked_count += 1
-                
+
                 result['best_locator'] = new_best
                 result['all_locators'] = scored_locators
-            
-            logger.info(f"✅ Re-ranking complete: {re_ranked_count}/{len(results_list)} elements upgraded")
+
+            logger.info(
+                f"✅ Re-ranking complete: {re_ranked_count}/{len(results_list)} elements upgraded")
             # ========================================
-            
+
             # Calculate metrics
             successful = sum(1 for r in results_list if r.get('found', False))
             failed = len(results_list) - successful
-            
+
             return {
                 'success': successful > 0,
                 'workflow_mode': True,
@@ -1528,7 +1592,7 @@ IMPORTANT REMINDERS:
                 'execution_time': execution_time,
                 'session_id': str(id(session))
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Workflow task error: {e}", exc_info=True)
             return {
@@ -1537,8 +1601,8 @@ IMPORTANT REMINDERS:
                 'error': str(e),
                 'results': [],
                 'summary': {
-                    'total_elements': len(elements), 
-                    'successful': 0, 
+                    'total_elements': len(elements),
+                    'successful': 0,
                     'failed': len(elements),
                     'success_rate': 0
                 }
@@ -1551,7 +1615,7 @@ IMPORTANT REMINDERS:
                     logger.info("🧹 Browser session closed")
                 except:
                     pass
-    
+
     # Run the async workflow
     try:
         import asyncio
@@ -1559,7 +1623,7 @@ IMPORTANT REMINDERS:
         asyncio.set_event_loop(loop)
         results = loop.run_until_complete(run_unified_workflow())
         loop.close()
-        
+
         # Update task status
         tasks[task_id].update({
             "status": "completed",
@@ -1567,13 +1631,15 @@ IMPORTANT REMINDERS:
             "message": f"Workflow completed: {results['summary']['successful']}/{results['summary']['total_elements']} elements found",
             "results": results
         })
-        
+
         logger.info(f"🎉 Workflow task {task_id} completed successfully")
         if 'summary' in results and 'success_rate' in results['summary']:
-            logger.info(f"   Success rate: {results['summary']['success_rate']*100:.1f}%")
-        
+            logger.info(
+                f"   Success rate: {results['summary']['success_rate']*100:.1f}%")
+
     except Exception as e:
-        logger.error(f"❌ Failed to execute workflow task {task_id}: {e}", exc_info=True)
+        logger.error(
+            f"❌ Failed to execute workflow task {task_id}: {e}", exc_info=True)
         tasks[task_id].update({
             "status": "completed",
             "completed_at": time.time(),
@@ -1591,7 +1657,7 @@ IMPORTANT REMINDERS:
 def process_batch_task(task_id: str, elements: list, url: str, user_query: str, session_config: dict):
     """
     Process a batch task to find multiple elements in one persistent browser session.
-    
+
     Args:
         task_id: Unique task identifier
         elements: List of element descriptions [{"id": "elem_1", "description": "...", "action": "..."}]
@@ -1604,11 +1670,11 @@ def process_batch_task(task_id: str, elements: list, url: str, user_query: str, 
         "started_at": time.time(),
         "message": f"Processing batch task with {len(elements)} elements"
     })
-    
+
     logger.info(f"Starting batch task {task_id} with {len(elements)} elements")
     logger.info(f"Target URL: {url}")
     logger.info(f"User query context: {user_query}")
-    
+
     async def run_batch_browser_use(elements_list, target_url, query_context):
         """
         Run browser automation for multiple elements in one session.
@@ -1616,43 +1682,49 @@ def process_batch_task(task_id: str, elements: list, url: str, user_query: str, 
         """
         from browser_use.browser.session import BrowserSession
         from browser_use.llm.google import ChatGoogle
-        
+
         session = None
         results_list = []
         pages_visited = []
         popups_handled = []
-        
+
         try:
             # Initialize browser session ONCE
-            logger.info("🌐 Initializing persistent browser session for batch processing...")
+            logger.info(
+                "🌐 Initializing persistent browser session for batch processing...")
             session = BrowserSession(
-                headless=session_config.get("headless", False),  # Set to False for debugging
+                # Set to False for debugging
+                headless=session_config.get("headless", False),
                 viewport={'width': 1920, 'height': 1080},
                 # Add disable security for better compatibility
             )
             logger.info("✅ Browser session created successfully")
-            
+
             # Note: Navigation will be handled by the first Agent call
             # The target_url will be included in the objective for the first element
-            
+
             # Parse user query to extract action parameters (e.g., search terms, text to input)
             import re
             search_term = None
-            search_match = re.search(r"search for ['\"]([^'\"]+)['\"]", query_context, re.IGNORECASE)
+            search_match = re.search(
+                r"search for ['\"]([^'\"]+)['\"]", query_context, re.IGNORECASE)
             if search_match:
                 search_term = search_match.group(1)
-                logger.info(f"🔍 Extracted search term from query: '{search_term}'")
-            
+                logger.info(
+                    f"🔍 Extracted search term from query: '{search_term}'")
+
             # Process each element in the same browser session
             for idx, element_spec in enumerate(elements_list):
                 element_id = element_spec.get("id", f"element_{idx}")
                 element_desc = element_spec.get("description", "")
                 element_action = element_spec.get("action", "")
-                
-                logger.info(f"🔍 Processing element {idx + 1}/{len(elements_list)}: {element_id}")
+
+                logger.info(
+                    f"🔍 Processing element {idx + 1}/{len(elements_list)}: {element_id}")
                 logger.info(f"   Description: {element_desc}")
-                logger.info(f"   Action: {element_action if element_action else 'None (locator only)'}")
-                
+                logger.info(
+                    f"   Action: {element_action if element_action else 'None (locator only)'}")
+
                 try:
                     # Build objective based on whether action is required
                     # For the first element, include navigation instruction
@@ -1661,10 +1733,10 @@ def process_batch_task(task_id: str, elements: list, url: str, user_query: str, 
                         navigation_instruction = f"First, navigate to {target_url}. Then, "
                     else:
                         navigation_instruction = ""
-                    
+
                     # Determine if element requires interaction (input or click)
                     needs_interaction = element_action in ["input", "click"]
-                    
+
                     if needs_interaction:
                         # For actionable elements: Extract locator AND perform action
                         if element_action == "input" and search_term:
@@ -1694,7 +1766,7 @@ CRITICAL: You are NOT here to interact with this element. You are ONLY here to:
 4. Return the JSON result
 
 DO NOT try to complete the user's task. JUST extract the locator."""
-                    
+
                     element_objective = f"""
 {navigation_instruction}Your task is to extract locators for this element: "{element_desc}"
 
@@ -1710,7 +1782,7 @@ After you identify the element and get its coordinates, execute this JavaScript:
 (Replace CENTER_X and CENTER_Y with the actual coordinates, and ELEMENT_DESCRIPTION with "{element_desc}")
 
 ```javascript"""
-                    
+
                     # Reuse the existing enhanced JavaScript and agent logic
                     # (Same as in process_task but in the existing session)
                     js_code = r"""
@@ -2041,7 +2113,7 @@ After you identify the element and get its coordinates, execute this JavaScript:
     
 })();
 """
-                    
+
                     enhanced_objective = f"""{element_objective}
 
 CRITICAL INSTRUCTIONS:
@@ -2058,8 +2130,8 @@ The JavaScript will:
 - Validate each generated locator in the DOM (F12-style check: unique, correct element)
 - Return ONLY validated locators with confidence scores
 """
-                    
-                    # Initialize agent with the existing session (reuse browser!)
+
+                    # Initialize agent with the existing session and default LLM (reuse browser!)
                     agent = Agent(
                         task=enhanced_objective,
                         browser_context=session,
@@ -2069,20 +2141,23 @@ The JavaScript will:
                             temperature=0.1
                         ),
                         use_vision=True,
-                        max_steps=BATCH_CONFIG["max_agent_steps"],  # Configurable max steps (default 15)
+                        # Configurable max steps (default 15)
+                        max_steps=BATCH_CONFIG["max_agent_steps"],
                         system_prompt="""You are an expert web automation agent. Find elements using vision and return validated locators.
 Focus ONLY on finding the requested element. Don't waste time on popups unless they block the element."""
                     )
-                    
+
                     # Run agent for this element
+                    logger.info(
+                        "🤖 Using default ChatGoogle LLM (no rate limiting needed)")
                     element_start_time = time.time()
                     agent_result = await agent.run()
                     element_execution_time = time.time() - element_start_time
-                    
+
                     # Parse result - look for execute_js action output in history
                     locator_data = None
                     success = False
-                    
+
                     # Check agent history for execute_js results
                     if hasattr(agent_result, 'history') and agent_result.history:
                         for step in agent_result.history:
@@ -2093,24 +2168,29 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                                     if 'execute_js' in result_str or 'best_locator' in result_str or 'element_found' in result_str:
                                         try:
                                             # Try to parse JSON from the result
-                                            json_match = re.search(r'\{[^{}]*"success"[^{}]*"element_found".*?\}', result_str, re.DOTALL)
+                                            json_match = re.search(
+                                                r'\{[^{}]*"success"[^{}]*"element_found".*?\}', result_str, re.DOTALL)
                                             if not json_match:
                                                 # Try broader JSON search
-                                                json_match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', result_str, re.DOTALL)
-                                            
+                                                json_match = re.search(
+                                                    r'\{(?:[^{}]|\{[^{}]*\})*\}', result_str, re.DOTALL)
+
                                             if json_match:
-                                                locator_data = json.loads(json_match.group(0))
+                                                locator_data = json.loads(
+                                                    json_match.group(0))
                                                 if locator_data.get('success') and locator_data.get('element_found'):
                                                     success = True
-                                                    logger.info(f"   📍 Found JS result in history for {element_id}")
+                                                    logger.info(
+                                                        f"   📍 Found JS result in history for {element_id}")
                                                     break
                                         except (json.JSONDecodeError, AttributeError) as e:
-                                            logger.debug(f"   Could not parse tool result as JSON: {e}")
+                                            logger.debug(
+                                                f"   Could not parse tool result as JSON: {e}")
                                             continue
-                            
+
                             if success:
                                 break
-                    
+
                     # Fallback: Try to get from final_result
                     if not success:
                         final_result = ""
@@ -2118,19 +2198,25 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                             final_result = str(agent_result.final_result())
                         elif hasattr(agent_result, 'history') and agent_result.history:
                             if len(agent_result.history) > 0:
-                                final_result = str(agent_result.history[-1].result) if hasattr(agent_result.history[-1], 'result') else ""
-                        
+                                final_result = str(
+                                    agent_result.history[-1].result) if hasattr(agent_result.history[-1], 'result') else ""
+
                         if final_result:
                             try:
-                                json_match = re.search(r'\{.*"best_locator".*\}', final_result, re.DOTALL)
+                                json_match = re.search(
+                                    r'\{.*"best_locator".*\}', final_result, re.DOTALL)
                                 if json_match:
-                                    locator_data = json.loads(json_match.group(0))
-                                    success = locator_data.get('success', False) and locator_data.get('element_found', False)
+                                    locator_data = json.loads(
+                                        json_match.group(0))
+                                    success = locator_data.get(
+                                        'success', False) and locator_data.get('element_found', False)
                             except json.JSONDecodeError:
                                 # Agent completed but didn't return structured data - mark as found anyway
-                                success = bool(final_result and len(final_result.strip()) > 20)
-                                logger.warning(f"   ⚠️ Agent completed for {element_id} but no structured locator data found")
-                    
+                                success = bool(final_result and len(
+                                    final_result.strip()) > 20)
+                                logger.warning(
+                                    f"   ⚠️ Agent completed for {element_id} but no structured locator data found")
+
                     # Store result for this element
                     element_result = {
                         "element_id": element_id,
@@ -2143,15 +2229,18 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                         "execution_time": element_execution_time,
                         "element_info": locator_data.get('element_info', {}) if locator_data else {}
                     }
-                    
+
                     results_list.append(element_result)
-                    
-                    logger.info(f"✅ Element {element_id} processed: {'Found' if success else 'Not found'}")
+
+                    logger.info(
+                        f"✅ Element {element_id} processed: {'Found' if success else 'Not found'}")
                     if success and locator_data:
-                        logger.info(f"   Best locator: {locator_data.get('best_locator')}")
-                    
+                        logger.info(
+                            f"   Best locator: {locator_data.get('best_locator')}")
+
                 except Exception as elem_error:
-                    logger.error(f"❌ Error processing element {element_id}: {elem_error}", exc_info=True)
+                    logger.error(
+                        f"❌ Error processing element {element_id}: {elem_error}", exc_info=True)
                     # Continue with other elements (partial results support)
                     results_list.append({
                         "element_id": element_id,
@@ -2163,15 +2252,17 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                         "validation": {},
                         "execution_time": 0
                     })
-            
-            logger.info(f"🎉 Batch processing complete: {len(results_list)}/{len(elements_list)} elements processed")
-            
+
+            logger.info(
+                f"🎉 Batch processing complete: {len(results_list)}/{len(elements_list)} elements processed")
+
             # Calculate success metrics
             successful_elements = [r for r in results_list if r.get('found')]
             failed_elements = [r for r in results_list if not r.get('found')]
-            
+
             return {
-                'success': len(successful_elements) > 0,  # Success if at least one element found
+                # Success if at least one element found
+                'success': len(successful_elements) > 0,
                 'session_id': str(id(session)),
                 'results': results_list,
                 'summary': {
@@ -2185,10 +2276,11 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                 'execution_time': time.time() - tasks[task_id]['started_at'],
                 'agent_status': 'completed'
             }
-            
+
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Error in batch browser automation: {error_msg}", exc_info=True)
+            logger.error(
+                f"Error in batch browser automation: {error_msg}", exc_info=True)
             return {
                 'success': False,
                 'error': error_msg,
@@ -2205,24 +2297,28 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                     elif hasattr(session, 'browser') and hasattr(session.browser, 'close'):
                         await session.browser.close()
                     else:
-                        logger.warning("Could not find proper close method for browser session")
-                    
-                    logger.info("🔒 Browser session closed successfully (batch mode)")
+                        logger.warning(
+                            "Could not find proper close method for browser session")
+
+                    logger.info(
+                        "🔒 Browser session closed successfully (batch mode)")
                 except Exception as e:
                     logger.error(f"Error closing browser session: {e}")
-    
+
     # Run the batch automation in a new event loop
     loop = None
     try:
         if hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8')
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(run_batch_browser_use(elements, url, user_query))
+        results = loop.run_until_complete(
+            run_batch_browser_use(elements, url, user_query))
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in batch event loop execution: {error_msg}", exc_info=True)
+        logger.error(
+            f"Error in batch event loop execution: {error_msg}", exc_info=True)
         results = {
             'success': False,
             'error': f"Batch event loop error: {error_msg}",
@@ -2236,12 +2332,13 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
                 if pending:
                     for task in pending:
                         task.cancel()
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                
+                    loop.run_until_complete(asyncio.gather(
+                        *pending, return_exceptions=True))
+
                 loop.close()
             except Exception as e:
                 logger.error(f"Error closing event loop: {e}")
-    
+
     # Update the task status and results
     tasks[task_id].update({
         "status": "completed",
@@ -2249,8 +2346,9 @@ Focus ONLY on finding the requested element. Don't waste time on popups unless t
         "message": f"Batch task completed: {len(elements)} elements processed",
         "results": results
     })
-    
-    logger.info(f"Batch task {task_id} completed. Success: {results.get('success', False)}")
+
+    logger.info(
+        f"Batch task {task_id} completed. Success: {results.get('success', False)}")
     logger.info(f"Summary: {results.get('summary', {})}")
 
 
@@ -2276,7 +2374,7 @@ def root():
         ],
         "endpoints": [
             "GET / - This endpoint",
-            "GET /health - Health check", 
+            "GET /health - Health check",
             "GET /probe - Legacy health check",
             "POST /submit - Submit single element automation task",
             "POST /workflow - Process workflow task (unified session, RECOMMENDED)",
@@ -2285,6 +2383,7 @@ def root():
             "GET /tasks - List all tasks"
         ]
     }), 200
+
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -2299,10 +2398,12 @@ def health():
         "google_api_configured": bool(GOOGLE_API_KEY and GOOGLE_API_KEY != 'your_api_key_here')
     }), 200
 
+
 @app.route('/probe', methods=['GET'])
 def probe():
     """Legacy probe endpoint for backward compatibility."""
     return jsonify({"status": "alive", "message": "enhanced_browser_use_service is alive"}), 200
+
 
 @app.route('/submit', methods=['POST'])
 def submit():
@@ -2311,23 +2412,24 @@ def submit():
         # Check if request has JSON data
         if not request.is_json:
             return jsonify({
-                "status": "error", 
+                "status": "error",
                 "message": "Request must be JSON with Content-Type: application/json"
             }), 400
-            
+
         data = request.get_json()
         if not data:
             return jsonify({"status": "error", "message": "No JSON data provided."}), 400
-            
+
         objective = data.get("browser_use_objective")
         if not objective:
             return jsonify({"status": "error", "message": "No 'browser_use_objective' field provided."}), 400
 
         # Check if service is busy (only one task at a time)
-        active_tasks = [t for t in tasks.values() if t.get('status') in ['processing', 'running']]
+        active_tasks = [t for t in tasks.values() if t.get('status') in [
+            'processing', 'running']]
         if active_tasks:
             return jsonify({
-                "status": "busy", 
+                "status": "busy",
                 "message": "Service is currently processing another task. Please try again later.",
                 "active_tasks": len(active_tasks)
             }), 429
@@ -2348,39 +2450,42 @@ def submit():
         future = executor.submit(process_task, task_id, objective)
         tasks[task_id]['future'] = future
 
-        logger.info(f"Task {task_id} submitted with objective: {objective[:100]}{'...' if len(objective) > 100 else ''}")
+        logger.info(
+            f"Task {task_id} submitted with objective: {objective[:100]}{'...' if len(objective) > 100 else ''}")
 
         # Return the task ID immediately
         return jsonify({
-            "status": "processing", 
+            "status": "processing",
             "task_id": task_id,
             "message": "Task submitted successfully with enhanced processing"
         }), 202
-        
+
     except Exception as e:
         logger.error(f"Error in submit endpoint: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Internal server error: {str(e)}"}), 500
 
+
 @app.route('/workflow', methods=['POST'])
-@app.route('/batch', methods=['POST'])  # Deprecated alias for backward compatibility
+# Deprecated alias for backward compatibility
+@app.route('/batch', methods=['POST'])
 def workflow_submit():
     """
     Process a workflow task with multiple elements in a single browser session.
-    
+
     This endpoint handles complete user workflows (navigate → act → extract locators).
     All elements are processed in ONE browser session for context preservation.
-    
+
     Endpoints:
         /workflow - Primary endpoint (recommended)
         /batch - Deprecated alias (backward compatible)
-    
+
     Request JSON:
         {
             "elements": [{"id": "elem_1", "description": "...", "action": "input"}, ...],
             "url": "https://example.com",
             "user_query": "search for shoes and get product name"
         }
-    
+
     Response JSON:
         {
             "task_id": "uuid",
@@ -2390,48 +2495,51 @@ def workflow_submit():
     """
     # Log deprecation warning if /batch endpoint is used
     if request.path == '/batch':
-        logger.warning("⚠️  /batch endpoint is deprecated. Please use /workflow instead.")
-    
+        logger.warning(
+            "⚠️  /batch endpoint is deprecated. Please use /workflow instead.")
+
     logger.info(f"📥 Received workflow request via {request.path}")
     try:
         # Check if request has JSON data
         if not request.is_json:
             return jsonify({
-                "status": "error", 
+                "status": "error",
                 "message": "Request must be JSON with Content-Type: application/json"
             }), 400
-            
+
         data = request.get_json()
         if not data:
             return jsonify({"status": "error", "message": "No JSON data provided."}), 400
-        
+
         # Validate batch request structure
         elements = data.get("elements")
         if not elements or not isinstance(elements, list):
             return jsonify({
-                "status": "error", 
+                "status": "error",
                 "message": "Missing or invalid 'elements' field. Must be a list of element descriptions."
             }), 400
-        
+
         if len(elements) == 0:
             return jsonify({
                 "status": "error",
                 "message": "Elements list cannot be empty."
             }), 400
-        
+
         url = data.get("url")
         user_query = data.get("user_query", "")
         session_config = data.get("session_config", {})
-        
+
         # All tasks are processed as unified workflows
         # (sequential actions + element extraction in single Agent session)
-        logger.info(f"✅ Using unified workflow mode (all tasks processed as workflows)")
-        
+        logger.info(
+            f"✅ Using unified workflow mode (all tasks processed as workflows)")
+
         # Check if service is busy (only one task at a time)
-        active_tasks = [t for t in tasks.values() if t.get('status') in ['processing', 'running']]
+        active_tasks = [t for t in tasks.values() if t.get('status') in [
+            'processing', 'running']]
         if active_tasks:
             return jsonify({
-                "status": "busy", 
+                "status": "busy",
                 "message": "Service is currently processing another task. Please try again later.",
                 "active_tasks": len(active_tasks)
             }), 429
@@ -2453,27 +2561,32 @@ def workflow_submit():
         }
 
         # Process as unified workflow
-        logger.info(f"🚀 Workflow task {task_id} submitted with {len(elements)} elements for URL: {url}")
-        logger.info(f"   Processing mode: Unified workflow (single Agent session)")
-        
-        # Submit to process_workflow_task (unified workflow processor)
-        future = executor.submit(process_workflow_task, task_id, elements, url, user_query, session_config)
-        
+        logger.info(
+            f"🚀 Workflow task {task_id} submitted with {len(elements)} elements for URL: {url}")
+        logger.info(
+            f"   Processing mode: Unified workflow (single Agent session)")
+
+        # Submit to process_task (unified workflow processor)
+        future = executor.submit(
+            process_task, task_id, elements, url, user_query, session_config)
+
         tasks[task_id]['future'] = future
-        logger.info(f"📝 User query: {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
+        logger.info(
+            f"📝 User query: {user_query[:100]}{'...' if len(user_query) > 100 else ''}")
 
         # Return the task ID immediately
         return jsonify({
-            "status": "processing", 
+            "status": "processing",
             "task_id": task_id,
             "message": f"Workflow task submitted with {len(elements)} elements (unified session)",
             "elements_count": len(elements),
             "mode": "workflow"
         }), 202
-        
+
     except Exception as e:
         logger.error(f"Error in batch submit endpoint: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/query/<task_id>', methods=['GET'])
 def query(task_id: str):
@@ -2483,17 +2596,18 @@ def query(task_id: str):
             return jsonify({"status": "error", "message": "Task ID not found."}), 404
 
         task = tasks[task_id]
-        
+
         # Prepare response data
         response_data = {
             "task_id": task_id,
             "status": task.get("status", "unknown"),
-            "objective": task.get("objective", "")[:200],  # Truncate long objectives
+            # Truncate long objectives
+            "objective": task.get("objective", "")[:200],
             "created_at": task.get("created_at"),
         }
-        
+
         status = task.get("status")
-        
+
         if status == "processing":
             return jsonify(response_data), 202
         elif status == "running":
@@ -2510,14 +2624,16 @@ def query(task_id: str):
                 "results": task.get("results", {}),
                 "total_time": (task.get("completed_at", time.time()) - task.get("created_at", time.time())) if task.get("created_at") else 0
             })
-            logger.info(f"Task {task_id} query completed: {task.get('results', {}).get('success', False)}")
+            logger.info(
+                f"Task {task_id} query completed: {task.get('results', {}).get('success', False)}")
             return jsonify(response_data), 200
         else:
             return jsonify(response_data), 200
-            
+
     except Exception as e:
         logger.error(f"Error in query endpoint: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/tasks', methods=['GET'])
 def list_tasks():
@@ -2528,23 +2644,26 @@ def list_tasks():
             task_summary = {
                 "task_id": task_id,
                 "status": task_data.get("status", "unknown"),
-                "objective": task_data.get("objective", "")[:100],  # Truncate for display
+                # Truncate for display
+                "objective": task_data.get("objective", "")[:100],
                 "created_at": task_data.get("created_at"),
             }
             if task_data.get("completed_at"):
                 task_summary["completed_at"] = task_data["completed_at"]
-                task_summary["success"] = task_data.get("results", {}).get("success", False)
+                task_summary["success"] = task_data.get(
+                    "results", {}).get("success", False)
             task_list.append(task_summary)
-        
+
         return jsonify({
             "tasks": task_list,
             "total_tasks": len(task_list),
             "active_tasks": len([t for t in tasks.values() if t.get('status') in ['processing', 'running']])
         }), 200
-        
+
     except Exception as e:
         logger.error(f"Error in list_tasks endpoint: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Internal server error: {str(e)}"}), 500
+
 
 @app.errorhandler(404)
 def not_found(error):
@@ -2554,7 +2673,7 @@ def not_found(error):
         "message": "Endpoint not found",
         "available_endpoints": [
             "GET / - Service info",
-            "GET /health - Health check", 
+            "GET /health - Health check",
             "GET /probe - Legacy health check",
             "POST /submit - Submit single element task",
             "POST /batch - Submit batch task (multiple elements)",
@@ -2562,6 +2681,7 @@ def not_found(error):
             "GET /tasks - List tasks"
         ]
     }), 404
+
 
 @app.errorhandler(500)
 def internal_error(error):
@@ -2572,32 +2692,38 @@ def internal_error(error):
         "error": str(error)
     }), 500
 
+
 if __name__ == '__main__':
     # Set encoding environment variables
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    
+
     logger.info("Starting Enhanced Browser Use Service v4.0...")
-    service_url = os.getenv("BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
+    service_url = os.getenv(
+        "BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
     parsed_url = urlparse(service_url)
-    resolved_port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
-    logger.info(f"Service will run on {parsed_url.scheme}://{parsed_url.hostname or '0.0.0.0'}:{resolved_port}")
+    resolved_port = parsed_url.port or (
+        443 if parsed_url.scheme == "https" else 80)
+    logger.info(
+        f"Service will run on {parsed_url.scheme}://{parsed_url.hostname or '0.0.0.0'}:{resolved_port}")
     logger.info("Available endpoints:")
     logger.info("  GET  / - Service information")
     logger.info("  GET  /health - Health check")
     logger.info("  GET  /probe - Legacy health check")
     logger.info("  POST /submit - Submit single element task")
-    logger.info("  POST /workflow - Process workflow task (unified session, primary endpoint)")
-    logger.info("  POST /batch - Deprecated alias for /workflow (backward compatible)")
+    logger.info(
+        "  POST /workflow - Process workflow task (unified session, primary endpoint)")
+    logger.info(
+        "  POST /batch - Deprecated alias for /workflow (backward compatible)")
     logger.info("  GET  /query/<task_id> - Query task status")
     logger.info("  GET  /tasks - List all tasks")
-    
+
     logger.info("Enhanced features:")
     logger.info("  - Better encoding handling for international characters")
-    logger.info("  - Improved CSS selector detection strategies") 
+    logger.info("  - Improved CSS selector detection strategies")
     logger.info("  - Enhanced error handling and recovery")
     logger.info("  - Batch processing with persistent browser sessions (NEW)")
     logger.info("  - Context-aware popup handling (NEW)")
     logger.info("  - Proper browser session cleanup")
     logger.info("  - Fallback mechanisms for dynamic sites")
-    
+
     app.run(debug=False, host='0.0.0.0', port=resolved_port, threaded=True)

@@ -34,6 +34,7 @@ def get_llm(model_provider, model_name):
         return LLM(
             api_key=os.getenv("GEMINI_API_KEY"),
             model=f"{model_name}",
+            num_retries=3
         )
 
 # Initialize the tools
