@@ -1,6 +1,7 @@
 from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
 from src.backend.crew_ai.tasks import RobotTasks
+from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner, formatting_monitor
 import re
 import logging
 
@@ -77,7 +78,25 @@ def run_crew(query: str, model_provider: str, model_name: str):
     )
 
     logger.info("🚀 Starting CrewAI workflow execution...")
-    result = crew.kickoff()
-    logger.info("✅ CrewAI workflow completed successfully")
+    logger.info(f"📊 LLM Output Cleaner Status: {formatting_monitor.get_stats()}")
     
-    return result, crew
+    try:
+        result = crew.kickoff()
+        logger.info("✅ CrewAI workflow completed successfully")
+        logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
+        return result, crew
+        
+    except Exception as e:
+        error_msg = str(e)
+        
+        # Check if this is a formatting error that slipped through
+        if LLMOutputCleaner.is_formatting_error(error_msg):
+            logger.error("❌ LLM formatting error detected despite cleaning!")
+            logger.error(f"   Error: {error_msg[:200]}...")
+            logger.error(f"   This indicates the cleaning logic needs improvement")
+            formatting_monitor.log_formatting_error(was_recovered=False)
+        else:
+            logger.error(f"❌ CrewAI workflow failed: {error_msg[:200]}...")
+        
+        logger.info(f"📊 LLM Stats at failure: {formatting_monitor.get_stats()}")
+        raise

@@ -1,43 +1,43 @@
-from langchain_ollama import OllamaLLM
-from tools.browser_use_tool import BrowserUseTool, BatchBrowserUseTool
 import os
+import sys
+import logging
 from crewai import Agent
 from crewai.llm import LLM
-# from langchain_community.llms import Ollama
 from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
-# Import browser_use_tool to ensure it's included in the package
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+from langchain_ollama import OllamaLLM
+
+# Import browser_use_tool from tools package
+# Note: Path setup is handled by tools/__init__.py automatically
+from tools.browser_use_tool import BrowserUseTool, BatchBrowserUseTool
+
+# Import cleaned LLM wrapper for robust output parsing
+from .cleaned_llm_wrapper import get_cleaned_llm
+
+logger = logging.getLogger(__name__)
 
 # Initialize the LLMs
 
 
 def get_llm(model_provider, model_name):
     """
-    Get LLM instance for the specified provider.
+    Get LLM instance for the specified provider with automatic output cleaning.
 
-    Uses direct LLM calls without rate limiting wrappers. Rate limiting was removed
-    during codebase cleanup as it added unnecessary complexity. Google Gemini API
-    has generous rate limits (1500 RPM for gemini-2.5-flash) that are sufficient
-    for our use case.
+    This function now returns cleaned LLM wrappers that automatically fix
+    common formatting issues (like extra text on Action lines) before CrewAI
+    parses the output. This prevents workflow failures due to LLM formatting quirks.
+
+    The cleaning is transparent - the LLM behaves exactly the same but with
+    robust parsing that handles real-world LLM behavior.
 
     Args:
         model_provider: "local" for Ollama, "online" for Gemini
         model_name: Model identifier (e.g., "llama3.1", "gemini-2.5-flash")
 
     Returns:
-        LLM instance (OllamaLLM for local, LLM for online)
+        Cleaned LLM wrapper instance that automatically fixes formatting issues
     """
-    if model_provider == "local":
-        return OllamaLLM(model=model_name)
-    else:
-        # Use direct LLM for online models (no rate limiting wrapper needed)
-        return LLM(
-            api_key=os.getenv("GEMINI_API_KEY"),
-            model=f"{model_name}",
-            num_retries=3
-        )
+    logger.info(f"🧹 Initializing cleaned LLM wrapper for {model_provider}/{model_name}")
+    return get_cleaned_llm(model_provider, model_name)
 
 
 # Initialize the tools

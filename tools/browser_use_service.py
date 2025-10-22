@@ -1,11 +1,11 @@
 # ========================================
-# PERMANENT UNICODE FIX - MUST BE FIRST
+# UNICODE FIX - MUST BE FIRST
 # ========================================
+# Force UTF-8 encoding on Windows BEFORE any other imports
 import sys
 import os
 import io
 
-# Force UTF-8 encoding on Windows BEFORE any other imports
 if sys.platform.startswith('win'):
     # Set environment variables
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -17,7 +17,21 @@ if sys.platform.startswith('win'):
     sys.stderr = io.TextIOWrapper(
         sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-# Now safe to import everything else
+# ========================================
+# PATH SETUP (FALLBACK)
+# ========================================
+# When running as a module (python -m tools.browser_use_service),
+# tools/__init__.py handles path setup automatically.
+# When running directly (python tools/browser_use_service.py),
+# we need this fallback to ensure imports work.
+from pathlib import Path
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+# ========================================
+# STANDARD LIBRARY & THIRD-PARTY IMPORTS
+# ========================================
 from browser_use.browser.session import BrowserSession
 from browser_use import Agent, Browser
 from dotenv import load_dotenv
@@ -28,13 +42,22 @@ import re
 import time
 import threading
 import uuid
-from pathlib import Path
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any
 
-# Simple logging setup
+# ========================================
+# LOCAL IMPORTS
+# ========================================
+# These imports work because:
+# 1. tools/__init__.py sets up path (when imported as module)
+# 2. Fallback above sets up path (when run directly)
+from src.backend.core.config import settings
+
+# ========================================
+# LOGGING SETUP
+# ========================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -45,14 +68,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# Add parent directory to path so we can import from src
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Adding this import after the directory declaration
-from src.backend.core.config import settings
+# Load environment variables
 load_dotenv("src/backend/.env")
-
 
 # Import litellm for RateLimitError handling (optional)
 try:
@@ -477,7 +494,7 @@ def process_task(task_id: str, objective: str) -> None:
             // Search in buttons, links, inputs
             const interactiveTags = ['button', 'a', 'input'];
             for (const tag of interactiveTags) {
-                const xpath = \`//\${tag}[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '\${keyword.toLowerCase()}')]\`;
+                const xpath = \`//\${tag}[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "\${keyword.toLowerCase()}")]\`;
                 const xpathResult = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
                 
                 if (xpathResult.snapshotLength > 0) {
@@ -1517,6 +1534,18 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             coord_offsets_json = json.dumps(coord_offsets)
             js_validation_code = js_validation_code.replace(
                 '{coord_offsets_json}', coord_offsets_json)
+            
+            # Validate JavaScript code integrity
+            logger.debug(f"📊 JavaScript validation code stats:")
+            logger.debug(f"   Total length: {len(js_validation_code)} characters")
+            logger.debug(f"   Contains 'const strategies': {'const strategies = [' in js_validation_code}")
+            logger.debug(f"   Contains 'for (const s of strategies)': {'for (const s of strategies)' in js_validation_code}")
+            
+            # Critical validation: ensure strategies array is defined
+            if 'for (const s of strategies)' in js_validation_code and 'const strategies = [' not in js_validation_code:
+                logger.error("❌ JavaScript validation FAILED: 'strategies' used but not defined!")
+                logger.error("   This will cause 'Uncaught at line 324' error")
+                raise ValueError("JavaScript template error: strategies array not properly defined")
 
             # Build the unified objective
             unified_objective = f"""
