@@ -36,7 +36,7 @@ from typing import Dict, Any
 
 # Simple logging setup
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -135,6 +135,198 @@ logger.info(
 # LLM USAGE: Using default ChatGoogle without rate limiting
 # Google Gemini API has sufficient rate limits (1500 RPM) for our use case
 # ========================================
+
+
+def extract_json_for_element(text: str, element_id: str) -> dict:
+    """
+    Extract JSON object for a specific element_id from text, handling nested braces properly.
+
+    Args:
+        text: The text containing JSON data
+        element_id: The element ID to search for (e.g., "elem_1")
+
+    Returns:
+        Parsed JSON dict if found, None otherwise
+    """
+    # Find the starting position of the element_id
+    # Check multiple patterns (with and without space after colon)
+    search_patterns = [
+        f'"element_id":"{element_id}"',  # No space (common in minified JSON)
+        f'"element_id": "{element_id}"',  # With space
+        f"'element_id':'{element_id}'",  # Single quotes, no space
+        f"'element_id': '{element_id}'"   # Single quotes, with space
+    ]
+
+    start_pos = -1
+    pattern_used = None
+    for pattern in search_patterns:
+        pos = text.find(pattern)
+        if pos != -1:
+            start_pos = pos
+            pattern_used = pattern
+            break
+
+    if start_pos == -1:
+        logger.debug(
+            f"extract_json_for_element: '{element_id}' not found in text (tried {len(search_patterns)} patterns)")
+        return None
+
+    logger.debug(
+        f"extract_json_for_element: Found '{element_id}' at position {start_pos} using pattern '{pattern_used}'")
+
+    # Find the opening brace before element_id
+    brace_pos = text.rfind('{', 0, start_pos)
+    if brace_pos == -1:
+        logger.debug(
+            f"extract_json_for_element: No opening brace found before '{element_id}'")
+        return None
+
+    logger.debug(
+        f"extract_json_for_element: Opening brace at position {brace_pos}")
+
+    # Now match braces to find the closing brace
+    brace_count = 0
+    in_string = False
+    escape_next = False
+
+    for i in range(brace_pos, len(text)):
+        char = text[i]
+
+        # Handle escape sequences
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == '\\':
+            escape_next = True
+            continue
+
+        # Handle strings (ignore braces inside strings)
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        # Count braces
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+
+            # Found matching closing brace
+            if brace_count == 0:
+                json_str = text[brace_pos:i+1]
+                logger.debug(
+                    f"extract_json_for_element: Found complete JSON for '{element_id}' ({len(json_str)} chars)")
+
+                # CRITICAL FIX: Unescape double-escaped quotes before parsing
+                # The JavaScript returns valid JSON, but when embedded in Python strings,
+                # quotes get double-escaped (\" becomes \\")
+                # We need to fix this before json.loads()
+                try:
+                    # First attempt: Parse as-is
+                    parsed = json.loads(json_str)
+                    logger.debug(
+                        f"extract_json_for_element: Successfully parsed JSON for '{element_id}'")
+                    return parsed
+                except json.JSONDecodeError as e:
+                    # Second attempt: Fix escaped quotes and try again
+                    logger.debug(
+                        f"extract_json_for_element: First parse failed, trying to fix escaped quotes...")
+                    try:
+                        # Replace double-escaped quotes with single-escaped quotes
+                        # \\" -> \"
+                        fixed_json_str = json_str.replace('\\\\"', '\\"')
+                        # Also handle \\' -> \'
+                        fixed_json_str = fixed_json_str.replace("\\\\'", "\\'")
+
+                        parsed = json.loads(fixed_json_str)
+                        logger.debug(
+                            f"extract_json_for_element: Successfully parsed JSON after fixing escapes for '{element_id}'")
+                        return parsed
+                    except json.JSONDecodeError as e2:
+                        logger.error(
+                            f"extract_json_for_element: Failed to parse JSON for {element_id} even after fixing escapes: {e2}")
+                        logger.error(
+                            f"Original JSON (first 500 chars): {json_str[:500]}...")
+                        logger.error(
+                            f"Fixed JSON (first 500 chars): {fixed_json_str[:500]}...")
+                        return None
+
+    logger.debug(
+        f"extract_json_for_element: No matching closing brace found for '{element_id}'")
+    return None
+
+
+def extract_workflow_json(text: str) -> dict:
+    """
+    Extract workflow completion JSON from text, handling nested braces properly.
+
+    Args:
+        text: The text containing workflow JSON data
+
+    Returns:
+        Parsed JSON dict if found, None otherwise
+    """
+    # Find the starting position of workflow_completed
+    search_pattern = '"workflow_completed"'
+    start_pos = text.find(search_pattern)
+
+    if start_pos == -1:
+        return None
+
+    # Find the opening brace before workflow_completed
+    brace_pos = text.rfind('{', 0, start_pos)
+    if brace_pos == -1:
+        return None
+
+    # Now match braces to find the closing brace
+    brace_count = 0
+    in_string = False
+    escape_next = False
+
+    for i in range(brace_pos, len(text)):
+        char = text[i]
+
+        # Handle escape sequences
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == '\\':
+            escape_next = True
+            continue
+
+        # Handle strings (ignore braces inside strings)
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        # Count braces
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+
+            # Found matching closing brace
+            if brace_count == 0:
+                json_str = text[brace_pos:i+1]
+                try:
+                    parsed = json.loads(json_str)
+                    # Verify it has the expected structure
+                    if 'workflow_completed' in parsed and 'results' in parsed:
+                        return parsed
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Failed to parse workflow JSON: {e}")
+                    logger.debug(f"JSON string: {json_str[:200]}...")
+                    return None
+
+    return None
 
 
 def process_task(task_id: str, objective: str) -> None:
@@ -842,43 +1034,91 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
 
             # Parse user query to extract action parameters
             import re
-            search_match = re.search(
-                r'search for ["\'](.*?)["\']', user_query, re.IGNORECASE)
-            search_term = search_match.group(1) if search_match else None
+            # Try multiple patterns to extract search term
+            search_patterns = [
+                r'search for ["\'](.*?)["\']',  # "search for 'shoes'"
+                r'type ["\'](.*?)["\']',  # "type 'shoes'"
+                r'input ["\'](.*?)["\']',  # "input 'shoes'"
+                r'enter ["\'](.*?)["\']',  # "enter 'shoes'"
+            ]
+
+            search_term = None
+            for pattern in search_patterns:
+                search_match = re.search(pattern, user_query, re.IGNORECASE)
+                if search_match:
+                    search_term = search_match.group(1)
+                    logger.info(
+                        f"📝 Extracted search term: '{search_term}' using pattern: {pattern}")
+                    break
+
+            if not search_term:
+                logger.warning(
+                    f"⚠️ Could not extract search term from query: {user_query}")
 
             # Build unified workflow objective
+            # SIMPLE, EXPLICIT APPROACH: Always extract locators in correct order
             workflow_steps = []
             workflow_steps.append(f"1. Navigate to {url}")
 
             step_num = 2
-            for idx, elem in enumerate(elements):
-                elem_id = elem.get("id", f"element_{idx}")
-                elem_desc = elem.get("description", "")
-                elem_action = elem.get("action", "")
 
-                # Build step description based on action
-                if elem_action == "input" and search_term:
-                    workflow_steps.append(
-                        f"{step_num}. Find '{elem_desc}', type '{search_term}', and press Enter")
-                    workflow_steps.append(
-                        f"{step_num + 1}. Wait 5 seconds for search results to load")
-                    step_num += 2
-                elif elem_action == "click":
-                    workflow_steps.append(
-                        f"{step_num}. Find '{elem_desc}' and click it")
-                    workflow_steps.append(
-                        f"{step_num + 1}. Wait 3 seconds for page to update")
-                    step_num += 2
-                else:
-                    # Just extraction, no action
-                    pass
+            # Separate elements by action type
+            interactive_elements = [e for e in elements if e.get('action') in [
+                'input', 'click']]
+            result_elements = [e for e in elements if e.get('action') not in [
+                'input', 'click']]
 
-            # Add extraction step
-            workflow_steps.append(
-                f"{step_num}. For EACH element below, find it and extract validated locators:")
-            for elem in elements:
+            logger.info(
+                f"📊 Element breakdown: {len(interactive_elements)} interactive, {len(result_elements)} result elements")
+
+            # PHASE 1: Extract locators for interactive elements BEFORE using them
+            if interactive_elements:
                 workflow_steps.append(
-                    f"   - {elem.get('id')}: {elem.get('description')}")
+                    f"{step_num}. BEFORE performing any actions, extract validated locators for these elements on the CURRENT page:")
+                for elem in interactive_elements:
+                    workflow_steps.append(
+                        f"   - {elem.get('id')}: {elem.get('description')}")
+                step_num += 1
+
+            # PHASE 2: Perform user actions using the extracted locators
+            if search_term:
+                for elem in interactive_elements:
+                    elem_action = elem.get('action', '')
+                    elem_id = elem.get('id')
+                    elem_desc = elem.get('description', '')
+
+                    if elem_action == 'input':
+                        workflow_steps.append(
+                            f"{step_num}. Type '{search_term}' into the element you just found ({elem_id})")
+                        workflow_steps.append(
+                            f"{step_num + 1}. Press Enter to submit the search")
+                        workflow_steps.append(
+                            f"{step_num + 2}. Wait 5 seconds for search results to load completely")
+                        step_num += 3
+                    elif elem_action == 'click':
+                        workflow_steps.append(
+                            f"{step_num}. Click on the element you just found ({elem_id}: '{elem_desc}')")
+                        workflow_steps.append(
+                            f"{step_num + 1}. Wait 3 seconds for the page to update")
+                        step_num += 2
+
+            # PHASE 3: Extract locators for result elements AFTER actions complete
+            if result_elements:
+                workflow_steps.append(
+                    f"{step_num}. AFTER all actions are complete, extract validated locators for these elements on the RESULTS page:")
+                for elem in result_elements:
+                    workflow_steps.append(
+                        f"   - {elem.get('id')}: {elem.get('description')}")
+                step_num += 1
+
+            # If no interactive elements, just extract all locators
+            if not interactive_elements and not result_elements:
+                workflow_steps.append(
+                    f"{step_num}. Extract validated locators for all elements:")
+                for elem in elements:
+                    workflow_steps.append(
+                        f"   - {elem.get('id')}: {elem.get('description')}")
+                step_num += 1
 
             # JavaScript validation code for locator extraction with CONTENT-BASED SEARCH
             # Config values passed from Python
@@ -1000,10 +1240,8 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
         
         // Escape special characters for XPath
         const escapeXPath = (str) => {{
-            if (str.includes('"')) {{
-                return `concat("`, str.split('"').join(`", '"', "`), `")`);
-            }}
-            return `"${{str}}"`;
+            // Simple approach: replace double quotes with single quotes for XPath
+            return `"${{str.replace(/"/g, "'")}}"`; 
         }};
         
         const escapedContent = escapeXPath(contentHint);
@@ -1246,22 +1484,31 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
     // Sort: unique locators first
     validatedLocators.sort((a, b) => (a.unique && !b.unique) ? -1 : ((!a.unique && b.unique) ? 1 : 0));
     
+    // CRITICAL: Only mark as found if we have at least ONE UNIQUE locator
+    const uniqueLocators = validatedLocators.filter(loc => loc.unique);
+    const hasUniqueLocator = uniqueLocators.length > 0;
+    const bestLocator = hasUniqueLocator ? uniqueLocators[0] : validatedLocators[0];
+    
     console.log(`\n✅ === EXTRACTION COMPLETE FOR ${{ELEMENT_ID}} ===`);
     console.log(`   Strategy: ${{strategyUsed}}`);
-    console.log(`   Locators found: ${{validatedLocators.length}}`);
-    console.log(`   Best locator: ${{validatedLocators[0]?.locator || 'none'}}`);
+    console.log(`   Total locators: ${{validatedLocators.length}}`);
+    console.log(`   Unique locators: ${{uniqueLocators.length}}`);
+    console.log(`   Best locator: ${{bestLocator?.locator || 'none'}}`);
+    console.log(`   Status: ${{hasUniqueLocator ? 'FOUND (unique)' : 'NOT FOUND (no unique locator)'}}`);
     
     return JSON.stringify({{
         element_id: ELEMENT_ID,
-        found: validatedLocators.length > 0,
-        best_locator: validatedLocators[0]?.locator,
+        found: hasUniqueLocator,  // ONLY true if we have a UNIQUE locator
+        best_locator: bestLocator?.locator,
         all_locators: validatedLocators,
+        unique_locators: uniqueLocators,
         strategy_used: strategyUsed,
         element_info: {{
             tag: element.tagName,
             text: element.textContent?.slice(0, 100),
             visible: element.offsetParent !== null
-        }}
+        }},
+        reason: hasUniqueLocator ? 'Found unique locator' : `Found ${{validatedLocators.length}} non-unique locators`
     }});
 }})();
 """
@@ -1353,6 +1600,13 @@ CRITICAL: After running JavaScript for ALL elements, return this EXACT JSON stru
 DO NOT use extract_structured_data. You MUST execute the JavaScript code for proper validation.
 DO NOT deviate from these steps. Complete the FULL workflow before finishing.
 
+CRITICAL COMPLETION RULES:
+1. Execute JavaScript for EACH element in the list (elem_1, elem_2, etc.) - ONE TIME ONLY
+2. Collect ALL results from JavaScript executions
+3. Return the JSON structure above with "workflow_completed": true
+4. STOP IMMEDIATELY - Do NOT retry, do NOT re-execute, do NOT validate again
+5. The task is COMPLETE once you return the JSON - NO FURTHER ACTIONS NEEDED
+
 IMPORTANT REMINDERS:
 - Always capture content text BEFORE executing JavaScript (the JS needs it for content-based search)
 - For prices: Capture ONLY first price number (current price), not full combined text
@@ -1375,7 +1629,18 @@ IMPORTANT REMINDERS:
                 use_vision=True,
                 # More steps for full workflow
                 max_steps=BATCH_CONFIG["max_agent_steps"] * len(elements),
-                system_prompt="You are a web automation agent. Complete the ENTIRE workflow and extract ALL locators before finishing."
+                system_prompt="""You are a web automation agent specialized in locator extraction.
+
+YOUR WORKFLOW:
+1. Execute JavaScript for EACH element to get locators
+2. The JavaScript will return JSON like: {"element_id": "elem_1", "found": true, "best_locator": "name=q", ...}
+3. After extracting ALL locators, call done() to complete the task
+
+IMPORTANT:
+- Execute the JavaScript validation code for EACH element
+- The JavaScript results are automatically captured
+- Call done(text="Successfully extracted locators for all elements", success=True) when finished
+- Do NOT retry or re-execute - once you have all results, you're done"""
             )
 
             # Run the unified workflow
@@ -1401,45 +1666,474 @@ IMPORTANT REMINDERS:
                     final_result = str(
                         agent_result.history[-1].result) if hasattr(agent_result.history[-1], 'result') else ""
 
+            logger.info(
+                f"📝 Agent final result (first 500 chars): {final_result[:500]}")
+
             # Look for workflow completion JSON
             if final_result:
                 try:
-                    json_match = re.search(
-                        r'\{.*"workflow_completed".*"results".*\}', final_result, re.DOTALL)
-                    if json_match:
-                        workflow_data = json.loads(json_match.group(0))
+                    # Try to find workflow_completed JSON using proper brace matching
+                    workflow_data = extract_workflow_json(final_result)
+                    if workflow_data:
                         workflow_completed = workflow_data.get(
                             'workflow_completed', False)
                         results_list = workflow_data.get('results', [])
                         logger.info(
                             f"📊 Parsed workflow results: {len(results_list)} elements")
-                except json.JSONDecodeError as e:
+                except Exception as e:
                     logger.warning(f"Could not parse workflow JSON: {e}")
 
             # If no structured results, try to extract individual element results from history
             if not results_list:
                 logger.warning(
                     "No structured workflow results, attempting to extract from history...")
-                if hasattr(agent_result, 'history'):
-                    for step in agent_result.history:
+
+                # APPROACH 1: Extract actual result content from agent history
+                logger.info(
+                    "   Approach 1: Extracting from agent history steps...")
+
+                # Build a list of all result strings from history
+                # CRITICAL: Try multiple ways to access the content to avoid double-escaping
+                result_strings = []
+                direct_results = []  # Store parsed results directly from tool execution
+
+                # Strategy 1: Try all_results attribute
+                if hasattr(agent_result, 'all_results') and agent_result.all_results:
+                    logger.debug(
+                        f"   Found all_results with {len(agent_result.all_results)} items")
+                    for idx, action_result in enumerate(agent_result.all_results):
+                        # DEBUG: Log available attributes
+                        logger.debug(
+                            f"   all_results[{idx}] attributes: {dir(action_result)}")
+
+                        # Try multiple attribute names
+                        content = None
+                        if hasattr(action_result, 'extracted_content') and action_result.extracted_content:
+                            content = action_result.extracted_content
+                            logger.debug(
+                                f"   Using extracted_content from all_results[{idx}]")
+                        elif hasattr(action_result, 'content') and action_result.content:
+                            content = action_result.content
+                            logger.debug(
+                                f"   Using content from all_results[{idx}]")
+                        elif hasattr(action_result, 'result') and action_result.result:
+                            # Check if result is a dict/object with direct access
+                            if isinstance(action_result.result, dict):
+                                logger.debug(
+                                    f"   all_results[{idx}].result is a dict!")
+                                direct_results.append(action_result.result)
+                            content = str(action_result.result)
+                            logger.debug(
+                                f"   Using str(result) from all_results[{idx}]")
+
+                        if content:
+                            result_strings.append(content)
+                            logger.debug(
+                                f"   Collected content from all_results[{idx}]: {len(content)} chars")
+
+                # Strategy 2: Try history attribute (MOST IMPORTANT for execute_js results)
+                if hasattr(agent_result, 'history') and agent_result.history:
+                    logger.debug(
+                        f"   Found history with {len(agent_result.history)} items")
+                    for idx, step in enumerate(agent_result.history):
+                        # Check for tool_results in state (this is where execute_js output is stored)
+                        if hasattr(step, 'state') and hasattr(step.state, 'tool_results'):
+                            logger.debug(
+                                f"   history[{idx}] has tool_results: {len(step.state.tool_results)} items")
+                            for tool_idx, tool_result in enumerate(step.state.tool_results):
+                                # DEBUG: Check what type tool_result is
+                                logger.debug(
+                                    f"   tool_result[{tool_idx}] type: {type(tool_result)}")
+                                # First 10 attrs
+                                logger.debug(
+                                    f"   tool_result[{tool_idx}] attributes: {dir(tool_result)[:10]}...")
+
+                                # Try to access result directly without str()
+                                if isinstance(tool_result, dict):
+                                    logger.info(
+                                        f"   🎯 tool_result[{tool_idx}] is a dict! Direct access possible")
+                                    if 'element_id' in tool_result:
+                                        direct_results.append(tool_result)
+                                        logger.info(
+                                            f"   ✅ Found element_id in tool_result dict!")
+                                elif hasattr(tool_result, 'result'):
+                                    if isinstance(tool_result.result, dict):
+                                        logger.info(
+                                            f"   🎯 tool_result[{tool_idx}].result is a dict!")
+                                        if 'element_id' in tool_result.result:
+                                            direct_results.append(
+                                                tool_result.result)
+                                            logger.info(
+                                                f"   ✅ Found element_id in tool_result.result dict!")
+                                    else:
+                                        # Add to string collection
+                                        content = str(tool_result.result)
+                                        if content and content not in result_strings:
+                                            result_strings.append(content)
+                                else:
+                                    # Last resort: convert to string
+                                    content = str(tool_result)
+                                    if content and content not in result_strings:
+                                        result_strings.append(content)
+
+                        # Also try direct content attributes
+                        content = None
+                        if hasattr(step, 'extracted_content') and step.extracted_content:
+                            content = step.extracted_content
+                        elif hasattr(step, 'content') and step.content:
+                            content = step.content
+                        elif hasattr(step, 'result'):
+                            if hasattr(step.result, 'extracted_content') and step.result.extracted_content:
+                                content = step.result.extracted_content
+                            elif hasattr(step.result, 'content') and step.result.content:
+                                content = step.result.content
+                            elif step.result:
+                                content = str(step.result)
+                                logger.debug(
+                                    f"   Using str() for history[{idx}].result")
+
+                        if content and content not in result_strings:
+                            result_strings.append(content)
+                            logger.debug(
+                                f"   Collected content from history[{idx}]: {len(content)} chars")
+
+                # Strategy 3: If still nothing, try converting entire agent_result to string as last resort
+                if not result_strings and not direct_results:
+                    logger.warning(
+                        "   No content found via direct access, falling back to str(agent_result)")
+                    result_strings.append(str(agent_result))
+
+                # PRIORITY: If we found direct dict results, use them immediately!
+                if direct_results:
+                    logger.info(
+                        f"   🎉 Found {len(direct_results)} direct dict results (NO PARSING NEEDED)!")
+                    for direct_result in direct_results:
+                        elem_id = direct_result.get('element_id')
+                        if elem_id and direct_result.get('found'):
+                            if not any(r.get('element_id') == elem_id for r in results_list):
+                                results_list.append(direct_result)
+                                logger.info(
+                                    f"   ✅ Direct access: {elem_id} (best_locator: {direct_result.get('best_locator')})")
+
+                    # If we got all elements via direct access, we're completely done!
+                    if len(results_list) == len(elements):
+                        logger.info(
+                            f"   🏆 All {len(elements)} elements extracted via DIRECT ACCESS (fastest path)!")
+                        # Skip all parsing - we have everything!
+                        # Jump to re-ranking section
+
+                # Combine all result strings
+                full_result_str = "\n".join(result_strings)
+                logger.info(
+                    f"   Collected {len(result_strings)} result strings, total length: {len(full_result_str)} characters")
+
+                # DEBUG: Show sample of result string to understand format
+                logger.info(f"   📋 Result string sample (first 2000 chars):")
+                logger.info(f"   {full_result_str[:2000]}")
+                logger.info(f"   {'='*80}")
+
+                # ROBUST EXTRACTION: Leverage "Result:" pattern from browser_use library
+                # The browser_use library ALWAYS prints "Result: {json}" after JavaScript execution
+                # This is the most reliable source of locator data
+                logger.info(
+                    "   🎯 Strategy: Extract from 'Result:' lines (most reliable)")
+                import re
+
+                # STRATEGY 1: Extract from "Result:" lines (MOST RELIABLE)
+                # Pattern: "Result: {complete JSON object}"
+                # The browser_use library prints this after every JavaScript execution
+                def extract_from_result_lines(text):
+                    """
+                    Extract JSON from 'Result:' lines printed by browser_use.
+                    This is the MOST RELIABLE method because:
+                    1. Always printed by browser_use after JS execution
+                    2. Contains complete, valid JSON
+                    3. Has best_locator already selected (first unique locator)
+                    4. No double-escaping issues
+                    """
+                    results = []
+                    # Look for "Result: {" followed by JSON
+                    pattern = r'Result:\s*(\{[^}]*?"element_id"[^}]*?\})'
+
+                    # Find all Result: lines
+                    lines = text.split('\n')
+                    for line in lines:
+                        if 'Result:' in line and 'element_id' in line:
+                            # Extract everything after "Result:"
+                            result_start = line.find('Result:')
+                            if result_start != -1:
+                                json_part = line[result_start + 7:].strip()
+
+                                # Find complete JSON using brace matching
+                                if json_part.startswith('{'):
+                                    brace_count = 0
+                                    in_string = False
+                                    escape_next = False
+
+                                    for i, char in enumerate(json_part):
+                                        if escape_next:
+                                            escape_next = False
+                                            continue
+                                        if char == '\\':
+                                            escape_next = True
+                                            continue
+                                        if char == '"':
+                                            in_string = not in_string
+                                            continue
+                                        if in_string:
+                                            continue
+
+                                        if char == '{':
+                                            brace_count += 1
+                                        elif char == '}':
+                                            brace_count -= 1
+                                            if brace_count == 0:
+                                                json_str = json_part[:i+1]
+                                                results.append(json_str)
+                                                break
+
+                    return results
+
+                # STRATEGY 2: Extract any JSON with element_id (FALLBACK)
+                def extract_all_element_jsons(text):
+                    """Extract all JSON objects containing element_id from text."""
+                    found_jsons = []
+                    # Look for {"element_id": patterns
+                    for pattern in ['"element_id":', "'element_id':"]:
+                        pos = 0
+                        while True:
+                            pos = text.find(pattern, pos)
+                            if pos == -1:
+                                break
+
+                            # Find the opening brace
+                            brace_pos = text.rfind(
+                                '{', max(0, pos - 50), pos + 20)
+                            if brace_pos == -1:
+                                pos += 1
+                                continue
+
+                            # Match braces to find complete JSON
+                            brace_count = 0
+                            in_string = False
+                            escape_next = False
+
+                            for i in range(brace_pos, min(len(text), brace_pos + 10000)):
+                                char = text[i]
+
+                                if escape_next:
+                                    escape_next = False
+                                    continue
+                                if char == '\\':
+                                    escape_next = True
+                                    continue
+                                if char == '"':
+                                    in_string = not in_string
+                                    continue
+                                if in_string:
+                                    continue
+
+                                if char == '{':
+                                    brace_count += 1
+                                elif char == '}':
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        json_str = text[brace_pos:i+1]
+                                        if json_str not in found_jsons:
+                                            found_jsons.append(json_str)
+                                        break
+
+                            pos += 1
+
+                    return found_jsons
+
+                # Try Strategy 1 first (Result: lines)
+                result_line_jsons = extract_from_result_lines(full_result_str)
+                if result_line_jsons:
+                    logger.info(
+                        f"   ✅ Extracted {len(result_line_jsons)} JSON blocks from 'Result:' lines")
+                    extracted_jsons = result_line_jsons
+                else:
+                    logger.warning(
+                        "   ⚠️  No 'Result:' lines found, trying fallback extraction...")
+                    # Try Strategy 2 (any JSON with element_id)
+                    extracted_jsons = extract_all_element_jsons(
+                        full_result_str)
+                    if extracted_jsons:
+                        logger.info(
+                            f"   ✅ Extracted {len(extracted_jsons)} JSON blocks (fallback method)")
+                    else:
+                        logger.warning(
+                            "   ⚠️  No JSON blocks with element_id found in output")
+
+                # Add extracted JSONs to the result string for pattern matching
+                if extracted_jsons:
+                    full_result_str += "\n" + "\n".join(extracted_jsons)
+                    logger.debug(
+                        f"   Added {len(extracted_jsons)} JSON blocks to search string")
+
+                    # OPTIMIZATION: Try to parse extracted JSONs directly
+                    # This is faster and more reliable than pattern matching + extraction
+                    logger.info(
+                        "   🚀 Attempting direct JSON parsing (optimized path)...")
+                    for json_str in extracted_jsons:
+                        try:
+                            parsed = json.loads(json_str)
+                            elem_id = parsed.get('element_id')
+                            if elem_id and parsed.get('found'):
+                                # Check if we already have this element
+                                if not any(r.get('element_id') == elem_id for r in results_list):
+                                    results_list.append(parsed)
+                                    logger.info(
+                                        f"   ✅ Directly parsed and added {elem_id} (best_locator: {parsed.get('best_locator')})")
+                        except json.JSONDecodeError as e:
+                            logger.debug(
+                                f"   Failed to parse JSON directly: {e}")
+                            # Will fall back to pattern matching below
+
+                    # If we got all elements via direct parsing, we're done!
+                    if len(results_list) == len(elements):
+                        logger.info(
+                            f"   🎉 All {len(elements)} elements extracted via direct JSON parsing!")
+                        # Skip pattern matching - we have everything we need
+
+                for elem in elements:
+                    elem_id = elem.get('id')
+                    logger.info(f"   🔍 Looking for {elem_id}...")
+
+                    # Check multiple patterns (with and without space after colon)
+                    patterns_to_check = [
+                        # No space (common in minified JSON)
+                        f'"element_id":"{elem_id}"',
+                        f'"element_id": "{elem_id}"',  # With space
+                        f"'element_id':'{elem_id}'",  # Single quotes, no space
+                        # Single quotes, with space
+                        f"'element_id': '{elem_id}'"
+                    ]
+
+                    # DEBUG: Show which patterns we're checking
+                    logger.info(
+                        f"   📝 Checking {len(patterns_to_check)} patterns:")
+                    for idx, pattern in enumerate(patterns_to_check, 1):
+                        is_found = pattern in full_result_str
+                        status = "✅ FOUND" if is_found else "❌ Not found"
+                        logger.info(f"      {idx}. '{pattern}' -> {status}")
+
+                    found = any(
+                        pattern in full_result_str for pattern in patterns_to_check)
+
+                    # DEBUG: Check if elem_id appears ANYWHERE in the string (any format)
+                    if not found:
+                        if elem_id in full_result_str:
+                            logger.warning(
+                                f"   ⚠️  '{elem_id}' exists in result but pattern didn't match!")
+                            logger.warning(
+                                f"   💡 Searching for context around '{elem_id}'...")
+                            # Find where elem_id appears and show context
+                            pos = full_result_str.find(elem_id)
+                            if pos != -1:
+                                start = max(0, pos - 100)
+                                end = min(len(full_result_str), pos + 100)
+                                context = full_result_str[start:end]
+                                logger.warning(f"   Context: ...{context}...")
+                        else:
+                            logger.warning(
+                                f"   ❌ '{elem_id}' does not appear ANYWHERE in result string")
+
+                    if found:
+                        logger.info(f"   Found '{elem_id}' in result string!")
+                        try:
+                            elem_data = extract_json_for_element(
+                                full_result_str, elem_id)
+                            if elem_data:
+                                logger.info(
+                                    f"   Extracted JSON for {elem_id}: found={elem_data.get('found')}")
+                                if elem_data.get('found'):
+                                    if not any(r.get('element_id') == elem_id for r in results_list):
+                                        results_list.append(elem_data)
+                                        logger.info(
+                                            f"   ✅ Extracted {elem_id} from full result string")
+                                    else:
+                                        logger.info(
+                                            f"   {elem_id} already in results list")
+                                else:
+                                    logger.warning(
+                                        f"   {elem_id} found but 'found' is False")
+                            else:
+                                logger.warning(
+                                    f"   extract_json_for_element returned None for {elem_id}")
+                        except Exception as e:
+                            logger.error(
+                                f"   Exception extracting {elem_id}: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                    else:
+                        logger.warning(
+                            f"   '{elem_id}' not found in result string")
+
+                # APPROACH 2: Check agent history structure
+                if not results_list and hasattr(agent_result, 'history'):
+                    logger.info(
+                        f"   Approach 2: Checking agent history ({len(agent_result.history)} steps)...")
+
+                    for step_idx, step in enumerate(agent_result.history):
+                        # Convert entire step to string
+                        step_str = str(step)
+
+                        # Check for JavaScript execution results
+                        if 'execute_js' in step_str or 'element_id' in step_str:
+                            logger.debug(
+                                f"   Step {step_idx} contains execute_js or element_id")
+
+                            for elem in elements:
+                                elem_id = elem.get('id')
+                                if f'"element_id": "{elem_id}"' in step_str:
+                                    try:
+                                        elem_data = extract_json_for_element(
+                                            step_str, elem_id)
+                                        if elem_data and elem_data.get('found'):
+                                            if not any(r.get('element_id') == elem_id for r in results_list):
+                                                results_list.append(elem_data)
+                                                logger.info(
+                                                    f"   ✅ Extracted {elem_id} from step {step_idx}")
+                                    except Exception as e:
+                                        logger.debug(
+                                            f"   Failed to extract {elem_id} from step {step_idx}: {e}")
+
+                        # Also check specific attributes if they exist
                         if hasattr(step, 'state') and hasattr(step.state, 'tool_results'):
                             for tool_result in step.state.tool_results:
                                 result_str = str(tool_result)
-                                # Look for element_id in results
                                 for elem in elements:
                                     elem_id = elem.get('id')
-                                    if f'"element_id": "{elem_id}"' in result_str or f"'element_id': '{elem_id}'" in result_str:
+                                    if f'"element_id": "{elem_id}"' in result_str:
                                         try:
-                                            elem_json_match = re.search(
-                                                r'\{[^{}]*"element_id"[^{}]*\}', result_str)
-                                            if elem_json_match:
-                                                elem_data = json.loads(
-                                                    elem_json_match.group(0))
-                                                if elem_data not in results_list:
+                                            elem_data = extract_json_for_element(
+                                                result_str, elem_id)
+                                            if elem_data and elem_data.get('found'):
+                                                if not any(r.get('element_id') == elem_id for r in results_list):
                                                     results_list.append(
                                                         elem_data)
-                                        except:
-                                            pass
+                                                    logger.info(
+                                                        f"   ✅ Extracted {elem_id} from tool_results")
+                                        except Exception as e:
+                                            logger.debug(f"   Failed: {e}")
+
+                        if hasattr(step, 'result'):
+                            result_str = str(step.result)
+                            for elem in elements:
+                                elem_id = elem.get('id')
+                                if f'"element_id": "{elem_id}"' in result_str:
+                                    try:
+                                        elem_data = extract_json_for_element(
+                                            result_str, elem_id)
+                                        if elem_data and elem_data.get('found'):
+                                            if not any(r.get('element_id') == elem_id for r in results_list):
+                                                results_list.append(elem_data)
+                                                logger.info(
+                                                    f"   ✅ Extracted {elem_id} from step.result")
+                                    except Exception as e:
+                                        logger.debug(f"   Failed: {e}")
 
             # If still no results, create default "not found" entries
             if not results_list:

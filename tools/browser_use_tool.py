@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 class BrowserUseAPI:
     """Enhanced API client for Browser Use Service."""
-    
+
     def __init__(self, url: str):
         self.url = url.rstrip('/')
-        
+
     def health_check(self) -> bool:
         """Check if the Browser Use Service is healthy."""
         try:
@@ -44,7 +44,7 @@ class BrowserUseAPI:
                 timeout=15,
                 headers={'Content-Type': 'application/json'}
             )
-            
+
             if response.status_code == 202:
                 result = response.json()
                 task_id = result.get("task_id")
@@ -54,10 +54,11 @@ class BrowserUseAPI:
                 logger.warning("Service is busy, please try again later")
                 return None
             else:
-                logger.error(f"Task submission failed with status code: {response.status_code}")
+                logger.error(
+                    f"Task submission failed with status code: {response.status_code}")
                 logger.error(f"Response: {response.text}")
                 return None
-                
+
         except requests.exceptions.RequestException as e:
             logger.error(f"An error occurred during task submission: {e}")
             return None
@@ -67,11 +68,11 @@ class BrowserUseAPI:
         try:
             logger.debug(f"Querying task status: {self.url}/query/{task_id}")
             response = requests.get(f"{self.url}/query/{task_id}", timeout=10)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 return {
-                    "status": "completed", 
+                    "status": "completed",
                     "message": "completed",
                     "data": data,
                     "success": data.get("results", {}).get("success", False)
@@ -79,19 +80,20 @@ class BrowserUseAPI:
             elif response.status_code == 202:
                 data = response.json()
                 return {
-                    "status": data.get("status", "processing"), 
+                    "status": data.get("status", "processing"),
                     "message": data.get("status", "processing"),
                     "running_time": data.get("running_time")
                 }
             elif response.status_code == 404:
                 return {"status": "error", "message": "Task not found"}
             else:
-                logger.error(f"Status query failed with status code: {response.status_code}")
+                logger.error(
+                    f"Status query failed with status code: {response.status_code}")
                 return {
-                    "status": "error", 
+                    "status": "error",
                     "message": f"Unexpected status code: {response.status_code}"
                 }
-                
+
         except requests.exceptions.RequestException as e:
             logger.error(f"An error occurred during status query: {e}")
             return {"status": "error", "message": f"Network error: {str(e)}"}
@@ -99,9 +101,9 @@ class BrowserUseAPI:
 
 class BrowserUseToolInput(BaseModel):
     """Enhanced input schema for BrowserUseTool."""
-    
+
     browser_use_objective: str = Field(
-        ..., 
+        ...,
         description=(
             "Detailed objective for browser automation with vision-based locator generation. "
             "The tool will use vision AI to identify elements and return structured locator data. "
@@ -120,7 +122,7 @@ class BrowserUseToolInput(BaseModel):
 
 class BrowserUseTool(BaseTool):
     """Vision-enhanced browser automation tool with structured locator generation."""
-    
+
     name: str = "vision_browser_automation"
     description: str = (
         "Perform vision-based web element identification with structured locator generation. "
@@ -135,22 +137,26 @@ class BrowserUseTool(BaseTool):
 
     def _run(self, browser_use_objective: str) -> Dict[str, Any]:
         """Execute the enhanced browser automation task with optional popup handling."""
-        logger.info(f"Starting enhanced browser automation: {browser_use_objective[:200]}...")
-        
+        logger.info(
+            f"Starting enhanced browser automation: {browser_use_objective[:200]}...")
+
         # Configuration from environment variables
-        api_url = os.environ.get("BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
-        timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))  # 15 minutes for complex tasks
-        check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))  # Check every 5 seconds
+        api_url = os.environ.get(
+            "BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
+        # 15 minutes for complex tasks
+        timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))
+        # Check every 5 seconds
+        check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))
         max_retries = int(os.environ.get("BROWSER_USE_MAX_RETRIES", "3"))
-        
+
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
-        
+
         # NOTE: Popup handling is managed by browser-use's system prompt
         # Explicitly mentioning "close popup BEFORE task" makes browser-use think popup closure IS the main task
         # Browser-use is a single-goal agent - it focuses on ONE objective at a time
         # The system prompt already has "IGNORE NON-ESSENTIAL POPUPS" guidance which works better
-        
+
         # Concise objective to minimize token usage
         enhanced_objective = f"""{browser_use_objective}
 
@@ -159,7 +165,7 @@ TASK: Use vision AI to locate element, extract DOM attributes, return JSON:
 
 Priority: id > data-* > aria-* > name > placeholder > text > CSS > XPath
 Avoid: dynamic classes, product names, non-unique selectors"""
-        
+
         # Health check with detailed feedback
         logger.info("Performing enhanced health check...")
         if not self._health_check_with_retry(api_client):
@@ -175,18 +181,19 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                     "Test service health: curl " + api_url + "/health"
                 ]
             }
-        
+
         # Submit task with retries
         logger.info("Submitting task with enhanced processing...")
-        task_id = None 
+        task_id = None
         for attempt in range(max_retries):
             task_id = api_client.submit_task(enhanced_objective)
             if task_id:
                 break
             elif attempt < max_retries - 1:
-                logger.warning(f"Task submission attempt {attempt + 1} failed, retrying in 10 seconds...")
+                logger.warning(
+                    f"Task submission attempt {attempt + 1} failed, retrying in 10 seconds...")
                 time.sleep(10)
-        
+
         if not task_id:
             return {
                 "status": "error",
@@ -201,17 +208,18 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                 ]
             }
 
-        logger.info(f"Task submitted with ID: {task_id}, starting enhanced monitoring...")
-        
+        logger.info(
+            f"Task submitted with ID: {task_id}, starting enhanced monitoring...")
+
         # Enhanced polling with progress tracking
         start_time = time.time()
         last_status = None
         status_changes = []
-        
+
         while time.time() - start_time < timeout:
             status_response = api_client.query_task_status(task_id)
             current_status = status_response.get("status")
-            
+
             # Track status changes for better debugging
             if current_status != last_status:
                 status_changes.append({
@@ -219,37 +227,41 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                     "timestamp": time.time(),
                     "elapsed": time.time() - start_time
                 })
-                
+
                 if current_status == "running":
                     logger.info(f"Task {task_id} is now running...")
                 elif current_status == "processing":
                     logger.info(f"Task {task_id} is being processed...")
                 last_status = current_status
-            
+
             if current_status == "completed":
                 data = status_response.get("data", {})
                 results = data.get("results", {})
-                
+
                 # Extract locator data if available
                 locator_data = results.get("locator_data")
                 result_text = results.get("result", "")
                 success = results.get('success', False)
                 execution_time = results.get("execution_time", 0)
                 steps_taken = results.get("steps_taken", 0)
-                
-                logger.info(f"Task {task_id} completed! Success: {success}, Steps: {steps_taken}, Time: {execution_time:.1f}s")
-                
+
+                logger.info(
+                    f"Task {task_id} completed! Success: {success}, Steps: {steps_taken}, Time: {execution_time:.1f}s")
+
                 # Parse JSON from result text if locator_data not directly available
                 if not locator_data and result_text:
                     try:
                         import re
-                        json_match = re.search(r'\{[\s\S]*"success"[\s\S]*\}', str(result_text))
+                        json_match = re.search(
+                            r'\{[\s\S]*"success"[\s\S]*\}', str(result_text))
                         if json_match:
                             locator_data = json.loads(json_match.group(0))
-                            logger.info("Extracted locator JSON from result text")
+                            logger.info(
+                                "Extracted locator JSON from result text")
                     except (json.JSONDecodeError, AttributeError) as e:
-                        logger.warning(f"Could not parse JSON from result: {e}")
-                
+                        logger.warning(
+                            f"Could not parse JSON from result: {e}")
+
                 # Build response with structured locator data
                 response = {
                     "status": "success" if success else "partial_success",
@@ -260,7 +272,7 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                     "task_id": task_id,
                     "total_time": time.time() - start_time
                 }
-                
+
                 # Include structured locator data if available
                 if locator_data:
                     response.update({
@@ -273,7 +285,8 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                         "message": f"Found element with {len(locator_data.get('all_locators', []))} locator strategies",
                         "result": result_text  # Include raw result as well
                     })
-                    logger.info(f"Returning structured response with best_locator: {response['best_locator']}")
+                    logger.info(
+                        f"Returning structured response with best_locator: {response['best_locator']}")
                 else:
                     # Fallback to text-based response
                     response.update({
@@ -281,24 +294,27 @@ Avoid: dynamic classes, product names, non-unique selectors"""
                         "message": data.get("message", "Task completed but no structured locator data available"),
                         "note": "Vision-based locator generation may not have produced structured output"
                     })
-                    logger.warning("No structured locator data found in response")
-                
+                    logger.warning(
+                        "No structured locator data found in response")
+
                 return response
-                
+
             elif current_status in ["processing", "running"]:
                 # Enhanced progress reporting
                 elapsed = time.time() - start_time
                 running_time = status_response.get("running_time", 0)
-                
+
                 if elapsed > 30 and elapsed % 30 == 0:  # Log every 30 seconds after initial 30 seconds
-                    logger.info(f"Task {task_id} still {current_status}... Elapsed: {elapsed:.1f}s")
-                
+                    logger.info(
+                        f"Task {task_id} still {current_status}... Elapsed: {elapsed:.1f}s")
+
                 time.sleep(check_interval)
-                
+
             elif current_status == "error":
-                error_message = status_response.get("message", "Unknown error occurred")
+                error_message = status_response.get(
+                    "message", "Unknown error occurred")
                 logger.error(f"Task {task_id} failed: {error_message}")
-                
+
                 return {
                     "status": "error",
                     "browser_use_objective": browser_use_objective,
@@ -321,17 +337,19 @@ Avoid: dynamic classes, product names, non-unique selectors"""
             "success": False,
             "task_id": task_id
         }
-    
+
     def _health_check_with_retry(self, api_client: BrowserUseAPI) -> bool:
         """Perform health check with retries."""
         for attempt in range(3):
             if api_client.health_check():
                 return True
             if attempt < 2:
-                logger.warning(f"Health check attempt {attempt + 1} failed, retrying...")
+                logger.warning(
+                    f"Health check attempt {attempt + 1} failed, retrying...")
                 time.sleep(2)
-        
-        logger.error("Browser Use Service health check failed after multiple attempts")
+
+        logger.error(
+            "Browser Use Service health check failed after multiple attempts")
         return False
 
 
@@ -341,7 +359,7 @@ Avoid: dynamic classes, product names, non-unique selectors"""
 
 class BatchBrowserUseToolInput(BaseModel):
     """Input schema for BatchBrowserUseTool."""
-    
+
     elements: list = Field(
         ...,
         description=(
@@ -352,7 +370,7 @@ class BatchBrowserUseToolInput(BaseModel):
             "{'id': 'elem_2', 'description': 'first product card', 'action': 'click'}]"
         )
     )
-    
+
     url: str = Field(
         ...,
         description=(
@@ -361,6 +379,17 @@ class BatchBrowserUseToolInput(BaseModel):
         )
     )
     
+    @classmethod
+    def validate_input(cls, values):
+        """
+        Validator to handle malformed input from LLM.
+        Sometimes the LLM wraps the correct data in an array or nests it incorrectly.
+        """
+        # This is called by Pydantic during validation
+        # If we receive malformed data, we can't fix it here because Pydantic
+        # has already rejected it. We need to handle it in the tool's _run method.
+        return values
+
     user_query: str = Field(
         default="",
         description=(
@@ -373,7 +402,7 @@ class BatchBrowserUseToolInput(BaseModel):
 class BatchBrowserUseTool(BaseTool):
     """
     Batch browser automation tool for finding multiple elements in one persistent browser session.
-    
+
     This tool is optimized for multi-step workflows where you need to find several elements
     on the same page or across multiple pages in a single user flow. Benefits:
     - Opens browser once, keeps session alive for all elements
@@ -382,7 +411,7 @@ class BatchBrowserUseTool(BaseTool):
     - Returns partial results if some elements fail
     - Much faster than multiple single calls
     """
-    
+
     name: str = "batch_browser_automation"
     description: str = (
         "Find multiple web elements in one browser session with full context. "
@@ -397,19 +426,47 @@ class BatchBrowserUseTool(BaseTool):
 
     def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
         """Execute batch browser automation to find multiple elements in one session."""
-        logger.info(f"Starting batch browser automation for {len(elements)} elements")
+
+        # CRITICAL FIX: Handle case where CrewAI/LLM passes malformed input
+        # Sometimes the input is wrapped incorrectly or duplicated
+        # Expected: elements = [{"id": "elem_1", ...}, {"id": "elem_2", ...}]
+        # Sometimes get: elements = [{"elements": [...], "url": "...", "user_query": "..."}]
+
+        if isinstance(elements, list) and len(elements) > 0:
+            first_item = elements[0]
+
+            # Check if first item is actually a full request dict (malformed input)
+            if isinstance(first_item, dict) and 'elements' in first_item and 'url' in first_item:
+                logger.warning(
+                    "⚠️ Detected malformed input - extracting correct data from nested structure")
+                logger.warning(
+                    f"   Received: {type(elements)} with {len(elements)} items")
+
+                # Extract the actual data from the first (and likely only valid) entry
+                actual_data = first_item
+                elements = actual_data.get('elements', [])
+                url = actual_data.get('url', url)
+                user_query = actual_data.get('user_query', user_query)
+
+                logger.info(
+                    f"✅ Extracted correct data: {len(elements)} elements, URL: {url}")
+
+        logger.info(
+            f"Starting batch browser automation for {len(elements)} elements")
         logger.info(f"Target URL: {url}")
         logger.info(f"User query context: {user_query[:100]}...")
-        
+
         # Configuration
-        api_url = os.environ.get("BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
-        timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))  # 15 minutes for batch
+        api_url = os.environ.get(
+            "BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
+        # 15 minutes for batch
+        timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))
         check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))
         max_retries = int(os.environ.get("BROWSER_USE_MAX_RETRIES", "3"))
-        
+
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
-        
+
         # Health check
         logger.info("Performing health check for batch processing...")
         if not self._health_check_with_retry(api_client):
@@ -420,7 +477,7 @@ class BatchBrowserUseTool(BaseTool):
                 "elements_processed": 0,
                 "results": []
             }
-        
+
         # Submit workflow task (renamed from /batch to /workflow)
         logger.info("Submitting workflow task...")
         try:
@@ -438,12 +495,14 @@ class BatchBrowserUseTool(BaseTool):
                 timeout=15,
                 headers={'Content-Type': 'application/json'}
             )
-            
+
             if response.status_code == 202:
                 result = response.json()
                 task_id = result.get("task_id")
-                logger.info(f"Workflow task submitted successfully with ID: {task_id}")
-                logger.info(f"Processing {result.get('elements_count', len(elements))} elements in unified session...")
+                logger.info(
+                    f"Workflow task submitted successfully with ID: {task_id}")
+                logger.info(
+                    f"Processing {result.get('elements_count', len(elements))} elements in unified session...")
             elif response.status_code == 429:
                 logger.warning("Service is busy")
                 return {
@@ -454,7 +513,8 @@ class BatchBrowserUseTool(BaseTool):
                     "results": []
                 }
             else:
-                logger.error(f"Batch task submission failed: {response.status_code}")
+                logger.error(
+                    f"Batch task submission failed: {response.status_code}")
                 return {
                     "status": "error",
                     "message": f"Task submission failed with status {response.status_code}",
@@ -462,7 +522,7 @@ class BatchBrowserUseTool(BaseTool):
                     "elements_processed": 0,
                     "results": []
                 }
-                
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Error submitting batch task: {e}")
             return {
@@ -472,16 +532,16 @@ class BatchBrowserUseTool(BaseTool):
                 "elements_processed": 0,
                 "results": []
             }
-        
+
         # Poll for results
         logger.info(f"Polling for batch task {task_id} results...")
         start_time = time.time()
         last_status = None
-        
+
         while time.time() - start_time < timeout:
             status_response = api_client.query_task_status(task_id)
             current_status = status_response.get("status")
-            
+
             # Log status changes
             if current_status != last_status:
                 if current_status == "running":
@@ -489,21 +549,21 @@ class BatchBrowserUseTool(BaseTool):
                 elif current_status == "processing":
                     logger.info(f"Batch task {task_id} is being processed...")
                 last_status = current_status
-            
+
             if current_status == "completed":
                 data = status_response.get("data", {})
                 results = data.get("results", {})
-                
+
                 # Extract batch results
                 element_results = results.get("results", [])
                 summary = results.get("summary", {})
                 success = results.get("success", False)
                 execution_time = results.get("execution_time", 0)
-                
+
                 logger.info(f"Batch task completed! Success: {success}")
                 logger.info(f"Summary: {summary}")
                 logger.info(f"Execution time: {execution_time:.1f}s")
-                
+
                 # Build element_id -> locator mapping
                 locator_mapping = {}
                 for elem_result in element_results:
@@ -521,7 +581,7 @@ class BatchBrowserUseTool(BaseTool):
                             "found": False,
                             "error": elem_result.get("error", "Element not found")
                         }
-                
+
                 return {
                     "status": "success",
                     "success": success,
@@ -535,25 +595,26 @@ class BatchBrowserUseTool(BaseTool):
                     "popups_handled": results.get("popups_handled", []),
                     "message": f"Batch completed: {summary.get('successful', 0)}/{summary.get('total_elements', 0)} elements found"
                 }
-                
+
             elif current_status in ["processing", "running"]:
                 elapsed = time.time() - start_time
-                
+
                 # Log progress every 30 seconds
                 if elapsed > 30 and int(elapsed) % 30 == 0:
-                    logger.info(f"Batch task still {current_status}... Elapsed: {elapsed:.1f}s")
-                
+                    logger.info(
+                        f"Batch task still {current_status}... Elapsed: {elapsed:.1f}s")
+
                 time.sleep(check_interval)
-                
+
             elif current_status == "error":
                 error_message = status_response.get("message", "Unknown error")
                 logger.error(f"Batch task failed: {error_message}")
-                
+
                 # Try to return partial results if available
                 data = status_response.get("data", {})
                 results = data.get("results", {})
                 element_results = results.get("results", [])
-                
+
                 return {
                     "status": "error",
                     "success": False,
@@ -563,7 +624,7 @@ class BatchBrowserUseTool(BaseTool):
                 }
             else:
                 time.sleep(check_interval)
-        
+
         # Timeout
         logger.error(f"Batch task {task_id} timed out after {timeout} seconds")
         return {
@@ -574,15 +635,17 @@ class BatchBrowserUseTool(BaseTool):
             "elements_processed": 0,
             "results": []
         }
-    
+
     def _health_check_with_retry(self, api_client: BrowserUseAPI) -> bool:
         """Perform health check with retries."""
         for attempt in range(3):
             if api_client.health_check():
                 return True
             if attempt < 2:
-                logger.warning(f"Health check attempt {attempt + 1} failed, retrying...")
+                logger.warning(
+                    f"Health check attempt {attempt + 1} failed, retrying...")
                 time.sleep(2)
-        
-        logger.error("Browser Use Service health check failed after multiple attempts")
+
+        logger.error(
+            "Browser Use Service health check failed after multiple attempts")
         return False

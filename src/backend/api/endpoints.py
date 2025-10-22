@@ -9,9 +9,6 @@ from src.backend.services.docker_service import get_docker_client, rebuild_image
 
 router = APIRouter()
 
-# Import healing endpoints
-from .healing_endpoints import router as healing_router
-
 class Query(BaseModel):
     query: str
 
@@ -54,15 +51,6 @@ async def docker_status_endpoint():
     except Exception as e:
         logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
         return {"status": "error", "docker_available": False, "error": "An unexpected error occurred."}
-
-# ========================================
-# HEALING ENDPOINTS
-# ========================================
-# All healing-related endpoints are defined in healing_endpoints.py to maintain
-# separation of concerns and avoid duplication. During Phase 4 of codebase cleanup,
-# duplicate healing endpoints were removed from this file and consolidated into
-# healing_endpoints.py as the canonical source.
-# ========================================
 
 @router.delete('/test/containers/cleanup')
 async def cleanup_test_containers_endpoint():

@@ -1,19 +1,14 @@
 """
-Services module for the test self-healing system.
+Services module for workflow and Docker management.
+Healing services have been removed - locators are validated during generation.
 """
 
-from .failure_detection_service import FailureDetectionService
-from .fingerprinting_service import FingerprintingService
-from .dom_analyzer import DOMAnalyzer
-from .healing_orchestrator import HealingOrchestrator
-from .chrome_session_manager import ChromeSessionManager
-from .test_code_updater import RobotTestCodeUpdater
+from .docker_service import get_docker_client, build_image, run_test_in_container
+from .workflow_service import stream_generate_and_run
 
 __all__ = [
-    "FailureDetectionService",
-    "FingerprintingService", 
-    "DOMAnalyzer",
-    "HealingOrchestrator",
-    "ChromeSessionManager",
-    "RobotTestCodeUpdater"
+    "get_docker_client",
+    "build_image",
+    "run_test_in_container",
+    "stream_generate_and_run"
 ]

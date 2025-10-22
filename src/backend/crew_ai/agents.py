@@ -1,3 +1,5 @@
+from langchain_ollama import OllamaLLM
+from tools.browser_use_tool import BrowserUseTool, BatchBrowserUseTool
 import os
 from crewai import Agent
 from crewai.llm import LLM
@@ -7,23 +9,23 @@ from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-from tools.browser_use_tool import BrowserUseTool, BatchBrowserUseTool
-from langchain_ollama import OllamaLLM
 
 # Initialize the LLMs
+
+
 def get_llm(model_provider, model_name):
     """
     Get LLM instance for the specified provider.
-    
+
     Uses direct LLM calls without rate limiting wrappers. Rate limiting was removed
     during codebase cleanup as it added unnecessary complexity. Google Gemini API
     has generous rate limits (1500 RPM for gemini-2.5-flash) that are sufficient
     for our use case.
-    
+
     Args:
         model_provider: "local" for Ollama, "online" for Gemini
         model_name: Model identifier (e.g., "llama3.1", "gemini-2.5-flash")
-    
+
     Returns:
         LLM instance (OllamaLLM for local, LLM for online)
     """
@@ -37,12 +39,16 @@ def get_llm(model_provider, model_name):
             num_retries=3
         )
 
+
 # Initialize the tools
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
 selenium_tool = SeleniumScrapingTool()
 scrape_tool = ScrapeElementFromWebsiteTool()
-browser_use_tool = BrowserUseTool()  # Single element locator finding (fallback only)
-batch_browser_use_tool = BatchBrowserUseTool()  # Primary tool: Batch processing for multiple elements with full context
+# Single element locator finding (fallback only)
+browser_use_tool = BrowserUseTool()
+# Primary tool: Batch processing for multiple elements with full context
+batch_browser_use_tool = BatchBrowserUseTool()
+
 
 class RobotAgents:
     def __init__(self, model_provider, model_name):
@@ -175,21 +181,39 @@ class RobotAgents:
                 "}\n"
                 "```\n"
                 "\n\n**CRITICAL OUTPUT RULE:**\n"
-                "When calling batch_browser_automation, output ONLY the Action and Action Input. NO explanations, NO thinking, NO text before or after.\n"
+                "When calling batch_browser_automation, you MUST output EXACTLY this format with NO extra text:\n"
+                "\n"
+                "Action: batch_browser_automation\n"
+                "Action Input: {\"elements\": [...], \"url\": \"...\", \"user_query\": \"...\"}\n"
+                "\n"
+                "CRITICAL FORMATTING RULES:\n"
+                "1. The word 'Action:' must be on its own line with NOTHING else on that line\n"
+                "2. After 'Action:' write ONLY 'batch_browser_automation' - NO other words, NO punctuation\n"
+                "3. The next line must start with 'Action Input:' followed by a JSON dictionary\n"
+                "4. Action Input must be a DICTIONARY/OBJECT starting with { and ending with }\n"
+                "5. Do NOT wrap Action Input in an array []\n"
+                "6. Do NOT add any explanation text before, after, or on the same line as 'Action:'\n"
+                "\n"
                 "CORRECT FORMAT:\n"
                 "```\n"
                 "Action: batch_browser_automation\n"
-                "Action Input: {your_json_here}\n"
+                "Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"search box\", \"action\": \"input\"}], \"url\": \"https://example.com\", \"user_query\": \"search for items\"}\n"
                 "```\n"
                 "\n"
-                "WRONG (DO NOT DO THIS):\n"
-                "First I need to analyze... [explanation]\n"
-                "Action: batch_browser_automation\n"
+                "WRONG FORMATS (DO NOT DO THIS):\n"
+                "❌ Action: batch_browser_automation and Action Input using...  // WRONG - Extra text on Action line!\n"
+                "❌ Action: batch_browser_automation`  // WRONG - Backtick at end!\n"
+                "❌ First I need to... Action: batch_browser_automation  // WRONG - Text before Action!\n"
+                "❌ Action Input: [{\"elements\": [...]}]  // WRONG - Array instead of dictionary!\n"
+                "❌ Action Input: {\"elements\": [...]} and then...  // WRONG - Text after Action Input!\n"
+                "\n"
+                "REMEMBER: The Action line must contain ONLY 'Action: batch_browser_automation' with NO other text.\n"
                 "\n"
                 "**Remember:** Batch mode is ALWAYS better because BrowserUse works best with full context. "
                 "Even for 1-2 elements, use batch mode. NO EXCEPTIONS."
             ),
-            tools=[batch_browser_use_tool],  # NEW: Batch processing tool for multiple elements
+            # NEW: Batch processing tool for multiple elements
+            tools=[batch_browser_use_tool],
             llm=self.llm,
             verbose=True,
             allow_delegation=False,

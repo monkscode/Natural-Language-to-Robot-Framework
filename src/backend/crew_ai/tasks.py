@@ -5,6 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class RobotTasks:
     def plan_steps_task(self, agent, query) -> Task:
         return Task(
@@ -108,10 +109,12 @@ class RobotTasks:
         if vision_locators_json:
             try:
                 vision_locators = json.loads(vision_locators_json)
-                logger.info(f"✅ Vision locators available for {len(vision_locators)} elements: {list(vision_locators.keys())}")
+                logger.info(
+                    f"✅ Vision locators available for {len(vision_locators)} elements: {list(vision_locators.keys())}")
             except json.JSONDecodeError:
-                logger.warning("⚠️ Could not parse VISION_LOCATORS_JSON from environment")
-        
+                logger.warning(
+                    "⚠️ Could not parse VISION_LOCATORS_JSON from environment")
+
         # Build vision locator instructions (for pre-identified elements, if any)
         if vision_locators:
             vision_instructions = (
@@ -122,7 +125,7 @@ class RobotTasks:
             )
             for element_name, locator in vision_locators.items():
                 vision_instructions += f"- **{element_name}**: `{locator}`\n"
-            
+
             vision_instructions += (
                 "\n"
                 "--- USING PRE-IDENTIFIED LOCATORS ---\n"
@@ -138,7 +141,7 @@ class RobotTasks:
                 "All elements will be found using batch_browser_automation.\n"
                 "\n"
             )
-        
+
         return Task(
             description=(
                 "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
@@ -297,16 +300,40 @@ class RobotTasks:
                 "\n"
                 "--- CRITICAL OUTPUT RULE ---\n"
                 "\n"
-                "When calling batch_browser_automation, output ONLY:\n"
-                "```\n"
+                "⚠️ MOST IMPORTANT: You MUST output the tool call in EXACTLY this format:\n"
+                "\n"
+                "Action: batch_browser_automation\n"
+                "Action Input: {\"elements\": [...], \"url\": \"...\", \"user_query\": \"...\"}\n"
+                "\n"
+                "CRITICAL FORMATTING RULES:\n"
+                "1. The line 'Action: batch_browser_automation' must have NOTHING else on it\n"
+                "2. Do NOT add any text before, after, or on the same line as 'Action:'\n"
+                "3. Do NOT add backticks, quotes, or any other characters after 'batch_browser_automation'\n"
+                "4. The next line must be 'Action Input:' followed by a JSON dictionary\n"
+                "5. Action Input must be a DICTIONARY { } NOT an array [ ]\n"
+                "\n"
+                "✅ CORRECT FORMAT:\n"
                 "Action: batch_browser_automation\n"
                 "Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"search box\", \"action\": \"input\"}], \"url\": \"https://example.com\", \"user_query\": \"search for items\"}\n"
-                "```\n"
                 "\n"
-                "DO NOT include ANY explanatory text before the Action line.\n"
-                "DO NOT include ANY thinking process or analysis.\n"
-                "Just the Action and Action Input with actual JSON values, nothing else.\n"
-                "IMPORTANT: Action Input must be valid JSON on a single line, not {json} placeholder.\n"
+                "❌ WRONG FORMATS (DO NOT DO THIS):\n"
+                "Action: batch_browser_automation` and `Action Input` using...  ← WRONG! Extra text on Action line\n"
+                "Action: batch_browser_automation`  ← WRONG! Backtick at end\n"
+                "First I need to... Action: batch_browser_automation  ← WRONG! Text before Action\n"
+                "Action Input: [{\"elements\": [...]}]  ← WRONG! Array instead of dictionary\n"
+                "\n"
+                "REMEMBER:\n"
+                "- Action line = ONLY 'Action: batch_browser_automation'\n"
+                "- Action Input = ONE dictionary starting with { and ending with }\n"
+                "- The 'elements' key INSIDE the dictionary contains the array\n"
+                "- NO explanations, NO thinking, NO extra text\n"
+                "\n"
+                "Structure of Action Input:\n"
+                "{\n"
+                "  \"elements\": [array of elements],  ← Array is INSIDE the dictionary\n"
+                "  \"url\": \"...\",\n"
+                "  \"user_query\": \"...\"\n"
+                "}\n"
             ),
             expected_output="A JSON array of objects, where each object represents a single test step with the added 'locator' key obtained from the batch_browser_automation tool.",
             agent=agent,
@@ -316,27 +343,29 @@ class RobotTasks:
         # Check if popup strategy is available
         popup_strategy_json = os.getenv('POPUP_STRATEGY_JSON')
         popup_instructions = ""
-        
+
         if popup_strategy_json:
             try:
                 popup_strategy = json.loads(popup_strategy_json)
                 dismiss_login = popup_strategy.get('dismiss_login_popup', True)
-                dismiss_cookies = popup_strategy.get('dismiss_cookie_consent', False)
-                dismiss_promo = popup_strategy.get('dismiss_promotional_popups', True)
-                
+                dismiss_cookies = popup_strategy.get(
+                    'dismiss_cookie_consent', False)
+                dismiss_promo = popup_strategy.get(
+                    'dismiss_promotional_popups', True)
+
                 popup_instructions = (
                     "\n\n"
                     "--- POPUP HANDLING STRATEGY ---\n"
                     "Based on popup strategy analysis, you MUST add popup dismissal steps:\n"
                     "\n"
                 )
-                
+
                 if dismiss_login or dismiss_cookies or dismiss_promo:
                     popup_instructions += (
                         "**ADD THESE LINES IMMEDIATELY AFTER 'Open Browser':**\n"
                         "\n"
                     )
-                    
+
                     if dismiss_login:
                         popup_instructions += (
                             "    # Dismiss login popup if present (non-blocking)\n"
@@ -344,7 +373,7 @@ class RobotTasks:
                             "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕') or contains(text(), '×')]\n"
                             "\n"
                         )
-                    
+
                     if dismiss_cookies:
                         popup_instructions += (
                             "    # Accept cookie consent if present\n"
@@ -352,7 +381,7 @@ class RobotTasks:
                             "    Run Keyword And Ignore Error    Click Element    xpath=//button[contains(text(), 'Accept') or contains(text(), 'OK') or contains(text(), 'Agree')]\n"
                             "\n"
                         )
-                    
+
                     if dismiss_promo:
                         popup_instructions += (
                             "    # Dismiss promotional popups (newsletters, app installs)\n"
@@ -362,7 +391,7 @@ class RobotTasks:
                         )
                 else:
                     popup_instructions += "No popup dismissal needed for this task.\n\n"
-                    
+
             except json.JSONDecodeError:
                 logger.warning("⚠️ Could not parse POPUP_STRATEGY_JSON")
                 popup_instructions = (
@@ -380,12 +409,89 @@ class RobotTasks:
                 "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕')]\n"
                 "\n"
             )
-        
+
         return Task(
             description=(
                 "Assemble the final Robot Framework code from the structured steps provided in the context. "
                 "The context will be the output of the 'identify_elements_task'.\n\n"
+
+                "--- CRITICAL: MANDATORY STRUCTURE ---\n"
+                "Your output MUST follow this exact structure:\n\n"
+                "```robot\n"
+                "*** Settings ***\n"
+                "Library    SeleniumLibrary\n"
+                "Library    BuiltIn\n\n"
+
+                "*** Variables ***\n"
+                "# Browser configuration (ALWAYS declare these if used in Open Browser)\n"
+                "${browser}    chrome\n"
+                "${options}    add_argument(\"--headless\");add_argument(\"--no-sandbox\");add_argument(\"--incognito\")\n"
+                "# Add other variables here\n\n"
+
+                "*** Test Cases ***\n"
+                "Generated Test\n"
+                "    Open Browser    <url>    ${browser}    options=${options}\n"
+                "    # Test steps here\n"
+                "    Close Browser\n"
+                "```\n\n"
+
+                "--- CRITICAL: VARIABLE DECLARATION RULES ---\n"
+                "1. **ALWAYS include *** Variables *** section** (even if empty)\n"
+                "2. **Declare ALL variables before use:**\n"
+                "   - If Open Browser step has 'browser' key → ${browser}    <value from step>\n"
+                "   - If Open Browser step has 'options' key → ${options}    <value from step>\n"
+                "   - For each element with locator → ${elem_X_locator}    <locator value>\n"
+                "   - For Get Text results → ${variable_name}    (no initial value needed)\n\n"
+
+                "3. **Variable Naming Convention:**\n"
+                "   - Browser config: ${browser}, ${options}\n"
+                "   - Element locators: ${search_box_locator}, ${product_name_locator}\n"
+                "   - Retrieved values: ${product_name}, ${product_price}, ${result}\n\n"
+
+                "4. **Extracting Values from Steps:**\n"
+                "   - Look for 'browser' key in Open Browser step → use as ${browser} value\n"
+                "   - Look for 'options' key in Open Browser step → use as ${options} value\n"
+                "   - Look for 'locator' key in each step → declare as ${elem_X_locator}\n\n"
+
+                "**Example Variable Extraction:**\n"
+                "If you receive:\n"
+                "```json\n"
+                "{\n"
+                "  \"keyword\": \"Open Browser\",\n"
+                "  \"value\": \"https://www.flipkart.com\",\n"
+                "  \"browser\": \"chrome\",\n"
+                "  \"options\": \"add_argument('--headless')\"\n"
+                "}\n"
+                "```\n"
+                "You MUST declare:\n"
+                "```robot\n"
+                "*** Variables ***\n"
+                "${browser}    chrome\n"
+                "${options}    add_argument('--headless')\n"
+                "```\n\n"
+
                 f"{popup_instructions}"
+
+                "--- LOCATOR MAPPING RULES ---\n"
+                "For each step that needs a locator:\n"
+                "1. Check if 'locator' key exists and 'found' is true\n"
+                "2. If found: Declare locator as variable and use it\n"
+                "3. If NOT found (found=false or error present):\n"
+                "   a. Add comment: # WARNING: Locator not found for <element_description>\n"
+                "   b. Use placeholder: xpath=//PLACEHOLDER_FOR_<element_id>\n"
+                "   c. Still generate syntactically valid code\n\n"
+
+                "**Example for missing locator:**\n"
+                "```robot\n"
+                "*** Variables ***\n"
+                "${product_locator}    xpath=//PLACEHOLDER_FOR_elem_2\n\n"
+                "*** Test Cases ***\n"
+                "Test\n"
+                "    # WARNING: Locator not found for 'first product name'\n"
+                "    # Manual intervention required: Inspect page and update locator\n"
+                "    ${product_name}=    Get Text    ${product_locator}\n"
+                "```\n\n"
+
                 "--- CRITICAL RULES FOR VALIDATION ---\n"
                 "When you encounter a step with keyword 'Should Be True' and a 'condition_expression' key:\n"
                 "1. Generate a proper Should Be True statement with the expression\n"
