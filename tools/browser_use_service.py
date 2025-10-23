@@ -1088,6 +1088,23 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             logger.info(
                 f"📊 Element breakdown: {len(interactive_elements)} interactive, {len(result_elements)} result elements")
 
+            # Calculate dynamic max_steps based on workflow complexity
+            # Formula: navigate(1) + extract_locators(all_elements) + perform_actions(interactive*2) + done(1) + buffer(3)
+            dynamic_max_steps = 1 + \
+                len(elements) + (len(interactive_elements) * 2) + 1 + 3
+            logger.info(
+                f"📊 Dynamic max_steps calculation:")
+            logger.info(
+                f"   Navigate: 1")
+            logger.info(
+                f"   Extract locators: {len(elements)} (one per element)")
+            logger.info(
+                f"   Perform actions: {len(interactive_elements) * 2} (2 steps per interactive element)")
+            logger.info(
+                f"   Done + buffer: 4")
+            logger.info(
+                f"   Total max_steps: {dynamic_max_steps}")
+
             # PHASE 1: Extract locators for interactive elements BEFORE using them
             if interactive_elements:
                 workflow_steps.append(
@@ -1534,18 +1551,23 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             coord_offsets_json = json.dumps(coord_offsets)
             js_validation_code = js_validation_code.replace(
                 '{coord_offsets_json}', coord_offsets_json)
-            
+
             # Validate JavaScript code integrity
             logger.debug(f"📊 JavaScript validation code stats:")
-            logger.debug(f"   Total length: {len(js_validation_code)} characters")
-            logger.debug(f"   Contains 'const strategies': {'const strategies = [' in js_validation_code}")
-            logger.debug(f"   Contains 'for (const s of strategies)': {'for (const s of strategies)' in js_validation_code}")
-            
+            logger.debug(
+                f"   Total length: {len(js_validation_code)} characters")
+            logger.debug(
+                f"   Contains 'const strategies': {'const strategies = [' in js_validation_code}")
+            logger.debug(
+                f"   Contains 'for (const s of strategies)': {'for (const s of strategies)' in js_validation_code}")
+
             # Critical validation: ensure strategies array is defined
             if 'for (const s of strategies)' in js_validation_code and 'const strategies = [' not in js_validation_code:
-                logger.error("❌ JavaScript validation FAILED: 'strategies' used but not defined!")
+                logger.error(
+                    "❌ JavaScript validation FAILED: 'strategies' used but not defined!")
                 logger.error("   This will cause 'Uncaught at line 324' error")
-                raise ValueError("JavaScript template error: strategies array not properly defined")
+                raise ValueError(
+                    "JavaScript template error: strategies array not properly defined")
 
             # Build the unified objective
             unified_objective = f"""
@@ -1656,8 +1678,8 @@ IMPORTANT REMINDERS:
                     temperature=0.1
                 ),
                 use_vision=True,
-                # More steps for full workflow
-                max_steps=BATCH_CONFIG["max_agent_steps"] * len(elements),
+                # Dynamic max_steps based on workflow complexity
+                max_steps=dynamic_max_steps,
                 system_prompt="""You are a web automation agent specialized in locator extraction.
 
 YOUR WORKFLOW:
@@ -1839,7 +1861,18 @@ IMPORTANT:
                     for direct_result in direct_results:
                         elem_id = direct_result.get('element_id')
                         if elem_id and direct_result.get('found'):
-                            if not any(r.get('element_id') == elem_id for r in results_list):
+                            existing_idx = next(
+                                (i for i, r in enumerate(results_list) if r.get('element_id') == elem_id), None)
+                            if existing_idx is not None:
+                                # Replace existing result (agent retry/correction)
+                                old_locator = results_list[existing_idx].get(
+                                    'best_locator')
+                                new_locator = direct_result.get('best_locator')
+                                logger.info(
+                                    f"   🔄 Replacing {elem_id}: '{old_locator}' → '{new_locator}' (agent retry/correction)")
+                                results_list[existing_idx] = direct_result
+                            else:
+                                # First occurrence, add it
                                 results_list.append(direct_result)
                                 logger.info(
                                     f"   ✅ Direct access: {elem_id} (best_locator: {direct_result.get('best_locator')})")
@@ -2011,7 +2044,18 @@ IMPORTANT:
                             elem_id = parsed.get('element_id')
                             if elem_id and parsed.get('found'):
                                 # Check if we already have this element
-                                if not any(r.get('element_id') == elem_id for r in results_list):
+                                existing_idx = next(
+                                    (i for i, r in enumerate(results_list) if r.get('element_id') == elem_id), None)
+                                if existing_idx is not None:
+                                    # Replace existing result (agent retry/correction)
+                                    old_locator = results_list[existing_idx].get(
+                                        'best_locator')
+                                    new_locator = parsed.get('best_locator')
+                                    logger.info(
+                                        f"   🔄 Replacing {elem_id}: '{old_locator}' → '{new_locator}' (agent retry/correction)")
+                                    results_list[existing_idx] = parsed
+                                else:
+                                    # First occurrence, add it
                                     results_list.append(parsed)
                                     logger.info(
                                         f"   ✅ Directly parsed and added {elem_id} (best_locator: {parsed.get('best_locator')})")
@@ -2078,13 +2122,22 @@ IMPORTANT:
                                 logger.info(
                                     f"   Extracted JSON for {elem_id}: found={elem_data.get('found')}")
                                 if elem_data.get('found'):
-                                    if not any(r.get('element_id') == elem_id for r in results_list):
+                                    existing_idx = next(
+                                        (i for i, r in enumerate(results_list) if r.get('element_id') == elem_id), None)
+                                    if existing_idx is not None:
+                                        # Replace existing result (agent retry/correction)
+                                        old_locator = results_list[existing_idx].get(
+                                            'best_locator')
+                                        new_locator = elem_data.get(
+                                            'best_locator')
+                                        logger.info(
+                                            f"   🔄 Replacing {elem_id}: '{old_locator}' → '{new_locator}' (agent retry/correction)")
+                                        results_list[existing_idx] = elem_data
+                                    else:
+                                        # First occurrence, add it
                                         results_list.append(elem_data)
                                         logger.info(
                                             f"   ✅ Extracted {elem_id} from full result string")
-                                    else:
-                                        logger.info(
-                                            f"   {elem_id} already in results list")
                                 else:
                                     logger.warning(
                                         f"   {elem_id} found but 'found' is False")
