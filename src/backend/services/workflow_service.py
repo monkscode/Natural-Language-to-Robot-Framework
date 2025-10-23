@@ -12,18 +12,18 @@ from src.backend.crew_ai.crew import run_crew
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
 
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     encoding="utf-8"
 )
 
+
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
     yielding progress updates and the final code.
-    
+
     Architecture Note:
     - VisionLocatorService was removed during Phase 3 of codebase cleanup as it was
       explicitly disabled and replaced by CrewAI agents with BatchBrowserUseTool.
@@ -50,7 +50,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     # STEP 2: Pass vision locators to CrewAI agents via environment (always empty now)
     if vision_locators:
         os.environ['VISION_LOCATORS_JSON'] = json.dumps(vision_locators)
-        logging.info(f"📦 Stored {len(vision_locators)} vision locators for CrewAI agents")
+        logging.info(
+            f"📦 Stored {len(vision_locators)} vision locators for CrewAI agents")
     else:
         os.environ.pop('VISION_LOCATORS_JSON', None)  # Clear any previous data
 
@@ -60,76 +61,114 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     # sufficient rate limits (1500 RPM) for our use case.
     try:
         yield {"status": "running", "message": "Generating Robot Framework code..."}
-        
+
         validation_output, crew_with_results = run_crew(
             natural_language_query, model_provider, model_name)
 
         # Extract robot code from task[2] (code_assembler - no more popup task)
         robot_code = crew_with_results.tasks[2].output.raw
+
+        # Clean up the robot code - remove markdown code blocks
         robot_code = re.sub(r'^```[a-zA-Z]*\n', '', robot_code)
         robot_code = re.sub(r'\n```$', '', robot_code)
-        robot_code = robot_code.strip()
+
+        # Remove any "Thoughts:", "Here's my plan:", or similar LLM thinking text
+        # These appear before the actual Robot Framework code
+        lines = robot_code.split('\n')
+        cleaned_lines = []
+        skip_until_robot = True
+
+        for line in lines:
+            # Check if we've reached the actual Robot Framework code
+            if skip_until_robot:
+                # Look for Robot Framework section markers
+                if line.strip().startswith('***') and line.strip().endswith('***'):
+                    skip_until_robot = False
+                    cleaned_lines.append(line)
+                # Skip lines that look like LLM thoughts/explanations
+                elif any(keyword in line.lower() for keyword in ['thought', 'plan:', 'here\'s', 'let\'s', 'i need', 'i\'ll', 'step', 'extract', 'variable']):
+                    continue
+                # Skip lines with bullet points or numbered lists
+                elif re.match(r'^\s*[-*•]\s', line) or re.match(r'^\s*\d+\.\s', line):
+                    continue
+                # Skip empty lines before Robot code starts
+                elif not line.strip():
+                    continue
+            else:
+                # Once we've found Robot code, keep everything
+                cleaned_lines.append(line)
+
+        robot_code = '\n'.join(cleaned_lines).strip()
 
         # Extract validation output from task[3] (code_validator)
         raw_validation_output = crew_with_results.tasks[3].output.raw
-        
+
         # Try multiple strategies to extract JSON
         validation_data = None
-        
+
         # Strategy 1: Remove markdown code blocks
         cleaned_output = re.sub(r'```json\s*', '', raw_validation_output)
         cleaned_output = re.sub(r'```\s*', '', cleaned_output)
         cleaned_output = cleaned_output.strip()
-        
+
         # Strategy 2: Try to parse the cleaned output directly
         try:
             validation_data = json.loads(cleaned_output)
             logging.info("✅ Parsed validation output directly")
         except json.JSONDecodeError:
             # Strategy 3: Extract JSON object with regex
-            json_match = re.search(r'\{[^{}]*"valid"[^{}]*"reason"[^{}]*\}', cleaned_output, re.DOTALL)
+            json_match = re.search(
+                r'\{[^{}]*"valid"[^{}]*"reason"[^{}]*\}', cleaned_output, re.DOTALL)
             if json_match:
                 try:
                     validation_data = json.loads(json_match.group(0))
                     logging.info("✅ Parsed validation output with regex")
                 except json.JSONDecodeError:
                     pass
-        
+
         if not validation_data:
             # Strategy 4: Look for valid/reason separately
-            valid_match = re.search(r'"valid"\s*:\s*(true|false)', cleaned_output, re.IGNORECASE)
-            reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', cleaned_output)
-            
+            valid_match = re.search(
+                r'"valid"\s*:\s*(true|false)', cleaned_output, re.IGNORECASE)
+            reason_match = re.search(
+                r'"reason"\s*:\s*"([^"]*)"', cleaned_output)
+
             if valid_match:
                 validation_data = {
                     "valid": valid_match.group(1).lower() == 'true',
                     "reason": reason_match.group(1) if reason_match else "Validation completed"
                 }
-                logging.info("✅ Parsed validation output with fallback extraction")
-        
+                logging.info(
+                    "✅ Parsed validation output with fallback extraction")
+
         if not validation_data:
-            logging.error(f"❌ Could not parse validation output. Raw output:\n{raw_validation_output[:500]}")
-            raise ValueError("No valid JSON object found in the validation output.")
+            logging.error(
+                f"❌ Could not parse validation output. Raw output:\n{raw_validation_output[:500]}")
+            raise ValueError(
+                "No valid JSON object found in the validation output.")
 
         if validation_data.get("valid"):
-            logging.info("Generated Robot Framework code is here:\n%s", robot_code)
+            logging.info(
+                "Generated Robot Framework code is here:\n%s", robot_code)
             logging.info(
                 "CrewAI workflow complete. Code validation successful.")
-            
+
             # Log vision locator usage stats
             if vision_locators:
-                logging.info(f"🎯 Test generated with {len(vision_locators)} vision-validated locators")
+                logging.info(
+                    f"🎯 Test generated with {len(vision_locators)} vision-validated locators")
             else:
                 logging.info("🤖 Test generated with AI-based locators only")
-            
+
             yield {"status": "complete", "robot_code": robot_code, "message": "Code generation successful."}
         else:
             logging.error(
                 f"CrewAI workflow finished, but code validation failed. Reason: {validation_data.get('reason')}")
             yield {"status": "error", "message": f"Code validation failed: {validation_data.get('reason')}"}
-            
+
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
-        logging.error("Failed to generate valid Robot Framework code." + str(e))
+        logging.error(
+            "Failed to generate valid Robot Framework code." + str(e))
         try:
             logging.error(
                 f"Failed to parse validation output from crew: {e}\nRaw output was:\n{raw_validation_output}")
@@ -140,7 +179,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
         yield {"status": "error", "message": f"An error occurred: {str(e)}"}
-    
+
     # Clean up environment variables
     os.environ.pop('VISION_LOCATORS_JSON', None)
 

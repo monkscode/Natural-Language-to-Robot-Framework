@@ -4,58 +4,34 @@ document.addEventListener('DOMContentLoaded', () => {
     const robotCodeEl = document.getElementById('robot-code');
     const executionLogsEl = document.getElementById('execution-logs');
     const downloadBtn = document.getElementById('download-btn');
+    const copyCodeBtn = document.getElementById('copy-code-btn');
+    const codeLanguageLabel = document.getElementById('code-language');
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
 
-    // Healing UI elements
-    const healingProgress = document.getElementById('healing-progress');
-    const healingStatus = document.getElementById('healing-status');
-    const healingProgressFill = document.getElementById('healing-progress-fill');
-    const healingDetails = document.getElementById('healing-details');
-
-    // Navigation and sections
-    const navTabs = document.querySelectorAll('.nav-tab');
-    const workspaceSection = document.querySelector('.workspace');
-    const executionSection = workspaceSection.nextElementSibling;
-    const healingConfigSection = document.getElementById('healing-config-section');
-    const healingDashboardSection = document.getElementById('healing-dashboard-section');
-
-    // Configuration elements
-    const healingEnabledCheckbox = document.getElementById('healing-enabled');
-    const maxAttemptsInput = document.getElementById('max-attempts');
-    const sessionTimeoutInput = document.getElementById('session-timeout');
-    const healingTimeoutInput = document.getElementById('healing-timeout');
-    const confidenceThresholdSlider = document.getElementById('confidence-threshold');
-    const confidenceValue = document.getElementById('confidence-value');
-    const saveConfigBtn = document.getElementById('save-config-btn');
-    const resetConfigBtn = document.getElementById('reset-config-btn');
-
-    // Dashboard elements
-    const totalAttemptsEl = document.getElementById('total-attempts');
-    const successRateEl = document.getElementById('success-rate');
-    const avgHealingTimeEl = document.getElementById('avg-healing-time');
-    const last24hAttemptsEl = document.getElementById('last-24h-attempts');
-    const refreshReportsBtn = document.getElementById('refresh-reports-btn');
-    const reportsTableBody = document.getElementById('reports-table-body');
-
-    // Modal elements
-    const healingReportModal = document.getElementById('healing-report-modal');
-    const closeReportModal = document.getElementById('close-report-modal');
-    const healingReportContent = document.getElementById('healing-report-content');
-
     let robotCodeContent = '';
-    let currentHealingSession = null;
+    let executionStartTime = null;
 
-    function updateStatus(status, text) {
+    function updateStatus(status, text, persistent = false) {
         statusBadge.style.display = 'flex';
         statusBadge.className = `status-badge status-${status}`;
         statusText.textContent = text;
+
+        // Add persistent class for final results
+        if (persistent) {
+            statusBadge.classList.add('status-persistent');
+        } else {
+            statusBadge.classList.remove('status-persistent');
+        }
     }
 
     function hideStatus() {
-        setTimeout(() => {
-            statusBadge.style.display = 'none';
-        }, 5000);
+        // Only hide if not persistent
+        if (!statusBadge.classList.contains('status-persistent')) {
+            setTimeout(() => {
+                statusBadge.style.display = 'none';
+            }, 5000);
+        }
     }
 
     function setButtonLoading(loading) {
@@ -74,7 +50,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Auto-resize textarea
-    queryInput.addEventListener('input', function() {
+    queryInput.addEventListener('input', function () {
         this.style.height = 'auto';
         this.style.height = Math.max(150, this.scrollHeight) + 'px';
     });
@@ -94,7 +70,16 @@ document.addEventListener('DOMContentLoaded', () => {
         robotCodeEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><p>Generated Robot Framework code will appear here</p></div>';
         executionLogsEl.innerHTML = ''; // Clear previous logs
         downloadBtn.style.display = 'none';
+        copyCodeBtn.style.display = 'none';
+        codeLanguageLabel.style.display = 'none';
         robotCodeContent = '';
+
+        // Clear previous persistent status when starting new test
+        statusBadge.classList.remove('status-persistent');
+        statusBadge.style.display = 'none';
+
+        // Track execution start time
+        executionStartTime = Date.now();
 
         try {
             const requestPayload = {
@@ -135,7 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             } catch (e) {
                                 console.error('Failed to parse JSON from stream:', jsonData);
                             }
-                         }
+                        }
                     }
                 }
             }
@@ -160,8 +145,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 executionLogsEl.scrollTop = executionLogsEl.scrollHeight; // Auto-scroll
             } else if (data.status === 'complete' && data.robot_code) {
                 robotCodeContent = data.robot_code;
-                robotCodeEl.textContent = robotCodeContent;
+
+                // Apply syntax highlighting
+                applySyntaxHighlighting(robotCodeContent);
+
+                // Show copy button and language label
+                copyCodeBtn.style.display = 'flex';
+                codeLanguageLabel.style.display = 'block';
                 downloadBtn.style.display = 'inline-flex';
+
                 // Clear generation logs and prepare for execution logs
                 executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
             } else if (data.status === 'error') {
@@ -186,11 +178,56 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (data.status === 'complete' && data.result) {
                 const logs = data.result.logs || 'No execution logs available';
                 executionLogsEl.textContent = logs; // Replace with final, full logs
-                if (logs.includes('PASSED')) {
-                    updateStatus('success', 'Test passed');
-                } else {
-                    updateStatus('error', 'Test failed');
+
+                // Calculate execution time
+                const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
+                const timeText = executionTime ? ` (${executionTime}s)` : '';
+
+                // PRIORITY 1: Use explicit test_status from backend (most reliable)
+                if (data.test_status === 'passed') {
+                    updateStatus('success', `Test passed${timeText}`, true); // persistent = true
+                } else if (data.test_status === 'failed') {
+                    updateStatus('error', 'Test failed', true); // No time for failures
                 }
+                // PRIORITY 2: Fallback to improved log parsing (for backward compatibility)
+                else {
+                    const logsUpper = logs.toUpperCase();
+
+                    // Pattern 1: Check for "X passed, 0 failed" (success)
+                    const resultsMatch = logsUpper.match(/(\d+)\s+PASSED,\s+(\d+)\s+FAILED/);
+                    // Calculate execution time
+                    const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
+                    const timeText = executionTime ? ` (${executionTime}s)` : '';
+
+                    if (resultsMatch) {
+                        const failedCount = parseInt(resultsMatch[2]);
+                        if (failedCount === 0) {
+                            updateStatus('success', `Test passed${timeText}`, true); // persistent
+                        } else {
+                            updateStatus('error', 'Test failed', true); // No time for failures
+                        }
+                    }
+                    // Pattern 2: Check for "All tests passed" message
+                    else if (logsUpper.includes('ALL TESTS PASSED')) {
+                        updateStatus('success', `Test passed${timeText}`, true); // persistent
+                    }
+                    // Pattern 3: Check for individual test status lines
+                    else if (logsUpper.includes('TEST:') && logsUpper.includes(' - PASS')) {
+                        updateStatus('success', `Test passed${timeText}`, true); // persistent
+                    }
+                    else if (logsUpper.includes('TEST:') && logsUpper.includes(' - FAIL')) {
+                        updateStatus('error', 'Test failed', true); // No time for failures
+                    }
+                    // Pattern 4: Check for error indicators
+                    else if (logsUpper.includes('ERROR') || logsUpper.includes('EXCEPTION')) {
+                        updateStatus('error', 'Test completed with errors', true); // No time for errors
+                    }
+                    // Default: If no clear failure indicators, assume success
+                    else {
+                        updateStatus('success', `Test completed${timeText}`, true); // persistent
+                    }
+                }
+
                 hideStatus();
             } else if (data.status === 'error') {
                 updateStatus('error', 'Execution failed');
@@ -200,114 +237,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 executionLogsEl.appendChild(errorEntry);
                 hideStatus();
             }
-        } else if (data.stage === 'healing') {
-            // Handle healing progress updates
-            handleHealingProgress(data);
         }
     }
 
-    function handleHealingProgress(data) {
-        if (data.status === 'running') {
-            // Show healing progress indicator
-            healingProgress.style.display = 'block';
-            healingStatus.textContent = data.message;
+    // Copy code button handler
+    copyCodeBtn.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(robotCodeContent);
 
-            // Update progress based on message content
-            let progress = 0;
-            if (data.message.includes('Analyzing')) {
-                progress = 25;
-                updateHealingStep('step-detection', 'active');
-            } else if (data.message.includes('Generating')) {
-                progress = 50;
-                updateHealingStep('step-detection', 'complete');
-                updateHealingStep('step-generation', 'active');
-            } else if (data.message.includes('Validating')) {
-                progress = 75;
-                updateHealingStep('step-generation', 'complete');
-                updateHealingStep('step-validation', 'active');
-            } else if (data.message.includes('Updating')) {
-                progress = 90;
-                updateHealingStep('step-validation', 'complete');
-                updateHealingStep('step-update', 'active');
-            }
-
-            healingProgressFill.style.width = `${progress}%`;
-
-            // Add healing log entry
-            const logEntry = document.createElement('div');
-            logEntry.style.color = 'var(--primary)';
-            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING: ${data.message}`;
-            executionLogsEl.appendChild(logEntry);
-            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
-
-        } else if (data.status === 'complete') {
-            // Healing completed successfully
-            healingProgressFill.style.width = '100%';
-            updateHealingStep('step-update', 'complete');
-            healingStatus.textContent = 'Healing completed successfully!';
+            // Success feedback - change icon to checkmark
+            const originalHTML = copyCodeBtn.innerHTML;
+            copyCodeBtn.classList.add('copied');
+            copyCodeBtn.innerHTML = `
+                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
+                </svg>
+            `;
 
             setTimeout(() => {
-                healingProgress.style.display = 'none';
-                resetHealingSteps();
-            }, 3000);
-
-            const logEntry = document.createElement('div');
-            logEntry.style.color = 'var(--success)';
-            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING: Successfully healed locators`;
-            executionLogsEl.appendChild(logEntry);
-            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
-
-        } else if (data.status === 'error') {
-            // Healing failed
-            healingStatus.textContent = 'Healing failed: ' + data.message;
-            updateAllHealingSteps('error');
-
-            setTimeout(() => {
-                healingProgress.style.display = 'none';
-                resetHealingSteps();
-            }, 5000);
-
-            const logEntry = document.createElement('div');
-            logEntry.style.color = 'var(--error)';
-            logEntry.textContent = `[${new Date().toLocaleTimeString()}] HEALING ERROR: ${data.message}`;
-            executionLogsEl.appendChild(logEntry);
-            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+                copyCodeBtn.classList.remove('copied');
+                copyCodeBtn.innerHTML = originalHTML;
+            }, 2000);
+        } catch (err) {
+            console.error('Failed to copy:', err);
+            alert('Failed to copy code to clipboard');
         }
-    }
+    });
 
-    function updateHealingStep(stepId, status) {
-        const stepElement = document.getElementById(stepId);
-        if (stepElement) {
-            stepElement.className = `step-status ${status}`;
-            switch (status) {
-                case 'active':
-                    stepElement.textContent = '🔄';
-                    break;
-                case 'complete':
-                    stepElement.textContent = '✅';
-                    break;
-                case 'error':
-                    stepElement.textContent = '❌';
-                    break;
-                default:
-                    stepElement.textContent = '⏳';
-            }
-        }
-    }
-
-    function updateAllHealingSteps(status) {
-        ['step-detection', 'step-generation', 'step-validation', 'step-update'].forEach(stepId => {
-            updateHealingStep(stepId, status);
-        });
-    }
-
-    function resetHealingSteps() {
-        ['step-detection', 'step-generation', 'step-validation', 'step-update'].forEach(stepId => {
-            updateHealingStep(stepId, 'pending');
-        });
-        healingProgressFill.style.width = '0%';
-    }
-
+    // Download button handler
     downloadBtn.addEventListener('click', () => {
         const blob = new Blob([robotCodeContent], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
@@ -343,258 +300,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Navigation tabs functionality
-    navTabs.forEach(tab => {
-        tab.addEventListener('click', () => {
-            const targetSection = tab.dataset.section;
-            
-            // Update active tab
-            navTabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            
-            // Show/hide sections
-            if (targetSection === 'workspace') {
-                workspaceSection.style.display = 'grid';
-                executionSection.style.display = 'block';
-                healingConfigSection.style.display = 'none';
-                healingDashboardSection.style.display = 'none';
-            } else if (targetSection === 'healing-config') {
-                workspaceSection.style.display = 'none';
-                executionSection.style.display = 'none';
-                healingConfigSection.style.display = 'block';
-                healingDashboardSection.style.display = 'none';
-                loadHealingConfig();
-            } else if (targetSection === 'healing-dashboard') {
-                workspaceSection.style.display = 'none';
-                executionSection.style.display = 'none';
-                healingConfigSection.style.display = 'none';
-                healingDashboardSection.style.display = 'block';
-                loadHealingDashboard();
-            }
-        });
-    });
-
-    // Configuration panel functionality
-    confidenceThresholdSlider.addEventListener('input', (e) => {
-        confidenceValue.textContent = e.target.value;
-    });
-
-    saveConfigBtn.addEventListener('click', async () => {
-        try {
-            const config = {
-                enabled: healingEnabledCheckbox.checked,
-                max_attempts_per_locator: parseInt(maxAttemptsInput.value),
-                chrome_session_timeout: parseInt(sessionTimeoutInput.value),
-                healing_timeout: parseInt(healingTimeoutInput.value) * 60, // Convert to seconds
-                confidence_threshold: parseFloat(confidenceThresholdSlider.value)
-            };
-
-            const response = await fetch('/api/healing/config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(config)
-            });
-
-            if (response.ok) {
-                showNotification('Configuration saved successfully!', 'success');
-            } else {
-                throw new Error('Failed to save configuration');
-            }
-        } catch (error) {
-            showNotification('Failed to save configuration: ' + error.message, 'error');
-        }
-    });
-
-    resetConfigBtn.addEventListener('click', () => {
-        // Reset to default values
-        healingEnabledCheckbox.checked = true;
-        maxAttemptsInput.value = '3';
-        sessionTimeoutInput.value = '30';
-        healingTimeoutInput.value = '5';
-        confidenceThresholdSlider.value = '0.7';
-        confidenceValue.textContent = '0.7';
-    });
-
-    // Dashboard functionality
-    refreshReportsBtn.addEventListener('click', () => {
-        loadHealingReports();
-    });
-
-    // Modal functionality
-    closeReportModal.addEventListener('click', () => {
-        healingReportModal.style.display = 'none';
-    });
-
-    healingReportModal.addEventListener('click', (e) => {
-        if (e.target === healingReportModal) {
-            healingReportModal.style.display = 'none';
-        }
-    });
-
-    // Load healing configuration
-    async function loadHealingConfig() {
-        try {
-            const response = await fetch('/api/healing/status');
-            if (response.ok) {
-                const data = await response.json();
-                const config = data.configuration;
-                
-                healingEnabledCheckbox.checked = data.healing_enabled;
-                maxAttemptsInput.value = config.max_attempts_per_locator;
-                sessionTimeoutInput.value = config.chrome_session_timeout;
-                healingTimeoutInput.value = Math.round(config.healing_timeout / 60); // Convert to minutes
-                confidenceThresholdSlider.value = config.confidence_threshold;
-                confidenceValue.textContent = config.confidence_threshold;
-            }
-        } catch (error) {
-            console.error('Failed to load healing config:', error);
-        }
-    }
-
-    // Load healing dashboard data
-    async function loadHealingDashboard() {
-        await Promise.all([
-            loadHealingStatistics(),
-            loadHealingReports()
-        ]);
-    }
-
-    async function loadHealingStatistics() {
-        try {
-            const response = await fetch('/api/healing/statistics');
-            if (response.ok) {
-                const data = await response.json();
-                const stats = data.statistics;
-                
-                totalAttemptsEl.textContent = stats.total_attempts;
-                successRateEl.textContent = `${stats.success_rate.toFixed(1)}%`;
-                avgHealingTimeEl.textContent = `${stats.average_healing_time.toFixed(1)}s`;
-                last24hAttemptsEl.textContent = stats.last_24h_attempts;
-            }
-        } catch (error) {
-            console.error('Failed to load healing statistics:', error);
-        }
-    }
-
-    async function loadHealingReports() {
-        try {
-            const response = await fetch('/api/healing/reports');
-            if (response.ok) {
-                const data = await response.json();
-                displayHealingReports(data.reports);
-            }
-        } catch (error) {
-            console.error('Failed to load healing reports:', error);
-        }
-    }
-
-    function displayHealingReports(reports) {
-        if (reports.length === 0) {
-            reportsTableBody.innerHTML = `
-                <tr class="empty-row">
-                    <td colspan="7">
-                        <div class="empty-state">
-                            <div class="empty-state-icon">📋</div>
-                            <p>No healing reports available</p>
-                        </div>
-                    </td>
-                </tr>
-            `;
-            return;
-        }
-
-        reportsTableBody.innerHTML = reports.map(report => `
-            <tr>
-                <td>${report.run_id}</td>
-                <td>${report.test_file}</td>
-                <td>${report.total_attempts}</td>
-                <td>${report.successful_healings}</td>
-                <td>${report.failed_healings}</td>
-                <td>${new Date(report.generated_at).toLocaleDateString()}</td>
-                <td>
-                    <button class="btn btn-secondary btn-small" onclick="viewHealingReport('${report.run_id}')">
-                        View Report
-                    </button>
-                </td>
-            </tr>
-        `).join('');
-    }
-
-    // Global function for viewing healing reports
-    window.viewHealingReport = async function(runId) {
-        try {
-            const response = await fetch(`/api/healing/reports/${runId}`);
-            if (response.ok) {
-                const data = await response.json();
-                displayHealingReportModal(data.report);
-            } else {
-                throw new Error('Failed to load report');
-            }
-        } catch (error) {
-            showNotification('Failed to load healing report: ' + error.message, 'error');
-        }
-    };
-
-    function displayHealingReportModal(report) {
-        const content = `
-            <div class="report-section">
-                <h3>Report Summary</h3>
-                <div class="report-grid">
-                    <div class="report-card">
-                        <div class="report-card-title">Total Attempts</div>
-                        <div class="report-card-value">${report.total_attempts}</div>
-                    </div>
-                    <div class="report-card">
-                        <div class="report-card-title">Successful</div>
-                        <div class="report-card-value">${report.successful_healings}</div>
-                    </div>
-                    <div class="report-card">
-                        <div class="report-card-title">Failed</div>
-                        <div class="report-card-value">${report.failed_healings}</div>
-                    </div>
-                    <div class="report-card">
-                        <div class="report-card-title">Total Time</div>
-                        <div class="report-card-value">${report.total_time.toFixed(1)}s</div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="report-section">
-                <h3>Healing Attempts</h3>
-                ${report.healing_attempts.map(attempt => `
-                    <div class="healing-attempt">
-                        <div class="attempt-header">
-                            <div class="attempt-title">${attempt.test_case}</div>
-                            <div class="attempt-status ${attempt.status}">${attempt.status}</div>
-                        </div>
-                        <div class="locator-comparison">
-                            <div class="locator-box">
-                                <div class="locator-label">Original Locator</div>
-                                <div class="locator-value">${attempt.original_locator}</div>
-                            </div>
-                            <div class="locator-box">
-                                <div class="locator-label">Healed Locator</div>
-                                <div class="locator-value">${attempt.healed_locator || 'N/A'}</div>
-                            </div>
-                        </div>
-                        ${attempt.error_message ? `<div style="margin-top: 0.75rem; color: var(--error); font-size: 0.875rem;">${attempt.error_message}</div>` : ''}
-                    </div>
-                `).join('')}
-            </div>
-        `;
-        
-        healingReportContent.innerHTML = content;
-        healingReportModal.style.display = 'flex';
-    }
-
+    // Notification helper function
     function showNotification(message, type = 'info') {
         // Create notification element
         const notification = document.createElement('div');
         notification.className = `notification notification-${type}`;
         notification.textContent = message;
-        
+
         // Add styles
         notification.style.cssText = `
             position: fixed;
@@ -607,7 +319,7 @@ document.addEventListener('DOMContentLoaded', () => {
             z-index: 1001;
             animation: slideIn 0.3s ease;
         `;
-        
+
         if (type === 'success') {
             notification.style.background = 'var(--success)';
         } else if (type === 'error') {
@@ -615,9 +327,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             notification.style.background = 'var(--primary)';
         }
-        
+
         document.body.appendChild(notification);
-        
+
         // Remove after 3 seconds
         setTimeout(() => {
             notification.style.animation = 'slideOut 0.3s ease';
@@ -640,4 +352,114 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     `;
     document.head.appendChild(style);
+
+    // Syntax highlighting function for Robot Framework
+    function applySyntaxHighlighting(code) {
+        const lines = code.split('\n');
+        let highlightedHTML = '';
+
+        lines.forEach(line => {
+            let highlightedLine = '';
+
+            // Sections (*** Settings ***, *** Variables ***, etc.)
+            if (line.trim().startsWith('***') && line.trim().endsWith('***')) {
+                highlightedLine = `<span class="rf-section">${escapeHtml(line)}</span>`;
+            }
+            // Comments
+            else if (line.trim().startsWith('#')) {
+                highlightedLine = `<span class="rf-comment">${escapeHtml(line)}</span>`;
+            }
+            // Settings keywords (Library, Resource, etc.) - detect by position
+            else if (line.match(/^(Library|Resource|Variables|Suite Setup|Suite Teardown|Test Setup|Test Teardown|Test Template|Test Timeout|Force Tags|Default Tags|Documentation)\s/)) {
+                const match = line.match(/^(Library|Resource|Variables|Suite Setup|Suite Teardown|Test Setup|Test Teardown|Test Template|Test Timeout|Force Tags|Default Tags|Documentation)(\s+.*)$/);
+                if (match) {
+                    const keyword = match[1];
+                    const rest = match[2];
+                    const restHighlighted = escapeHtml(rest).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
+                    highlightedLine = `<span class="rf-keyword">${keyword}</span>${restHighlighted}`;
+                } else {
+                    highlightedLine = escapeHtml(line);
+                }
+            }
+            // Variable definitions at column 0 (starts with ${)
+            else if (line.startsWith('${')) {
+                // Variable definition: ${name}    value
+                const varMatch = line.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
+                if (varMatch) {
+                    const varName = varMatch[1];
+                    const separator = varMatch[2];
+                    const varValue = varMatch[3];
+                    // Variable name in blue, value in default text color
+                    highlightedLine = `<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
+                } else {
+                    // Just a variable without value
+                    highlightedLine = `<span class="rf-variable">${escapeHtml(line)}</span>`;
+                }
+            }
+            // Test case names (lines that don't start with whitespace and aren't sections/comments)
+            else if (line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('***') && !line.startsWith('#')) {
+                highlightedLine = `<span class="rf-test-name">${escapeHtml(line)}</span>`;
+            }
+            // Indented lines (test steps or variable definitions) - dynamically detect keywords
+            else if (line.match(/^\s+\S/)) {
+                const leadingSpaces = line.match(/^(\s+)/)[1];
+                const trimmed = line.trimStart();
+                
+                // Check if this is a variable definition (starts with ${)
+                if (trimmed.startsWith('${')) {
+                    // Variable definition: ${name}    value
+                    // Match variable name, then any whitespace (1+), then the value
+                    const varMatch = trimmed.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
+                    if (varMatch) {
+                        const varName = varMatch[1];
+                        const separator = varMatch[2];
+                        const varValue = varMatch[3];
+                        // Variable name in blue, value in default text color (no span = default)
+                        highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
+                    } else {
+                        // Just a variable without value - highlight only the variable
+                        highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(trimmed)}</span>`;
+                    }
+                } else {
+                    // Robot Framework uses 2+ spaces or tabs to separate keyword from arguments
+                    // Match everything before the first occurrence of 2+ spaces or tab
+                    const keywordMatch = trimmed.match(/^([^\s]+(?:\s+[^\s]+)*?)(\s{2,}|\t)/);
+                    
+                    if (keywordMatch) {
+                        // Found a keyword (text before 2+ spaces or tab)
+                        const keyword = keywordMatch[1];
+                        const separator = keywordMatch[2];
+                        const rest = trimmed.substring(keyword.length + separator.length);
+                        
+                        // Highlight variables in the rest
+                        const restHighlighted = escapeHtml(rest).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
+                        highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(keyword)}</span>${separator}${restHighlighted}`;
+                    } else {
+                        // No separator found - could be a keyword without arguments (like "Close Browser")
+                        // Highlight the entire trimmed line as a keyword
+                        highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(trimmed)}</span>`;
+                    }
+                }
+            }
+            // Variables (${...}) in other lines (but NOT indented lines starting with ${)
+            else if (line.includes('${') && !line.match(/^\s+\$/)) {
+                highlightedLine = escapeHtml(line).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
+            }
+            // Default: just escape HTML
+            else {
+                highlightedLine = escapeHtml(line);
+            }
+
+            highlightedHTML += highlightedLine + '\n';
+        });
+
+        robotCodeEl.innerHTML = highlightedHTML;
+    }
+
+    // Helper function to escape HTML
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
 });

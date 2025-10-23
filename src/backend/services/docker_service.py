@@ -240,7 +240,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 if tests_passed:
                     message = "Test execution finished: All tests passed."
                     logging.info(f"🎉 DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "result": {
+                    return {"status": "complete", "message": message, "test_status": "passed", "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -248,7 +248,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 else:
                     message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                     logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "result": {
+                    return {"status": "complete", "message": message, "test_status": "failed", "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -269,7 +269,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         if exit_code == 0:
             message = "Test execution finished: All tests passed."
             logging.info(f"✅ DOCKER SERVICE: {message}")
-            return {"status": "complete", "message": message, "result": {
+            return {"status": "complete", "message": message, "test_status": "passed", "result": {
                 'logs': robot_logs,
                 'log_html': f"/reports/{run_id}/log.html",
                 'report_html': f"/reports/{run_id}/report.html"
@@ -278,7 +278,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             if os.path.exists(log_html_path):
                 message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                 logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                return {"status": "complete", "message": message, "result": {
+                return {"status": "complete", "message": message, "test_status": "failed", "result": {
                     'logs': robot_logs,
                     'log_html': f"/reports/{run_id}/log.html",
                     'report_html': f"/reports/{run_id}/report.html"
