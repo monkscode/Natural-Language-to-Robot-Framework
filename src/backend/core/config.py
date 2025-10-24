@@ -26,9 +26,19 @@ class Settings(BaseSettings):
     APP_PORT: int = Field(default=5000, description="Port for FastAPI service")
     BROWSER_USE_SERVICE_URL: str = Field(default="http://localhost:4999", description="URL for BrowserUse service")
     
+    # Robot Framework Library Configuration
+    ROBOT_LIBRARY: str = Field(default="selenium", description="Robot Framework library to use: 'selenium' or 'browser'")
+    
     # Self-healing configuration
     SELF_HEALING_ENABLED: bool = Field(default=True, description="Enable/disable self-healing globally")
     SELF_HEALING_CONFIG_PATH: str = Field(default="config/self_healing.yaml", description="Path to self-healing config file")
+    
+    @validator('ROBOT_LIBRARY')
+    def validate_robot_library(cls, v):
+        """Validate that ROBOT_LIBRARY is either 'selenium' or 'browser'."""
+        if v.lower() not in ['selenium', 'browser']:
+            raise ValueError(f"ROBOT_LIBRARY must be 'selenium' or 'browser', got '{v}'")
+        return v.lower()
 
     class Config:
         env_file = ".env"

@@ -44,6 +44,7 @@ else
     echo "Installing dependencies..."
     pip install uv
     uv pip install -r src/backend/requirements.txt
+    rfbrowser install chromium
 fi
 
 # Run the application

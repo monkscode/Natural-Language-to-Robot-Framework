@@ -55,6 +55,9 @@ from typing import Dict, Any
 # 2. Fallback above sets up path (when run directly)
 from src.backend.core.config import settings
 
+# Get library type from config (will log after logger is initialized)
+ROBOT_LIBRARY = settings.ROBOT_LIBRARY
+
 # ========================================
 # LOGGING SETUP
 # ========================================
@@ -70,6 +73,9 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv("src/backend/.env")
+
+# Log library configuration
+logger.info(f"🔧 Browser Use Service configured for: {ROBOT_LIBRARY}")
 
 # Import litellm for RateLimitError handling (optional)
 try:
@@ -127,6 +133,227 @@ logger.info(
     f"Batch Config: max_steps={BATCH_CONFIG['max_agent_steps']}, max_retries={BATCH_CONFIG['max_retries_per_element']}, timeout={BATCH_CONFIG['element_timeout']}s")
 logger.info(
     f"Locator Extraction Config: content_retries={LOCATOR_EXTRACTION_CONFIG['content_based_retries']}, coordinate_retries={LOCATOR_EXTRACTION_CONFIG['coordinate_based_retries']}, coordinate_offsets={LOCATOR_EXTRACTION_CONFIG['coordinate_offset_attempts']}")
+
+# ========================================
+# LIBRARY-SPECIFIC LOCATOR STRATEGIES
+# ========================================
+
+
+def get_locator_strategies_js(library_type: str) -> str:
+    """
+    Generate JavaScript locator strategies based on Robot Framework library type.
+
+    Args:
+        library_type: "selenium" or "browser"
+
+    Returns:
+        JavaScript code defining locator strategies for the specified library
+    """
+    if library_type == "browser":
+        # Browser Library (Playwright) - supports text and role selectors
+        # NOTE: gen() returns Robot Framework format, sel() returns CSS/XPath for JS validation
+        return """
+        {{ type: 'id', gen: () => element.id ? `id=${{element.id}}` : null, sel: () => element.id ? `#${{element.id}}` : null }},
+        {{ type: 'data-testid', gen: () => element.dataset?.testid ? `data-testid=${{element.dataset.testid}}` : null, sel: () => element.dataset?.testid ? `[data-testid="${{element.dataset.testid}}"]` : null }},
+        {{ type: 'aria-label', gen: () => element.getAttribute('aria-label') ? `[aria-label="${{element.getAttribute('aria-label')}}"]` : null, sel: () => element.getAttribute('aria-label') ? `[aria-label="${{element.getAttribute('aria-label')}}"]` : null }},
+        {{ type: 'text', gen: () => element.textContent?.trim() ? `text=${{element.textContent.trim()}}` : null, sel: () => element.textContent?.trim() ? `//*[contains(normalize-space(text()), "${{element.textContent.trim().replace(/"/g, '\\\\"')}}")]` : null, isXPath: true }},
+        {{ type: 'role', gen: () => getRoleLocator(element), sel: () => getRoleSelector(element), isXPath: true }},
+        {{ type: 'xpath', gen: () => generateXPath(element), sel: () => generateXPath(element), isXPath: true }},
+        {{ type: 'css-class', gen: () => element.className ? `${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null, sel: () => element.className ? `${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null }}
+        """
+    else:
+        # SeleniumLibrary - traditional format with prefixes
+        return """
+        {{ type: 'id', gen: () => element.id ? `id=${{element.id}}` : null, sel: () => element.id ? `#${{element.id}}` : null }},
+        {{ type: 'name', gen: () => element.name ? `name=${{element.name}}` : null, sel: () => element.name ? `[name="${{element.name}}"]` : null }},
+        {{ type: 'data-testid', gen: () => element.dataset?.testid ? `css=[data-testid="${{element.dataset.testid}}"]` : null, sel: () => element.dataset?.testid ? `[data-testid="${{element.dataset.testid}}"]` : null }},
+        {{ type: 'aria-label', gen: () => element.getAttribute('aria-label') ? `css=[aria-label="${{element.getAttribute('aria-label')}}"]` : null, sel: () => element.getAttribute('aria-label') ? `[aria-label="${{element.getAttribute('aria-label')}}"]` : null }},
+        {{ type: 'title', gen: () => element.getAttribute('title') ? `xpath=//*[@title="${{element.getAttribute('title')}}"]` : null, sel: () => element.getAttribute('title') ? `//*[@title="${{element.getAttribute('title')}}"]` : null, isXPath: true }},
+        {{ type: 'text', gen: () => element.textContent?.trim() ? `xpath=//*[text()="${{element.textContent.trim().slice(0,50)}}"]` : null, sel: () => element.textContent?.trim() ? `//*[text()="${{element.textContent.trim().slice(0,50)}}"]` : null, isXPath: true }},
+        {{ type: 'css-class', gen: () => element.className ? `css=${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null, sel: () => element.className ? `${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null }}
+        """
+
+
+def get_helper_functions_js(library_type: str) -> str:
+    """
+    Generate helper functions for locator generation.
+
+    Args:
+        library_type: "selenium" or "browser"
+
+    Returns:
+        JavaScript helper functions
+    """
+    if library_type == "browser":
+        # Browser Library needs role locator helper and role selector for validation
+        return """
+    function getRoleLocator(el) {
+        const roleMap = {
+            'BUTTON': 'button',
+            'A': 'link',
+            'INPUT': 'textbox',
+            'SELECT': 'combobox',
+            'TEXTAREA': 'textbox'
+        };
+        const role = el.getAttribute('role') || roleMap[el.tagName] || null;
+        const name = el.getAttribute('aria-label') || el.textContent?.trim().slice(0,30) || null;
+        if (role && name) {
+            return `role=${{role}}[name="${{name}}"]`;
+        }
+        return null;
+    }
+    
+    function getRoleSelector(el) {
+        // Returns XPath for validation (since role= is Playwright-specific)
+        const roleMap = {
+            'BUTTON': 'button',
+            'A': 'a',
+            'INPUT': 'input',
+            'SELECT': 'select',
+            'TEXTAREA': 'textarea'
+        };
+        const tag = roleMap[el.tagName] || el.tagName.toLowerCase();
+        const name = el.getAttribute('aria-label') || el.textContent?.trim().slice(0,30) || null;
+        if (name) {
+            // XPath that finds element by tag and text/aria-label
+            return `//${{tag}}[contains(text(), "${{name}}") or @aria-label="${{name}}"]`;
+        }
+        return null;
+    }
+    
+    function generateXPath(el) {
+        // Simple XPath generation (without prefix for Browser Library)
+        if (el.id) return `//*[@id="${{el.id}}"]`;
+        return null;
+    }
+        """
+    else:
+        # SeleniumLibrary doesn't need special helpers
+        return """
+    function generateXPath(el) {
+        // Simple XPath generation (with prefix for SeleniumLibrary)
+        if (el.id) return `//*[@id="${{el.id}}"]`;
+        return null;
+    }
+        """
+
+
+# ========================================
+# PLAYWRIGHT LOCATOR VALIDATION (Browser Library Only)
+# ========================================
+
+async def validate_locators_with_playwright(page, locators: list, library_type: str) -> list:
+    """
+    Validate locators using Playwright's built-in locator API.
+    This provides an additional layer of validation specifically for Browser Library.
+    
+    Args:
+        page: Playwright page object from the browser session
+        locators: List of locator dictionaries from JavaScript validation
+        library_type: "browser" or "selenium"
+    
+    Returns:
+        List of locators with updated validation status from Playwright
+    """
+    if library_type != "browser":
+        # Skip Playwright validation for SeleniumLibrary
+        logger.info("Skipping Playwright validation (not using Browser Library)")
+        return locators
+    
+    if not locators:
+        return locators
+    
+    logger.info(f"🎭 Starting Playwright validation for {len(locators)} locators...")
+    validated_locators = []
+    
+    for loc_data in locators:
+        locator_str = loc_data.get('locator', '')
+        loc_type = loc_data.get('type', '')
+        
+        try:
+            # Convert Robot Framework locator to Playwright locator
+            playwright_locator = None
+            
+            if locator_str.startswith('id='):
+                # id=element_id → #element_id
+                element_id = locator_str[3:]
+                playwright_locator = page.locator(f'#{element_id}')
+            
+            elif locator_str.startswith('text='):
+                # text=button text → text=button text
+                text_value = locator_str[5:]
+                playwright_locator = page.locator(f'text={text_value}')
+            
+            elif locator_str.startswith('role='):
+                # role=button[name="Submit"] → role=button[name="Submit"]
+                playwright_locator = page.locator(locator_str)
+            
+            elif locator_str.startswith('data-testid='):
+                # data-testid=value → [data-testid="value"]
+                testid_value = locator_str[12:]
+                playwright_locator = page.locator(f'[data-testid="{testid_value}"]')
+            
+            elif locator_str.startswith('xpath='):
+                # xpath=//*[@id="test"] → //*[@id="test"]
+                xpath_value = locator_str[6:]
+                playwright_locator = page.locator(f'xpath={xpath_value}')
+            
+            else:
+                # Assume it's a CSS selector
+                playwright_locator = page.locator(locator_str)
+            
+            if playwright_locator:
+                # Use Playwright's count() to check how many elements match
+                count = await playwright_locator.count()
+                
+                # Check if element is visible (for the first match)
+                is_visible = False
+                if count > 0:
+                    try:
+                        is_visible = await playwright_locator.first.is_visible(timeout=1000)
+                    except:
+                        is_visible = False
+                
+                # Update validation data
+                loc_data['playwright_validated'] = True
+                loc_data['playwright_count'] = count
+                loc_data['playwright_visible'] = is_visible
+                
+                # Update uniqueness based on Playwright count
+                if count == 1:
+                    loc_data['unique'] = True
+                    loc_data['confidence'] = 1.0
+                    logger.info(f"✅ Playwright: {locator_str} → UNIQUE (1 match, visible={is_visible})")
+                elif count > 1:
+                    loc_data['unique'] = False
+                    loc_data['confidence'] = 0.7 if is_visible else 0.5
+                    logger.info(f"⚠️  Playwright: {locator_str} → NOT UNIQUE ({count} matches, visible={is_visible})")
+                else:
+                    loc_data['confidence'] = 0.0
+                    logger.warning(f"❌ Playwright: {locator_str} → NOT FOUND (0 matches)")
+                    continue  # Skip locators that don't match anything
+                
+                validated_locators.append(loc_data)
+            else:
+                # Couldn't convert to Playwright locator, keep original
+                loc_data['playwright_validated'] = False
+                validated_locators.append(loc_data)
+                logger.warning(f"⚠️  Could not convert to Playwright locator: {locator_str}")
+        
+        except Exception as e:
+            logger.warning(f"⚠️  Playwright validation error for {locator_str}: {e}")
+            loc_data['playwright_validated'] = False
+            loc_data['playwright_error'] = str(e)
+            validated_locators.append(loc_data)
+    
+    # Re-sort by confidence after Playwright validation
+    validated_locators.sort(key=lambda x: (x.get('unique', False), x.get('confidence', 0)), reverse=True)
+    
+    unique_count = sum(1 for loc in validated_locators if loc.get('unique', False))
+    logger.info(f"🎭 Playwright validation complete: {len(validated_locators)} valid, {unique_count} unique")
+    
+    return validated_locators
+
 
 # Task storage to keep track of tasks
 tasks: Dict[str, Dict[str, Any]] = {}
@@ -896,6 +1123,32 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
                         success = locator_data.get('success', False)
                         logger.info(
                             f"Parsed locator JSON successfully. Best locator: {locator_data.get('best_locator', 'N/A')}")
+                        
+                        # STEP 7: Playwright validation for Browser Library
+                        if library_type == "browser" and locator_data and locator_data.get('all_locators'):
+                            try:
+                                logger.info("🎭 Running Playwright validation on locators...")
+                                # Get the Playwright page from the session
+                                page = session.context.pages[0] if session.context.pages else None
+                                
+                                if page:
+                                    # Validate locators with Playwright
+                                    validated_locators = await validate_locators_with_playwright(
+                                        page, 
+                                        locator_data['all_locators'],
+                                        library_type
+                                    )
+                                    
+                                    # Update locator_data with Playwright-validated results
+                                    locator_data['all_locators'] = validated_locators
+                                    if validated_locators:
+                                        locator_data['best_locator'] = validated_locators[0]['locator']
+                                        logger.info(f"✅ Best locator after Playwright validation: {locator_data['best_locator']}")
+                                else:
+                                    logger.warning("⚠️  No Playwright page available for validation")
+                            except Exception as e:
+                                logger.warning(f"⚠️  Playwright validation failed: {e}")
+                                # Continue with JavaScript-validated locators
                     else:
                         # Fallback: consider it successful if we have meaningful data
                         success = bool(final_result and len(
@@ -1159,6 +1412,13 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             content_retries = LOCATOR_EXTRACTION_CONFIG["content_based_retries"]
             coord_retries = LOCATOR_EXTRACTION_CONFIG["coordinate_based_retries"]
             coord_offsets = LOCATOR_EXTRACTION_CONFIG["coordinate_offsets"]
+
+            # Get library-specific locator strategies
+            library_type = ROBOT_LIBRARY
+            locator_strategies_js = get_locator_strategies_js(library_type)
+            helper_functions_js = get_helper_functions_js(library_type)
+
+            logger.info(f"🔧 Generating locators for {library_type} library")
 
             js_validation_code = r"""
 (function() {{
@@ -1472,18 +1732,17 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
     console.log(`   Text: "${{element.textContent?.slice(0, 100)}}..."`);
     
     // ========================================
+    // HELPER FUNCTIONS FOR LOCATOR GENERATION
+    // ========================================
+    {helper_functions_placeholder}
+    
+    // ========================================
     // GENERATE AND VALIDATE LOCATORS
     // ========================================
     console.log(`\n🔍 Generating and validating locators...`);
     const validatedLocators = [];
     const strategies = [
-        {{ type: 'id', gen: () => element.id ? `id=${{element.id}}` : null, sel: () => element.id ? `#${{element.id}}` : null }},
-        {{ type: 'name', gen: () => element.name ? `name=${{element.name}}` : null, sel: () => element.name ? `[name="${{element.name}}"]` : null }},
-        {{ type: 'data-testid', gen: () => element.dataset?.testid ? `css=[data-testid="${{element.dataset.testid}}"]` : null, sel: () => element.dataset?.testid ? `[data-testid="${{element.dataset.testid}}"]` : null }},
-        {{ type: 'aria-label', gen: () => element.getAttribute('aria-label') ? `css=[aria-label="${{element.getAttribute('aria-label')}}"]` : null, sel: () => element.getAttribute('aria-label') ? `[aria-label="${{element.getAttribute('aria-label')}}"]` : null }},
-        {{ type: 'title', gen: () => element.getAttribute('title') ? `xpath=//*[@title="${{element.getAttribute('title')}}"]` : null, sel: () => element.getAttribute('title') ? `//*[@title="${{element.getAttribute('title')}}"]` : null, isXPath: true }},
-        {{ type: 'text', gen: () => element.textContent?.trim() ? `xpath=//*[text()="${{element.textContent.trim().slice(0,50)}}"]` : null, sel: () => element.textContent?.trim() ? `//*[text()="${{element.textContent.trim().slice(0,50)}}"]` : null, isXPath: true }},
-        {{ type: 'css-class', gen: () => element.className ? `css=${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null, sel: () => element.className ? `${{element.tagName.toLowerCase()}}.${{element.className.split(' ')[0]}}` : null }}
+        {strategies_placeholder}
     ];
     
     for (const s of strategies) {{
@@ -1551,6 +1810,12 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             coord_offsets_json = json.dumps(coord_offsets)
             js_validation_code = js_validation_code.replace(
                 '{coord_offsets_json}', coord_offsets_json)
+
+            # Replace library-specific placeholders
+            js_validation_code = js_validation_code.replace(
+                '{helper_functions_placeholder}', helper_functions_js)
+            js_validation_code = js_validation_code.replace(
+                '{strategies_placeholder}', locator_strategies_js)
 
             # Validate JavaScript code integrity
             logger.debug(f"📊 JavaScript validation code stats:")

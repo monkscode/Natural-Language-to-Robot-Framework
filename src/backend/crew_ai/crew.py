@@ -45,17 +45,37 @@ def extract_url_from_query(query: str) -> str:
     logger.warning("No URL found in query, returning placeholder")
     return "website mentioned in query"
 
-def run_crew(query: str, model_provider: str, model_name: str):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
+    
+    Args:
+        query: User's natural language test description
+        model_provider: "local" or "online"
+        model_name: Model identifier
+        library_type: "selenium" or "browser" (optional, defaults to config setting)
     
     Architecture Note:
     - Rate limiting was removed during Phase 2 of codebase cleanup. Direct LLM calls
       are now used without wrappers as Google Gemini API has sufficient rate limits.
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
+    - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
     """
-    agents = RobotAgents(model_provider, model_name)
-    tasks = RobotTasks()
+    # Load library context based on configuration
+    from src.backend.core.config import settings
+    from src.backend.crew_ai.library_context import get_library_context
+    
+    # Use provided library_type or fall back to config setting
+    if library_type is None:
+        library_type = settings.ROBOT_LIBRARY
+    
+    logger.info(f"🔧 Loading library context for: {library_type}")
+    library_context = get_library_context(library_type)
+    logger.info(f"✅ Loaded {library_context.library_name} context with dynamic keywords")
+    
+    # Initialize agents and tasks with library context
+    agents = RobotAgents(model_provider, model_name, library_context)
+    tasks = RobotTasks(library_context)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
     step_planner_agent = agents.step_planner_agent()

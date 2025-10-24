@@ -7,6 +7,60 @@ logger = logging.getLogger(__name__)
 
 
 class RobotTasks:
+    def __init__(self, library_context=None):
+        """
+        Initialize Robot Framework tasks.
+        
+        Args:
+            library_context: LibraryContext instance (optional, for dynamic library knowledge)
+        """
+        self.library_context = library_context
+    
+    def _get_keyword_guidelines(self) -> str:
+        """Get keyword guidelines from library context or use defaults."""
+        if self.library_context:
+            # Use dynamic keywords from library context
+            return self.library_context.planning_context
+        else:
+            # Fallback to basic guidelines (backward compatibility)
+            return """
+            *   `Open Browser`: For starting a new browser session.
+            *   `Input Text`: For typing text into input fields.
+            *   `Press Keys`: For pressing keyboard keys (e.g., ENTER, TAB, ESC).
+            *   `Click Element`: For clicking buttons, links, etc.
+            *   `Get Text`: For retrieving text from an element.
+            *   `Close Browser`: For ending the test session.
+            
+            --- SEARCH OPTIMIZATION ---
+            *   For search operations: Use `Press Keys` with `RETURN` after `Input Text`.
+            """
+    
+    def _get_code_structure_template(self) -> str:
+        """Get code structure template from library context or use defaults."""
+        if self.library_context:
+            # Use dynamic code structure from library context
+            return self.library_context.code_assembly_context
+        else:
+            # Fallback to basic SeleniumLibrary structure (backward compatibility)
+            return """
+            --- MANDATORY STRUCTURE ---
+            ```robot
+            *** Settings ***
+            Library    SeleniumLibrary
+            Library    BuiltIn
+
+            *** Variables ***
+            ${browser}    chrome
+            ${options}    add_argument("--headless")
+
+            *** Test Cases ***
+            Generated Test
+                Open Browser    <url>    ${browser}    options=${options}
+                # Test steps here
+                Close Browser
+            ```
+            """
+    
     def plan_steps_task(self, agent, query) -> Task:
         return Task(
             description=f"""
@@ -57,15 +111,7 @@ class RobotTasks:
             4.  **User Intent Only:** ONLY create steps for what the user explicitly asked for.
 
             --- KEYWORD GUIDELINES ---
-            *   `Open Browser`: For starting a new browser session.
-            *   `Input Text`: For typing text into input fields.
-            *   `Press Keys`: For pressing keyboard keys (e.g., ENTER, TAB, ESC). Use this for search boxes instead of clicking buttons.
-            *   `Click Element`: For clicking buttons, links, etc. Only use if keyboard action won't work.
-            *   `Get Text`: For retrieving text from an element to be stored or validated.
-            *   `Select From List By Value`: For selecting an option from a dropdown menu.
-            *   `Wait Until Element Is Visible`: For waiting for dynamic content to appear.
-            *   `Close Browser`: For ending the test session.
-            *   `Should Be True`: For validation assertions with conditions.
+            {self._get_keyword_guidelines()}
             
             --- SEARCH OPTIMIZATION RULES ---
             *   For search operations: After `Input Text` into search box, use `Press Keys` with `RETURN` (Enter key) instead of finding/clicking a search button.
@@ -415,25 +461,7 @@ class RobotTasks:
                 "Assemble the final Robot Framework code from the structured steps provided in the context. "
                 "The context will be the output of the 'identify_elements_task'.\n\n"
 
-                "--- CRITICAL: MANDATORY STRUCTURE ---\n"
-                "Your output MUST follow this exact structure:\n\n"
-                "```robot\n"
-                "*** Settings ***\n"
-                "Library    SeleniumLibrary\n"
-                "Library    BuiltIn\n\n"
-
-                "*** Variables ***\n"
-                "# Browser configuration (ALWAYS declare these if used in Open Browser)\n"
-                "${browser}    chrome\n"
-                "${options}    add_argument(\"--headless\");add_argument(\"--no-sandbox\");add_argument(\"--incognito\")\n"
-                "# Add other variables here\n\n"
-
-                "*** Test Cases ***\n"
-                "Generated Test\n"
-                "    Open Browser    <url>    ${browser}    options=${options}\n"
-                "    # Test steps here\n"
-                "    Close Browser\n"
-                "```\n\n"
+                f"{self._get_code_structure_template()}\n\n"
 
                 "--- CRITICAL: VARIABLE DECLARATION RULES ---\n"
                 "1. **ALWAYS include *** Variables *** section** (even if empty)\n"
@@ -520,11 +548,11 @@ class RobotTasks:
                 "`    FOR    ${link}    IN    @{links}`\n"
                 "`        Click Element    ${link}`\n"
                 "`    END`\n\n"
-                "--- LIBRARIES TO INCLUDE ---\n"
-                "Always include these libraries in the Settings section:\n"
-                "- SeleniumLibrary (for web automation)\n"
-                "- BuiltIn (for basic Robot Framework keywords like Should Be True, Evaluate)\n"
-                "- String (if string manipulation is needed)\n\n"
+                f"--- LIBRARIES TO INCLUDE ---\n"
+                f"Always include these libraries in the Settings section:\n"
+                f"- {self.library_context.library_name if self.library_context else 'SeleniumLibrary'} (for web automation)\n"
+                f"- BuiltIn (for basic Robot Framework keywords like Should Be True, Evaluate)\n"
+                f"- String (if string manipulation is needed)\n\n"
                 "--- CRITICAL RULES ---\n"
                 "1. You MUST respond with ONLY the raw Robot Framework code.\n"
                 "2. The code should start with '*** Settings ***' or '*** Test Cases ***'.\n"
@@ -537,22 +565,33 @@ class RobotTasks:
         )
 
     def validate_code_task(self, agent) -> Task:
+        # Get library-specific validation rules
+        validation_rules = ""
+        if self.library_context:
+            validation_rules = f"\n\n{self.library_context.validation_context}\n\n"
+        else:
+            # Fallback validation rules
+            validation_rules = """
+                --- VALIDATION CHECKLIST ---
+                1. All required libraries are imported (SeleniumLibrary, BuiltIn, String if needed)
+                2. All keywords have the correct number of arguments
+                3. Variables are properly declared before use
+                4. Should Be True statements have valid expressions
+                5. Run Keyword If statements have proper syntax
+                6. Price/numeric comparisons use proper conversion (Evaluate)
+
+                --- COMMON ERRORS TO CHECK ---
+                1. Get Text without locator argument
+                2. Invalid expressions in Should Be True
+                3. Missing variable assignments (${var}=)
+                4. Incorrect conditional syntax
+                """
+        
         return Task(
             description=(
                 "Validate the generated Robot Framework code for correctness and adherence to critical rules. "
                 "The context will be the output of the 'assemble_code_task'.\n\n"
-                "--- VALIDATION CHECKLIST ---\n"
-                "1. All required libraries are imported (SeleniumLibrary, BuiltIn, String if needed)\n"
-                "2. All keywords have the correct number of arguments\n"
-                "3. Variables are properly declared before use\n"
-                "4. Should Be True statements have valid expressions\n"
-                "5. Run Keyword If statements have proper syntax\n"
-                "6. Price/numeric comparisons use proper conversion (Evaluate)\n\n"
-                "--- COMMON ERRORS TO CHECK ---\n"
-                "1. Get Text without locator argument\n"
-                "2. Invalid expressions in Should Be True\n"
-                "3. Missing variable assignments (${var}=)\n"
-                "4. Incorrect conditional syntax\n\n"
+                f"{validation_rules}"
                 "--- CRITICAL RULES ---\n"
                 "1. You MUST respond with ONLY a single, valid JSON object.\n"
                 "2. Do NOT include any introductory text, natural language explanations, or markdown formatting like ```json.\n"

@@ -51,13 +51,27 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 
 class RobotAgents:
-    def __init__(self, model_provider, model_name):
+    def __init__(self, model_provider, model_name, library_context=None):
+        """
+        Initialize Robot Framework agents.
+        
+        Args:
+            model_provider: "local" or "online"
+            model_name: Model identifier
+            library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
+        """
         self.llm = get_llm(model_provider, model_name)
+        self.library_context = library_context
 
     def step_planner_agent(self) -> Agent:
+        # Get library-specific context if available
+        library_knowledge = ""
+        if self.library_context:
+            library_knowledge = f"\n\n{self.library_context.planning_context}"
+        
         return Agent(
             role="Test Automation Planner",
-            goal="Break down a natural language query into a structured series of high-level test steps for Robot Framework. ONLY include elements and actions explicitly mentioned in the user's query.",
+            goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {self.library_context.library_name if self.library_context else 'Robot Framework'}. ONLY include elements and actions explicitly mentioned in the user's query.",
             backstory=(
                 "You are an expert test automation planner with a strict focus on user requirements. "
                 "Your task is to analyze the user's query and convert ONLY the explicitly mentioned actions into structured test steps. "
@@ -69,6 +83,7 @@ class RobotAgents:
                 "5. If user says 'search for shoes', create steps for: search input + enter. Nothing else.\n"
                 "6. If user says 'get product name', create step for: get product name. Nothing else.\n"
                 "7. Be meticulous but ONLY for what user explicitly asked for."
+                f"{library_knowledge}"
             ),
             llm=self.llm,
             verbose=True,
@@ -277,20 +292,40 @@ class RobotAgents:
         )
 
     def code_assembler_agent(self) -> Agent:
+        # Get library-specific context if available
+        library_knowledge = ""
+        if self.library_context:
+            library_knowledge = f"\n\n{self.library_context.code_assembly_context}"
+        
         return Agent(
             role="Robot Framework Code Assembler",
-            goal="Assemble the final Robot Framework code from structured steps.",
-            backstory="You are a meticulous code assembler. Your task is to take a list of structured test steps and assemble them into a complete and syntactically correct Robot Framework test case. You must ensure the code is clean, readable, and follows the standard Robot Framework syntax.",
+            goal=f"Assemble the final Robot Framework code from structured steps using {self.library_context.library_name if self.library_context else 'Robot Framework'}.",
+            backstory=(
+                "You are a meticulous code assembler. Your task is to take a list of structured test steps "
+                "and assemble them into a complete and syntactically correct Robot Framework test case. "
+                "You must ensure the code is clean, readable, and follows the standard Robot Framework syntax."
+                f"{library_knowledge}"
+            ),
             llm=self.llm,
             verbose=True,
             allow_delegation=False,
         )
 
     def code_validator_agent(self) -> Agent:
+        # Get library-specific context if available
+        library_knowledge = ""
+        if self.library_context:
+            library_knowledge = f"\n\n{self.library_context.validation_context}"
+        
         return Agent(
             role="Robot Framework Linter and Quality Assurance Engineer",
-            goal="Validate the generated Robot Framework code for correctness and adherence to critical rules.",
-            backstory="You are an expert Robot Framework linter. Your sole task is to validate the provided Robot Framework code for syntax errors, correct keyword usage, and adherence to critical rules. You must be thorough and provide a clear validation result.",
+            goal=f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules.",
+            backstory=(
+                "You are an expert Robot Framework linter. Your sole task is to validate the provided "
+                "Robot Framework code for syntax errors, correct keyword usage, and adherence to critical rules. "
+                "You must be thorough and provide a clear validation result."
+                f"{library_knowledge}"
+            ),
             llm=self.llm,
             verbose=True,
             allow_delegation=False,
