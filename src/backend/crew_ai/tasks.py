@@ -10,12 +10,12 @@ class RobotTasks:
     def __init__(self, library_context=None):
         """
         Initialize Robot Framework tasks.
-        
+
         Args:
             library_context: LibraryContext instance (optional, for dynamic library knowledge)
         """
         self.library_context = library_context
-    
+
     def _get_keyword_guidelines(self) -> str:
         """Get keyword guidelines from library context or use defaults."""
         if self.library_context:
@@ -34,7 +34,7 @@ class RobotTasks:
             --- SEARCH OPTIMIZATION ---
             *   For search operations: Use `Press Keys` with `RETURN` after `Input Text`.
             """
-    
+
     def _get_code_structure_template(self) -> str:
         """Get code structure template from library context or use defaults."""
         if self.library_context:
@@ -60,7 +60,72 @@ class RobotTasks:
                 Close Browser
             ```
             """
-    
+
+    def _get_browser_init_instructions(self) -> str:
+        """Get library-specific browser initialization instructions."""
+        if self.library_context:
+            params = self.library_context.browser_init_params
+            library_name = self.library_context.library_name
+
+            if library_name == "Browser":
+                # Browser Library uses New Browser
+                param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
+                return f"""
+    - For Browser Library: Use "New Browser" keyword
+    - Include these parameters: {param_list}
+    - Example: {{"keyword": "New Browser", "browser": "{params.get('browser', 'chromium')}", "headless": "{params.get('headless', 'True')}"}}
+    - DO NOT include 'options' parameter for Browser Library
+                """
+            else:
+                # SeleniumLibrary uses Open Browser
+                param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
+                return f"""
+    - For SeleniumLibrary: Use "Open Browser" keyword
+    - Include these parameters: {param_list}
+    - Example: {{"keyword": "Open Browser", "value": "<url>", "browser": "{params.get('browser', 'chrome')}", "options": "{params.get('options', '')}"}}
+                """
+        else:
+            # Fallback for backward compatibility
+            logger.warning(
+                "No library context available, using SeleniumLibrary defaults")
+            return """
+    - Use "Open Browser" keyword with browser=chrome and options parameters
+    - Example: {"keyword": "Open Browser", "value": "<url>", "browser": "chrome", "options": "add_argument(\\"--headless\\")"}
+            """
+
+    def _get_viewport_instructions(self) -> str:
+        """Get viewport configuration instructions if needed."""
+        if self.library_context and self.library_context.requires_viewport_config:
+            return f"""
+--- VIEWPORT CONFIGURATION (CRITICAL FOR {self.library_context.library_name.upper()}) ---
+
+**MANDATORY**: After "New Browser" and before "New Page", you MUST add:
+{self.library_context.get_viewport_config_code()}
+
+**Why**: Browser Library uses a small default viewport (800x600) which causes:
+- Elements outside viewport are not detected
+- Locators fail to find elements
+- Tests fail with "element not found" errors
+
+**Correct Order**:
+1. New Browser    ${{browser}}    headless=${{headless}}
+2. New Context    viewport=None    ← REQUIRED
+3. New Page    ${{url}}
+
+**Example**:
+```robot
+*** Test Cases ***
+Generated Test
+    New Browser    chromium    headless=True
+    New Context    viewport=None
+    New Page    https://example.com
+    # Test steps here
+```
+
+**CRITICAL**: viewport=None uses full browser window size, ensuring all elements are visible.
+            """
+        return ""
+
     def plan_steps_task(self, agent, query) -> Task:
         return Task(
             description=f"""
@@ -139,7 +204,8 @@ class RobotTasks:
             3.  For validation steps, use "Should Be True" keyword with a "condition_expression" key.
             4.  The keys `condition_type`, `condition_value`, `loop_type`, and `loop_source` are OPTIONAL and should only be included for steps with conditional logic or loops.
             5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
-            6.  When generating an "Open Browser" step, you MUST also include the `browser=chrome` argument and options to ensure a clean session. Use `options=add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")`.
+            6.  When generating a browser initialization step, you MUST include library-specific parameters:
+            {self._get_browser_init_instructions()}
             7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "RETURN" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
             8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 
@@ -463,6 +529,8 @@ class RobotTasks:
 
                 f"{self._get_code_structure_template()}\n\n"
 
+                f"{self._get_viewport_instructions()}\n\n"
+
                 "--- CRITICAL: VARIABLE DECLARATION RULES ---\n"
                 "1. **ALWAYS include *** Variables *** section** (even if empty)\n"
                 "2. **Declare ALL variables before use:**\n"
@@ -586,7 +654,7 @@ class RobotTasks:
                 3. Missing variable assignments (${var}=)
                 4. Incorrect conditional syntax
                 """
-        
+
         return Task(
             description=(
                 "Validate the generated Robot Framework code for correctness and adherence to critical rules. "

@@ -15,19 +15,19 @@ logger = logging.getLogger(__name__)
 
 class SeleniumLibraryContext(LibraryContext):
     """Context provider for SeleniumLibrary with dynamic keyword extraction."""
-    
+
     def __init__(self):
         """Initialize with dynamic documentation extractor."""
         self._doc_extractor = DynamicLibraryDocumentation("SeleniumLibrary")
-    
+
     @property
     def library_name(self) -> str:
         return "SeleniumLibrary"
-    
+
     @property
     def library_import(self) -> str:
         return "Library    SeleniumLibrary"
-    
+
     @property
     def planning_context(self) -> str:
         """
@@ -35,12 +35,13 @@ class SeleniumLibraryContext(LibraryContext):
         Combines dynamic keywords with static best practices.
         """
         # Get dynamic keywords from installed library (top 25 most common)
-        dynamic_keywords = self._doc_extractor.get_keywords_summary(max_keywords=25)
-        
+        dynamic_keywords = self._doc_extractor.get_keywords_summary(
+            max_keywords=25)
+
         # Add complete keyword list (lightweight - just names)
         from .dynamic_context import get_all_keywords_list
         all_keywords = get_all_keywords_list("SeleniumLibrary")
-        
+
         # Add static best practices
         best_practices = """
 
@@ -67,9 +68,9 @@ class SeleniumLibraryContext(LibraryContext):
 - xpath=<expression>  → Find by XPath
 - css=<selector>      → Find by CSS selector
 """
-        
+
         return dynamic_keywords + all_keywords + best_practices
-    
+
     @property
     def code_assembly_context(self) -> str:
         """Context for Code Assembler Agent - extracted from existing tasks.py"""
@@ -95,6 +96,8 @@ Generated Test
     # Test steps here
     Close Browser
 ```
+
+**CRITICAL: SeleniumLibrary MUST use options=${options} parameter in Open Browser keyword**
 
 **VARIABLE DECLARATION RULES:**
 1. ALL variables must be declared in *** Variables *** section
@@ -162,7 +165,39 @@ Use FOR loops for iteration:
 4. Include proper indentation (4 spaces)
 5. Add documentation to test cases
 """
-    
+
+    @property
+    def browser_init_params(self) -> dict:
+        """
+        Return browser initialization parameters for SeleniumLibrary.
+
+        Returns:
+            dict: Dictionary with 'browser' and 'options' parameters
+        """
+        return {
+            'browser': 'chrome',
+            'options': 'add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")'
+        }
+
+    @property
+    def requires_viewport_config(self) -> bool:
+        """
+        SeleniumLibrary does not require explicit viewport configuration.
+
+        Returns:
+            bool: False - SeleniumLibrary manages viewport automatically
+        """
+        return False
+
+    def get_viewport_config_code(self) -> str:
+        """
+        Return viewport configuration code for SeleniumLibrary.
+
+        Returns:
+            str: Empty string - SeleniumLibrary doesn't need viewport config
+        """
+        return ""
+
     @property
     def validation_context(self) -> str:
         """Context for Code Validator Agent - extracted from existing tasks.py"""

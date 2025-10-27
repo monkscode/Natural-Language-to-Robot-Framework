@@ -176,69 +176,6 @@ class DynamicLibraryDocumentation:
             logger.warning(f"Could not generate keywords summary: {e}")
             return f"--- {self.library_name.upper()} KEYWORDS ---\n\nCould not load dynamic documentation.\n"
     
-    def get_keyword_details(self, keyword_name: str) -> Optional[Dict]:
-        """
-        Get detailed information about a specific keyword.
-        
-        Args:
-            keyword_name: Name of the keyword
-            
-        Returns:
-            Dictionary with keyword details or None if not found
-        """
-        try:
-            doc_data = self.get_library_documentation()
-            keywords = doc_data.get('keywords', [])
-            
-            for kw in keywords:
-                if kw['name'].lower() == keyword_name.lower():
-                    return kw
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Could not get keyword details: {e}")
-            return None
-    
-    def get_locator_format_guide(self) -> str:
-        """
-        Extract locator format information from library documentation.
-        
-        Returns:
-            Formatted string with locator format guide
-        """
-        try:
-            doc_data = self.get_library_documentation()
-            intro = doc_data.get('doc', '')
-            
-            # Look for locator-related documentation
-            if 'locator' in intro.lower() or 'selector' in intro.lower():
-                # Extract relevant sections
-                lines = intro.split('\n')
-                locator_lines = []
-                in_locator_section = False
-                
-                for line in lines:
-                    if 'locator' in line.lower() or 'selector' in line.lower():
-                        in_locator_section = True
-                    
-                    if in_locator_section:
-                        locator_lines.append(line)
-                        
-                        # Stop after a reasonable amount
-                        if len(locator_lines) > 20:
-                            break
-                
-                if locator_lines:
-                    return '\n'.join(locator_lines)
-            
-            # Fallback: generic guide
-            return self._get_generic_locator_guide()
-            
-        except Exception as e:
-            logger.warning(f"Could not extract locator guide: {e}")
-            return self._get_generic_locator_guide()
-    
     def _get_generic_locator_guide(self) -> str:
         """Fallback locator guide if extraction fails."""
         if self.library_name == 'Browser':
@@ -259,25 +196,6 @@ class DynamicLibraryDocumentation:
 - xpath=<expression>  → Find by XPath
 - css=<selector>      → Find by CSS
 """
-
-
-def get_dynamic_keywords(library_name: str, max_keywords: int = 20) -> str:
-    """
-    Convenience function to get keyword summary for a library.
-    
-    Args:
-        library_name: Name of the Robot Framework library
-        max_keywords: Maximum number of keywords to include
-        
-    Returns:
-        Formatted keyword documentation string
-    """
-    try:
-        doc_extractor = DynamicLibraryDocumentation(library_name)
-        return doc_extractor.get_keywords_summary(max_keywords)
-    except Exception as e:
-        logger.error(f"Failed to get dynamic keywords for {library_name}: {e}")
-        return f"--- {library_name.upper()} KEYWORDS ---\n\nFailed to load documentation: {str(e)}\n"
 
 
 def get_all_keywords_list(library_name: str) -> str:

@@ -29,6 +29,23 @@ class BrowserLibraryContext(LibraryContext):
         return "Library    Browser"
 
     @property
+    def browser_init_params(self) -> dict:
+        """Return browser initialization parameters for Browser Library."""
+        return {
+            'browser': 'chromium',
+            'headless': 'True'
+        }
+
+    @property
+    def requires_viewport_config(self) -> bool:
+        """Browser Library requires explicit viewport configuration."""
+        return True
+
+    def get_viewport_config_code(self) -> str:
+        """Return viewport configuration code for Browser Library."""
+        return "    New Context    viewport=None"
+
+    @property
     def planning_context(self) -> str:
         """
         Context for Step Planner Agent.
@@ -99,10 +116,20 @@ ${headless}    True
 Generated Test
     [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
+    New Context    viewport=None
     New Page    ${url}
     # Test steps here
     Close Browser
 ```
+
+**CRITICAL: VIEWPORT CONFIGURATION**
+Browser Library uses a small default viewport (800x600) which causes element detection failures.
+You MUST include "New Context    viewport=None" after "New Browser" and before "New Page".
+
+**Correct Order:**
+1. New Browser    ${browser}    headless=${headless}
+2. New Context    viewport=None    ← REQUIRED
+3. New Page    ${url}
 
 **VARIABLE DECLARATION RULES:**
 1. ALL variables must be declared in *** Variables *** section
@@ -112,8 +139,14 @@ Generated Test
 
 **KEYWORD SYNTAX:**
 
-New Browser + New Page:
+New Browser (NO options parameter):
     New Browser    chromium    headless=True
+    Note: Browser Library uses 'browser' and 'headless' parameters, NOT 'options'
+
+New Context (viewport configuration):
+    New Context    viewport=None
+
+New Page:
     New Page    <url>
 
 Fill Text:
@@ -136,10 +169,12 @@ Close Browser:
     Close Browser
 
 **CRITICAL RULES:**
-1. Always use New Browser before New Page
-2. Browser Library auto-waits, so explicit waits are rarely needed
-3. Locators can be CSS selectors without prefix
-4. Text and role selectors are preferred for stability
+1. Always use New Browser before New Context before New Page
+2. MUST include "New Context    viewport=None" for proper element detection
+3. Browser Library uses 'browser' and 'headless' parameters (NOT 'options')
+4. Browser Library auto-waits, so explicit waits are rarely needed
+5. Locators can be CSS selectors without prefix
+6. Text and role selectors are preferred for stability
 """
 
     @property
