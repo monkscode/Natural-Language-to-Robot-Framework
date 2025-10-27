@@ -234,63 +234,6 @@ class RobotAgents:
             allow_delegation=False,
         )
 
-    def popup_strategy_agent(self) -> Agent:
-        return Agent(
-            role="Popup Interference Strategy Analyzer",
-            goal="Analyze the user's query and website context to determine which popups/modals need dismissal and which can be ignored",
-            backstory=(
-                "You are an expert at understanding web automation task requirements and "
-                "distinguishing between essential UI interactions and distractions. "
-                "\n\nYour responsibility is to analyze the user's task and determine:\n"
-                "1. Does this task require user login? (e.g., 'add to cart', 'checkout', 'view orders')\n"
-                "2. Does this task require cookie consent? (e.g., form submission, account actions)\n"
-                "3. Can this task be completed without dismissing certain popups?\n"
-                "\n**EXAMPLES OF YOUR ANALYSIS:**\n"
-                "\nExample 1: Search Task (NO LOGIN NEEDED)\n"
-                "Query: 'Search for shoes on Flipkart and get the first product name'\n"
-                "Analysis:\n"
-                "- Task: Public search and data extraction\n"
-                "- Login required: NO (search is public)\n"
-                "- Cookie consent: NO (reading data only)\n"
-                "- Strategy: Dismiss login popup if blocking, ignore newsletter\n"
-                "\nExample 2: Cart Task (LOGIN NEEDED)\n"
-                "Query: 'Add product to cart and proceed to checkout'\n"
-                "Analysis:\n"
-                "- Task: Requires user session\n"
-                "- Login required: YES (cart requires account)\n"
-                "- Cookie consent: YES (session management)\n"
-                "- Strategy: DO NOT dismiss login popup, accept cookies\n"
-                "\nExample 3: Price Comparison (NO INTERACTION NEEDED)\n"
-                "Query: 'Compare prices of iPhone on Amazon and Flipkart'\n"
-                "Analysis:\n"
-                "- Task: Read-only data extraction\n"
-                "- Login required: NO\n"
-                "- Cookie consent: NO\n"
-                "- Strategy: Dismiss all popups blocking content\n"
-                "\n**YOUR OUTPUT FORMAT:**\n"
-                "You must return ONLY a valid JSON object with these keys:\n"
-                "```json\n"
-                "{\n"
-                "    \"task_requires_login\": false,\n"
-                "    \"task_requires_cookies\": false,\n"
-                "    \"dismiss_login_popup\": true,\n"
-                "    \"dismiss_cookie_consent\": false,\n"
-                "    \"dismiss_promotional_popups\": true,\n"
-                "    \"reasoning\": \"User wants to search for shoes which is a public action. Login popup will block the search box, so it must be dismissed. Cookie consent is not needed for reading search results.\"\n"
-                "}\n"
-                "```\n"
-                "\n**RULES:**\n"
-                "- Be conservative: If unsure, set dismiss flags to true (better to dismiss than block user's task)\n"
-                "- Focus on user's goal: 'Search' = public, 'Checkout' = requires login\n"
-                "- Promotional popups: Always safe to dismiss (newsletters, offers, app installs)\n"
-                "- Return ONLY valid JSON, no markdown, no explanation outside JSON\n"
-            ),
-            tools=[],  # This is an analysis agent, no tools needed
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=False,
-        )
-
     def code_assembler_agent(self) -> Agent:
         # Get library-specific context if available
         library_knowledge = ""
