@@ -83,9 +83,39 @@ AI-powered browser automation:
 ### 3. Library Context System
 
 Dynamic code generation for different Robot Framework libraries:
-- SeleniumLibrary support
-- Browser Library support
-- Extensible for future libraries
+
+**Supported Libraries:**
+- **Browser Library (Playwright)** - Recommended for modern websites
+- **SeleniumLibrary** - Legacy support for compatibility
+
+**Key Features:**
+- Dynamic keyword extraction from installed libraries
+- Library-specific best practices and templates
+- Automatic syntax adaptation
+- Extensible architecture for future libraries
+
+**How it works:**
+1. Configuration specifies library (`ROBOT_LIBRARY=browser` or `selenium`)
+2. Library context loaded at startup
+3. AI agents receive library-specific instructions
+4. Generated code uses correct keywords and syntax
+5. Validation ensures library-specific correctness
+
+**Example - Same query, different libraries:**
+
+*Browser Library output:*
+```robot
+New Browser    chromium    headless=False
+New Context    viewport=None
+New Page    https://example.com
+Fill Text    name=q    search term
+```
+
+*SeleniumLibrary output:*
+```robot
+Open Browser    https://example.com    chrome
+Input Text    name=q    search term
+```
 
 ### 4. Docker Execution
 
@@ -108,11 +138,14 @@ Isolated test execution:
 
 - **Backend**: FastAPI (Python)
 - **AI Framework**: CrewAI (multi-agent orchestration)
-- **LLM**: Google Gemini or Ollama
-- **Browser Automation**: BrowserUse (AI vision)
+- **LLM**: Google Gemini or Ollama (local)
+- **Browser Automation**: BrowserUse (AI vision with Playwright)
 - **Test Framework**: Robot Framework
 - **Containerization**: Docker
-- **Libraries**: SeleniumLibrary, Browser Library
+- **Test Libraries**: 
+  - Browser Library (Playwright) - Recommended
+  - SeleniumLibrary - Legacy support
+- **Locator Validation**: Playwright (for Browser Library) or JavaScript (for SeleniumLibrary)
 
 ## Key Design Decisions
 
@@ -163,6 +196,55 @@ Future improvements:
 - Docker isolation for execution
 - Optional local AI models (Ollama)
 
+## Library Context Architecture
+
+Mark 1 uses a flexible library context system to support multiple Robot Framework libraries:
+
+```
+src/backend/crew_ai/library_context/
+├── base.py                    # Abstract base class
+├── browser_context.py         # Browser Library (Playwright)
+├── selenium_context.py        # SeleniumLibrary
+├── dynamic_context.py         # Dynamic keyword extraction
+└── __init__.py               # Factory function
+```
+
+**Adding a new library:**
+
+1. Create new context class:
+```python
+# my_library_context.py
+from .base import LibraryContext
+
+class MyLibraryContext(LibraryContext):
+    @property
+    def library_name(self) -> str:
+        return "MyLibrary"
+    
+    @property
+    def planning_context(self) -> str:
+        return "Keywords and best practices..."
+    
+    # Implement other required methods
+```
+
+2. Register in factory:
+```python
+# __init__.py
+def get_library_context(library_type: str):
+    if library_type == "mylibrary":
+        return MyLibraryContext()
+```
+
+3. Update configuration:
+```python
+# config.py
+@validator('ROBOT_LIBRARY')
+def validate_robot_library(cls, v):
+    if v.lower() not in ['selenium', 'browser', 'mylibrary']:
+        raise ValueError(...)
+```
+
 ## Extension Points
 
 Mark 1 is designed to be extensible:
@@ -170,18 +252,23 @@ Mark 1 is designed to be extensible:
 1. **New Robot Framework Libraries**
    - Add library context in `library_context/`
    - Implement LibraryContext interface
+   - Update configuration validator
+   - Example: AppiumLibrary for mobile testing
 
 2. **New AI Models**
    - Configure in `.env`
    - Supported via LiteLLM
+   - Example: Claude, GPT-4, local models
 
 3. **Custom Agents**
    - Add to `agents.py`
    - Integrate in workflow
+   - Example: Performance testing agent
 
 4. **New Test Types**
    - Extend agent capabilities
    - Add new task definitions
+   - Example: API testing, mobile testing
 
 ## Learn More
 

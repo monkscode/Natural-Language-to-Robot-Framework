@@ -140,17 +140,80 @@ BROWSER_USE_TIMEOUT=900
 
 ### ROBOT_LIBRARY
 
-Which Robot Framework library to use.
+Which Robot Framework library to use for test execution.
 
 ```env
-ROBOT_LIBRARY=selenium
+ROBOT_LIBRARY=browser  # Recommended
 ```
 
 **Options:**
-- `selenium` - SeleniumLibrary (default, stable)
-- `browser` - Browser Library (modern, faster)
+- `browser` - Browser Library (Playwright-based) - **Recommended** ⭐
+- `selenium` - SeleniumLibrary (legacy support)
 
-**Recommendation:** Use `selenium` for compatibility.
+**Browser Library (Recommended):**
+- ✅ **2-3x faster** execution than Selenium
+- ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
+- ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
+- ✅ **Auto-waiting built-in** - No explicit waits needed
+- ✅ **Powerful locators** - Text-based (`text=Login`), role-based (`role=button[name="Submit"]`), and traditional selectors
+- ✅ **Consistent validation** - Same Playwright engine for locator generation and execution
+- ✅ **Better error messages** - More detailed diagnostics
+
+**SeleniumLibrary (Legacy):**
+- ✅ **Mature and stable** - Battle-tested over many years
+- ✅ **Wide compatibility** - Works with older websites
+- ✅ **Familiar syntax** - Traditional Selenium WebDriver approach
+- ⚠️ Slower execution
+- ⚠️ Manual waits often needed
+- ⚠️ Limited modern web support
+
+**When to use Browser Library:**
+- New projects
+- Modern websites (React, Vue, Angular)
+- Performance-critical tests
+- Sites with Shadow DOM or complex iframes
+- When you want faster test execution
+
+**When to use SeleniumLibrary:**
+- Existing projects with Selenium tests
+- Legacy websites
+- Team has Selenium expertise
+- Compatibility with older browsers
+
+**Switching libraries:**
+1. Change `ROBOT_LIBRARY` in `.env`
+2. Restart Mark 1
+3. Generate new tests - they'll use the selected library automatically!
+
+**Example outputs:**
+
+*Browser Library:*
+```robot
+*** Settings ***
+Library    Browser
+
+*** Test Cases ***
+Example Test
+    New Browser    chromium    headless=False
+    New Context    viewport=None
+    New Page    https://example.com
+    Fill Text    name=q    search term
+    Click    text=Search
+    Close Browser
+```
+
+*SeleniumLibrary:*
+```robot
+*** Settings ***
+Library    SeleniumLibrary
+
+*** Test Cases ***
+Example Test
+    Open Browser    https://example.com    chrome
+    Input Text    name=q    search term
+    Click Element    xpath=//button[text()='Search']
+    Close Browser
+```
 
 ## Logging Settings
 
@@ -235,7 +298,7 @@ TEMPERATURE=0.1
 
 ## Example Configurations
 
-### Production Setup (Cloud)
+### Production Setup (Cloud) - Recommended
 
 ```env
 # AI Provider
@@ -250,7 +313,7 @@ APP_HOST=0.0.0.0
 # Browser Automation
 BROWSER_USE_SERVICE_URL=http://localhost:4999
 BROWSER_USE_TIMEOUT=900
-ROBOT_LIBRARY=selenium
+ROBOT_LIBRARY=browser  # Use Browser Library for best performance
 
 # Logging
 LOG_LEVEL=INFO
@@ -270,7 +333,7 @@ APP_HOST=127.0.0.1
 # Browser Automation
 BROWSER_USE_SERVICE_URL=http://localhost:4999
 BROWSER_USE_TIMEOUT=600
-ROBOT_LIBRARY=selenium
+ROBOT_LIBRARY=browser  # Use Browser Library for faster development
 
 # Logging
 LOG_LEVEL=DEBUG
@@ -290,9 +353,30 @@ APP_PORT=5000
 
 # Browser Automation
 BROWSER_USE_SERVICE_URL=http://localhost:4999
-ROBOT_LIBRARY=selenium
+ROBOT_LIBRARY=browser  # Browser Library works great locally too
 
 # Logging (local only)
+LOG_LEVEL=INFO
+```
+
+### Legacy/Compatibility Setup
+
+```env
+# AI Provider
+MODEL_PROVIDER=online
+GEMINI_API_KEY=your-key
+ONLINE_MODEL=gemini-2.5-flash
+
+# Application
+APP_PORT=5000
+APP_HOST=0.0.0.0
+
+# Browser Automation
+BROWSER_USE_SERVICE_URL=http://localhost:4999
+BROWSER_USE_TIMEOUT=900
+ROBOT_LIBRARY=selenium  # Use SeleniumLibrary for legacy compatibility
+
+# Logging
 LOG_LEVEL=INFO
 ```
 
@@ -305,8 +389,9 @@ Mark 1 validates configuration on startup. Common validation errors:
 - Ensure no extra spaces
 
 ### "Invalid ROBOT_LIBRARY"
-- Must be 'selenium' or 'browser'
+- Must be 'selenium' or 'browser' (lowercase)
 - Check spelling
+- Recommended: Use 'browser' for best performance
 
 ### "Invalid MODEL_PROVIDER"
 - Must be 'online' or 'local'

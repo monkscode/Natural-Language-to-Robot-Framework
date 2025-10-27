@@ -6,6 +6,7 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 
 ### Getting Started
 - **[Main README](../README.md)** - Quick start and overview
+- **[Library Switching Guide](LIBRARY_SWITCHING_GUIDE.md)** - Switch between Browser Library & Selenium ⚡
 - **[Configuration Guide](CONFIGURATION.md)** - Set up and configure Mark 1
 - **[FAQ](FAQ.md)** - Frequently asked questions
 
@@ -43,6 +44,7 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 ### Configuration
 - [Environment Variables](CONFIGURATION.md#environment-variables)
 - [AI Model Setup](CONFIGURATION.md#core-settings)
+- [Robot Framework Library Selection](CONFIGURATION.md#robot_library) - **Browser vs Selenium**
 - [Docker Configuration](CONFIGURATION.md#docker-settings)
 - [Security Best Practices](CONFIGURATION.md#security-best-practices)
 
@@ -61,6 +63,7 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 ### Understanding Mark 1
 - [System Architecture](ARCHITECTURE.md#system-architecture)
 - [Multi-Agent System](ARCHITECTURE.md#1-multi-agent-ai-system)
+- [Library Context System](ARCHITECTURE.md#library-context-architecture) - **How library switching works**
 - [Technology Stack](ARCHITECTURE.md#technology-stack)
 - [Design Decisions](ARCHITECTURE.md#key-design-decisions)
 

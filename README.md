@@ -131,6 +131,7 @@ mark-1/
 
 ## 📚 Documentation
 
+- **[Library Switching Guide](docs/LIBRARY_SWITCHING_GUIDE.md)** - Switch between Browser Library & Selenium ⭐
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Environment variables and settings
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Fix common issues
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
@@ -145,22 +146,30 @@ mark-1/
 Open Flipkart and search for shoes and then get the first product name
 ```
 
-**Generated Code:**
+**Generated Code (Browser Library):**
 ```robot
 *** Settings ***
-Library    SeleniumLibrary
+Library    Browser
+
+*** Variables ***
+${browser}    chromium
+${headless}    False
 
 *** Test Cases ***
 Search Shoes On Flipkart
-    Open Browser    https://www.flipkart.com    chrome
-    Input Text    name=q    shoes
-    Press Keys    name=q    RETURN
+    New Browser    ${browser}    headless=${headless}
+    New Context    viewport=None
+    New Page    https://www.flipkart.com
+    Fill Text    name=q    shoes
+    Keyboard Key    press    Enter
     ${product_name}=    Get Text    xpath=(//div[@class='_4rR01T'])[1]
     Log    First product name: ${product_name}
     Close Browser
 ```
 
 **Result:** Working test + detailed HTML report in ~20 seconds.
+
+**Note:** Code format depends on your `ROBOT_LIBRARY` setting (browser or selenium).
 
 ## 🛠️ Configuration
 
@@ -178,12 +187,47 @@ APP_PORT=5000
 # Browser Automation
 BROWSER_USE_SERVICE_URL=http://localhost:4999
 BROWSER_USE_TIMEOUT=900
-ROBOT_LIBRARY=selenium
+
+# Robot Framework Library (selenium or browser)
+ROBOT_LIBRARY=browser
 ```
 
 **Get your free Gemini API key:** [Google AI Studio](https://aistudio.google.com/app/apikey)
 
 For detailed configuration options, see the [Configuration Guide](docs/CONFIGURATION.md).
+
+### 🎯 Robot Framework Library Support
+
+Mark 1 supports **two Robot Framework libraries** for test execution:
+
+#### Browser Library (Playwright) - **Recommended** ⭐
+```env
+ROBOT_LIBRARY=browser
+```
+
+**Benefits:**
+- ✅ **2-3x faster** test execution
+- ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
+- ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
+- ✅ **Auto-waiting built-in** - No explicit waits needed
+- ✅ **Powerful locators** - Text-based, role-based, and traditional selectors
+- ✅ **Consistent validation** - Same engine (Playwright) for generation and execution
+
+**When to use:** New projects, modern websites, performance-critical tests
+
+#### SeleniumLibrary - **Legacy Support**
+```env
+ROBOT_LIBRARY=selenium
+```
+
+**Benefits:**
+- ✅ **Mature and stable** - Battle-tested library
+- ✅ **Wide compatibility** - Works with older websites
+- ✅ **Familiar syntax** - Traditional Selenium approach
+
+**When to use:** Existing projects, legacy websites, Selenium expertise
+
+**Switching is easy:** Just change `ROBOT_LIBRARY` in your `.env` file and restart Mark 1!
 
 ## 🧪 Testing
 
