@@ -21,7 +21,7 @@ def cleanup_containers():
             container_name = container.name
             
             # Clean up test-related containers
-            if any(prefix in container_name for prefix in ['robot-test-', 'chrome-healing-', 'test-runner-']):
+            if any(prefix in container_name for prefix in ['robot-test-', 'test-runner-']):
                 try:
                     print(f"   Removing container: {container_name}")
                     container.remove(force=True)
