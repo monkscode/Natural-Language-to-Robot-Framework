@@ -542,12 +542,6 @@ else:
 
 ### 1. Role-Based Specialization
 
----
-
-## Prompt Engineering Techniques
-
-### 1. Role-Based Specialization
-
 **Pattern**:
 ```python
 Agent(
