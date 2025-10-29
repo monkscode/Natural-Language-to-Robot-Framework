@@ -43,10 +43,6 @@ app.add_middleware(
 # --- API Router ---
 app.include_router(api_router)
 
-# --- Monitoring API Router (optional - can be removed if only used for healing) ---
-# from src.backend.api.monitoring_endpoints import router as monitoring_router
-# app.include_router(monitoring_router, prefix="/api")
-
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")

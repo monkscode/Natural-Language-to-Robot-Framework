@@ -1,31 +1,5 @@
-"""Core data models for the test self-healing system."""
+"""Core data models for Natural Language to Robot Framework."""
 
-from .healing_models import (
-    FailureContext,
-    ElementFingerprint,
-    HealingReport,
-    HealingSession,
-    HealingConfiguration,
-    LocatorAttempt,
-    ValidationResult,
-    MatchResult,
-    FailureType,
-    LocatorStrategy,
-    HealingStatus
-)
+# Currently no models are used - this module is a placeholder for future models
 
-# Note: Service classes are imported separately from their respective modules
-
-__all__ = [
-    "FailureContext",
-    "ElementFingerprint", 
-    "HealingReport",
-    "HealingSession",
-    "HealingConfiguration",
-    "LocatorAttempt",
-    "ValidationResult",
-    "MatchResult",
-    "FailureType",
-    "LocatorStrategy",
-    "HealingStatus"
-]
+__all__ = []
