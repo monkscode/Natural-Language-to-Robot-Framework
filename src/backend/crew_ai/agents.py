@@ -36,7 +36,8 @@ def get_llm(model_provider, model_name):
     Returns:
         Cleaned LLM wrapper instance that automatically fixes formatting issues
     """
-    logger.info(f"🧹 Initializing cleaned LLM wrapper for {model_provider}/{model_name}")
+    logger.info(
+        f"🧹 Initializing cleaned LLM wrapper for {model_provider}/{model_name}")
     return get_cleaned_llm(model_provider, model_name)
 
 
@@ -54,7 +55,7 @@ class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None):
         """
         Initialize Robot Framework agents.
-        
+
         Args:
             model_provider: "local" or "online"
             model_name: Model identifier
@@ -68,7 +69,7 @@ class RobotAgents:
         library_knowledge = ""
         if self.library_context:
             library_knowledge = f"\n\n{self.library_context.planning_context}"
-        
+
         return Agent(
             role="Test Automation Planner",
             goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {self.library_context.library_name if self.library_context else 'Robot Framework'}. ONLY include elements and actions explicitly mentioned in the user's query.",
@@ -239,37 +240,121 @@ class RobotAgents:
         library_knowledge = ""
         if self.library_context:
             library_knowledge = f"\n\n{self.library_context.code_assembly_context}"
-        
+
         return Agent(
-            role="Robot Framework Code Assembler",
-            goal=f"Assemble the final Robot Framework code from structured steps using {self.library_context.library_name if self.library_context else 'Robot Framework'}.",
+            role="Robot Framework Code Generator (Output ONLY Code)",
+            goal=f"Generate ONLY raw Robot Framework code using {self.library_context.library_name if self.library_context else 'Robot Framework'}. NO explanations, NO thinking process, ONLY code.",
             backstory=(
-                "You are a meticulous code assembler. Your task is to take a list of structured test steps "
-                "and assemble them into a complete and syntactically correct Robot Framework test case. "
-                "You must ensure the code is clean, readable, and follows the standard Robot Framework syntax."
+                "You are a CODE PRINTER, not a code explainer. Your ONLY job is to output raw Robot Framework code.\n\n"
+                
+                "🚫 **ABSOLUTELY FORBIDDEN IN YOUR OUTPUT** 🚫\n"
+                "You must NEVER include:\n"
+                "❌ Thinking process ('Thought:', 'I will', 'Let me', 'First', 'Now')\n"
+                "❌ Explanations ('From the first step:', 'Also add', 'This is because')\n"
+                "❌ Markdown formatting ('**Variables:**', '```robot', '```')\n"
+                "❌ Numbered lists ('1. New Browser', '2. New Context')\n"
+                "❌ Commentary ('# This does X', except actual Robot Framework comments)\n"
+                "❌ Any text before *** Settings ***\n"
+                "❌ Any text after the last keyword (Close Browser, etc.)\n\n"
+                
+                "✅ **YOUR OUTPUT MUST BE** ✅\n"
+                "ONLY raw Robot Framework code that:\n"
+                "1. Starts IMMEDIATELY with *** Settings *** (first line, first character)\n"
+                "2. Contains ONLY valid Robot Framework syntax\n"
+                "3. Has NO explanatory text anywhere\n"
+                "4. Can be directly saved as a .robot file and executed\n\n"
+                
+                "📋 **EXAMPLE OF CORRECT OUTPUT** 📋\n"
+                "*** Settings ***\n"
+                "Library    Browser\n"
+                "Library    BuiltIn\n\n"
+                "*** Variables ***\n"
+                "${browser}    chromium\n\n"
+                "*** Test Cases ***\n"
+                "Generated Test\n"
+                "    New Browser    ${browser}\n"
+                "    Close Browser\n\n"
+                
+                "❌ **EXAMPLE OF WRONG OUTPUT** ❌\n"
+                "Now, I will assemble the code.*** Settings ***  ← WRONG! No text before ***\n"
+                "**Variables:**  ← WRONG! No markdown headers\n"
+                "From the first step: ...  ← WRONG! No explanations\n\n"
+                
+                "🎯 **REMEMBER** 🎯\n"
+                "You are a CODE PRINTER. Your output is directly saved as a .robot file.\n"
+                "If you include ANY text that is not valid Robot Framework syntax, the file will be broken.\n"
+                "Think of yourself as a printer that can ONLY print code, nothing else.\n\n"
+                
+                "When you receive input, immediately output the code starting with *** Settings ***.\n"
+                "Do NOT explain what you're doing. Do NOT think out loud. Just output the code.\n\n"
+                "**DELEGATION HANDLING:**\n"
+                "You may receive delegation requests from Code Validator with error details. "
+                "When you receive a delegation request:\n"
+                "1. Carefully review the error details and validation feedback provided\n"
+                "2. Identify the specific issues in the previously generated code\n"
+                "3. Regenerate the code with all corrections applied\n"
+                "4. Focus on fixing the exact errors mentioned (syntax, keyword usage, variable assignments, etc.)\n"
+                "5. Preserve all correct parts of the code while fixing only the problematic sections\n"
+                "6. Ensure the regenerated code addresses every error point raised by the validator\n\n"
+                "When processing delegation requests, prioritize:\n"
+                "- Critical syntax errors that prevent code execution\n"
+                "- Incorrect keyword usage for the target library\n"
+                "- Missing variable assignments for keywords that return values\n"
+                "- Proper indentation and formatting\n\n"
+                "Your goal is to learn from validation feedback and produce corrected code that passes validation."
                 f"{library_knowledge}"
             ),
             llm=self.llm,
             verbose=True,
-            allow_delegation=False,
+            allow_delegation=True,
         )
 
     def code_validator_agent(self) -> Agent:
+        # Import settings to access MAX_AGENT_ITERATIONS
+        from ..core.config import settings
+
         # Get library-specific context if available
         library_knowledge = ""
         if self.library_context:
             library_knowledge = f"\n\n{self.library_context.validation_context}"
-        
+
         return Agent(
             role="Robot Framework Linter and Quality Assurance Engineer",
-            goal=f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules.",
+            goal=f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules, and delegate fixes to Code Assembly Agent if errors are found.",
             backstory=(
                 "You are an expert Robot Framework linter. Your sole task is to validate the provided "
                 "Robot Framework code for syntax errors, correct keyword usage, and adherence to critical rules. "
-                "You must be thorough and provide a clear validation result."
+                "You must be thorough and provide a clear validation result.\n\n"
+                "**DELEGATION WORKFLOW:**\n"
+                "When you find errors in the code, you MUST follow this workflow:\n"
+                "1. Identify and document all syntax errors, incorrect keyword usage, and rule violations\n"
+                "2. Create a detailed fix request with:\n"
+                "   - Specific line numbers where errors occur\n"
+                "   - Clear description of each error\n"
+                "   - Examples of correct syntax for each issue\n"
+                "   - Relevant Robot Framework rules being violated\n"
+                "3. Delegate the fix request to the Code Assembly Agent with clear, actionable instructions\n"
+                "4. The Code Assembly Agent will regenerate the code incorporating your feedback\n"
+                "5. You will then validate the regenerated code and repeat if necessary\n\n"
+                "**CRITICAL DELEGATION INSTRUCTIONS:**\n"
+                "When you find errors, create a detailed fix request and delegate to Code Assembly Agent.\n"
+                "Your delegation message should include:\n"
+                "- A summary of all errors found\n"
+                "- Specific corrections needed for each error\n"
+                "- Code examples showing the correct implementation\n"
+                "- Priority ranking if multiple errors exist (fix critical syntax errors first)\n\n"
+                "**VALIDATION CRITERIA:**\n"
+                "- Syntax correctness (indentation, spacing, structure)\n"
+                "- Correct keyword usage for the target library\n"
+                "- Proper variable assignments for keywords that return values\n"
+                "- Valid locator formats\n"
+                "- Correct test case structure\n\n"
+                "If the code is valid, clearly state 'VALID' and provide a brief summary. "
+                "If errors are found, immediately delegate to Code Assembly Agent with detailed fix instructions."
                 f"{library_knowledge}"
             ),
             llm=self.llm,
             verbose=True,
-            allow_delegation=False,
+            allow_delegation=True,
+            max_iter=settings.MAX_AGENT_ITERATIONS,
         )

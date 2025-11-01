@@ -68,36 +68,61 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Extract robot code from task[2] (code_assembler - no more popup task)
         robot_code = crew_with_results.tasks[2].output.raw
 
-        # Clean up the robot code - remove markdown code blocks
+        # Simplified cleaning logic - prompt now handles most cases
+        # Keep only essential defensive measures
+        
+        # Step 1: Remove markdown code fences (defensive - LLMs sometimes add these)
         robot_code = re.sub(r'^```[a-zA-Z]*\n', '', robot_code)
         robot_code = re.sub(r'\n```$', '', robot_code)
-
-        # Remove any "Thoughts:", "Here's my plan:", or similar LLM thinking text
-        # These appear before the actual Robot Framework code
+        
+        # Step 2: Handle multiple Settings blocks (LLM might output code multiple times)
+        # Find ALL occurrences of *** Settings ***
+        settings_matches = list(re.finditer(
+            r'\*\*\*\s+Settings\s+\*\*\*', robot_code, re.IGNORECASE))
+        
+        if len(settings_matches) > 1:
+            # Multiple Settings blocks found - take the LAST one (usually the cleanest)
+            logging.info(
+                f"✅ Found {len(settings_matches)} Settings blocks, using the last one")
+            robot_code = robot_code[settings_matches[-1].start():]
+        elif len(settings_matches) == 1:
+            # Single Settings block - remove everything before it
+            robot_code = robot_code[settings_matches[0].start():]
+            logging.info("✅ Found Settings block, extracted code from there")
+        else:
+            # No Settings block found - try fallback to Variables or Test Cases
+            logging.warning("⚠️ No *** Settings *** block found in code!")
+            
+            variables_match = re.search(
+                r'\*\*\*\s+Variables\s+\*\*\*', robot_code, re.IGNORECASE)
+            test_cases_match = re.search(
+                r'\*\*\*\s+Test\s+Cases\s+\*\*\*', robot_code, re.IGNORECASE)
+            
+            if variables_match:
+                robot_code = robot_code[variables_match.start():]
+                logging.warning(
+                    "⚠️ Starting from *** Variables *** instead (Settings missing!)")
+            elif test_cases_match:
+                robot_code = robot_code[test_cases_match.start():]
+                logging.warning(
+                    "⚠️ Starting from *** Test Cases *** instead (Settings and Variables missing!)")
+            else:
+                logging.error("❌ No Robot Framework sections found in output!")
+        
+        # Step 3: Final cleanup - remove any trailing non-Robot content
+        # Split into lines and keep only content that's part of Robot Framework
         lines = robot_code.split('\n')
         cleaned_lines = []
-        skip_until_robot = True
-
+        
         for line in lines:
-            # Check if we've reached the actual Robot Framework code
-            if skip_until_robot:
-                # Look for Robot Framework section markers
-                if line.strip().startswith('***') and line.strip().endswith('***'):
-                    skip_until_robot = False
-                    cleaned_lines.append(line)
-                # Skip lines that look like LLM thoughts/explanations
-                elif any(keyword in line.lower() for keyword in ['thought', 'plan:', 'here\'s', 'let\'s', 'i need', 'i\'ll', 'step', 'extract', 'variable']):
-                    continue
-                # Skip lines with bullet points or numbered lists
-                elif re.match(r'^\s*[-*•]\s', line) or re.match(r'^\s*\d+\.\s', line):
-                    continue
-                # Skip empty lines before Robot code starts
-                elif not line.strip():
-                    continue
-            else:
-                # Once we've found Robot code, keep everything
-                cleaned_lines.append(line)
-
+            # Keep all lines - prompt should ensure clean output
+            # Only skip completely empty trailing lines
+            cleaned_lines.append(line)
+        
+        # Remove trailing empty lines
+        while cleaned_lines and not cleaned_lines[-1].strip():
+            cleaned_lines.pop()
+        
         robot_code = '\n'.join(cleaned_lines).strip()
 
         # Extract validation output from task[3] (code_validator)
@@ -106,32 +131,50 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Try multiple strategies to extract JSON
         validation_data = None
 
-        # Strategy 1: Remove markdown code blocks
-        cleaned_output = re.sub(r'```json\s*', '', raw_validation_output)
-        cleaned_output = re.sub(r'```\s*', '', cleaned_output)
-        cleaned_output = cleaned_output.strip()
-
-        # Strategy 2: Try to parse the cleaned output directly
+        # Strategy 1: Try to use output.pydantic or output.json_dict (CrewAI structured output)
         try:
-            validation_data = json.loads(cleaned_output)
-            logging.info("✅ Parsed validation output directly")
-        except json.JSONDecodeError:
-            # Strategy 3: Extract JSON object with regex
-            json_match = re.search(
-                r'\{[^{}]*"valid"[^{}]*"reason"[^{}]*\}', cleaned_output, re.DOTALL)
-            if json_match:
-                try:
-                    validation_data = json.loads(json_match.group(0))
-                    logging.info("✅ Parsed validation output with regex")
-                except json.JSONDecodeError:
-                    pass
+            # First try pydantic attribute (when output_json is a Pydantic model)
+            if hasattr(crew_with_results.tasks[3].output, 'pydantic') and crew_with_results.tasks[3].output.pydantic:
+                validation_data = crew_with_results.tasks[3].output.pydantic.model_dump(
+                )
+                logging.info(
+                    "✅ Parsed validation output from output.pydantic (Pydantic model)")
+            # Fallback to json_dict
+            elif hasattr(crew_with_results.tasks[3].output, 'json_dict') and crew_with_results.tasks[3].output.json_dict:
+                validation_data = crew_with_results.tasks[3].output.json_dict
+                logging.info(
+                    "✅ Parsed validation output from output.json_dict")
+        except (AttributeError, TypeError) as e:
+            logging.debug(f"Could not access structured output: {e}")
+            pass
 
         if not validation_data:
-            # Strategy 4: Look for valid/reason separately
+            # Strategy 2: Remove markdown code blocks and parse
+            cleaned_output = re.sub(r'```json\s*', '', raw_validation_output)
+            cleaned_output = re.sub(r'```\s*', '', cleaned_output)
+            cleaned_output = cleaned_output.strip()
+
+            # Strategy 3: Try to parse the cleaned output directly
+            try:
+                validation_data = json.loads(cleaned_output)
+                logging.info("✅ Parsed validation output directly")
+            except json.JSONDecodeError:
+                # Strategy 4: Extract JSON object with regex (look for complete JSON)
+                json_match = re.search(
+                    r'\{[^{}]*"valid"[^{}]*"reason"[^{}]*\}', cleaned_output, re.DOTALL)
+                if json_match:
+                    try:
+                        validation_data = json.loads(json_match.group(0))
+                        logging.info("✅ Parsed validation output with regex")
+                    except json.JSONDecodeError:
+                        pass
+
+        if not validation_data:
+            # Strategy 5: Look for valid/reason separately in JSON format
             valid_match = re.search(
-                r'"valid"\s*:\s*(true|false)', cleaned_output, re.IGNORECASE)
+                r'"valid"\s*:\s*(true|false)', raw_validation_output, re.IGNORECASE)
             reason_match = re.search(
-                r'"reason"\s*:\s*"([^"]*)"', cleaned_output)
+                r'"reason"\s*:\s*"([^"]*)"', raw_validation_output)
 
             if valid_match:
                 validation_data = {
@@ -140,6 +183,27 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 }
                 logging.info(
                     "✅ Parsed validation output with fallback extraction")
+
+        if not validation_data:
+            # Strategy 6: Fallback to plain text "VALID" or "INVALID" format
+            # This handles legacy format or cases where JSON output fails
+            if 'VALID' in raw_validation_output.upper():
+                # Check if it's explicitly INVALID
+                if 'INVALID' in raw_validation_output.upper():
+                    validation_data = {
+                        "valid": False,
+                        "reason": "Code validation found errors (parsed from text format)"
+                    }
+                    logging.info(
+                        "✅ Parsed validation output from text format (INVALID)")
+                else:
+                    # It's VALID
+                    validation_data = {
+                        "valid": True,
+                        "reason": "Code validation passed (parsed from text format)"
+                    }
+                    logging.info(
+                        "✅ Parsed validation output from text format (VALID)")
 
         if not validation_data:
             logging.error(

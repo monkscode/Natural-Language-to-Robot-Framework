@@ -33,12 +33,42 @@ class Settings(BaseSettings):
     SELF_HEALING_ENABLED: bool = Field(default=True, description="Enable/disable self-healing globally")
     SELF_HEALING_CONFIG_PATH: str = Field(default="config/self_healing.yaml", description="Path to self-healing config file")
     
+    # Agent Retry Configuration
+    MAX_AGENT_ITERATIONS: int = Field(default=3, description="Maximum iterations for agents with delegation enabled (retry attempts)")
+    
+    # Custom Actions Configuration
+    ENABLE_CUSTOM_ACTIONS: bool = Field(default=True, description="Enable/disable custom actions for browser automation")
+    CUSTOM_ACTION_TIMEOUT: int = Field(default=5, description="Timeout for custom action execution (in seconds)")
+    MAX_LOCATOR_STRATEGIES: int = Field(default=21, description="Maximum number of locator strategies to try")
+    TRACK_LLM_COSTS: bool = Field(default=True, description="Enable/disable LLM cost tracking and logging")
+    
     @validator('ROBOT_LIBRARY')
     def validate_robot_library(cls, v):
         """Validate that ROBOT_LIBRARY is either 'selenium' or 'browser'."""
         if v.lower() not in ['selenium', 'browser']:
             raise ValueError(f"ROBOT_LIBRARY must be 'selenium' or 'browser', got '{v}'")
         return v.lower()
+    
+    @validator('MAX_AGENT_ITERATIONS')
+    def validate_max_iterations(cls, v):
+        """Validate that MAX_AGENT_ITERATIONS is between 1 and 5."""
+        if v < 1 or v > 5:
+            raise ValueError(f"MAX_AGENT_ITERATIONS must be between 1 and 5, got {v}")
+        return v
+    
+    @validator('CUSTOM_ACTION_TIMEOUT')
+    def validate_custom_action_timeout(cls, v):
+        """Validate that CUSTOM_ACTION_TIMEOUT is positive."""
+        if v <= 0:
+            raise ValueError(f"CUSTOM_ACTION_TIMEOUT must be positive, got {v}")
+        return v
+    
+    @validator('MAX_LOCATOR_STRATEGIES')
+    def validate_max_locator_strategies(cls, v):
+        """Validate that MAX_LOCATOR_STRATEGIES is between 1 and 50."""
+        if v < 1 or v > 50:
+            raise ValueError(f"MAX_LOCATOR_STRATEGIES must be between 1 and 50, got {v}")
+        return v
 
     class Config:
         env_file = ".env"
