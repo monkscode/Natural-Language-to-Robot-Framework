@@ -119,6 +119,9 @@ try:
 except ImportError:
     litellm = None
 
+# Import requests for HTTP calls (metrics recording)
+import requests
+
 app = Flask(__name__)
 
 # ========================================
@@ -3394,6 +3397,81 @@ Avoid dynamic classes (active, hover, focus, selected, disabled)"""
         f"Task {task_id} completed. Success: {results.get('success', False)}")
 
 
+def _record_workflow_metrics(workflow_id: str, url: str, results: dict, session_id: Optional[str] = None):
+    """
+    Record workflow metrics to the API endpoint for persistence.
+    
+    Args:
+        workflow_id: Unique workflow/task identifier
+        url: Target URL that was automated
+        results: Workflow results containing summary and metrics
+        session_id: Optional browser session ID
+    """
+    try:
+        summary = results.get('summary', {})
+        execution_time = results.get('execution_time', 0)
+        
+        # Extract metrics from summary
+        total_elements = summary.get('total_elements', 0)
+        successful_elements = summary.get('successful', 0)
+        failed_elements = summary.get('failed', 0)
+        success_rate = summary.get('success_rate', 0.0)
+        total_llm_calls = summary.get('total_llm_calls', 0)
+        avg_llm_calls_per_element = summary.get('avg_llm_calls_per_element', 0.0)
+        total_cost = summary.get('estimated_total_cost', 0.0)
+        avg_cost_per_element = summary.get('estimated_cost_per_element', 0.0)
+        custom_actions_enabled = summary.get('custom_actions_enabled', False)
+        
+        # Count custom action usage from results
+        custom_action_usage_count = 0
+        if 'results' in results:
+            for elem_result in results['results']:
+                if elem_result.get('metrics', {}).get('custom_action_used', False):
+                    custom_action_usage_count += 1
+        
+        # Prepare metrics payload
+        metrics_payload = {
+            "workflow_id": workflow_id,
+            "total_elements": total_elements,
+            "successful_elements": successful_elements,
+            "failed_elements": failed_elements,
+            "success_rate": success_rate,
+            "total_llm_calls": total_llm_calls,
+            "avg_llm_calls_per_element": avg_llm_calls_per_element,
+            "total_cost": total_cost,
+            "avg_cost_per_element": avg_cost_per_element,
+            "custom_actions_enabled": custom_actions_enabled,
+            "custom_action_usage_count": custom_action_usage_count,
+            "execution_time": execution_time,
+            "url": url,
+            "session_id": session_id
+        }
+        
+        # Get the backend API URL (assuming it's running on the same host)
+        backend_url = "http://localhost:" + str(settings.APP_PORT)
+        metrics_endpoint = f"{backend_url}/api/workflow-metrics/record"
+        
+        logger.info(f"📊 Recording workflow metrics to {metrics_endpoint}")
+        logger.debug(f"   Metrics payload: {metrics_payload}")
+        
+        # Send POST request to record metrics
+        response = requests.post(
+            metrics_endpoint,
+            json=metrics_payload,
+            timeout=5,
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Workflow metrics recorded successfully for workflow {workflow_id}")
+        else:
+            logger.warning(f"⚠️ Failed to record metrics: HTTP {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error recording workflow metrics: {e}", exc_info=True)
+        # Don't raise - metrics recording should not break the workflow
+
+
 def process_task(task_id: str, elements: list, url: str, user_query: str, session_config: dict, enable_custom_actions: bool = None):
     """
     Process elements as a UNIFIED WORKFLOW in a single browser session.
@@ -5544,6 +5622,22 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
         if 'summary' in results and 'success_rate' in results['summary']:
             logger.info(
                 f"   Success rate: {results['summary']['success_rate']*100:.1f}%")
+        
+        # ========================================
+        # RECORD WORKFLOW METRICS
+        # ========================================
+        # Send metrics to the workflow metrics API endpoint for persistence
+        if settings.TRACK_LLM_COSTS and 'summary' in results:
+            try:
+                _record_workflow_metrics(
+                    workflow_id=task_id,
+                    url=url,
+                    results=results,
+                    session_id=results.get('session_id')
+                )
+            except Exception as metrics_error:
+                # Don't fail the workflow if metrics recording fails
+                logger.warning(f"⚠️ Failed to record workflow metrics: {metrics_error}")
 
     except Exception as e:
         logger.error(
