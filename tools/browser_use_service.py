@@ -891,10 +891,11 @@ PARAMETERS:
   • candidate_locator (str, optional): Your suggested locator if you can identify one
     Examples: "id=search-input", "data-testid=login-btn", "name=username"
 
-WHEN TO CALL THIS ACTION:
-  • Call it for EVERY element in the list above
-  • Call it after you've identified the element using your vision
-  • Call it after you've obtained the element's center coordinates
+⚠️ CRITICAL - YOU MUST CALL THIS ACTION:
+  • You MUST call find_unique_locator for EVERY element in the list above
+  • Call it IMMEDIATELY after you've identified the element using your vision
+  • Call it IMMEDIATELY after you've obtained the element's center coordinates
+  • The custom action handles ALL validation automatically
 
 HOW IT WORKS:
   1. If you provide a candidate_locator, the action validates it first with Playwright
@@ -993,15 +994,47 @@ CRITICAL INSTRUCTIONS
 ✓ SHOULD provide candidate_locator if you can identify id, data-testid, or name
 ✓ MUST NOT validate locators yourself - the action does this
 ✓ MUST NOT execute JavaScript to check uniqueness - the action does this
+✓ MUST NOT use querySelector, querySelectorAll, or execute_js for validation
 ✓ MUST NOT retry or check count - the action guarantees count=1
 ✓ ONLY call done() when ALL elements have validated results from the action
+
+⛔ FORBIDDEN ACTIONS:
+  • DO NOT call execute_js with querySelector to validate locators
+  • DO NOT try to count elements yourself
+  • DO NOT check if locators are unique yourself
+  • DO NOT extract text content from elements - just find the locators
+  • DO NOT use querySelector after getting the locator - just return it
+  • The find_unique_locator action does ALL validation for you!
+
+⚠️ IMPORTANT - YOUR ONLY JOB:
+  • Find elements and get their validated locators
+  • DO NOT extract text, click, or interact with elements
+  • DO NOT verify the locator works by using it
+  • Just call find_unique_locator and store the result
+  • The locators will be used later in Robot Framework tests
+
+⚠️ IMPORTANT - NUMERIC IDs:
+  • If you find an element with ID starting with a number (e.g., id="892238219")
+  • DO NOT try to use querySelector('#892238219') - this is INVALID CSS
+  • INSTEAD: Call find_unique_locator with candidate_locator="id=892238219"
+  • The custom action will handle numeric IDs correctly using [id="..."] syntax
+  • DO NOT try to extract text using the locator - just return the locator itself
 
 COMPLETION CRITERIA:
   • ALL elements must have validated results from find_unique_locator action
   • Each result must have: validated=true, count=1, unique=true, valid=true
   • Call done() with complete JSON structure containing all results
+  • DO NOT extract text or interact with elements - just return the locators
+
+⚠️ CRITICAL - DO NOT EXTRACT TEXT:
+  • After getting the locator from find_unique_locator, DO NOT use it
+  • DO NOT call execute_js to extract text using the locator
+  • DO NOT verify the locator by using querySelector
+  • Just store the locator and move to the next element
+  • The locators will be used in Robot Framework tests, not by you
 
 Your final done() call MUST include the complete JSON with all elements_found data!
+DO NOT extract text content - just return the validated locators!
 """
     else:
         # LEGACY WORKFLOW: Use JavaScript validation (backward compatibility)
@@ -1037,13 +1070,15 @@ CRITICAL INSTRUCTIONS:
        
        // Check ID locator
        if (domId) {{
+         // Always use attribute selector for IDs (handles numeric IDs correctly)
          const idCount = document.querySelectorAll(`[id="${{domId}}"]`).length;
          locators.push({{
            type: 'id',
            locator: `id=${{domId}}`,
            count: idCount,
            unique: idCount === 1,
-           validated: true
+           validated: true,
+           note: 'Using [id="..."] selector (works with numeric IDs)'
          }});
        }}
        
@@ -1221,9 +1256,15 @@ CRITICAL RULES:
 ✓ DO call done() when ALL elements processed
 
 ✗ DO NOT execute JavaScript for validation (action handles uniqueness)
+✗ DO NOT extract text content from elements (not your job)
+✗ DO NOT use querySelector or execute_js after getting locator
+✗ DO NOT verify locator by using it - just return it
 ✗ DO NOT retry more than 2 times per element
 ✗ DO NOT skip elements - process ALL of them
 ✗ DO NOT call done() until ALL elements processed
+
+⚠️ YOUR ONLY JOB: Find elements → Get coordinates → Call find_unique_locator → Return locators
+⚠️ NOT YOUR JOB: Extract text, click elements, or verify locators work
 
 VALIDATION GUARANTEE:
 - The find_unique_locator action validates UNIQUENESS (count=1) using Playwright
@@ -1670,11 +1711,21 @@ def generate_locators_from_attributes(
 
     # Priority 3: name (semantic, stable)
     if element_attrs.get('name'):
-        locators.append({
-            'type': 'name',
-            'locator': f"name={element_attrs['name']}",
-            'priority': 3
-        })
+        if library_type == "browser":
+            # Browser Library (Playwright) doesn't support name= prefix
+            # Must use attribute selector
+            locators.append({
+                'type': 'name',
+                'locator': f"[name=\"{element_attrs['name']}\"]",
+                'priority': 3
+            })
+        else:  # selenium
+            # SeleniumLibrary supports name= prefix
+            locators.append({
+                'type': 'name',
+                'locator': f"name={element_attrs['name']}",
+                'priority': 3
+            })
 
     # Priority 4: aria-label (accessibility, semantic)
     if element_attrs.get('ariaLabel'):
@@ -2007,8 +2058,31 @@ async def find_unique_locator_action(
                     logger.warning(f"⚠️ Invalid candidate locator format: {candidate_locator}")
                     logger.info(f"🔄 Continuing with smart locator finder...")
                 else:
+                    # Convert candidate locator to Playwright format if needed
+                    # Agent might provide name=q which Playwright doesn't understand
+                    playwright_locator = candidate_locator
+                    
+                    # Check if it's a format that needs conversion
+                    if '=' in candidate_locator:
+                        prefix, value = candidate_locator.split('=', 1)
+                        prefix = prefix.lower().strip()
+                        
+                        if prefix == 'name':
+                            # name=q → [name="q"] for Playwright
+                            playwright_locator = f"[name='{value.strip()}']"
+                            logger.info(f"   Converted name= to attribute selector: {playwright_locator}")
+                        elif prefix == 'link':
+                            # link=text → text=text for Playwright
+                            playwright_locator = f"text={value.strip()}"
+                            logger.info(f"   Converted link= to text selector: {playwright_locator}")
+                        elif prefix == 'tag':
+                            # tag=button → button for Playwright
+                            playwright_locator = value.strip()
+                            logger.info(f"   Converted tag= to CSS selector: {playwright_locator}")
+                        # id=, text=, css=, xpath=, data-testid= work as-is in Playwright
+                    
                     # Try to validate with Playwright
-                    count = await page.locator(candidate_locator).count()
+                    count = await page.locator(playwright_locator).count()
                     
                     # Log detailed validation results
                     is_unique = (count == 1)
@@ -2023,12 +2097,17 @@ async def find_unique_locator_action(
                     
                     if count == 1:
                         # Candidate is valid and unique!
+                        # Use the converted locator for Browser Library compatibility
+                        final_locator = playwright_locator if playwright_locator != candidate_locator else candidate_locator
+                        
                         logger.info(f"")
                         logger.info(f"{'='*80}")
                         logger.info(f"✅ CANDIDATE LOCATOR IS UNIQUE - Using it directly!")
                         logger.info(f"{'='*80}")
                         logger.info(f"   Skipping 21 strategies (not needed)")
-                        logger.info(f"   Locator: {candidate_locator}")
+                        logger.info(f"   Original: {candidate_locator}")
+                        if final_locator != candidate_locator:
+                            logger.info(f"   Converted: {final_locator} (Browser Library compatible)")
                         logger.info(f"   Type: candidate")
                         logger.info(f"   Priority: 0 (agent-provided)")
                         logger.info(f"{'='*80}")
@@ -2038,12 +2117,12 @@ async def find_unique_locator_action(
                             'element_id': element_id,
                             'description': element_description,
                             'found': True,
-                            'best_locator': candidate_locator,
+                            'best_locator': final_locator,  # Use converted locator
                             'all_locators': [{
                                 'type': 'candidate',
-                                'locator': candidate_locator,
+                                'locator': final_locator,  # Use converted locator
                                 'priority': 0,
-                                'strategy': 'Agent-provided candidate',
+                                'strategy': 'Agent-provided candidate (converted for Browser Library)',
                                 'count': count,
                                 'unique': True,
                                 'valid': True,
@@ -2089,6 +2168,19 @@ async def find_unique_locator_action(
                 logger.warning(f"⚠️ Candidate locator validation timed out: {e}")
                 logger.warning(f"   Locator: {candidate_locator}")
                 logger.info(f"🔄 Continuing with smart locator finder...")
+            
+            except RuntimeError as e:
+                # Playwright runtime errors (including invalid CSS selectors)
+                error_str = str(e).lower()
+                if 'not a valid selector' in error_str or 'invalid selector' in error_str:
+                    logger.warning(f"⚠️ Candidate locator has invalid CSS syntax: {e}")
+                    logger.warning(f"   Locator: {candidate_locator}")
+                    logger.warning(f"   Note: This often happens with numeric IDs (e.g., #123)")
+                    logger.info(f"🔄 Continuing with smart locator finder (will use [id='...'] syntax)...")
+                else:
+                    logger.warning(f"⚠️ Candidate locator validation failed with RuntimeError: {e}")
+                    logger.warning(f"   Locator: {candidate_locator}")
+                    logger.info(f"🔄 Continuing with smart locator finder...")
                 
             except Exception as e:
                 # Generic error during candidate validation
@@ -2121,7 +2213,8 @@ async def find_unique_locator_action(
                     y=y,
                     element_id=element_id,
                     element_description=element_description,
-                    candidate_locator=None  # Already validated above, so pass None
+                    candidate_locator=None,  # Already validated above, so pass None
+                    library_type=ROBOT_LIBRARY  # Use global library type
                 ),
                 timeout=settings.CUSTOM_ACTION_TIMEOUT
             )
@@ -3746,11 +3839,42 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
             logger.info("🤖 Starting unified Agent...")
             logger.info(
                 "🤖 Using default ChatGoogle LLM (no rate limiting needed)")
+            
+            # Log available actions for debugging
+            if hasattr(agent, 'tools') and agent.tools:
+                if hasattr(agent.tools, 'registry') and hasattr(agent.tools.registry, '_registry'):
+                    available_actions = list(agent.tools.registry._registry.keys())
+                    logger.info(f"📋 Available custom actions: {available_actions}")
+                else:
+                    logger.info("📋 Tools registry structure unknown")
+            else:
+                logger.info("⚠️ Agent has no tools registered")
+            
             start_time = time.time()
             agent_result = await agent.run()
             execution_time = time.time() - start_time
 
             logger.info(f"✅ Agent completed in {execution_time:.1f}s")
+            
+            # Check if agent actually used the custom action
+            if custom_actions_enabled and hasattr(agent_result, 'history'):
+                custom_action_calls = 0
+                execute_js_calls = 0
+                for step in agent_result.history:
+                    if hasattr(step, 'action') and step.action:
+                        action_name = str(step.action).lower()
+                        if 'find_unique_locator' in action_name:
+                            custom_action_calls += 1
+                        elif 'execute_js' in action_name:
+                            execute_js_calls += 1
+                
+                logger.info(f"📊 Action usage: find_unique_locator={custom_action_calls}, execute_js={execute_js_calls}")
+                
+                if custom_action_calls == 0 and execute_js_calls > 0:
+                    logger.warning("⚠️ Agent used execute_js instead of find_unique_locator custom action!")
+                    logger.warning("   This may indicate the custom action wasn't properly registered or visible to the agent")
+                elif custom_action_calls > 0:
+                    logger.info(f"✅ Agent successfully used find_unique_locator custom action {custom_action_calls} times")
             
             # ========================================
             # METRICS LOGGING: LLM Call Count
@@ -4830,7 +4954,8 @@ def process_task(task_id: str, elements: list, url: str, user_query: str, sessio
                                                     x=coords['x'],
                                                     y=coords['y'],
                                                     element_id=elem_id,
-                                                    element_description=elem_desc
+                                                    element_description=elem_desc,
+                                                    library_type=library_type  # Pass library type from outer scope
                                                 )
                                                 
                                                 if smart_result.get('found') and smart_result.get('best_locator'):

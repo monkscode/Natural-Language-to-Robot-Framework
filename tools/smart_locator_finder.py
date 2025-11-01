@@ -18,7 +18,8 @@ async def find_unique_locator_at_coordinates(
     y: float,
     element_id: str,
     element_description: str,
-    candidate_locator: Optional[str] = None
+    candidate_locator: Optional[str] = None,
+    library_type: str = "browser"
 ) -> Dict:
     """
     Given coordinates, systematically try multiple strategies to find a unique locator.
@@ -37,6 +38,7 @@ async def find_unique_locator_at_coordinates(
         element_id: Element identifier (elem_1, elem_2, etc.)
         element_description: Human-readable description
         candidate_locator: Optional locator to validate first (e.g., "id=search-input")
+        library_type: "browser" or "selenium" - determines locator format
 
     Returns:
         Dict with best_locator, all_locators, validation_summary, validation_method
@@ -243,13 +245,25 @@ async def find_unique_locator_at_coordinates(
         })
 
     # Strategy 5: name (Priority 3)
+    # Note: Browser Library (Playwright) doesn't support name= prefix
+    # SeleniumLibrary supports name= prefix
     if element_data['name']:
-        locator_strategies.append({
-            'type': 'name',
-            'locator': f"name={element_data['name']}",
-            'priority': 3,
-            'strategy': 'Name attribute'
-        })
+        if library_type == "browser":
+            # Browser Library: use attribute selector
+            locator_strategies.append({
+                'type': 'name',
+                'locator': f"[name='{element_data['name']}']",
+                'priority': 3,
+                'strategy': 'Name attribute'
+            })
+        else:
+            # SeleniumLibrary: use name= prefix
+            locator_strategies.append({
+                'type': 'name',
+                'locator': f"name={element_data['name']}",
+                'priority': 3,
+                'strategy': 'Name attribute'
+            })
 
     # Strategy 6: aria-label (Priority 4)
     if element_data['ariaLabel']:
