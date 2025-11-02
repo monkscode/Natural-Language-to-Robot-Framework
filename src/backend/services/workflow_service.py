@@ -258,7 +258,102 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
 
+async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
+    """
+    Generates Robot Framework test code without executing it.
+    Allows user to review and edit before execution.
+    """
+    robot_code = None
+    q = Queue()
+
+    workflow_thread = Thread(
+        target=run_workflow_in_thread,
+        args=(q, user_query, model_provider, model_name)
+    )
+    workflow_thread.start()
+
+    while workflow_thread.is_alive():
+        try:
+            event = q.get_nowait()
+            event_data = {'stage': 'generation', **event}
+            yield f"data: {json.dumps(event_data)}\n\n"
+
+            if event.get("status") == "complete" and "robot_code" in event:
+                robot_code = event["robot_code"]
+                workflow_thread.join()
+                break
+            elif event.get("status") == "error":
+                workflow_thread.join()
+                return
+        except Empty:
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+
+    if not robot_code:
+        while not q.empty():
+            event = q.get_nowait()
+            event_data = {'stage': 'generation', **event}
+            yield f"data: {json.dumps(event_data)}\n\n"
+            if event.get("status") == "complete" and "robot_code" in event:
+                robot_code = event["robot_code"]
+            elif event.get("status") == "error":
+                return
+        if not robot_code:
+            final_error_message = "Agentic workflow finished without generating code."
+            logging.error(final_error_message)
+            yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
+            return
+
+    # Generation complete - return code without execution
+    logging.info("✅ Test generation complete. Ready for user review.")
+
+
+async def stream_execute_only(robot_code: str) -> Generator[str, None, None]:
+    """
+    Executes provided Robot Framework test code in Docker container.
+    Accepts user-edited or manually-written code.
+    """
+    if not robot_code or not robot_code.strip():
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
+        return
+
+    run_id = str(uuid.uuid4())
+    robot_tests_dir = os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
+    run_dir = os.path.join(robot_tests_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    test_filename = "test.robot"
+    test_filepath = os.path.join(run_dir, test_filename)
+    
+    try:
+        with open(test_filepath, 'w', encoding='utf-8') as f:
+            f.write(robot_code)
+        logging.info(f"📝 Saved test code to {test_filepath}")
+    except Exception as e:
+        logging.error(f"Failed to save test code: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
+        return
+
+    try:
+        client = get_docker_client()
+        for event in build_image(client):
+            yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
+
+        # Execute test
+        logging.info(f"🚀 Executing test: {test_filename}")
+        result = run_test_in_container(client, run_id, test_filename)
+        yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
+
+    except (ConnectionError, RuntimeError, Exception) as e:
+        logging.error(f"An error occurred during Docker execution: {e}")
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+
+
 async def stream_generate_and_run(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
+    """
+    Legacy endpoint: Generates and executes test in one flow.
+    Kept for backward compatibility.
+    """
     robot_code = None
     q = Queue()
 
