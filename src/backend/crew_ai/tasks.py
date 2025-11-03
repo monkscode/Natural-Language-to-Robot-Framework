@@ -225,51 +225,12 @@ Generated Test
         )
 
     def identify_elements_task(self, agent) -> Task:
-        # Check if vision locators are available from environment (for pre-identified elements)
-        vision_locators_json = os.getenv('VISION_LOCATORS_JSON')
-        vision_locators = {}
-        if vision_locators_json:
-            try:
-                vision_locators = json.loads(vision_locators_json)
-                logger.info(
-                    f"✅ Vision locators available for {len(vision_locators)} elements: {list(vision_locators.keys())}")
-            except json.JSONDecodeError:
-                logger.warning(
-                    "⚠️ Could not parse VISION_LOCATORS_JSON from environment")
-
-        # Build vision locator instructions (for pre-identified elements, if any)
-        if vision_locators:
-            vision_instructions = (
-                "\n\n"
-                "🎯 **VISION LOCATORS AVAILABLE (PRE-IDENTIFIED)** 🎯\n"
-                "The following elements have been PRE-IDENTIFIED:\n"
-                "\n"
-            )
-            for element_name, locator in vision_locators.items():
-                vision_instructions += f"- **{element_name}**: `{locator}`\n"
-
-            vision_instructions += (
-                "\n"
-                "--- USING PRE-IDENTIFIED LOCATORS ---\n"
-                "1. Check if element matches a pre-identified locator\n"
-                "2. If YES: Use it directly (no tool call needed)\n"
-                "3. If NO: Include it in the batch_browser_automation call\n"
-                "\n"
-            )
-        else:
-            vision_instructions = (
-                "\n\n"
-                "ℹ️ **NO PRE-IDENTIFIED LOCATORS AVAILABLE**\n"
-                "All elements will be found using batch_browser_automation.\n"
-                "\n"
-            )
-
         return Task(
             description=(
                 "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
                 "Your mission: Find locators for ALL elements in ONE batch operation.\n"
                 "The context will be the output of the 'plan_steps_task' (array of test steps).\n\n"
-                f"{vision_instructions}"
+                "ℹ️ All elements will be found using batch_browser_automation.\n\n"
                 "--- MANDATORY BATCH WORKFLOW ---\n"
                 "\n"
                 "**STEP 1: ANALYZE THE PLAN**\n"

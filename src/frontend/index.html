@@ -149,12 +149,63 @@
             </div>
         </div>
 
-        <div class="section">
+        <div id="generation-logs-section" class="section" style="display: none;">
             <div class="section-header">
-                <div class="section-title">Execution Results</div>
-                <div class="section-subtitle">Real-time test execution logs and results</div>
+                <div class="result-actions">
+                    <div>
+                        <div class="section-title">Generation Logs</div>
+                        <div class="section-subtitle">Real-time test generation progress and insights</div>
+                    </div>
+                    <button id="toggle-generation-logs" class="btn btn-secondary btn-sm">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                        <span>Collapse</span>
+                    </button>
+                </div>
             </div>
-            <div class="section-content">
+            <div id="generation-logs-content" class="section-content">
+                <div id="generation-progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-global">
+                            <div id="generation-progress-fill" class="progress-fill-global" style="width: 0%;"></div>
+                        </div>
+                        <div id="generation-progress-text" class="progress-text-global">0%</div>
+                    </div>
+                </div>
+                <div id="generation-logs" class="logs-block">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎬</div>
+                        <p>Test generation logs will appear here</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="execution-logs-section" class="section" style="display: none;">
+            <div class="section-header">
+                <div class="result-actions">
+                    <div>
+                        <div class="section-title">Execution Logs</div>
+                        <div class="section-subtitle">Real-time test execution logs and results</div>
+                    </div>
+                    <button id="toggle-execution-logs" class="btn btn-secondary btn-sm">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                        <span>Collapse</span>
+                    </button>
+                </div>
+            </div>
+            <div id="execution-logs-content" class="section-content">
+                <div id="execution-progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-global">
+                            <div id="execution-progress-fill" class="progress-fill-global" style="width: 0%;"></div>
+                        </div>
+                        <div id="execution-progress-text" class="progress-text-global">0%</div>
+                    </div>
+                </div>
                 <div id="execution-logs" class="logs-block">
                     <div class="empty-state">
                         <div class="empty-state-icon">📋</div>

@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const newTestBtn = document.getElementById('new-test-btn');
     const robotCodeEl = document.getElementById('robot-code');
     const codePlaceholder = document.getElementById('code-placeholder');
+    const generationLogsEl = document.getElementById('generation-logs');
     const executionLogsEl = document.getElementById('execution-logs');
     const downloadBtn = document.getElementById('download-btn');
     const copyCodeBtn = document.getElementById('copy-code-btn');
@@ -17,6 +18,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let robotCodeContent = '';
     let executionStartTime = null;
     let currentState = 'idle'; // idle, ready_generate, ready_execute, generating, executing
+    
+    // Track generation and execution history
+    let hasGeneratedCode = false;
+    let hasExecutedCode = false;
+    
+    // Track manual collapse/expand state
+    let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
+    let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
+    
+    // Get log section containers
+    const generationLogsSection = document.getElementById('generation-logs-section');
+    const executionLogsSection = document.getElementById('execution-logs-section');
 
     // UI State Management
     const UIState = {
@@ -199,6 +212,94 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function createLogEntry(logEvent, stage) {
+        const logEntry = document.createElement('div');
+        logEntry.className = 'log-entry';
+        
+        // Determine log level styling based on message content or status
+        let logLevel = 'info';
+        if (logEvent.status === 'error' || logEvent.message.includes('⚠️') || logEvent.message.includes('ERROR')) {
+            logLevel = 'error';
+        } else if (logEvent.message.includes('🎉') || logEvent.message.includes('Success')) {
+            logLevel = 'success';
+            // Check if this is a celebration message
+            if (logEvent.message.includes('🎉') && (logEvent.message.includes('Generated') || logEvent.message.includes('Success!'))) {
+                logEntry.classList.add('log-celebration');
+            }
+        } else if (logEvent.message.includes('💡')) {
+            logLevel = 'insight';
+        }
+        logEntry.classList.add(`log-${logLevel}`);
+        
+        // Build the log message HTML
+        let html = `<div class="log-timestamp">[${new Date().toLocaleTimeString()}]</div>`;
+        html += `<div class="log-message">${escapeHtml(logEvent.message)}`;
+        
+        // Add step info if present (no individual progress bars)
+        if (logEvent.step) {
+            html += ` <span class="log-step-info">(Step ${logEvent.step})</span>`;
+        }
+        
+        html += `</div>`;
+        
+        logEntry.innerHTML = html;
+        
+        // Update global progress bar if progress is present
+        if (logEvent.progress !== undefined) {
+            updateGlobalProgress(stage, logEvent.progress);
+        }
+        
+        return logEntry;
+    }
+    
+    function updateGlobalProgress(stage, progress) {
+        const progressContainer = stage === 'generation' 
+            ? document.getElementById('generation-progress-container')
+            : document.getElementById('execution-progress-container');
+        const progressFill = stage === 'generation'
+            ? document.getElementById('generation-progress-fill')
+            : document.getElementById('execution-progress-fill');
+        const progressText = stage === 'generation'
+            ? document.getElementById('generation-progress-text')
+            : document.getElementById('execution-progress-text');
+        
+        // Show progress container
+        progressContainer.style.display = 'block';
+        
+        // Update progress bar and text
+        progressFill.style.width = `${progress}%`;
+        progressText.textContent = `${progress}%`;
+        
+        // Hide progress bar when complete (100%)
+        if (progress >= 100) {
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+            }, 1000);
+        }
+    }
+
+    function routeLogToContainer(logEntry, stage) {
+        // Route log to the correct container based on stage
+        const targetContainer = stage === 'generation' ? generationLogsEl : executionLogsEl;
+        const contentEl = stage === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        
+        // Remove empty state if present
+        const emptyState = targetContainer.querySelector('.empty-state');
+        if (emptyState) {
+            targetContainer.innerHTML = '';
+        }
+        
+        // Append log entry
+        targetContainer.appendChild(logEntry);
+        
+        // Only auto-scroll if section is expanded
+        if (!contentEl.classList.contains('collapsed')) {
+            targetContainer.scrollTop = targetContainer.scrollHeight;
+        }
+    }
+
     // Event Listeners
     queryInput.addEventListener('input', function () {
         this.style.height = 'auto';
@@ -231,6 +332,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // Apply syntax highlighting to pasted code (preserves original formatting)
             applySyntaxHighlighting(text);
             // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
+            
+            // User pasted code directly - don't show generation logs
+            // Execution logs will show when user clicks execute
         }
     });
 
@@ -266,11 +370,138 @@ document.addEventListener('DOMContentLoaded', () => {
         queryInput.value = '';
         queryInput.style.height = 'auto';
         clearCode();
+        generationLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎬</div><p>Test generation logs will appear here</p></div>';
         executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
+        
+        // Reset tracking flags
+        hasGeneratedCode = false;
+        hasExecutedCode = false;
+        generationLogsManualState = null;
+        executionLogsManualState = null;
+        
+        // Hide both log sections
+        generationLogsSection.style.display = 'none';
+        executionLogsSection.style.display = 'none';
+        
         updateUI();
     }
+    
+    // Manage log section visibility
+    function updateLogSectionsVisibility() {
+        // Generation logs visibility
+        if (hasGeneratedCode) {
+            generationLogsSection.style.display = 'block';
+            
+            // Auto-collapse during execution unless manually overridden
+            if (generationLogsManualState === null) {
+                if (currentState === UIState.EXECUTING || hasExecutedCode) {
+                    collapseSection('generation', false);
+                } else {
+                    expandSection('generation', false);
+                }
+            } else {
+                // Respect manual state
+                if (generationLogsManualState) {
+                    expandSection('generation', false);
+                } else {
+                    collapseSection('generation', false);
+                }
+            }
+        } else {
+            generationLogsSection.style.display = 'none';
+        }
+        
+        // Execution logs visibility
+        if (hasExecutedCode || currentState === UIState.EXECUTING) {
+            executionLogsSection.style.display = 'block';
+            
+            // Auto-expand during execution unless manually overridden
+            if (executionLogsManualState === null) {
+                expandSection('execution', false);
+            } else {
+                // Respect manual state
+                if (executionLogsManualState) {
+                    expandSection('execution', false);
+                } else {
+                    collapseSection('execution', false);
+                }
+            }
+        } else if (!hasGeneratedCode) {
+            // If user pastes code directly (no generation), don't show execution logs until execution starts
+            executionLogsSection.style.display = 'none';
+        }
+    }
+    
+    function collapseSection(section, isManual = true) {
+        const content = section === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        const button = section === 'generation'
+            ? document.getElementById('toggle-generation-logs')
+            : document.getElementById('toggle-execution-logs');
+        const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
+        
+        content.classList.add('collapsed');
+        sectionEl.classList.add('collapsed-section');
+        button.querySelector('span').textContent = 'Expand';
+        button.querySelector('svg path').setAttribute('d', 'M5 15l7-7 7 7');
+        
+        if (isManual) {
+            if (section === 'generation') {
+                generationLogsManualState = false;
+            } else {
+                executionLogsManualState = false;
+            }
+        }
+    }
+    
+    function expandSection(section, isManual = true) {
+        const content = section === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        const button = section === 'generation'
+            ? document.getElementById('toggle-generation-logs')
+            : document.getElementById('toggle-execution-logs');
+        const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
+        const logsEl = section === 'generation' ? generationLogsEl : executionLogsEl;
+        
+        content.classList.remove('collapsed');
+        sectionEl.classList.remove('collapsed-section');
+        button.querySelector('span').textContent = 'Collapse';
+        button.querySelector('svg path').setAttribute('d', 'M19 9l-7 7-7-7');
+        
+        // Auto-scroll to latest log when expanding
+        if (isManual) {
+            logsEl.scrollTop = logsEl.scrollHeight;
+            
+            if (section === 'generation') {
+                generationLogsManualState = true;
+            } else {
+                executionLogsManualState = true;
+            }
+        }
+    }
+    
+    // Toggle button handlers
+    document.getElementById('toggle-generation-logs').addEventListener('click', () => {
+        const content = document.getElementById('generation-logs-content');
+        if (content.classList.contains('collapsed')) {
+            expandSection('generation', true);
+        } else {
+            collapseSection('generation', true);
+        }
+    });
+    
+    document.getElementById('toggle-execution-logs').addEventListener('click', () => {
+        const content = document.getElementById('execution-logs-content');
+        if (content.classList.contains('collapsed')) {
+            expandSection('execution', true);
+        } else {
+            collapseSection('execution', true);
+        }
+    });
 
     // Main Action Button Handler
     actionBtn.addEventListener('click', async () => {
@@ -298,10 +529,27 @@ document.addEventListener('DOMContentLoaded', () => {
         
         updateButtonState(UIState.GENERATING);
         clearCode();
-        executionLogsEl.innerHTML = '';
+        generationLogsEl.innerHTML = '';
         downloadBtn.style.display = 'none';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
+        
+        // Reset progress bar
+        const generationProgressContainer = document.getElementById('generation-progress-container');
+        const generationProgressFill = document.getElementById('generation-progress-fill');
+        const generationProgressText = document.getElementById('generation-progress-text');
+        generationProgressContainer.style.display = 'none';
+        generationProgressFill.style.width = '0%';
+        generationProgressText.textContent = '0%';
+        
+        // Mark that generation has started
+        hasGeneratedCode = true;
+        
+        // Reset manual state for generation logs (allow auto-management)
+        generationLogsManualState = null;
+        
+        // Update log sections visibility
+        updateLogSectionsVisibility();
 
         try {
             const requestPayload = {
@@ -368,6 +616,23 @@ document.addEventListener('DOMContentLoaded', () => {
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
         executionStartTime = Date.now();
+        
+        // Reset progress bar
+        const executionProgressContainer = document.getElementById('execution-progress-container');
+        const executionProgressFill = document.getElementById('execution-progress-fill');
+        const executionProgressText = document.getElementById('execution-progress-text');
+        executionProgressContainer.style.display = 'none';
+        executionProgressFill.style.width = '0%';
+        executionProgressText.textContent = '0%';
+        
+        // Mark that execution has started
+        hasExecutedCode = true;
+        
+        // Reset manual state for execution logs (allow auto-management)
+        executionLogsManualState = null;
+        
+        // Update log sections visibility (will auto-collapse generation, show execution)
+        updateLogSectionsVisibility();
 
         try {
             const requestPayload = {
@@ -424,43 +689,37 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStatus('processing', data.message);
 
         if (data.status === 'running') {
-            const logEntry = document.createElement('div');
-            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
-            executionLogsEl.appendChild(logEntry);
-            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+            const stage = data.stage || 'generation';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.robot_code) {
             applySyntaxHighlighting(data.robot_code);
-            executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
             updateStatus('success', 'Generation complete', false);
             hideStatus();
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();
+            updateLogSectionsVisibility();
         } else if (data.status === 'error') {
             updateStatus('error', 'Generation failed');
-            const errorEntry = document.createElement('div');
-            errorEntry.style.color = 'var(--error)';
-            errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
-            executionLogsEl.appendChild(errorEntry);
+            const stage = data.stage || 'generation';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
             hideStatus();
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();
+            updateLogSectionsVisibility();
         }
     }
 
     function handleExecutionData(data) {
         updateStatus('processing', data.message);
-
-        if (executionLogsEl.querySelector('.empty-state')) {
-            executionLogsEl.innerHTML = '';
-        }
         
         if (data.status === 'running') {
-            const logEntry = document.createElement('div');
-            logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
-            executionLogsEl.appendChild(logEntry);
-            executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
+            const stage = data.stage || 'execution';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.result) {
             const logs = data.result.logs || 'No execution logs available';
             executionLogsEl.textContent = logs;
@@ -495,6 +754,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();
+            updateLogSectionsVisibility();
         } else if (data.status === 'error') {
             updateStatus('error', 'Execution failed');
             const errorEntry = document.createElement('div');
@@ -505,6 +765,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();
+            updateLogSectionsVisibility();
         }
     }
 
