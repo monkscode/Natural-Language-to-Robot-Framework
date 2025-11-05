@@ -8,7 +8,7 @@ from langchain_ollama import OllamaLLM
 
 # Import browser_use_tool from tools package
 # Note: Path setup is handled by tools/__init__.py automatically
-from tools.browser_use_tool import BrowserUseTool, BatchBrowserUseTool
+from tools.browser_use_tool import BatchBrowserUseTool
 
 # Import cleaned LLM wrapper for robust output parsing
 from .cleaned_llm_wrapper import get_cleaned_llm
@@ -45,8 +45,6 @@ def get_llm(model_provider, model_name):
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
 selenium_tool = SeleniumScrapingTool()
 scrape_tool = ScrapeElementFromWebsiteTool()
-# Single element locator finding (fallback only)
-browser_use_tool = BrowserUseTool()
 # Primary tool: Batch processing for multiple elements with full context
 batch_browser_use_tool = BatchBrowserUseTool()
 
