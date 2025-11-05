@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import requests
@@ -8,10 +7,10 @@ from typing import Any, Type, Optional, Dict
 from dotenv import load_dotenv
 load_dotenv("src/backend/.env")
 
-from src.backend.core.config import settings
+from src.backend.core.config import settings  # noqa: E402
 
-from crewai.tools import BaseTool
-from pydantic import BaseModel, Field
+from crewai.tools import BaseTool  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", encoding="utf-8"
@@ -102,6 +101,7 @@ class BrowserUseAPI:
 # BATCH BROWSER USE TOOL - NEW FOR MULTI-ELEMENT PROCESSING
 # ============================================================================
 
+
 class BatchBrowserUseToolInput(BaseModel):
     """Input schema for BatchBrowserUseTool."""
 
@@ -123,7 +123,7 @@ class BatchBrowserUseToolInput(BaseModel):
             "find all elements in the same session. Example: 'https://www.flipkart.com'"
         )
     )
-    
+
     @classmethod
     def validate_input(cls, values):
         """
@@ -207,7 +207,6 @@ class BatchBrowserUseTool(BaseTool):
         # 15 minutes for batch
         timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))
         check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))
-        max_retries = int(os.environ.get("BROWSER_USE_MAX_RETRIES", "3"))
 
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
