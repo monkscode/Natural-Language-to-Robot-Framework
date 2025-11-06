@@ -44,6 +44,7 @@ else
     echo "Installing dependencies..."
     pip install uv
     uv pip install -r src/backend/requirements.txt
+    playwright install chromium
     rfbrowser install chromium
 fi
 

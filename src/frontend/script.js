@@ -1,23 +1,202 @@
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');
-    const generateBtn = document.getElementById('generate-btn');
+    const actionBtn = document.getElementById('action-btn');
+    const actionBtnText = document.getElementById('action-btn-text');
+    const actionBtnIcon = document.getElementById('action-btn-icon');
+    const newTestBtn = document.getElementById('new-test-btn');
     const robotCodeEl = document.getElementById('robot-code');
+    const codePlaceholder = document.getElementById('code-placeholder');
+    const generationLogsEl = document.getElementById('generation-logs');
     const executionLogsEl = document.getElementById('execution-logs');
     const downloadBtn = document.getElementById('download-btn');
     const copyCodeBtn = document.getElementById('copy-code-btn');
     const codeLanguageLabel = document.getElementById('code-language');
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
+    const editHint = document.getElementById('edit-hint');
 
     let robotCodeContent = '';
     let executionStartTime = null;
+    let currentState = 'idle'; // idle, ready_generate, ready_execute, generating, executing
+    
+    // Track generation and execution history
+    let hasGeneratedCode = false;
+    let hasExecutedCode = false;
+    
+    // Track manual collapse/expand state
+    let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
+    let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
+    
+    // Get log section containers
+    const generationLogsSection = document.getElementById('generation-logs-section');
+    const executionLogsSection = document.getElementById('execution-logs-section');
+
+    // UI State Management
+    const UIState = {
+        IDLE: 'idle',
+        READY_TO_GENERATE: 'ready_generate',
+        READY_TO_EXECUTE: 'ready_execute',
+        GENERATING: 'generating',
+        EXECUTING: 'executing'
+    };
+
+    const buttonConfig = {
+        [UIState.IDLE]: {
+            text: 'Enter a query or paste code',
+            disabled: true,
+            icon: 'M13 10V3L4 14h7v7l9-11h-7z', // Lightning bolt
+            action: null
+        },
+        [UIState.READY_TO_GENERATE]: {
+            text: 'Generate Test',
+            disabled: false,
+            icon: 'M13 10V3L4 14h7v7l9-11h-7z', // Lightning bolt
+            action: 'generate'
+        },
+        [UIState.READY_TO_EXECUTE]: {
+            text: 'Execute Test',
+            disabled: false,
+            icon: 'M5 3l14 9-14 9V3z', // Play icon
+            action: 'execute'
+        },
+        [UIState.GENERATING]: {
+            text: 'Generating...',
+            disabled: true,
+            icon: null,
+            action: null
+        },
+        [UIState.EXECUTING]: {
+            text: 'Executing...',
+            disabled: true,
+            icon: null,
+            action: null
+        }
+    };
+
+    function updateButtonState(state) {
+        currentState = state;
+        const config = buttonConfig[state];
+        
+        actionBtnText.textContent = config.text;
+        actionBtn.disabled = config.disabled;
+        
+        if (config.icon) {
+            actionBtnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${config.icon}"></path>`;
+            actionBtnIcon.style.display = 'block';
+        } else {
+            actionBtnIcon.style.display = 'none';
+        }
+        
+        // Show/hide spinner
+        const btnSpinner = actionBtn.querySelector('.btn-spinner');
+        if (state === UIState.GENERATING || state === UIState.EXECUTING) {
+            actionBtn.classList.add('btn-loading');
+            btnSpinner.style.display = 'block';
+        } else {
+            actionBtn.classList.remove('btn-loading');
+            btnSpinner.style.display = 'none';
+        }
+    }
+
+    function determineState() {
+        const hasQuery = queryInput.value.trim().length > 0;
+        const hasCode = getCodeContent().trim().length > 0;
+        
+        if (currentState === UIState.GENERATING || currentState === UIState.EXECUTING) {
+            return currentState; // Don't change state during operations
+        }
+        
+        if (hasCode) {
+            return UIState.READY_TO_EXECUTE;
+        } else if (hasQuery) {
+            return UIState.READY_TO_GENERATE;
+        } else {
+            return UIState.IDLE;
+        }
+    }
+
+    function updateUI() {
+        const newState = determineState();
+        updateButtonState(newState);
+        updatePlaceholder();
+        updateNewTestButton();
+    }
+
+    function updatePlaceholder() {
+        const hasQuery = queryInput.value.trim().length > 0;
+        const hasCode = getCodeContent().trim().length > 0;
+        
+        if (!hasCode && codePlaceholder) {
+            if (hasQuery) {
+                codePlaceholder.querySelector('p').textContent = "⚡ Click 'Generate Test' to create code from your query";
+            } else {
+                codePlaceholder.querySelector('p').textContent = "📝 Paste your Robot Framework code here, or enter a query above to generate";
+            }
+        }
+    }
+
+    function updateNewTestButton() {
+        const hasQuery = queryInput.value.trim().length > 0;
+        const hasCode = getCodeContent().trim().length > 0;
+        
+        // Show "New Test" button if there's any content
+        if (hasQuery || hasCode) {
+            newTestBtn.style.display = 'inline-flex';
+        } else {
+            newTestBtn.style.display = 'none';
+        }
+    }
+
+    function getCodeContent() {
+        // Get text content, excluding the placeholder
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            return '';
+        }
+        return robotCodeEl.textContent || '';
+    }
+
+    function setCodeContent(code, highlighted = false) {
+        robotCodeContent = code;
+        
+        // Remove placeholder if exists
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+        }
+        
+        if (highlighted) {
+            robotCodeEl.innerHTML = code;
+        } else {
+            robotCodeEl.textContent = code;
+        }
+        
+        if (code.trim()) {
+            copyCodeBtn.style.display = 'flex';
+            codeLanguageLabel.style.display = 'block';
+            downloadBtn.style.display = 'inline-flex';
+            editHint.style.display = 'block';
+        }
+        
+        updateUI();
+    }
+
+    function clearCode() {
+        robotCodeEl.innerHTML = '';
+        if (codePlaceholder) {
+            robotCodeEl.appendChild(codePlaceholder);
+        }
+        robotCodeContent = '';
+        copyCodeBtn.style.display = 'none';
+        codeLanguageLabel.style.display = 'none';
+        downloadBtn.style.display = 'none';
+        editHint.style.display = 'none';
+        updateUI();
+    }
 
     function updateStatus(status, text, persistent = false) {
         statusBadge.style.display = 'flex';
         statusBadge.className = `status-badge status-${status}`;
         statusText.textContent = text;
 
-        // Add persistent class for final results
         if (persistent) {
             statusBadge.classList.add('status-persistent');
         } else {
@@ -26,7 +205,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function hideStatus() {
-        // Only hide if not persistent
         if (!statusBadge.classList.contains('status-persistent')) {
             setTimeout(() => {
                 statusBadge.style.display = 'none';
@@ -34,52 +212,344 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function setButtonLoading(loading) {
-        const btnText = generateBtn.querySelector('.btn-text');
-        const btnSpinner = generateBtn.querySelector('.btn-spinner');
-
-        if (loading) {
-            generateBtn.classList.add('btn-loading');
-            btnSpinner.style.display = 'block';
-            generateBtn.disabled = true;
-        } else {
-            generateBtn.classList.remove('btn-loading');
-            btnSpinner.style.display = 'none';
-            generateBtn.disabled = false;
+    function createLogEntry(logEvent, stage) {
+        const logEntry = document.createElement('div');
+        logEntry.className = 'log-entry';
+        
+        // Determine log level styling based on message content or status
+        let logLevel = 'info';
+        if (logEvent.status === 'error' || logEvent.message.includes('⚠️') || logEvent.message.includes('ERROR')) {
+            logLevel = 'error';
+        } else if (logEvent.message.includes('🎉') || logEvent.message.includes('Success')) {
+            logLevel = 'success';
+            // Check if this is a celebration message
+            if (logEvent.message.includes('🎉') && (logEvent.message.includes('Generated') || logEvent.message.includes('Success!'))) {
+                logEntry.classList.add('log-celebration');
+            }
+        } else if (logEvent.message.includes('💡')) {
+            logLevel = 'insight';
+        }
+        logEntry.classList.add(`log-${logLevel}`);
+        
+        // Build the log message HTML
+        let html = `<div class="log-timestamp">[${new Date().toLocaleTimeString()}]</div>`;
+        html += `<div class="log-message">${escapeHtml(logEvent.message)}`;
+        
+        // Add step info if present (no individual progress bars)
+        if (logEvent.step) {
+            html += ` <span class="log-step-info">(Step ${logEvent.step})</span>`;
+        }
+        
+        html += `</div>`;
+        
+        logEntry.innerHTML = html;
+        
+        // Update global progress bar if progress is present
+        if (logEvent.progress !== undefined) {
+            updateGlobalProgress(stage, logEvent.progress);
+        }
+        
+        return logEntry;
+    }
+    
+    function updateGlobalProgress(stage, progress) {
+        const progressContainer = stage === 'generation' 
+            ? document.getElementById('generation-progress-container')
+            : document.getElementById('execution-progress-container');
+        const progressFill = stage === 'generation'
+            ? document.getElementById('generation-progress-fill')
+            : document.getElementById('execution-progress-fill');
+        const progressText = stage === 'generation'
+            ? document.getElementById('generation-progress-text')
+            : document.getElementById('execution-progress-text');
+        
+        // Show progress container
+        progressContainer.style.display = 'block';
+        
+        // Update progress bar and text
+        progressFill.style.width = `${progress}%`;
+        progressText.textContent = `${progress}%`;
+        
+        // Hide progress bar when complete (100%)
+        if (progress >= 100) {
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+            }, 1000);
         }
     }
 
-    // Auto-resize textarea
+    function routeLogToContainer(logEntry, stage) {
+        // Route log to the correct container based on stage
+        const targetContainer = stage === 'generation' ? generationLogsEl : executionLogsEl;
+        const contentEl = stage === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        
+        // Remove empty state if present
+        const emptyState = targetContainer.querySelector('.empty-state');
+        if (emptyState) {
+            targetContainer.innerHTML = '';
+        }
+        
+        // Append log entry
+        targetContainer.appendChild(logEntry);
+        
+        // Only auto-scroll if section is expanded
+        if (!contentEl.classList.contains('collapsed')) {
+            targetContainer.scrollTop = targetContainer.scrollHeight;
+        }
+    }
+
+    // Event Listeners
     queryInput.addEventListener('input', function () {
         this.style.height = 'auto';
         this.style.height = Math.max(150, this.scrollHeight) + 'px';
+        updateUI();
     });
 
-    generateBtn.addEventListener('click', async () => {
-        const query = queryInput.value.trim();
-        if (!query) {
-            queryInput.focus();
-            queryInput.style.borderColor = 'var(--error)';
-            setTimeout(() => {
-                queryInput.style.borderColor = '';
-            }, 2000);
-            return;
+    robotCodeEl.addEventListener('input', () => {
+        // When user types or edits, update UI state
+        // Remove placeholder if user starts typing
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            const text = robotCodeEl.textContent.trim();
+            if (text && text !== codePlaceholder.textContent.trim()) {
+                robotCodeEl.removeChild(codePlaceholder);
+            }
         }
+        updateUI();
+    });
 
-        setButtonLoading(true);
-        robotCodeEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><p>Generated Robot Framework code will appear here</p></div>';
-        executionLogsEl.innerHTML = ''; // Clear previous logs
-        downloadBtn.style.display = 'none';
-        copyCodeBtn.style.display = 'none';
-        codeLanguageLabel.style.display = 'none';
-        robotCodeContent = '';
+    robotCodeEl.addEventListener('paste', (e) => {
+        // Handle paste to preserve user's formatting and apply syntax highlighting
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain');
+        
+        if (text.trim()) {
+            // Remove placeholder if present
+            if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+                robotCodeEl.removeChild(codePlaceholder);
+            }
+            // Apply syntax highlighting to pasted code (preserves original formatting)
+            applySyntaxHighlighting(text);
+            // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
+            
+            // User pasted code directly - don't show generation logs
+            // Execution logs will show when user clicks execute
+        }
+    });
 
-        // Clear previous persistent status when starting new test
+    // Also listen for blur event to apply formatting when user finishes typing
+    robotCodeEl.addEventListener('blur', () => {
+        const code = getCodeContent().trim();
+        if (code && !robotCodeEl.querySelector('.rf-section')) {
+            // Code exists but no syntax highlighting - apply it
+            applySyntaxHighlighting(code);
+        }
+    });
+
+    // Keyup event as backup for detecting content changes
+    robotCodeEl.addEventListener('keyup', () => {
+        updateUI();
+    });
+
+    // New Test Button Handler
+    newTestBtn.addEventListener('click', () => {
+        const hasCode = getCodeContent().trim().length > 0;
+        
+        if (hasCode) {
+            // Show confirmation dialog
+            if (confirm('⚠️ This will clear your current test. Are you sure you want to start a new test?')) {
+                clearAll();
+            }
+        } else {
+            clearAll();
+        }
+    });
+
+    function clearAll() {
+        queryInput.value = '';
+        queryInput.style.height = 'auto';
+        clearCode();
+        generationLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎬</div><p>Test generation logs will appear here</p></div>';
+        executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
+        
+        // Reset tracking flags
+        hasGeneratedCode = false;
+        hasExecutedCode = false;
+        generationLogsManualState = null;
+        executionLogsManualState = null;
+        
+        // Hide both log sections
+        generationLogsSection.style.display = 'none';
+        executionLogsSection.style.display = 'none';
+        
+        updateUI();
+    }
+    
+    // Manage log section visibility
+    function updateLogSectionsVisibility() {
+        // Generation logs visibility
+        if (hasGeneratedCode) {
+            generationLogsSection.style.display = 'block';
+            
+            // Auto-collapse during execution unless manually overridden
+            if (generationLogsManualState === null) {
+                if (currentState === UIState.EXECUTING || hasExecutedCode) {
+                    collapseSection('generation', false);
+                } else {
+                    expandSection('generation', false);
+                }
+            } else {
+                // Respect manual state
+                if (generationLogsManualState) {
+                    expandSection('generation', false);
+                } else {
+                    collapseSection('generation', false);
+                }
+            }
+        } else {
+            generationLogsSection.style.display = 'none';
+        }
+        
+        // Execution logs visibility
+        if (hasExecutedCode || currentState === UIState.EXECUTING) {
+            executionLogsSection.style.display = 'block';
+            
+            // Auto-expand during execution unless manually overridden
+            if (executionLogsManualState === null) {
+                expandSection('execution', false);
+            } else {
+                // Respect manual state
+                if (executionLogsManualState) {
+                    expandSection('execution', false);
+                } else {
+                    collapseSection('execution', false);
+                }
+            }
+        } else if (!hasGeneratedCode) {
+            // If user pastes code directly (no generation), don't show execution logs until execution starts
+            executionLogsSection.style.display = 'none';
+        }
+    }
+    
+    function collapseSection(section, isManual = true) {
+        const content = section === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        const button = section === 'generation'
+            ? document.getElementById('toggle-generation-logs')
+            : document.getElementById('toggle-execution-logs');
+        const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
+        
+        content.classList.add('collapsed');
+        sectionEl.classList.add('collapsed-section');
+        button.querySelector('span').textContent = 'Expand';
+        button.querySelector('svg path').setAttribute('d', 'M5 15l7-7 7 7');
+        
+        if (isManual) {
+            if (section === 'generation') {
+                generationLogsManualState = false;
+            } else {
+                executionLogsManualState = false;
+            }
+        }
+    }
+    
+    function expandSection(section, isManual = true) {
+        const content = section === 'generation' 
+            ? document.getElementById('generation-logs-content')
+            : document.getElementById('execution-logs-content');
+        const button = section === 'generation'
+            ? document.getElementById('toggle-generation-logs')
+            : document.getElementById('toggle-execution-logs');
+        const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
+        const logsEl = section === 'generation' ? generationLogsEl : executionLogsEl;
+        
+        content.classList.remove('collapsed');
+        sectionEl.classList.remove('collapsed-section');
+        button.querySelector('span').textContent = 'Collapse';
+        button.querySelector('svg path').setAttribute('d', 'M19 9l-7 7-7-7');
+        
+        // Auto-scroll to latest log when expanding
+        if (isManual) {
+            logsEl.scrollTop = logsEl.scrollHeight;
+            
+            if (section === 'generation') {
+                generationLogsManualState = true;
+            } else {
+                executionLogsManualState = true;
+            }
+        }
+    }
+    
+    // Toggle button handlers
+    document.getElementById('toggle-generation-logs').addEventListener('click', () => {
+        const content = document.getElementById('generation-logs-content');
+        if (content.classList.contains('collapsed')) {
+            expandSection('generation', true);
+        } else {
+            collapseSection('generation', true);
+        }
+    });
+    
+    document.getElementById('toggle-execution-logs').addEventListener('click', () => {
+        const content = document.getElementById('execution-logs-content');
+        if (content.classList.contains('collapsed')) {
+            expandSection('execution', true);
+        } else {
+            collapseSection('execution', true);
+        }
+    });
 
-        // Track execution start time
-        executionStartTime = Date.now();
+    // Main Action Button Handler
+    actionBtn.addEventListener('click', async () => {
+        const config = buttonConfig[currentState];
+        
+        if (!config.action) return;
+        
+        if (config.action === 'generate') {
+            await handleGenerate();
+        } else if (config.action === 'execute') {
+            await handleExecute();
+        }
+    });
+
+    async function handleGenerate() {
+        const query = queryInput.value.trim();
+        const hasExistingCode = getCodeContent().trim().length > 0;
+        
+        // Confirmation for regeneration
+        if (hasExistingCode) {
+            if (!confirm('⚠️ This will replace your current code. Continue?')) {
+                return;
+            }
+        }
+        
+        updateButtonState(UIState.GENERATING);
+        clearCode();
+        generationLogsEl.innerHTML = '';
+        downloadBtn.style.display = 'none';
+        statusBadge.classList.remove('status-persistent');
+        statusBadge.style.display = 'none';
+        
+        // Reset progress bar
+        const generationProgressContainer = document.getElementById('generation-progress-container');
+        const generationProgressFill = document.getElementById('generation-progress-fill');
+        const generationProgressText = document.getElementById('generation-progress-text');
+        generationProgressContainer.style.display = 'none';
+        generationProgressFill.style.width = '0%';
+        generationProgressText.textContent = '0%';
+        
+        // Mark that generation has started
+        hasGeneratedCode = true;
+        
+        // Reset manual state for generation logs (allow auto-management)
+        generationLogsManualState = null;
+        
+        // Update log sections visibility
+        updateLogSectionsVisibility();
 
         try {
             const requestPayload = {
@@ -87,7 +557,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 model: "gemini-1.5-pro-latest"
             };
 
-            const response = await fetch('/generate-and-run', {
+            const response = await fetch('/generate-test', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -116,7 +586,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (jsonData.trim()) {
                             try {
                                 const data = JSON.parse(jsonData);
-                                handleStreamedData(data);
+                                handleGenerationData(data);
                             } catch (e) {
                                 console.error('Failed to parse JSON from stream:', jsonData);
                             }
@@ -125,127 +595,186 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         } catch (error) {
-            updateStatus('error', 'Request failed');
+            updateStatus('error', 'Generation failed');
             executionLogsEl.textContent = `Error: ${error.message}`;
             hideStatus();
         } finally {
-            setButtonLoading(false);
+            updateUI();
         }
-    });
+    }
 
-    function handleStreamedData(data) {
-        updateStatus('processing', data.message);
+    async function handleExecute() {
+        const code = getCodeContent().trim();
+        
+        if (!code) {
+            alert('No code to execute');
+            return;
+        }
+        
+        updateButtonState(UIState.EXECUTING);
+        executionLogsEl.innerHTML = '';
+        statusBadge.classList.remove('status-persistent');
+        statusBadge.style.display = 'none';
+        executionStartTime = Date.now();
+        
+        // Reset progress bar
+        const executionProgressContainer = document.getElementById('execution-progress-container');
+        const executionProgressFill = document.getElementById('execution-progress-fill');
+        const executionProgressText = document.getElementById('execution-progress-text');
+        executionProgressContainer.style.display = 'none';
+        executionProgressFill.style.width = '0%';
+        executionProgressText.textContent = '0%';
+        
+        // Mark that execution has started
+        hasExecutedCode = true;
+        
+        // Reset manual state for execution logs (allow auto-management)
+        executionLogsManualState = null;
+        
+        // Update log sections visibility (will auto-collapse generation, show execution)
+        updateLogSectionsVisibility();
 
-        if (data.stage === 'generation') {
-            // Display running logs for generation stage
-            if (data.status === 'running') {
-                const logEntry = document.createElement('div');
-                logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
-                executionLogsEl.appendChild(logEntry);
-                executionLogsEl.scrollTop = executionLogsEl.scrollHeight; // Auto-scroll
-            } else if (data.status === 'complete' && data.robot_code) {
-                robotCodeContent = data.robot_code;
+        try {
+            const requestPayload = {
+                robot_code: code
+            };
 
-                // Apply syntax highlighting
-                applySyntaxHighlighting(robotCodeContent);
+            const response = await fetch('/execute-test', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
+                body: JSON.stringify(requestPayload),
+            });
 
-                // Show copy button and language label
-                copyCodeBtn.style.display = 'flex';
-                codeLanguageLabel.style.display = 'block';
-                downloadBtn.style.display = 'inline-flex';
-
-                // Clear generation logs and prepare for execution logs
-                executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
-            } else if (data.status === 'error') {
-                updateStatus('error', 'Generation failed');
-                robotCodeEl.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>${data.message}</p></div>`;
-                const errorEntry = document.createElement('div');
-                errorEntry.style.color = 'var(--error)';
-                errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
-                executionLogsEl.appendChild(errorEntry);
-                hideStatus();
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-        } else if (data.stage === 'execution') {
-            // When execution starts, clear the placeholder and show the first real log
-            if (executionLogsEl.querySelector('.empty-state')) {
-                executionLogsEl.innerHTML = '';
-            }
-            if (data.status === 'running') {
-                const logEntry = document.createElement('div');
-                logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${data.message}`;
-                executionLogsEl.appendChild(logEntry);
-                executionLogsEl.scrollTop = executionLogsEl.scrollHeight;
-            } else if (data.status === 'complete' && data.result) {
-                const logs = data.result.logs || 'No execution logs available';
-                executionLogsEl.textContent = logs; // Replace with final, full logs
 
-                // Calculate execution time
-                const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
-                const timeText = executionTime ? ` (${executionTime}s)` : '';
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
 
-                // PRIORITY 1: Use explicit test_status from backend (most reliable)
-                if (data.test_status === 'passed') {
-                    updateStatus('success', `Test passed${timeText}`, true); // persistent = true
-                } else if (data.test_status === 'failed') {
-                    updateStatus('error', 'Test failed', true); // No time for failures
-                }
-                // PRIORITY 2: Fallback to improved log parsing (for backward compatibility)
-                else {
-                    const logsUpper = logs.toUpperCase();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-                    // Pattern 1: Check for "X passed, 0 failed" (success)
-                    const resultsMatch = logsUpper.match(/(\d+)\s+PASSED,\s+(\d+)\s+FAILED/);
-                    // Calculate execution time
-                    const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
-                    const timeText = executionTime ? ` (${executionTime}s)` : '';
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n\n');
 
-                    if (resultsMatch) {
-                        const failedCount = parseInt(resultsMatch[2]);
-                        if (failedCount === 0) {
-                            updateStatus('success', `Test passed${timeText}`, true); // persistent
-                        } else {
-                            updateStatus('error', 'Test failed', true); // No time for failures
+                for (const line of lines) {
+                    if (line.startsWith('data:')) {
+                        const jsonData = line.substring(5);
+                        if (jsonData.trim()) {
+                            try {
+                                const data = JSON.parse(jsonData);
+                                handleExecutionData(data);
+                            } catch (e) {
+                                console.error('Failed to parse JSON from stream:', jsonData);
+                            }
                         }
                     }
-                    // Pattern 2: Check for "All tests passed" message
-                    else if (logsUpper.includes('ALL TESTS PASSED')) {
-                        updateStatus('success', `Test passed${timeText}`, true); // persistent
-                    }
-                    // Pattern 3: Check for individual test status lines
-                    else if (logsUpper.includes('TEST:') && logsUpper.includes(' - PASS')) {
-                        updateStatus('success', `Test passed${timeText}`, true); // persistent
-                    }
-                    else if (logsUpper.includes('TEST:') && logsUpper.includes(' - FAIL')) {
-                        updateStatus('error', 'Test failed', true); // No time for failures
-                    }
-                    // Pattern 4: Check for error indicators
-                    else if (logsUpper.includes('ERROR') || logsUpper.includes('EXCEPTION')) {
-                        updateStatus('error', 'Test completed with errors', true); // No time for errors
-                    }
-                    // Default: If no clear failure indicators, assume success
-                    else {
-                        updateStatus('success', `Test completed${timeText}`, true); // persistent
-                    }
                 }
-
-                hideStatus();
-            } else if (data.status === 'error') {
-                updateStatus('error', 'Execution failed');
-                const errorEntry = document.createElement('div');
-                errorEntry.style.color = 'var(--error)';
-                errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
-                executionLogsEl.appendChild(errorEntry);
-                hideStatus();
             }
+        } catch (error) {
+            updateStatus('error', 'Execution failed');
+            executionLogsEl.textContent = `Error: ${error.message}`;
+            hideStatus();
+        } finally {
+            updateUI();
+        }
+    }
+
+    function handleGenerationData(data) {
+        updateStatus('processing', data.message);
+
+        if (data.status === 'running') {
+            const stage = data.stage || 'generation';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
+        } else if (data.status === 'complete' && data.robot_code) {
+            applySyntaxHighlighting(data.robot_code);
+            updateStatus('success', 'Generation complete', false);
+            hideStatus();
+            // Reset state to allow button update, then update UI
+            currentState = UIState.IDLE;
+            updateUI();
+            updateLogSectionsVisibility();
+        } else if (data.status === 'error') {
+            updateStatus('error', 'Generation failed');
+            const stage = data.stage || 'generation';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
+            hideStatus();
+            // Reset state to allow button update, then update UI
+            currentState = UIState.IDLE;
+            updateUI();
+            updateLogSectionsVisibility();
+        }
+    }
+
+    function handleExecutionData(data) {
+        updateStatus('processing', data.message);
+        
+        if (data.status === 'running') {
+            const stage = data.stage || 'execution';
+            const logEntry = createLogEntry(data, stage);
+            routeLogToContainer(logEntry, stage);
+        } else if (data.status === 'complete' && data.result) {
+            const logs = data.result.logs || 'No execution logs available';
+            executionLogsEl.textContent = logs;
+
+            const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
+            const timeText = executionTime ? ` (${executionTime}s)` : '';
+
+            if (data.test_status === 'passed') {
+                updateStatus('success', `Test passed${timeText}`, true);
+            } else if (data.test_status === 'failed') {
+                updateStatus('error', 'Test failed', true);
+            } else {
+                const logsUpper = logs.toUpperCase();
+                const resultsMatch = logsUpper.match(/(\d+)\s+PASSED,\s+(\d+)\s+FAILED/);
+
+                if (resultsMatch) {
+                    const failedCount = parseInt(resultsMatch[2]);
+                    if (failedCount === 0) {
+                        updateStatus('success', `Test passed${timeText}`, true);
+                    } else {
+                        updateStatus('error', 'Test failed', true);
+                    }
+                } else if (logsUpper.includes('ALL TESTS PASSED')) {
+                    updateStatus('success', `Test passed${timeText}`, true);
+                } else if (logsUpper.includes('ERROR') || logsUpper.includes('EXCEPTION')) {
+                    updateStatus('error', 'Test completed with errors', true);
+                } else {
+                    updateStatus('success', `Test completed${timeText}`, true);
+                }
+            }
+            hideStatus();
+            // Reset state to allow button update, then update UI
+            currentState = UIState.IDLE;
+            updateUI();
+            updateLogSectionsVisibility();
+        } else if (data.status === 'error') {
+            updateStatus('error', 'Execution failed');
+            const errorEntry = document.createElement('div');
+            errorEntry.style.color = 'var(--error)';
+            errorEntry.textContent = `[${new Date().toLocaleTimeString()}] ERROR: ${data.message}`;
+            executionLogsEl.appendChild(errorEntry);
+            hideStatus();
+            // Reset state to allow button update, then update UI
+            currentState = UIState.IDLE;
+            updateUI();
+            updateLogSectionsVisibility();
         }
     }
 
     // Copy code button handler
     copyCodeBtn.addEventListener('click', async () => {
+        const code = getCodeContent();
         try {
-            await navigator.clipboard.writeText(robotCodeContent);
+            await navigator.clipboard.writeText(code);
 
-            // Success feedback - change icon to checkmark
             const originalHTML = copyCodeBtn.innerHTML;
             copyCodeBtn.classList.add('copied');
             copyCodeBtn.innerHTML = `
@@ -266,7 +795,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Download button handler
     downloadBtn.addEventListener('click', () => {
-        const blob = new Blob([robotCodeContent], { type: 'text/plain' });
+        const code = getCodeContent();
+        const blob = new Blob([code], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -276,7 +806,6 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        // Success feedback
         downloadBtn.classList.add('download-success');
         const originalHTML = downloadBtn.innerHTML;
         downloadBtn.innerHTML = `
@@ -292,85 +821,38 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 2000);
     });
 
-    // Keyboard shortcut
+    // Keyboard shortcuts
     queryInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
-            generateBtn.click();
+            if (currentState === UIState.READY_TO_GENERATE) {
+                actionBtn.click();
+            }
         }
     });
 
-    // Notification helper function
-    function showNotification(message, type = 'info') {
-        // Create notification element
-        const notification = document.createElement('div');
-        notification.className = `notification notification-${type}`;
-        notification.textContent = message;
-
-        // Add styles
-        notification.style.cssText = `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 1rem 1.5rem;
-            border-radius: 8px;
-            color: white;
-            font-weight: 500;
-            z-index: 1001;
-            animation: slideIn 0.3s ease;
-        `;
-
-        if (type === 'success') {
-            notification.style.background = 'var(--success)';
-        } else if (type === 'error') {
-            notification.style.background = 'var(--error)';
-        } else {
-            notification.style.background = 'var(--primary)';
+    robotCodeEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            if (currentState === UIState.READY_TO_EXECUTE) {
+                actionBtn.click();
+            }
         }
+    });
 
-        document.body.appendChild(notification);
-
-        // Remove after 3 seconds
-        setTimeout(() => {
-            notification.style.animation = 'slideOut 0.3s ease';
-            setTimeout(() => {
-                document.body.removeChild(notification);
-            }, 300);
-        }, 3000);
-    }
-
-    // Add CSS animations for notifications
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes slideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
-        @keyframes slideOut {
-            from { transform: translateX(0); opacity: 1; }
-            to { transform: translateX(100%); opacity: 0; }
-        }
-    `;
-    document.head.appendChild(style);
-
-    // Syntax highlighting function for Robot Framework
+    // Syntax highlighting function
     function applySyntaxHighlighting(code) {
         const lines = code.split('\n');
         let highlightedHTML = '';
 
-        lines.forEach(line => {
+        lines.forEach((line, index) => {
             let highlightedLine = '';
 
-            // Sections (*** Settings ***, *** Variables ***, etc.)
             if (line.trim().startsWith('***') && line.trim().endsWith('***')) {
                 highlightedLine = `<span class="rf-section">${escapeHtml(line)}</span>`;
-            }
-            // Comments
-            else if (line.trim().startsWith('#')) {
+            } else if (line.trim().startsWith('#')) {
                 highlightedLine = `<span class="rf-comment">${escapeHtml(line)}</span>`;
-            }
-            // Settings keywords (Library, Resource, etc.) - detect by position
-            else if (line.match(/^(Library|Resource|Variables|Suite Setup|Suite Teardown|Test Setup|Test Teardown|Test Template|Test Timeout|Force Tags|Default Tags|Documentation)\s/)) {
+            } else if (line.match(/^(Library|Resource|Variables|Suite Setup|Suite Teardown|Test Setup|Test Teardown|Test Template|Test Timeout|Force Tags|Default Tags|Documentation)\s/)) {
                 const match = line.match(/^(Library|Resource|Variables|Suite Setup|Suite Teardown|Test Setup|Test Teardown|Test Template|Test Timeout|Force Tags|Default Tags|Documentation)(\s+.*)$/);
                 if (match) {
                     const keyword = match[1];
@@ -380,86 +862,68 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     highlightedLine = escapeHtml(line);
                 }
-            }
-            // Variable definitions at column 0 (starts with ${)
-            else if (line.startsWith('${')) {
-                // Variable definition: ${name}    value
+            } else if (line.startsWith('${')) {
                 const varMatch = line.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
                 if (varMatch) {
                     const varName = varMatch[1];
                     const separator = varMatch[2];
                     const varValue = varMatch[3];
-                    // Variable name in blue, value in default text color
                     highlightedLine = `<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
                 } else {
-                    // Just a variable without value
                     highlightedLine = `<span class="rf-variable">${escapeHtml(line)}</span>`;
                 }
-            }
-            // Test case names (lines that don't start with whitespace and aren't sections/comments)
-            else if (line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('***') && !line.startsWith('#')) {
+            } else if (line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('***') && !line.startsWith('#')) {
                 highlightedLine = `<span class="rf-test-name">${escapeHtml(line)}</span>`;
-            }
-            // Indented lines (test steps or variable definitions) - dynamically detect keywords
-            else if (line.match(/^\s+\S/)) {
+            } else if (line.match(/^\s+\S/)) {
                 const leadingSpaces = line.match(/^(\s+)/)[1];
                 const trimmed = line.trimStart();
                 
-                // Check if this is a variable definition (starts with ${)
                 if (trimmed.startsWith('${')) {
-                    // Variable definition: ${name}    value
-                    // Match variable name, then any whitespace (1+), then the value
                     const varMatch = trimmed.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
                     if (varMatch) {
                         const varName = varMatch[1];
                         const separator = varMatch[2];
                         const varValue = varMatch[3];
-                        // Variable name in blue, value in default text color (no span = default)
                         highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
                     } else {
-                        // Just a variable without value - highlight only the variable
                         highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(trimmed)}</span>`;
                     }
                 } else {
-                    // Robot Framework uses 2+ spaces or tabs to separate keyword from arguments
-                    // Match everything before the first occurrence of 2+ spaces or tab
                     const keywordMatch = trimmed.match(/^([^\s]+(?:\s+[^\s]+)*?)(\s{2,}|\t)/);
                     
                     if (keywordMatch) {
-                        // Found a keyword (text before 2+ spaces or tab)
                         const keyword = keywordMatch[1];
                         const separator = keywordMatch[2];
                         const rest = trimmed.substring(keyword.length + separator.length);
-                        
-                        // Highlight variables in the rest
                         const restHighlighted = escapeHtml(rest).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
                         highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(keyword)}</span>${separator}${restHighlighted}`;
                     } else {
-                        // No separator found - could be a keyword without arguments (like "Close Browser")
-                        // Highlight the entire trimmed line as a keyword
                         highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(trimmed)}</span>`;
                     }
                 }
-            }
-            // Variables (${...}) in other lines (but NOT indented lines starting with ${)
-            else if (line.includes('${') && !line.match(/^\s+\$/)) {
+            } else if (line.includes('${') && !line.match(/^\s+\$/)) {
                 highlightedLine = escapeHtml(line).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
-            }
-            // Default: just escape HTML
-            else {
+            } else {
                 highlightedLine = escapeHtml(line);
             }
 
-            highlightedHTML += highlightedLine + '\n';
+            // Add newline only if not the last line
+            if (index < lines.length - 1) {
+                highlightedHTML += highlightedLine + '\n';
+            } else {
+                highlightedHTML += highlightedLine;
+            }
         });
 
-        robotCodeEl.innerHTML = highlightedHTML;
+        setCodeContent(highlightedHTML, true);
     }
 
-    // Helper function to escape HTML
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
     }
+
+    // Initialize UI
+    updateUI();
 });

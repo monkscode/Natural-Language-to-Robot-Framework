@@ -2,8 +2,18 @@ from crewai import Task
 import os
 import json
 import logging
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class ValidationOutput(BaseModel):
+    """Pydantic model for validation task output."""
+    valid: bool = Field(description="Whether the code is valid or not")
+    reason: str = Field(description="Explanation of validation result")
+    errors: Optional[List[str]] = Field(
+        default=None, description="List of error messages if code is invalid")
 
 
 class RobotTasks:
@@ -215,51 +225,12 @@ Generated Test
         )
 
     def identify_elements_task(self, agent) -> Task:
-        # Check if vision locators are available from environment (for pre-identified elements)
-        vision_locators_json = os.getenv('VISION_LOCATORS_JSON')
-        vision_locators = {}
-        if vision_locators_json:
-            try:
-                vision_locators = json.loads(vision_locators_json)
-                logger.info(
-                    f"✅ Vision locators available for {len(vision_locators)} elements: {list(vision_locators.keys())}")
-            except json.JSONDecodeError:
-                logger.warning(
-                    "⚠️ Could not parse VISION_LOCATORS_JSON from environment")
-
-        # Build vision locator instructions (for pre-identified elements, if any)
-        if vision_locators:
-            vision_instructions = (
-                "\n\n"
-                "🎯 **VISION LOCATORS AVAILABLE (PRE-IDENTIFIED)** 🎯\n"
-                "The following elements have been PRE-IDENTIFIED:\n"
-                "\n"
-            )
-            for element_name, locator in vision_locators.items():
-                vision_instructions += f"- **{element_name}**: `{locator}`\n"
-
-            vision_instructions += (
-                "\n"
-                "--- USING PRE-IDENTIFIED LOCATORS ---\n"
-                "1. Check if element matches a pre-identified locator\n"
-                "2. If YES: Use it directly (no tool call needed)\n"
-                "3. If NO: Include it in the batch_browser_automation call\n"
-                "\n"
-            )
-        else:
-            vision_instructions = (
-                "\n\n"
-                "ℹ️ **NO PRE-IDENTIFIED LOCATORS AVAILABLE**\n"
-                "All elements will be found using batch_browser_automation.\n"
-                "\n"
-            )
-
         return Task(
             description=(
                 "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
                 "Your mission: Find locators for ALL elements in ONE batch operation.\n"
                 "The context will be the output of the 'plan_steps_task' (array of test steps).\n\n"
-                f"{vision_instructions}"
+                "ℹ️ All elements will be found using batch_browser_automation.\n\n"
                 "--- MANDATORY BATCH WORKFLOW ---\n"
                 "\n"
                 "**STEP 1: ANALYZE THE PLAN**\n"
@@ -524,7 +495,34 @@ Generated Test
 
         return Task(
             description=(
-                "Assemble the final Robot Framework code from the structured steps provided in the context. "
+                "🚨 **YOU ARE A CODE PRINTER - OUTPUT ONLY CODE** 🚨\n\n"
+
+                "Your ONLY task: Generate raw Robot Framework code from the provided steps.\n\n"
+
+                "⛔ **ABSOLUTELY FORBIDDEN** ⛔\n"
+                "DO NOT include:\n"
+                "- Thinking process ('Thought:', 'I will', 'Let me', 'First', 'Now', 'I need')\n"
+                "- Explanations ('From the first step:', 'Also add', 'Variables:', 'Test Case Steps:')\n"
+                "- Markdown ('**Variables:**', '```robot', '```', '**Test Cases:**')\n"
+                "- Numbered lists ('1. New Browser', '2. New Context')\n"
+                "- ANY text before *** Settings ***\n"
+                "- ANY text after the last keyword\n\n"
+
+                "✅ **YOUR OUTPUT MUST BE** ✅\n"
+                "Raw Robot Framework code that:\n"
+                "1. Starts with *** Settings *** (first line, first character)\n"
+                "2. Contains ONLY valid Robot Framework syntax\n"
+                "3. Can be saved directly as a .robot file\n\n"
+
+                "Example of CORRECT output:\n"
+                "*** Settings ***\n"
+                "Library    Browser\n"
+                "...\n\n"
+
+                "Example of WRONG output:\n"
+                "Now, I will assemble...*** Settings ***  ← WRONG!\n"
+                "**Variables:**  ← WRONG!\n\n"
+
                 "The context will be the output of the 'identify_elements_task'.\n\n"
 
                 f"{self._get_code_structure_template()}\n\n"
@@ -568,14 +566,64 @@ Generated Test
 
                 f"{popup_instructions}"
 
+                "--- CRITICAL: USE PROVIDED LOCATORS EXACTLY (NO EXCEPTIONS) ---\n"
+                "⚠️ **MOST IMPORTANT RULE FOR LOCATORS** ⚠️\n\n"
+
+                "The locators provided have been:\n"
+                "- Found by AI vision on the actual webpage\n"
+                "- Validated to work correctly\n"
+                "- Scored and prioritized (ID > data-testid > name > aria-label > text > XPath)\n"
+                "- Selected as the BEST option for stability\n\n"
+
+                "**YOU MUST:**\n"
+                "1. Copy the EXACT locator value from the 'locator' field\n"
+                "2. DO NOT modify, improve, or convert the locator\n"
+                "3. DO NOT change id=X to xpath=//*[@id='X']\n"
+                "4. DO NOT change any locator format\n"
+                "5. If you think a locator is wrong, USE IT ANYWAY and add a comment\n\n"
+
+                "**WHY THIS IS CRITICAL:**\n"
+                "- The locator was validated on the actual page\n"
+                "- Changing it will break the test\n"
+                "- The scoring system already selected the best option\n"
+                "- Your job is code assembly, not locator optimization\n\n"
+
+                "**EXAMPLES:**\n"
+                "✅ CORRECT:\n"
+                "Input: {\"locator\": \"id=submit-btn\"}\n"
+                "Output: ${submit_locator}    id=submit-btn\n\n"
+
+                "❌ WRONG (DO NOT DO THIS):\n"
+                "Input: {\"locator\": \"id=submit-btn\"}\n"
+                "Output: ${submit_locator}    xpath=//*[@id='submit-btn']  ← WRONG!\n\n"
+
+                "❌ WRONG (DO NOT DO THIS):\n"
+                "Input: {\"locator\": \"xpath=//button[1]\"}\n"
+                "Output: ${submit_locator}    id=submit-btn  ← WRONG! Use provided XPath!\n\n"
+
+                "❌ WRONG (DO NOT DO THIS):\n"
+                "Input: {\"locator\": \"name=q\"}\n"
+                "Output: ${search_locator}    id=search-box  ← WRONG! Use provided name locator!\n\n"
+
+                "⚠️ REMEMBER: Locators are pre-validated and pre-scored. DO NOT modify them! ⚠️\n\n"
+
                 "--- LOCATOR MAPPING RULES ---\n"
                 "For each step that needs a locator:\n"
                 "1. Check if 'locator' key exists and 'found' is true\n"
-                "2. If found: Declare locator as variable and use it\n"
+                "2. If found: Declare locator as variable and use it EXACTLY as provided\n"
                 "3. If NOT found (found=false or error present):\n"
                 "   a. Add comment: # WARNING: Locator not found for <element_description>\n"
                 "   b. Use placeholder: xpath=//PLACEHOLDER_FOR_<element_id>\n"
                 "   c. Still generate syntactically valid code\n\n"
+
+                "**Example for found locator:**\n"
+                "```robot\n"
+                "*** Variables ***\n"
+                "${search_box_locator}    id=search-input  # ← Use EXACT value from 'locator' field\n\n"
+                "*** Test Cases ***\n"
+                "Test\n"
+                "    Input Text    ${search_box_locator}    shoes\n"
+                "```\n\n"
 
                 "**Example for missing locator:**\n"
                 "```robot\n"
@@ -621,18 +669,35 @@ Generated Test
                 f"- {self.library_context.library_name if self.library_context else 'SeleniumLibrary'} (for web automation)\n"
                 f"- BuiltIn (for basic Robot Framework keywords like Should Be True, Evaluate)\n"
                 f"- String (if string manipulation is needed)\n\n"
-                "--- CRITICAL RULES ---\n"
-                "1. You MUST respond with ONLY the raw Robot Framework code.\n"
-                "2. The code should start with '*** Settings ***' or '*** Test Cases ***'.\n"
-                "3. Do NOT include any introductory text, natural language explanations, or markdown formatting like ``` or ```robotframework.\n"
-                "4. For price or numeric validations, always use Evaluate to convert strings to numbers properly.\n"
-                "5. ALWAYS include popup dismissal steps as specified above."
+                "--- CRITICAL OUTPUT FORMAT RULES ---\n"
+                "1. ⚠️ Output ONLY raw Robot Framework code\n"
+                "2. Start with *** Settings *** (first line)\n"
+                "3. End with the last test keyword (e.g., Close Browser)\n"
+                "4. No explanatory text before or after the code\n"
+                "5. No markdown formatting (no ```)\n"
+                "6. For price or numeric validations, use Evaluate to convert strings to numbers\n"
+                "7. Include popup dismissal steps as specified above\n\n"
+                "Example of correct output:\n"
+                "*** Settings ***\n"
+                "Library    Browser\n\n"
+                "*** Variables ***\n"
+                "${browser}    chromium\n\n"
+                "*** Test Cases ***\n"
+                "Generated Test\n"
+                "    New Browser    ${browser}\n"
+                "    Close Browser"
             ),
-            expected_output="A raw string containing only the complete and syntactically correct Robot Framework code. The output MUST NOT contain any markdown fences or other explanatory text.",
+            expected_output=(
+                "ONLY raw Robot Framework code. "
+                "First line MUST be: *** Settings *** "
+                "Last line MUST be: Close Browser (or similar keyword). "
+                "NO thinking process. NO explanations. NO markdown. "
+                "Just pure code that can be saved as .robot file."
+            ),
             agent=agent,
         )
 
-    def validate_code_task(self, agent) -> Task:
+    def validate_code_task(self, agent, code_assembler_agent=None) -> Task:
         # Get library-specific validation rules
         validation_rules = ""
         if self.library_context:
@@ -657,18 +722,67 @@ Generated Test
 
         return Task(
             description=(
-                "Validate the generated Robot Framework code for correctness and adherence to critical rules. "
-                "The context will be the output of the 'assemble_code_task'.\n\n"
+                "⚠️ **PRIMARY TASK: VALIDATE THE ROBOT FRAMEWORK CODE** ⚠️\n"
+                "Your MAIN responsibility is to validate Robot Framework code for correctness.\n"
+                "Delegation is ONLY for invalid code - DO NOT delegate if code is valid!\n\n"
+
                 f"{validation_rules}"
+
+                "--- VALIDATION WORKFLOW ---\n"
+                "1. **Analyze the code thoroughly** - Check syntax, keywords, variables, locators\n"
+                "2. **If code is VALID:**\n"
+                "   - Return {\"valid\": true, \"reason\": \"Code is syntactically correct...\"}\n"
+                "   - ⚠️ DO NOT delegate to any agent\n"
+                "   - Your job is DONE - stop here\n"
+                "3. **If code is INVALID (has errors):**\n"
+                "   - Return {\"valid\": false, \"reason\": \"...\", \"errors\": [...]}\n"
+                "   - THEN delegate to Robot Framework Code Assembler to fix the errors\n\n"
+
+                "⚠️ **CRITICAL:** Only delegate if you found ACTUAL errors! Valid code = NO delegation! ⚠️\n\n"
+
+                "--- REQUIRED JSON OUTPUT FORMAT ---\n"
+                "You MUST respond with ONLY a valid JSON object (no markdown, no extra text):\n\n"
+                "**If code is VALID (no errors found):**\n"
+                "{\n"
+                "  \"valid\": true,\n"
+                "  \"reason\": \"Code is syntactically correct and follows all validation rules. All keywords are correct, variables are properly declared, and locators are valid.\"\n"
+                "}\n"
+                "⚠️ DO NOT delegate when returning valid=true! ⚠️\n\n"
+
+                "**If code is INVALID (errors found):**\n"
+                "{\n"
+                "  \"valid\": false,\n"
+                "  \"reason\": \"Code has validation errors that need to be fixed\",\n"
+                "  \"errors\": [\n"
+                "    \"Missing Variable Assignment: 'Get Text' keyword on line 15 returns a value but no variable is assigned. Should be: ${result}=    Get Text    ${locator}\",\n"
+                "    \"Syntax Error: Incorrect indentation on line 18. Robot Framework requires 4 spaces for test step indentation.\",\n"
+                "    \"Incorrect Keyword: 'Click Button' is not a valid keyword. Use 'Click Element' instead.\"\n"
+                "  ]\n"
+                "}\n"
+                "Then delegate to Robot Framework Code Assembler with these error details.\n\n"
+
+                "--- ERROR REPORTING GUIDELINES (Only if code is invalid) ---\n"
+                "For each error in the errors array, provide:\n"
+                "- Error type (e.g., Missing Variable Assignment, Syntax Error, Incorrect Keyword)\n"
+                "- Specific location (line number or keyword name)\n"
+                "- What is wrong\n"
+                "- How to fix it (with example if possible)\n\n"
+
                 "--- CRITICAL RULES ---\n"
-                "1. You MUST respond with ONLY a single, valid JSON object.\n"
-                "2. Do NOT include any introductory text, natural language explanations, or markdown formatting like ```json.\n"
-                "3. The JSON object must have exactly two keys: 'valid' (a boolean) and 'reason' (a string).\n"
-                "4. If the code is valid, set 'valid' to true and 'reason' to 'The code is valid.'.\n"
-                "5. If the code is invalid, set 'valid' to false and provide a brief, clear explanation in the 'reason' key."
+                "1. ⚠️ **MOST IMPORTANT:** If code is valid, return valid=true and DO NOT delegate!\n"
+                "2. You MUST output ONLY valid JSON (no markdown code blocks, no extra text)\n"
+                "3. The JSON must have 'valid' (boolean) and 'reason' (string) fields\n"
+                "4. If valid=false, include 'errors' array with detailed error descriptions\n"
+                "5. Do NOT include any text before or after the JSON object\n"
+                "6. Only delegate to Robot Framework Code Assembler if you found actual errors\n"
+                "7. Be specific and actionable in error descriptions to help fix issues"
             ),
-            expected_output="A single, raw JSON object with two keys: 'valid' (boolean) and 'reason' (string). For example: {\"valid\": true, \"reason\": \"The code is valid.\"}",
+            expected_output="A valid JSON object with 'valid' (boolean) and 'reason' (string) fields. If valid=true, DO NOT delegate. If valid=false, include 'errors' array and delegate to Robot Framework Code Assembler for correction.",
             agent=agent,
+            output_json=ValidationOutput,  # Force JSON output format using Pydantic model
+            # Only allow delegation to Code Assembler
+            allowed_agents=[
+                code_assembler_agent] if code_assembler_agent else None,
         )
 
     def analyze_popup_strategy_task(self, agent, user_query, target_url) -> Task:

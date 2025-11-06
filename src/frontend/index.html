@@ -71,8 +71,19 @@
         <div class="workspace">
             <div class="section">
                 <div class="section-header">
-                    <div class="section-title">Test Description</div>
-                    <div class="section-subtitle">Describe your test scenario in plain English</div>
+                    <div class="result-actions">
+                        <div>
+                            <div class="section-title">Test Description</div>
+                            <div class="section-subtitle">Describe your test scenario in plain English</div>
+                        </div>
+                        <button id="new-test-btn" class="btn btn-secondary" style="display: none;">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 4v16m8-8H4"></path>
+                            </svg>
+                            New Test
+                        </button>
+                    </div>
                 </div>
                 <div class="section-content">
                     <div class="form-group">
@@ -84,14 +95,14 @@
 • Go to YouTube, search for 'Python automation', filter by upload date, and play the first video
 • Visit Amazon, search for 'wireless headphones', filter by rating, and add the top result to cart"></textarea>
                     </div>
-                    <button id="generate-btn" class="btn btn-primary btn-full">
+                    <button id="action-btn" class="btn btn-primary btn-full" disabled>
                         <span class="btn-text">
-                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg id="action-btn-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M5 3l14 9-14 9V3z"></path>
+                                    d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                             </svg>
-                            Generate & Execute Test
                         </span>
+                        <span id="action-btn-text">Enter a query or paste code</span>
                         <div class="btn-spinner" style="display: none;"></div>
                     </button>
                 </div>
@@ -129,18 +140,72 @@
                                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                             </svg>
                         </button>
-                        <pre id="robot-code" class="code-block"><div class="empty-state"><div class="empty-state-icon">⚡</div><p>Generated Robot Framework code will appear here</p></div></pre>
+                        <pre id="robot-code" class="code-block" contenteditable="true" spellcheck="false"><div class="empty-state" id="code-placeholder"><div class="empty-state-icon">⚡</div><p>Generated Robot Framework code will appear here</p></div></pre>
+                    </div>
+                    <div id="edit-hint" class="edit-hint" style="display: none;">
+                        💡 Tip: You can edit the code above before execution
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section">
+        <div id="generation-logs-section" class="section" style="display: none;">
             <div class="section-header">
-                <div class="section-title">Execution Results</div>
-                <div class="section-subtitle">Real-time test execution logs and results</div>
+                <div class="result-actions">
+                    <div>
+                        <div class="section-title">Generation Logs</div>
+                        <div class="section-subtitle">Real-time test generation progress and insights</div>
+                    </div>
+                    <button id="toggle-generation-logs" class="btn btn-secondary btn-sm">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                        <span>Collapse</span>
+                    </button>
+                </div>
             </div>
-            <div class="section-content">
+            <div id="generation-logs-content" class="section-content">
+                <div id="generation-progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-global">
+                            <div id="generation-progress-fill" class="progress-fill-global" style="width: 0%;"></div>
+                        </div>
+                        <div id="generation-progress-text" class="progress-text-global">0%</div>
+                    </div>
+                </div>
+                <div id="generation-logs" class="logs-block">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎬</div>
+                        <p>Test generation logs will appear here</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="execution-logs-section" class="section" style="display: none;">
+            <div class="section-header">
+                <div class="result-actions">
+                    <div>
+                        <div class="section-title">Execution Logs</div>
+                        <div class="section-subtitle">Real-time test execution logs and results</div>
+                    </div>
+                    <button id="toggle-execution-logs" class="btn btn-secondary btn-sm">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                        <span>Collapse</span>
+                    </button>
+                </div>
+            </div>
+            <div id="execution-logs-content" class="section-content">
+                <div id="execution-progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar-global">
+                            <div id="execution-progress-fill" class="progress-fill-global" style="width: 0%;"></div>
+                        </div>
+                        <div id="execution-progress-text" class="progress-text-global">0%</div>
+                    </div>
+                </div>
                 <div id="execution-logs" class="logs-block">
                     <div class="empty-state">
                         <div class="empty-state-icon">📋</div>

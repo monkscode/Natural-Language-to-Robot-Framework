@@ -254,9 +254,30 @@ ${PASSWORD}    %{TEST_PASSWORD}
 
 ## CI/CD Integration
 
-### API Integration
+### Two-Phase API Integration (Recommended)
 
 ```bash
+# Step 1: Generate test code
+curl -X POST http://localhost:5000/generate-test \
+  -H "Content-Type: application/json" \
+  -d '{"query": "your test query"}' > generation_response.json
+
+# Step 2: Extract robot_code from response and execute
+curl -X POST http://localhost:5000/execute-test \
+  -H "Content-Type: application/json" \
+  -d '{"robot_code": "*** Settings ***\n..."}'
+```
+
+**Benefits:**
+- Review generated code before execution
+- Edit code if needed
+- Better error handling (know which phase failed)
+- More control over the process
+
+### Legacy Single-Phase API
+
+```bash
+# Generate and execute in one call
 curl -X POST http://localhost:5000/generate-and-run \
   -H "Content-Type: application/json" \
   -d '{"query": "your test query"}'

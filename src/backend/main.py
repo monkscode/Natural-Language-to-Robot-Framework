@@ -43,6 +43,10 @@ app.add_middleware(
 # --- API Router ---
 app.include_router(api_router)
 
+# --- Workflow Metrics API Router ---
+from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
+app.include_router(workflow_metrics_router, prefix="/api")
+
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")

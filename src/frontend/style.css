@@ -255,6 +255,11 @@ body {
     background: var(--gray-200);
 }
 
+.btn-sm {
+    padding: 0.5rem 1rem;
+    font-size: 0.8125rem;
+}
+
 .btn-full {
     width: 100%;
 }
@@ -354,6 +359,28 @@ body {
     max-height: 400px;
     overflow-y: auto;
     margin: 0;
+    outline: none;
+    transition: box-shadow 0.2s ease;
+}
+
+.code-block:focus {
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3);
+}
+
+.code-block:empty:before {
+    content: attr(data-placeholder);
+    color: var(--gray-400);
+    font-style: italic;
+}
+
+.edit-hint {
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: rgb(37 99 235 / 0.05);
+    border-left: 3px solid var(--primary);
+    border-radius: 4px;
+    font-size: 0.875rem;
+    color: var(--gray-600);
 }
 
 /* Robot Framework Syntax Highlighting - VS Code Standard Colors */
@@ -446,6 +473,150 @@ body {
     border-radius: 3px;
 }
 
+/* Enhanced Log Entry Styling */
+.log-entry {
+    padding: 12px 16px;
+    margin: 8px 0;
+    border-left: 4px solid var(--primary);
+    background: rgba(37, 99, 235, 0.05);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.log-entry:hover {
+    background: rgba(37, 99, 235, 0.08);
+    transform: translateX(2px);
+    box-shadow: var(--shadow-sm);
+}
+
+.log-entry.log-success {
+    border-left-color: var(--success);
+    background: rgba(5, 150, 105, 0.05);
+}
+
+.log-entry.log-success:hover {
+    background: rgba(5, 150, 105, 0.08);
+}
+
+.log-entry.log-error {
+    border-left-color: var(--error);
+    background: rgba(220, 38, 38, 0.05);
+}
+
+.log-entry.log-error:hover {
+    background: rgba(220, 38, 38, 0.08);
+}
+
+.log-entry.log-insight {
+    border-left-color: var(--warning);
+    background: rgba(217, 119, 6, 0.05);
+}
+
+.log-entry.log-insight:hover {
+    background: rgba(217, 119, 6, 0.08);
+}
+
+.log-timestamp {
+    font-size: 11px;
+    color: var(--gray-500);
+    margin-bottom: 4px;
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+}
+
+.log-message {
+    color: var(--gray-800);
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.log-step-info {
+    color: var(--gray-500);
+    font-size: 12px;
+    font-weight: 500;
+    margin-left: 0.5rem;
+}
+
+.progress-info {
+    font-size: 12px;
+    color: var(--gray-600);
+    margin-top: 8px;
+    font-weight: 500;
+}
+
+.progress-bar {
+    height: 8px;
+    background: var(--gray-200);
+    border-radius: 4px;
+    margin-top: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), #8b5cf6);
+    border-radius: 4px;
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.3);
+}
+
+.progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    right: 0;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.3),
+        transparent
+    );
+    animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* Celebration Message Styling */
+.log-entry.log-celebration {
+    border: none;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(37, 99, 235, 0.1));
+    padding: 16px 20px;
+    box-shadow: var(--shadow-md);
+    position: relative;
+    overflow: hidden;
+}
+
+.log-entry.log-celebration::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #8b5cf6, var(--primary), #06b6d4);
+}
+
+.log-entry.log-celebration:hover {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(37, 99, 235, 0.15));
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.log-entry.log-celebration .log-message {
+    font-weight: 600;
+    font-size: 15px;
+}
+
 .status-badge {
     display: inline-flex;
     align-items: center;
@@ -512,11 +683,76 @@ body {
     opacity: 0.5;
 }
 
+/* Collapsed section styling */
+.section-content.collapsed {
+    display: none;
+}
+
+.section.collapsed-section {
+    opacity: 0.7;
+}
+
+/* Global progress bar styling */
+.progress-container {
+    padding: 0 0 1rem 0;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--gray-200);
+}
+
+.progress-bar-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.progress-bar-global {
+    flex: 1;
+    height: 12px;
+    background: var(--gray-200);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.progress-fill-global {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), #8b5cf6);
+    border-radius: 6px;
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.3);
+}
+
+.progress-fill-global::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    right: 0;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.3),
+        transparent
+    );
+    animation: shimmer 2s infinite;
+}
+
+.progress-text-global {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--gray-700);
+    min-width: 45px;
+    text-align: right;
+}
+
 .result-actions {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    width: 100%;
 }
 
 .download-success {
