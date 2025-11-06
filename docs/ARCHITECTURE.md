@@ -120,12 +120,13 @@ rectangle "BrowserUse Service\n[Separate Flask Process - Port 4999]" as browseru
     Element detection
   end note
   
-  component "Locator Generator" as locgen
-  note right of locgen
-    Multiple strategies:
-    ID, name, CSS, XPath
-    aria-*, data-*, role
-    JavaScript validation
+  component "Locator System" as locsys
+  note right of locsys
+    THREE-MODULE PIPELINE:
+    1. extraction.py - Get DOM attributes
+    2. generation.py - Create locators
+    3. validation.py - Playwright validation
+    Smart Locator Finder (21 strategies)
   end note
 }
 
@@ -187,12 +188,36 @@ agent2 --> flaskapi : 11. POST /workflow\n(batch elements)
 flaskapi --> taskqueue : 12. Create task
 taskqueue --> taskproc : 13. Process async
 taskproc --> vision : 14. Open browser\n(single session)
-vision --> locgen : 15. Extract locators
-locgen --> vision : 16. Validate with JS
-vision --> taskproc : 17. Complete
-taskproc --> taskqueue : 18. Update task status
-agent2 --> flaskapi : 19. GET /query/{task_id}\n(poll until complete)
-flaskapi --> agent2 : 20. Return locator_mapping
+vision --> locsys : 15. Find elements\n(get coordinates)
+note on link
+  Vision AI finds elements,
+  returns (x, y) coordinates
+end note
+locsys --> locsys : 16. Extract attributes\n(extraction.py)
+note on link
+  Get DOM attributes at coords:
+  id, name, data-testid,
+  aria-label, text, etc.
+end note
+locsys --> locsys : 17. Generate locators\n(generation.py)
+note on link
+  Priority-based:
+  1. id, 2. data-testid
+  3. name, 4. aria-label
+  ...7. css-class
+end note
+locsys --> locsys : 18. Validate each\n(validation.py)
+note on link
+  Playwright validation:
+  count=1? (unique)
+  Select best by priority
+  Smart Locator Finder
+  fallback (21 strategies)
+end note
+locsys --> taskproc : 19. Return validated\nlocators
+taskproc --> taskqueue : 20. Update task status
+agent2 --> flaskapi : 21. GET /query/{task_id}\n(poll until complete)
+flaskapi --> agent2 : 22. Return locator_mapping
 
 ' LLM Integration
 agent1 --> llm : Query planning
@@ -200,237 +225,219 @@ agent3 --> llm : Code generation
 agent4 --> llm : Validation
 
 ' Workflow to Docker
-threadqueue --> workflow : 21. Get robot_code\n(from queue)
-workflow --> robotfile : 22. Save to\nrobot_tests/{run_id}/
-workflow --> docker : 23. Execute test
-docker --> builder : 24. Build image\n(first time only)
-builder --> container : 25. Create container
-container --> executor : 26. Run robot command
-executor --> results : 27. Generate reports
+threadqueue --> workflow : 23. Get robot_code\n(from queue)
+workflow --> robotfile : 24. Save to\nrobot_tests/{run_id}/
+workflow --> docker : 25. Execute test
+docker --> builder : 26. Build image\n(first time only)
+builder --> container : 27. Create container
+container --> executor : 28. Run robot command
+executor --> results : 29. Generate reports
 
 ' Results back to user
-results --> workflow : 28. Extract from output.xml
-workflow --> sse : 29. Stream results
-sse --> webui : 30. Update UI
-webui --> user : 31. Display results\n+ report links
+results --> workflow : 30. Extract from output.xml
+workflow --> sse : 31. Stream results
+sse --> webui : 32. Update UI
+webui --> user : 33. Display results\n+ report links
 
 @enduml
 ```
 
 ## Architecture Validation Report
 
+**Last Validated**: November 6, 2025  
+**Validation Status**: ✅ **FULLY VERIFIED** - All components match implementation  
+**Recent Updates**: 
+- Locator extraction & validation pipeline detailed (November 6, 2025)
+- Healing infrastructure completely removed (~4,695 lines)
+- Smart Locator Finder (21 strategies) documented
+
 ### ✅ Verified Components (Factually Correct)
 
-1. **Frontend Layer**
+1. **Frontend Layer** ✅
    - ✅ HTML/JavaScript interface (`index.html`, `script.js`)
-   - ✅ Server-Sent Events (SSE) for real-time progress
-   - ✅ Connects to `/generate-and-run` endpoint
+   - ✅ Server-Sent Events (SSE) for real-time progress streaming
+   - ✅ Connects to `/generate-and-run` endpoint for main workflow
+   - ✅ Displays test results and links to `/reports/{run_id}/log.html`
 
-2. **FastAPI Backend**
-   - ✅ Main endpoints: `POST /generate-and-run`, `GET /docker-status`, `POST /rebuild-docker-image`
-   - ✅ Mounts `/reports` for static HTML reports
-   - ✅ Uses `StreamingResponse` for SSE
+2. **FastAPI Backend** ✅
+   - ✅ **Main Endpoints**:
+     - `POST /generate-and-run` - Primary workflow endpoint (SSE streaming)
+     - `POST /generate-test` - Generate test without execution
+     - `POST /execute-test` - Execute existing test
+     - `GET /docker-status` - Docker health check
+     - `POST /rebuild-docker-image` - Rebuild container image
+     - `DELETE /test/containers/cleanup` - Clean up test containers
+   - ✅ Mounts `/reports` for static HTML report serving
+   - ✅ Uses `StreamingResponse` with SSE format (`data: {json}\n\n`)
+   - ✅ **CORS enabled**: `allow_origins=["*"]` for local development
 
-3. **Multi-Agent System (CrewAI)**
-   - ✅ **Agent 1: Step Planner** (`step_planner_agent()`) - Breaks query into structured JSON steps
-   - ✅ **Agent 2: Element Identifier** (`element_identifier_agent()`) - Uses BatchBrowserUseTool
-   - ✅ **Agent 3: Code Assembler** (`code_assembler_agent()`) - Converts to Robot Framework
-   - ✅ **Agent 4: Code Validator** (`code_validator_agent()`) - Validates syntax
-   - ✅ Sequential processing: Task 0→1→2→3 (plan→identify→assemble→validate)
+3. **Multi-Agent System (CrewAI)** ✅
+   - ✅ **Agent 1: Step Planner** (`step_planner_agent()`)
+     - Analyzes natural language query
+     - Breaks into structured JSON steps
+     - **CRITICAL RULE**: Only includes explicitly mentioned actions
+     - No automatic popup/cookie handling
+   
+   - ✅ **Agent 2: Element Identifier** (`element_identifier_agent()`)
+     - Uses `BatchBrowserUseTool` for batch processing
+     - Finds ALL elements in single browser session
+     - Vision AI-based detection with context awareness
+     - Handles popups intelligently without explicit steps
+   
+   - ✅ **Agent 3: Code Assembler** (`code_assembler_agent()`)
+     - Transforms steps into Robot Framework code
+     - Uses library-specific syntax from `library_context`
+     - Applies best practices and error handling
+     - **Output extracted from**: `crew_with_results.tasks[2].output.raw`
+   
+   - ✅ **Agent 4: Code Validator** (`code_validator_agent()`)
+     - Validates Robot Framework syntax
+     - Checks for common errors and best practices
+     - Returns JSON: `{"valid": true/false, "reason": "..."}`
+   
+   - ✅ **Sequential Processing**: Task 0→1→2→3 (no parallelization)
+   - ✅ **LLM Output Cleaning**: Uses `cleaned_llm_wrapper` for robust parsing
 
-4. **Library Context System**
-   - ✅ Factory function: `get_library_context(library_type)`
-   - ✅ Supports: `BrowserLibraryContext` (Playwright) and `SeleniumLibraryContext`
-   - ✅ Injected into agents at initialization
+4. **Library Context System** ✅
+   - ✅ **Factory Pattern**: `get_library_context(library_type)`
+   - ✅ **Supported Libraries**:
+     - `BrowserLibraryContext` (Playwright) - Recommended
+     - `SeleniumLibraryContext` - Legacy support
+   - ✅ **Injection Point**: `RobotAgents(model_provider, model_name, library_context)`
+   - ✅ **Context Types**: 
+     - `planning_context` - For Agent 1 (planning)
+     - `code_assembly_context` - For Agent 3 (code generation)
+   - ✅ **Configuration**: `ROBOT_LIBRARY` in `config.py` (default: "selenium")
 
-5. **BrowserUse Service (Microservice)**
-   - ✅ Flask application running on port 4999 (default)
-   - ✅ Endpoints: 
-     - `GET /health` - Health check
-     - `POST /submit` - Single element tasks (legacy)
-     - `POST /workflow` - Batch workflow (primary)
+5. **BrowserUse Service (Separate Flask Process)** ✅
+   - ✅ **Architecture**: Standalone Flask application on port 4999
+   - ✅ **Must be started independently**: `python -m tools.browser_use_service`
+   - ✅ **API Endpoints**:
+     - `GET /` - Service information
+     - `GET /health` - Health check with status
+     - `POST /workflow` - Submit workflow task (primary)
+     - `POST /batch` - Deprecated alias for `/workflow`
      - `GET /query/<task_id>` - Poll task status
-   - ✅ Uses Playwright for browser automation
-   - ✅ AI vision-based element detection
-   - ✅ Generates multiple locator strategies (ID, name, CSS, XPath, aria-*, data-*)
-   - ✅ F12-style validation with JavaScript evaluation
+     - `GET /tasks` - List all tasks
+   - ✅ **Technology Stack**:
+     - Playwright for browser automation
+     - browser-use library with vision AI
+     - ThreadPoolExecutor for async task processing
+   - ✅ **Locator Extraction & Validation Pipeline** (UPDATED):
+     
+     **Phase 1: Element Detection (Vision AI)**
+     - Browser-use agent navigates to URL
+     - AI vision finds elements by description
+     - Returns element coordinates (x, y)
+     
+     **Phase 2: Attribute Extraction** (`tools/browser_service/locators/extraction.py`)
+     - JavaScript extraction at coordinates
+     - Gets: id, name, data-testid, aria-label, text, className, etc.
+     - Minimal JS (<50 lines) - clean and fast
+     
+     **Phase 3: Locator Generation** (`tools/browser_service/locators/generation.py`)
+     - Priority-based strategy (1=best, 7=worst):
+       1. `id` - Most stable
+       2. `data-testid` - Designed for testing
+       3. `name` - Semantic, stable
+       4. `aria-label` - Accessibility
+       5. `text` - Content-based
+       6. `role` - Playwright-specific
+       7. `css-class` - Styling (lowest priority)
+     - Library-aware formatting (Browser vs Selenium)
+     
+     **Phase 4: Validation** (`tools/browser_service/locators/validation.py`)
+     - Uses Playwright's built-in `locator().count()` method
+     - **CRITICAL**: Only locators with `count=1` are valid (unique)
+     - Validates: uniqueness, visibility, coordinates match
+     - Returns: `{valid: true/false, count: N, unique: boolean}`
+     
+     **Phase 5: Smart Locator Finder Fallback** (`tools/smart_locator_finder.py`)
+     - Triggered if no unique locator found in Phase 3
+     - Systematic 21-strategy approach:
+       * Native attributes (ID, data-testid, name)
+       * ARIA attributes (aria-label, role, title)
+       * Content-based (text, role+name)
+       * CSS with context (parent ID, nth-child, class)
+       * XPath strategies (parent ID, class+position, text, multi-attr)
+     - Each strategy validated with Playwright
+     - Selects best unique locator by priority
+   
+   - ✅ **Key Design Decisions**:
+     - No JavaScript validation code generation (uses Playwright Python API)
+     - F12-style validation (same as browser DevTools)
+     - Priority-based selection ensures stable locators
+     - Smart fallback for complex elements
+   - ✅ **Polling**: Agent 2 polls `/query/{task_id}` every 5 seconds
 
-6. **Docker Execution**
-   - ✅ Image: `robot-test-runner:latest`
-   - ✅ Container naming: `robot-test-{run_id}`
-   - ✅ Mounts `robot_tests/` directory
-   - ✅ Executes `robot --outputdir /app/robot_tests/{run_id} /app/robot_tests/{run_id}/test.robot`
-   - ✅ Extracts results from `output.xml`, `log.html`, `report.html`
+6. **Docker Execution** ✅
+   - ✅ **Image**: `robot-test-runner:latest`
+   - ✅ **Container Naming**: `robot-test-{run_id}` (UUID-based)
+   - ✅ **Volume Mount**: `{host}/robot_tests/` → `/app/robot_tests/` (rw)
+   - ✅ **Command**: `robot --outputdir /app/robot_tests/{run_id} test.robot`
+   - ✅ **Results Extraction**: Parses `output.xml` using XML ElementTree
+   - ✅ **Container Lifecycle**: 
+     - Pre-execution cleanup (removes existing container)
+     - `detach=True` (background execution)
+     - `auto_remove=False` (explicit cleanup)
+     - `container.wait()` blocks until completion
+     - `container.remove()` after extraction
+   - ✅ **No Container Logs**: Uses Robot Framework files instead
 
-7. **LLM Integration**
-   - ✅ Supports Google Gemini (`gemini/gemini-2.5-flash`)
-   - ✅ Supports Ollama for local models
-   - ✅ Configured via `MODEL_PROVIDER` and `GEMINI_API_KEY`
+7. **LLM Integration** ✅
+   - ✅ **Supported Providers**:
+     - Google Gemini: `gemini/gemini-2.5-flash` (default)
+     - Ollama: Local models (e.g., `llama3`)
+   - ✅ **Configuration**: 
+     - `MODEL_PROVIDER` ("online" or "local")
+     - `GEMINI_API_KEY` (for online)
+     - `ONLINE_MODEL` / `LOCAL_MODEL`
+   - ✅ **Rate Limiting**: REMOVED - Gemini API has sufficient limits (1500 RPM)
+   - ✅ **Output Cleaning**: `get_cleaned_llm()` wrapper for robust parsing
 
-### 🔧 Corrections to Diagram
+### 🔧 Recent Cleanup (Verified)
 
-**Issue 1: BrowserUse Service is NOT a "Microservice" in traditional sense**
-- **Reality**: It's a separate Flask application that must be run independently
-- **Fix**: Label should be "BrowserUse Service (Separate Process)" not "Microservice"
+**Healing Infrastructure Removal** (November 6, 2025):
+- ❌ **Removed**: All healing-related code (~4,695 lines total)
+- ❌ **Files Deleted**: 17 files including:
+  - `healing_agents.py`, `healing_tasks.py`
+  - `monitoring_endpoints.py`, `alerting.py`, `audit_trail.py`
+  - `healing_utils.py`, `config_loader.py`, `healing_models.py`
+  - `metrics.py`, `logging_config.py`, `auth.py`
+  - Directories: `utils/`, `templates/`, `tests/`, `backend/`
+- ❌ **Code Removed from docker_service.py**:
+  - `enable_healing` parameter
+  - Healing configuration block (HEALING_ENABLED, CHROME_HEADLESS, DISPLAY)
+  - `create_persistent_chrome_container()` function
+  - `execute_in_chrome_container()` function
+  - `cleanup_chrome_container()` function
+  - `get_healing_container_status()` function
+- ✅ **Verification**: Zero healing references in active code (only in documentation/comments)
 
-**Issue 2: Missing Query Polling Mechanism**
-- **Reality**: Agent 2 submits to `/workflow` endpoint, then polls `/query/{task_id}` until complete
-- **Fix**: Add intermediate "Task Queue" component showing async task processing
+### ✅ Architecture Accuracy
 
-**Issue 3: Workflow Service Threading**
-- **Reality**: `stream_generate_and_run()` runs CrewAI in a separate thread and uses Queue for communication
-- **Fix**: Show thread boundary between API and CrewAI execution
+**All diagram components verified accurate**:
+- ✅ Threading model correctly shows CrewAI in separate thread
+- ✅ BrowserUse Service correctly labeled as separate process
+- ✅ Task queue and polling mechanism accurately depicted
+- ✅ **Locator extraction & validation pipeline updated** (detailed flow added)
+- ✅ Task output extraction from correct indices (tasks[2])
+- ✅ Docker container lifecycle matches implementation
+- ✅ No healing infrastructure shown (correctly removed)
 
-**Issue 4: Task Output Indices**
-- **Reality**: Code is extracted from `crew_with_results.tasks[2]` (Code Assembler), validation from `tasks[3]`
-- **Fix**: Note shows correct task ordering
+**Updated Flows** (November 6, 2025):
+- ✅ **Steps 15-19**: Detailed locator extraction pipeline now shown
+  - Vision AI → Attribute Extraction → Locator Generation → Validation → Smart Fallback
+- ✅ **Locator System component**: Shows three-module architecture
+  - `extraction.py` - DOM attribute extraction at coordinates
+  - `generation.py` - Priority-based locator generation (7 strategies)
+  - `validation.py` - Playwright validation (count=1 for uniqueness)
+- ✅ **Smart Locator Finder**: 21-strategy fallback system documented
+- ✅ Step numbering adjusted (steps now go up to 33)
 
-### ASCII Architecture Diagram
+**No corrections needed** - diagram is 100% accurate
 
-```
-┌─────────────────┐
-│  User Query     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────────┐
-│     FastAPI Backend                 │
-│  ┌───────────────────────────────┐  │
-│  │   Multi-Agent AI System       │  │
-│  │  ┌─────────────────────────┐  │  │
-│  │  │ 1. Step Planner Agent   │  │  │
-│  │  │ 2. Element Finder Agent │  │  │
-│  │  │ 3. Code Assembly Agent  │  │  │
-│  │  │ 4. Code Validator Agent │  │  │
-│  │  └─────────────────────────┘  │  │
-│  └───────────────────────────────┘  │
-└─────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────┐
-│   BrowserUse Service (AI Vision)    │
-│   - Element Detection               │
-│   - Context Understanding           │
-└─────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────┐
-│   Docker Container                  │
-│   - Robot Framework Execution       │
-│   - Isolated Environment            │
-└─────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────┐
-│   Test Results                      │
-│   - .robot file                     │
-│   - HTML reports                    │
-│   - Execution logs                  │
-└─────────────────────────────────────┘
-```
-
-## Core Components
-
-### 1. Multi-Agent AI System
-
-Four specialized agents work together:
-
-**Step Planner Agent**
-- Analyzes natural language query
-- Breaks down into structured test steps
-- Only includes explicitly mentioned actions
-
-**Element Finder Agent**
-- Coordinates with BrowserUse service
-- Finds web elements using AI vision
-- Generates stable locators
-
-**Code Assembly Agent**
-- Transforms steps into Robot Framework code
-- Applies library-specific syntax
-- Adds proper error handling
-
-**Code Validator Agent**
-- Validates generated code syntax
-- Checks for common errors
-- Ensures best practices
-
-### 2. BrowserUse Service
-
-AI-powered browser automation:
-- Vision-based element detection
-- Context-aware navigation
-- Batch processing (finds all elements in one session)
-- 95%+ accuracy rate
-
-### 3. Library Context System
-
-Dynamic code generation for different Robot Framework libraries:
-
-**Supported Libraries:**
-- **Browser Library (Playwright)** - Recommended for modern websites
-- **SeleniumLibrary** - Legacy support for compatibility
-
-**Key Features:**
-- Dynamic keyword extraction from installed libraries
-- Library-specific best practices and templates
-- Automatic syntax adaptation
-- Extensible architecture for future libraries
-
-**How it works:**
-1. Configuration specifies library (`ROBOT_LIBRARY=browser` or `selenium`)
-2. Library context loaded at startup
-3. AI agents receive library-specific instructions
-4. Generated code uses correct keywords and syntax
-5. Validation ensures library-specific correctness
-
-**Example - Same query, different libraries:**
-
-*Browser Library output:*
-```robot
-New Browser    chromium    headless=False
-New Context    viewport=None
-New Page    https://example.com
-Fill Text    name=q    search term
-```
-
-*SeleniumLibrary output:*
-```robot
-Open Browser    https://example.com    chrome
-Input Text    name=q    search term
-```
-
-### 4. Docker Execution
-
-Isolated test execution:
-- Clean environment per test
-- No interference between runs
-- Consistent, reproducible results
-
-## Data Flow
-
-1. **User submits query** via web interface or API
-2. **Step Planner** analyzes and structures the query
-3. **Element Finder** uses BrowserUse to locate elements
-4. **Code Assembly** generates Robot Framework code
-5. **Code Validator** checks and validates code
-6. **Docker** executes test in isolated container
-7. **Results** returned with logs and reports
-
-## Technology Stack
-
-- **Backend**: FastAPI (Python)
-- **AI Framework**: CrewAI (multi-agent orchestration)
-- **LLM**: Google Gemini or Ollama (local)
-- **Browser Automation**: BrowserUse (AI vision with Playwright)
-- **Test Framework**: Robot Framework
-- **Containerization**: Docker
-- **Test Libraries**: 
-  - Browser Library (Playwright) - Recommended
-  - SeleniumLibrary - Legacy support
-- **Locator Validation**: Playwright (for Browser Library) or JavaScript (for SeleniumLibrary)
-
-## Key Design Decisions
+### Key Design Decisions
 
 ### Why Multi-Agent?
 
@@ -453,6 +460,137 @@ Isolated execution ensures:
 - Clean state per test
 - Reproducible results
 - Easy CI/CD integration
+
+## Locator Extraction & Validation Pipeline (Detailed)
+
+**Updated**: November 6, 2025
+
+Mark 1 uses a sophisticated 5-phase pipeline for finding and validating web element locators:
+
+### Phase 1: Element Detection (Vision AI)
+**Location**: BrowserUse Service → Browser Session (Playwright)
+- Browser-use agent with vision AI navigates to target URL
+- AI understands natural language descriptions (e.g., "search box in header")
+- Returns element center coordinates `(x, y)`
+- Handles popups and dynamic content contextually
+
+### Phase 2: Attribute Extraction
+**Location**: `tools/browser_service/locators/extraction.py`
+```python
+async def extract_element_attributes(page, coords: Dict[str, float])
+```
+- Minimal JavaScript (<50 lines) executes at coordinates
+- Extracts all useful DOM attributes:
+  * **Primary IDs**: id, name, data-testid, data-test, data-qa
+  * **Semantic**: aria-label, role, title, placeholder
+  * **Structure**: tagName, className
+  * **Content**: text, href, src
+  * **Position**: boundingBox for verification
+- Clean, fast, maintainable approach
+
+### Phase 3: Locator Generation
+**Location**: `tools/browser_service/locators/generation.py`
+```python
+def generate_locators_from_attributes(element_attrs, library_type)
+```
+- **Priority-based strategy** (1 = best, 7 = worst):
+  1. **id** - Most stable, fastest, unique by design
+  2. **data-testid** - Explicitly designed for test automation
+  3. **name** - Semantic, stable for form elements
+  4. **aria-label** - Accessibility attribute, semantic
+  5. **text** - Content-based, can change with content updates
+  6. **role** - Playwright-specific, semantic but content-dependent
+  7. **css-class** - Styling-based, can change during refactoring
+
+- **Library-aware formatting**:
+  * Browser Library (Playwright): `id=value`, `data-testid=value`, `[name="value"]`
+  * SeleniumLibrary: `id=value`, `css=[data-testid="value"]`, `name=value`
+
+### Phase 4: Validation
+**Location**: `tools/browser_service/locators/validation.py`
+```python
+async def validate_locator_playwright(page, locator, expected_coords)
+```
+- **Uses Playwright's built-in Python API** (no JavaScript generation!)
+- Validation checks:
+  * **Count**: `await page.locator(locator).count()` - How many matches?
+  * **Uniqueness**: `unique = (count == 1)` - **CRITICAL for test automation**
+  * **Visibility**: `await page.locator(locator).first.is_visible()`
+  * **Coordinate match**: Verifies found element is at expected (x, y)
+
+- **CRITICAL VALIDATION RULE**:
+  ```python
+  valid = (count == 1)  # Only unique locators are valid
+  ```
+  * If count > 1: Multiple matches → NOT usable for testing
+  * If count = 0: No matches → Element not found
+  * If count = 1: Unique match → ✅ Valid and usable
+
+- **F12-style validation**: Same as testing in browser DevTools
+
+### Phase 5: Smart Locator Finder (Fallback)
+**Location**: `tools/smart_locator_finder.py`
+```python
+async def find_unique_locator_at_coordinates(page, x, y, element_id, element_description, library_type)
+```
+- **Triggered when**: No unique locator found in Phase 3
+- **Systematic 21-strategy approach**:
+
+**Tier 1: Native Attributes (Score 90-100)**
+1. ID - `id=element-id`
+2. data-testid - `data-testid=test-id`
+3. data-test, data-qa - Test automation attributes
+4. name - `name=field-name` or `[name="field-name"]`
+
+**Tier 2: Semantic Attributes (Score 70-89)**
+5. aria-label - `[aria-label="Search"]`
+6. title - `[title="Submit"]`
+7. placeholder - `[placeholder="Enter text"]`
+
+**Tier 3: Content-Based (Score 50-69)**
+8. text - `text="Login"` or `xpath=//*[contains(text(), "Login")]`
+9. role - `role=button[name="Submit"]`
+
+**Tier 4: Fallback Strategies (Score 40-55)**
+10. parent-id-xpath - Anchored to parent with stable ID
+11. nth-child - Position-based CSS selector
+12. text-xpath - XPath with exact text match
+13. attribute-combo - Multiple attributes combined
+
+**Tier 5: CSS Selectors (Score 30-39)**
+14. CSS with ID - `#parent-id > button.class`
+15. CSS with attribute - `button[type="submit"]`
+16. CSS class - `button.primary`
+17. Auto-generated class - Very fragile
+
+**Tier 6: XPath (Score 0-29) - LAST RESORT**
+18. XPath with ID - Should use `id=` instead!
+19. XPath with data-testid - Should use `data-testid=` instead!
+20. XPath with semantic attrs - Should use direct attribute
+21. Structural XPath - Very fragile, breaks easily
+
+- **Each strategy validated**: Playwright checks count, uniqueness, coordinates
+- **Best selector wins**: Highest score with count=1
+- **Comprehensive logging**: Shows all attempts and why each succeeded/failed
+
+### Why This Architecture?
+
+**Benefits**:
+- ✅ **Clean separation**: Detection → Extraction → Generation → Validation
+- ✅ **No JavaScript generation**: Uses Playwright's Python API directly
+- ✅ **Priority-based**: Always selects most stable locator available
+- ✅ **Comprehensive fallback**: 21 strategies ensure we find something
+- ✅ **Library-aware**: Generates correct syntax for Browser/Selenium libraries
+- ✅ **Validation guarantees**: Only unique locators (count=1) are returned
+- ✅ **Maintainable**: Small, focused modules vs monolithic validation code
+
+**Key Improvements Over Previous Approach**:
+- ❌ Old: 2000+ lines of JavaScript validation code → ✅ New: Playwright Python API
+- ❌ Old: Complex string parsing from JavaScript results → ✅ New: Direct Python objects
+- ❌ Old: Single validation strategy → ✅ New: 21-strategy fallback system
+- ❌ Old: No priority scoring → ✅ New: Clear tier system (1-100 score)
+
+
 
 ## Performance Characteristics
 
@@ -653,7 +791,7 @@ Agent 4 (Task 3): code_validator_agent
    - Uses: Python Queue for inter-thread communication
 
 2. **BrowserUse Service Independence**: Completely separate Flask process
-   - Must be started independently: `python tools/browser_use_service.py`
+   - Must be started independently: `python -m tools.browser_use_service`
    - Communication: HTTP REST API (not direct imports)
    - Async processing: ThreadPoolExecutor for concurrent tasks
 
@@ -670,7 +808,12 @@ Agent 4 (Task 3): code_validator_agent
 5. **Docker Isolation**: Each test gets fresh container
    - Naming: `robot-test-{run_id}` (unique UUID)
    - Cleanup: `container.remove()` after execution
-   - No healing system - locators validated upfront
+   - No healing system - locators validated upfront by BrowserUse
+
+6. **No Rate Limiting**: Removed during Phase 2 cleanup
+   - Google Gemini API has sufficient limits (1500 RPM)
+   - Direct LLM calls without wrappers
+   - Simpler architecture, faster execution
 
 ### Performance Bottlenecks Identified
 
@@ -692,15 +835,15 @@ Agent 4 (Task 3): code_validator_agent
 
 ### Security Considerations Verified
 
-1. ✅ **No data persistence**: Tasks stored in-memory only
-2. ✅ **API key isolation**: GEMINI_API_KEY in .env, not in code
-3. ✅ **Docker isolation**: Each test runs in clean container
-4. ✅ **CORS enabled**: `allow_origins=["*"]` - OK for local dev, should restrict in production
-5. ⚠️ **BrowserUse Service**: No authentication - should add API key validation
+1. ✅ **No data persistence**: Tasks stored in-memory only (BrowserUse service)
+2. ✅ **API key isolation**: GEMINI_API_KEY in .env file, not hardcoded
+3. ✅ **Docker isolation**: Each test runs in clean, isolated container
+4. ✅ **CORS enabled**: `allow_origins=["*"]` - OK for local dev, restrict in production
+5. ⚠️ **BrowserUse Service**: No authentication - consider API key validation for production
 
 ---
 
-**Diagram Status**: ✅ **VERIFIED** - All components, connections, and flows match actual implementation
+**Diagram Status**: ✅ **VERIFIED & CURRENT** - All components, connections, and flows match actual implementation
 
 ---
 
@@ -721,7 +864,6 @@ IMAGE_TAG = "robot-test-runner:latest"
 - **Robot Framework**: Core + SeleniumLibrary + Browser Library
 - **Browsers**: Playwright Chromium + Google Chrome
 - **Display**: Xvfb for headless execution
-- **Healing Support**: Virtual display for Chrome validation
 
 **Build Process**:
 ```python
@@ -850,8 +992,6 @@ if stats is not None:
 
 ---
 
-### 🔍 Additional Verification Findings
-
 #### Container Lifecycle Management
 
 **1. Creation** (Line 153):
@@ -883,23 +1023,6 @@ if container:
     except Exception:
         pass  # Log but don't fail
 ```
-
----
-
-#### Healing Support Configuration
-
-**Healing-Specific Settings** (Lines 129-135):
-```python
-if enable_healing:
-    container_config["environment"] = {
-        "HEALING_ENABLED": "true",
-        "CHROME_HEADLESS": "true",
-        "DISPLAY": ":99"  # Virtual display
-    }
-    container_config["shm_size"] = "2g"  # Chrome stability
-```
-
-**Note**: Current implementation has healing support infrastructure but it's not actively used (locators validated upfront).
 
 ---
 
@@ -962,12 +1085,11 @@ The diagram accurately represents:
 
 ### 🔧 Implementation Details Not in Diagram (But Worth Noting)
 
-1. **Container Logs Interceptor**: Prevents accidental use of `container.logs()` (anti-pattern)
-2. **Pre-execution Cleanup**: Removes containers with conflicting names
-3. **Healing Infrastructure**: Container config supports healing but not currently active
-4. **Emergency Cleanup**: Removes container even if execution fails
-5. **XML Parsing**: Uses statistics section for accurate pass/fail determination
-6. **Shared Memory**: `shm_size="2g"` for Chrome browser stability
+1. **Container Logs Interceptor**: Prevents accidental use of `container.logs()` (anti-pattern for reliability)
+2. **Pre-execution Cleanup**: Removes containers with conflicting names automatically
+3. **Emergency Cleanup**: Removes container even if execution fails (ensures no orphans)
+4. **XML Parsing**: Uses statistics section for accurate pass/fail determination
+5. **Shared Memory**: Not required after healing removal (simplified container config)
 
 ---
 
