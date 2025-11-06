@@ -22,3 +22,14 @@ robot_tests/
 
 # Test files
 test.py
+
+# Ignore the AI generated md files
+.kiro
+.cursor
+.claude
+
+# Ignore the jsonl files
+*.jsonl
+
+# Ignore the local browser_service
+tools/browser_service_local/*
