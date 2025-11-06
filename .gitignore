@@ -27,6 +27,8 @@ test.py
 .kiro
 .cursor
 .claude
+.vscode
+.codex
 
 # Ignore the jsonl files
 *.jsonl
