@@ -88,7 +88,8 @@ async def docker_status_endpoint():
         status = get_docker_status(client)
         return status
     except ConnectionError as e:
-        return {"status": "error", "docker_available": False, "error": str(e)}
+        logging.error(f"Docker connection error: {e}")
+        return {"status": "error", "docker_available": False, "error": "Docker is unavailable."}
     except Exception as e:
         logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
         return {"status": "error", "docker_available": False, "error": "An unexpected error occurred."}
