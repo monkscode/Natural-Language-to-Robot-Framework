@@ -878,15 +878,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const leadingSpaces = line.match(/^(\s+)/)[1];
                 const trimmed = line.trimStart();
                 
+                const escapedLeadingSpaces = escapeHtml(leadingSpaces);
                 if (trimmed.startsWith('${')) {
                     const varMatch = trimmed.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
                     if (varMatch) {
                         const varName = varMatch[1];
                         const separator = varMatch[2];
                         const varValue = varMatch[3];
-                        highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
+                        highlightedLine = `${escapedLeadingSpaces}<span class="rf-variable">${escapeHtml(varName)}</span>${escapeHtml(separator)}${escapeHtml(varValue)}`;
                     } else {
-                        highlightedLine = `${leadingSpaces}<span class="rf-variable">${escapeHtml(trimmed)}</span>`;
+                        highlightedLine = `${escapedLeadingSpaces}<span class="rf-variable">${escapeHtml(trimmed)}</span>`;
                     }
                 } else {
                     const keywordMatch = trimmed.match(/^([^\s]+(?:\s+[^\s]+)*?)(\s{2,}|\t)/);
@@ -896,9 +897,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         const separator = keywordMatch[2];
                         const rest = trimmed.substring(keyword.length + separator.length);
                         const restHighlighted = escapeHtml(rest).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
-                        highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(keyword)}</span>${separator}${restHighlighted}`;
+                        highlightedLine = `${escapedLeadingSpaces}<span class="rf-builtin">${escapeHtml(keyword)}</span>${escapeHtml(separator)}${restHighlighted}`;
                     } else {
-                        highlightedLine = `${leadingSpaces}<span class="rf-builtin">${escapeHtml(trimmed)}</span>`;
+                        highlightedLine = `${escapedLeadingSpaces}<span class="rf-builtin">${escapeHtml(trimmed)}</span>`;
                     }
                 }
             } else if (line.includes('${') && !line.match(/^\s+\$/)) {
