@@ -6,8 +6,6 @@ from pydantic_settings import BaseSettings
 from pydantic import Field, validator
 from dotenv import load_dotenv
 
-from .models.healing_models import HealingConfiguration, LocatorStrategy
-
 load_dotenv("src/backend/.env")
 
 class Settings(BaseSettings):
@@ -28,10 +26,6 @@ class Settings(BaseSettings):
     
     # Robot Framework Library Configuration
     ROBOT_LIBRARY: str = Field(default="selenium", description="Robot Framework library to use: 'selenium' or 'browser'")
-    
-    # Self-healing configuration
-    SELF_HEALING_ENABLED: bool = Field(default=True, description="Enable/disable self-healing globally")
-    SELF_HEALING_CONFIG_PATH: str = Field(default="config/self_healing.yaml", description="Path to self-healing config file")
     
     # Agent Retry Configuration
     MAX_AGENT_ITERATIONS: int = Field(default=3, description="Maximum iterations for agents with delegation enabled (retry attempts)")

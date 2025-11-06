@@ -43,10 +43,6 @@ app.add_middleware(
 # --- API Router ---
 app.include_router(api_router)
 
-# --- Monitoring API Router (optional - can be removed if only used for healing) ---
-# from src.backend.api.monitoring_endpoints import router as monitoring_router
-# app.include_router(monitoring_router, prefix="/api")
-
 # --- Workflow Metrics API Router ---
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")

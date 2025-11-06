@@ -100,10 +100,10 @@ def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, 
             raise
 
 
-def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str, enable_healing: bool = True) -> Dict[str, Any]:
+def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> Dict[str, Any]:
     container = None
     logging.info(
-        f"🚀 DOCKER SERVICE: Starting test execution for run_id={run_id}, test_filename={test_filename}, enable_healing={enable_healing}")
+        f"🚀 DOCKER SERVICE: Starting test execution for run_id={run_id}, test_filename={test_filename}")
 
     try:
         robot_command = ["robot", "--outputdir",
@@ -111,7 +111,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         logging.info(
             f"🤖 DOCKER SERVICE: Robot command: {' '.join(robot_command)}")
 
-        # Enhanced container configuration for healing support
+        # Container configuration
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
@@ -123,18 +123,6 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         }
         logging.info(
             f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id}")
-
-        # Add healing-specific environment variables and configurations
-        if enable_healing:
-            container_config["environment"] = {
-                "HEALING_ENABLED": "true",
-                "CHROME_HEADLESS": "true",
-                "DISPLAY": ":99"  # Virtual display for headless Chrome
-            }
-            # Add shared memory for Chrome stability
-            container_config["shm_size"] = "2g"
-            logging.info(
-                f"🔧 DOCKER SERVICE: Added healing configuration to container")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"
@@ -508,125 +496,3 @@ def get_docker_status(client: docker.DockerClient) -> Dict[str, Any]:
         "docker_available": True,
         "image": image_info
     }
-
-
-def create_persistent_chrome_container(client: docker.DockerClient, session_id: str) -> docker.models.containers.Container:
-    """
-    Create a persistent Chrome container for healing validation.
-
-    Args:
-        client: Docker client
-        session_id: Unique session identifier
-
-    Returns:
-        Docker container object
-    """
-    try:
-        container_name = f"chrome-healing-{session_id}"
-
-        # Chrome container configuration for healing
-        container = client.containers.run(
-            image=IMAGE_TAG,
-            name=container_name,
-            command=["tail", "-f", "/dev/null"],  # Keep container running
-            environment={
-                "DISPLAY": ":99",
-                "CHROME_HEADLESS": "true",
-                "HEALING_SESSION": "true"
-            },
-            volumes={os.path.abspath(ROBOT_TESTS_DIR): {
-                'bind': '/app/robot_tests', 'mode': 'rw'}},
-            working_dir="/app",
-            detach=True,
-            auto_remove=False,  # Don't auto-remove for persistent sessions
-            shm_size="2g",  # Shared memory for Chrome stability
-            cap_add=["SYS_ADMIN"],  # Required for Chrome sandbox
-            security_opt=["seccomp=unconfined"]  # Chrome security options
-        )
-
-        logging.info(f"Created persistent Chrome container: {container_name}")
-        return container
-
-    except docker.errors.DockerException as e:
-        logging.error(f"Failed to create persistent Chrome container: {e}")
-        raise RuntimeError(f"Failed to create Chrome container: {e}")
-
-
-def execute_in_chrome_container(container: docker.models.containers.Container, command: list) -> str:
-    """
-    Execute a command in a persistent Chrome container.
-
-    Args:
-        container: Docker container object
-        command: Command to execute
-
-    Returns:
-        Command output as string
-    """
-    try:
-        exec_result = container.exec_run(command, stdout=True, stderr=True)
-        return exec_result.output.decode('utf-8', errors='ignore')
-    except docker.errors.DockerException as e:
-        logging.error(f"Failed to execute command in Chrome container: {e}")
-        raise RuntimeError(f"Command execution failed: {e}")
-
-
-def cleanup_chrome_container(client: docker.DockerClient, session_id: str):
-    """
-    Clean up a persistent Chrome container.
-
-    Args:
-        client: Docker client
-        session_id: Session identifier
-    """
-    try:
-        container_name = f"chrome-healing-{session_id}"
-        container = client.containers.get(container_name)
-        container.stop(timeout=10)
-        container.remove()
-        logging.info(f"Cleaned up Chrome container: {container_name}")
-    except docker.errors.NotFound:
-        logging.debug(
-            f"Chrome container {container_name} not found (already cleaned up)")
-    except docker.errors.DockerException as e:
-        logging.warning(
-            f"Failed to cleanup Chrome container {container_name}: {e}")
-
-
-def get_healing_container_status(client: docker.DockerClient) -> Dict[str, Any]:
-    """
-    Get status of healing-related containers.
-
-    Args:
-        client: Docker client
-
-    Returns:
-        Dictionary with container status information
-    """
-    try:
-        containers = client.containers.list(
-            all=True, filters={"name": "chrome-healing-"})
-
-        container_info = []
-        for container in containers:
-            container_info.append({
-                "name": container.name,
-                "status": container.status,
-                "created": container.attrs.get('Created', 'Unknown'),
-                "image": container.image.tags[0] if container.image.tags else 'Unknown'
-            })
-
-        return {
-            "status": "success",
-            "healing_containers": container_info,
-            "total_containers": len(container_info)
-        }
-
-    except docker.errors.DockerException as e:
-        logging.error(f"Failed to get healing container status: {e}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "healing_containers": [],
-            "total_containers": 0
-        }

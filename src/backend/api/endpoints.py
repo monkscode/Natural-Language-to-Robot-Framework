@@ -101,9 +101,9 @@ async def cleanup_test_containers_endpoint():
     Note: This endpoint uses the docker_service.cleanup_test_containers() function
     which specifically targets "robot-test-*" containers. There is also a standalone
     CLI tool (tools/cleanup_docker_containers.py) that provides more comprehensive
-    cleanup including chrome-healing-* and test-runner-* containers. Both are kept
-    as they serve different purposes: API endpoint for programmatic cleanup vs
-    manual CLI tool for comprehensive maintenance.
+    cleanup including test-runner-* containers. Both are kept as they serve 
+    different purposes: API endpoint for programmatic cleanup vs manual CLI tool 
+    for comprehensive maintenance.
     """
     try:
         client = get_docker_client()
