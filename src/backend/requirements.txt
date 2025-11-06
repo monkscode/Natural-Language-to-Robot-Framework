@@ -23,3 +23,4 @@ langchain-ollama
 browser_use==0.7.10
 robotframework-browser[bb]
 playwright
+browser-service>=1.0.0
