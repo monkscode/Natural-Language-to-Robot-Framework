@@ -17,14 +17,16 @@ class ValidationOutput(BaseModel):
 
 
 class RobotTasks:
-    def __init__(self, library_context=None):
+    def __init__(self, library_context=None, workflow_id: str = ""):
         """
         Initialize Robot Framework tasks.
 
         Args:
             library_context: LibraryContext instance (optional, for dynamic library knowledge)
+            workflow_id: Unique workflow identifier for metrics tracking
         """
         self.library_context = library_context
+        self.workflow_id = workflow_id
 
     def _get_keyword_guidelines(self) -> str:
         """Get keyword guidelines from library context or use defaults."""
@@ -225,11 +227,14 @@ Generated Test
         )
 
     def identify_elements_task(self, agent) -> Task:
+        workflow_id_instruction = f"\n**WORKFLOW ID**: {self.workflow_id}\n⚠️ CRITICAL: You MUST include 'workflow_id': '{self.workflow_id}' in the Action Input dictionary for metrics tracking.\n\n" if self.workflow_id else ""
+        
         return Task(
             description=(
                 "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
                 "Your mission: Find locators for ALL elements in ONE batch operation.\n"
                 "The context will be the output of the 'plan_steps_task' (array of test steps).\n\n"
+                f"{workflow_id_instruction}"
                 "ℹ️ All elements will be found using batch_browser_automation.\n\n"
                 "--- MANDATORY BATCH WORKFLOW ---\n"
                 "\n"
@@ -269,7 +274,7 @@ Generated Test
                 "\n"
                 "```\n"
                 "Action: batch_browser_automation\n"
-                "Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"}, {\"id\": \"elem_2\", \"description\": \"first product name in search results\", \"action\": \"get_text\"}, {\"id\": \"elem_3\", \"description\": \"first product price in search results\", \"action\": \"get_text\"}], \"url\": \"https://www.flipkart.com\", \"user_query\": \"Search for shoes and get first product name and price\"}\n"
+                f"Action Input: {{\"elements\": [{{\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"}}, {{\"id\": \"elem_2\", \"description\": \"first product name in search results\", \"action\": \"get_text\"}}, {{\"id\": \"elem_3\", \"description\": \"first product price in search results\", \"action\": \"get_text\"}}], \"url\": \"https://www.flipkart.com\", \"user_query\": \"Search for shoes and get first product name and price\", \"workflow_id\": \"{self.workflow_id}\"}}\n"
                 "```\n"
                 "\n"
                 "**STEP 6: RECEIVE BATCH RESPONSE**\n"

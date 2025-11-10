@@ -48,7 +48,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = ""):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -57,6 +57,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         model_provider: "local" or "online"
         model_name: Model identifier
         library_type: "selenium" or "browser" (optional, defaults to config setting)
+        workflow_id: Unique workflow identifier for metrics tracking
 
     Architecture Note:
     - Rate limiting was removed during Phase 2 of codebase cleanup. Direct LLM calls
@@ -77,9 +78,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     logger.info(
         f"✅ Loaded {library_context.library_name} context with dynamic keywords")
 
-    # Initialize agents and tasks with library context
+    # Initialize agents and tasks with library context and workflow_id
     agents = RobotAgents(model_provider, model_name, library_context)
-    tasks = RobotTasks(library_context)
+    tasks = RobotTasks(library_context, workflow_id=workflow_id)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
     step_planner_agent = agents.step_planner_agent()

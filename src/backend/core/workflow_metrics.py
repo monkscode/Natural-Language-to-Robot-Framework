@@ -16,21 +16,37 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WorkflowMetrics:
-    """Metrics for a single workflow execution."""
+    """Metrics for a single workflow execution with CrewAI and Browser-use breakdown."""
     workflow_id: str
     timestamp: datetime
-    total_elements: int
-    successful_elements: int
-    failed_elements: int
-    success_rate: float
-    total_llm_calls: int
-    avg_llm_calls_per_element: float
-    total_cost: float
-    avg_cost_per_element: float
-    custom_actions_enabled: bool
-    custom_action_usage_count: int
-    execution_time: float
     url: str
+    
+    # Overall metrics (totals)
+    total_llm_calls: int
+    total_cost: float
+    execution_time: float
+    
+    # CrewAI breakdown
+    crewai_llm_calls: int = 0
+    crewai_cost: float = 0.0
+    crewai_tokens: int = 0
+    crewai_prompt_tokens: int = 0
+    crewai_completion_tokens: int = 0
+    
+    # Browser-use breakdown
+    browser_use_llm_calls: int = 0
+    browser_use_cost: float = 0.0
+    browser_use_tokens: int = 0
+    
+    # Browser-use specific metrics
+    total_elements: int = 0
+    successful_elements: int = 0
+    failed_elements: int = 0
+    success_rate: float = 0.0
+    avg_llm_calls_per_element: float = 0.0
+    avg_cost_per_element: float = 0.0
+    custom_actions_enabled: bool = False
+    custom_action_usage_count: int = 0
     session_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
@@ -41,10 +57,60 @@ class WorkflowMetrics:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'WorkflowMetrics':
-        """Create from dictionary with ISO format timestamp."""
+        """
+        Create from dictionary with ISO format timestamp.
+        Handles both old and new format for backward compatibility.
+        """
         data = data.copy()
-        if isinstance(data['timestamp'], str):
+        
+        # Convert timestamp string to datetime
+        if isinstance(data.get('timestamp'), str):
             data['timestamp'] = datetime.fromisoformat(data['timestamp'])
+        
+        # Remove obsolete fields from very old format
+        data.pop('execution_id', None)  # Old field, no longer used
+        
+        # Backward compatibility: Handle old format without breakdown
+        if 'crewai_llm_calls' not in data:
+            # Old format - all metrics were from browser-use
+            old_total_llm_calls = data.get('total_llm_calls', 0)
+            old_total_cost = data.get('total_cost', 0.0)
+            
+            # Set CrewAI metrics to 0 (didn't exist in old format)
+            data['crewai_llm_calls'] = 0
+            data['crewai_cost'] = 0.0
+            data['crewai_tokens'] = 0
+            data['crewai_prompt_tokens'] = 0
+            data['crewai_completion_tokens'] = 0
+            
+            # Set browser-use metrics to old totals
+            data['browser_use_llm_calls'] = old_total_llm_calls
+            data['browser_use_cost'] = old_total_cost
+            data['browser_use_tokens'] = 0  # Not tracked in old format
+            
+            # Keep totals as-is
+            data['total_llm_calls'] = old_total_llm_calls
+            data['total_cost'] = old_total_cost
+        
+        # Ensure all required fields have defaults
+        data.setdefault('crewai_llm_calls', 0)
+        data.setdefault('crewai_cost', 0.0)
+        data.setdefault('crewai_tokens', 0)
+        data.setdefault('crewai_prompt_tokens', 0)
+        data.setdefault('crewai_completion_tokens', 0)
+        data.setdefault('browser_use_llm_calls', 0)
+        data.setdefault('browser_use_cost', 0.0)
+        data.setdefault('browser_use_tokens', 0)
+        data.setdefault('total_elements', 0)
+        data.setdefault('successful_elements', 0)
+        data.setdefault('failed_elements', 0)
+        data.setdefault('success_rate', 0.0)
+        data.setdefault('avg_llm_calls_per_element', 0.0)
+        data.setdefault('avg_cost_per_element', 0.0)
+        data.setdefault('custom_actions_enabled', False)
+        data.setdefault('custom_action_usage_count', 0)
+        data.setdefault('session_id', None)
+        
         return cls(**data)
 
 
@@ -84,14 +150,16 @@ class WorkflowMetricsCollector:
                     return []
                 
                 with open(self.storage_path, 'r', encoding='utf-8') as f:
-                    for line in f:
+                    for line_num, line in enumerate(f, 1):
                         line = line.strip()
                         if line:
                             try:
                                 data = json.loads(line)
                                 metrics.append(WorkflowMetrics.from_dict(data))
                             except json.JSONDecodeError as e:
-                                logger.warning(f"Skipping invalid metrics line: {e}")
+                                logger.warning(f"Skipping invalid JSON on line {line_num}: {e}")
+                            except Exception as e:
+                                logger.warning(f"Skipping invalid metrics on line {line_num}: {e}")
                 
                 # Sort by timestamp descending (most recent first)
                 metrics.sort(key=lambda m: m.timestamp, reverse=True)
@@ -191,3 +259,59 @@ def get_workflow_metrics_collector() -> WorkflowMetricsCollector:
     if _metrics_collector is None:
         _metrics_collector = WorkflowMetricsCollector()
     return _metrics_collector
+
+
+def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.0-flash-exp") -> dict:
+    """
+    Calculate cost from CrewAI usage_metrics.
+    
+    Args:
+        usage_metrics: Usage metrics dict from CrewAI with keys:
+            - total_tokens: Total tokens used
+            - prompt_tokens: Input tokens
+            - completion_tokens: Output tokens
+            - successful_requests: Number of successful LLM calls
+        model_name: Model used for pricing
+    
+    Returns:
+        Dict with llm_calls, cost, tokens breakdown
+    
+    Example:
+        >>> crew = Crew(agents=[...], tasks=[...])
+        >>> result = crew.kickoff()
+        >>> usage_obj = crew.calculate_usage_metrics()  # CrewAI 1.3.0+
+        >>> usage_dict = {
+        ...     'total_tokens': usage_obj.total_tokens,
+        ...     'prompt_tokens': usage_obj.prompt_tokens,
+        ...     'completion_tokens': usage_obj.completion_tokens,
+        ...     'successful_requests': usage_obj.successful_requests
+        ... }
+        >>> metrics = calculate_crewai_cost(usage_dict, "gemini-2.0-flash-exp")
+        >>> print(f"Cost: ${metrics['cost']:.4f}")
+    """
+    # Pricing per 1K tokens (update based on your model)
+    PRICING = {
+        "gemini-2.0-flash-exp": {"input": 0.00015, "output": 0.0006},
+        "gemini-1.5-pro": {"input": 0.00125, "output": 0.005},
+        "gemini-1.5-flash": {"input": 0.000075, "output": 0.0003},
+        "gemini-1.5-flash-8b": {"input": 0.0000375, "output": 0.00015},
+    }
+    
+    pricing = PRICING.get(model_name, PRICING["gemini-2.0-flash-exp"])
+    
+    prompt_tokens = usage_metrics.get('prompt_tokens', 0)
+    completion_tokens = usage_metrics.get('completion_tokens', 0)
+    total_tokens = usage_metrics.get('total_tokens', 0)
+    
+    cost = (
+        (prompt_tokens / 1000) * pricing["input"] +
+        (completion_tokens / 1000) * pricing["output"]
+    )
+    
+    return {
+        'llm_calls': usage_metrics.get('successful_requests', 0),
+        'cost': round(cost, 6),
+        'tokens': total_tokens,
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens
+    }

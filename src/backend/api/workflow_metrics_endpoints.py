@@ -14,21 +14,37 @@ router = APIRouter(prefix="/workflow-metrics", tags=["workflow-metrics"])
 
 
 class WorkflowMetricsResponse(BaseModel):
-    """Response model for individual workflow metrics."""
+    """Response model for individual workflow metrics with CrewAI and Browser-use breakdown."""
     workflow_id: str
     timestamp: str
+    url: str
+    
+    # Overall metrics (totals)
+    total_llm_calls: int
+    total_cost: float
+    execution_time: float
+    
+    # CrewAI breakdown
+    crewai_llm_calls: int
+    crewai_cost: float
+    crewai_tokens: int
+    crewai_prompt_tokens: int
+    crewai_completion_tokens: int
+    
+    # Browser-use breakdown
+    browser_use_llm_calls: int
+    browser_use_cost: float
+    browser_use_tokens: int
+    
+    # Browser-use specific metrics
     total_elements: int
     successful_elements: int
     failed_elements: int
     success_rate: float
-    total_llm_calls: int
     avg_llm_calls_per_element: float
-    total_cost: float
     avg_cost_per_element: float
     custom_actions_enabled: bool
     custom_action_usage_count: int
-    execution_time: float
-    url: str
     session_id: Optional[str] = None
 
 
@@ -49,20 +65,36 @@ class AggregateMetricsResponse(BaseModel):
 
 
 class RecordMetricsRequest(BaseModel):
-    """Request model for recording workflow metrics."""
+    """Request model for recording workflow metrics (backward compatible)."""
     workflow_id: str
-    total_elements: int
-    successful_elements: int
-    failed_elements: int
-    success_rate: float
-    total_llm_calls: int
-    avg_llm_calls_per_element: float
-    total_cost: float
-    avg_cost_per_element: float
-    custom_actions_enabled: bool
-    custom_action_usage_count: int
-    execution_time: float
     url: str
+    
+    # Overall metrics
+    total_llm_calls: int
+    total_cost: float
+    execution_time: float
+    
+    # CrewAI breakdown (optional for backward compatibility)
+    crewai_llm_calls: int = 0
+    crewai_cost: float = 0.0
+    crewai_tokens: int = 0
+    crewai_prompt_tokens: int = 0
+    crewai_completion_tokens: int = 0
+    
+    # Browser-use breakdown (optional for backward compatibility)
+    browser_use_llm_calls: int = 0
+    browser_use_cost: float = 0.0
+    browser_use_tokens: int = 0
+    
+    # Browser-use specific
+    total_elements: int = 0
+    successful_elements: int = 0
+    failed_elements: int = 0
+    success_rate: float = 0.0
+    avg_llm_calls_per_element: float = 0.0
+    avg_cost_per_element: float = 0.0
+    custom_actions_enabled: bool = False
+    custom_action_usage_count: int = 0
     session_id: Optional[str] = None
 
 
@@ -114,18 +146,34 @@ async def get_workflow_metrics(
             WorkflowMetricsResponse(
                 workflow_id=m.workflow_id,
                 timestamp=m.timestamp.isoformat(),
+                url=m.url,
+                
+                # Totals
+                total_llm_calls=m.total_llm_calls,
+                total_cost=m.total_cost,
+                execution_time=m.execution_time,
+                
+                # CrewAI breakdown
+                crewai_llm_calls=m.crewai_llm_calls,
+                crewai_cost=m.crewai_cost,
+                crewai_tokens=m.crewai_tokens,
+                crewai_prompt_tokens=m.crewai_prompt_tokens,
+                crewai_completion_tokens=m.crewai_completion_tokens,
+                
+                # Browser-use breakdown
+                browser_use_llm_calls=m.browser_use_llm_calls,
+                browser_use_cost=m.browser_use_cost,
+                browser_use_tokens=m.browser_use_tokens,
+                
+                # Browser-use specific
                 total_elements=m.total_elements,
                 successful_elements=m.successful_elements,
                 failed_elements=m.failed_elements,
                 success_rate=m.success_rate,
-                total_llm_calls=m.total_llm_calls,
                 avg_llm_calls_per_element=m.avg_llm_calls_per_element,
-                total_cost=m.total_cost,
                 avg_cost_per_element=m.avg_cost_per_element,
                 custom_actions_enabled=m.custom_actions_enabled,
                 custom_action_usage_count=m.custom_action_usage_count,
-                execution_time=m.execution_time,
-                url=m.url,
                 session_id=m.session_id
             )
             for m in metrics
@@ -205,18 +253,34 @@ async def record_workflow_metrics(request: RecordMetricsRequest):
         metrics = WorkflowMetrics(
             workflow_id=request.workflow_id,
             timestamp=datetime.now(),
+            url=request.url,
+            
+            # Totals
+            total_llm_calls=request.total_llm_calls,
+            total_cost=request.total_cost,
+            execution_time=request.execution_time,
+            
+            # CrewAI breakdown
+            crewai_llm_calls=request.crewai_llm_calls,
+            crewai_cost=request.crewai_cost,
+            crewai_tokens=request.crewai_tokens,
+            crewai_prompt_tokens=request.crewai_prompt_tokens,
+            crewai_completion_tokens=request.crewai_completion_tokens,
+            
+            # Browser-use breakdown
+            browser_use_llm_calls=request.browser_use_llm_calls,
+            browser_use_cost=request.browser_use_cost,
+            browser_use_tokens=request.browser_use_tokens,
+            
+            # Browser-use specific
             total_elements=request.total_elements,
             successful_elements=request.successful_elements,
             failed_elements=request.failed_elements,
             success_rate=request.success_rate,
-            total_llm_calls=request.total_llm_calls,
             avg_llm_calls_per_element=request.avg_llm_calls_per_element,
-            total_cost=request.total_cost,
             avg_cost_per_element=request.avg_cost_per_element,
             custom_actions_enabled=request.custom_actions_enabled,
             custom_action_usage_count=request.custom_action_usage_count,
-            execution_time=request.execution_time,
-            url=request.url,
             session_id=request.session_id
         )
         

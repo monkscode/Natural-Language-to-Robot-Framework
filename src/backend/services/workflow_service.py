@@ -7,10 +7,17 @@ import asyncio
 from queue import Queue, Empty
 from threading import Thread
 from typing import Generator, Dict, Any
+from datetime import datetime
 
-from src.backend.crew_ai.crew import run_crew
+from src.backend.crew_ai.crew import run_crew, extract_url_from_query
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
 from src.backend.config.logging_config import EMOJI
+from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
+from src.backend.core.workflow_metrics import (
+    get_workflow_metrics_collector,
+    WorkflowMetrics,
+    calculate_crewai_cost
+)
 
 
 logging.basicConfig(
@@ -38,6 +45,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         model_name: Model identifier
     """
     logging.info("--- Starting CrewAI Workflow with Vision Integration ---")
+    
+    # Generate unique workflow ID for metrics tracking
+    workflow_id = str(uuid.uuid4())
+    logging.info(f"🆔 Workflow ID: {workflow_id}")
     
     # Start with welcome message
     yield {"status": "running", "message": f"{EMOJI['start']} Starting your test generation journey...", "progress": 0}
@@ -68,7 +79,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
         validation_output, crew_with_results = run_crew(
-            natural_language_query, model_provider, model_name, library_type=None)
+            natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
         
         # Stage 3: Generating (50-75%)
         yield {"status": "running", "message": f"{EMOJI['code']} Generating test code...", "progress": 60}
@@ -230,6 +241,110 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info(
                 "CrewAI workflow complete. Code validation successful.")
 
+            # ============================================
+            # NEW: Collect and merge metrics
+            # ============================================
+            try:
+                # 1. Extract CrewAI metrics
+                # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
+                try:
+                    usage_metrics_obj = crew_with_results.calculate_usage_metrics()
+                    
+                    # Convert UsageMetrics object to dict
+                    usage_metrics_dict = {
+                        'total_tokens': usage_metrics_obj.total_tokens,
+                        'prompt_tokens': usage_metrics_obj.prompt_tokens,
+                        'completion_tokens': usage_metrics_obj.completion_tokens,
+                        'successful_requests': usage_metrics_obj.successful_requests
+                    }
+                    
+                    logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
+                    
+                except Exception as e:
+                    logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
+                    # Fallback to empty metrics
+                    usage_metrics_dict = {
+                        'total_tokens': 0,
+                        'prompt_tokens': 0,
+                        'completion_tokens': 0,
+                        'successful_requests': 0
+                    }
+                
+                crewai_metrics = calculate_crewai_cost(
+                    usage_metrics_dict,
+                    model_name=model_name
+                )
+                logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
+                
+                # 2. Read browser-use metrics from temp file
+                temp_storage = get_temp_metrics_storage()
+                browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
+                logging.info(f"📊 Browser-use metrics: {browser_metrics}")
+                
+                # 3. Create unified metrics
+                # Calculate averages
+                total_elements = browser_metrics.get('elements_processed', 0)
+                browser_llm_calls = browser_metrics.get('llm_calls', 0)
+                browser_cost = browser_metrics.get('cost', 0.0)
+                
+                avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
+                avg_cost = browser_cost / total_elements if total_elements > 0 else 0
+                
+                unified_metrics = WorkflowMetrics(
+                    workflow_id=workflow_id,
+                    timestamp=datetime.now(),
+                    url=extract_url_from_query(natural_language_query),
+                    
+                    # Totals
+                    total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
+                    total_cost=crewai_metrics['cost'] + browser_cost,
+                    execution_time=browser_metrics.get('execution_time', 0),
+                    
+                    # CrewAI breakdown
+                    crewai_llm_calls=crewai_metrics['llm_calls'],
+                    crewai_cost=crewai_metrics['cost'],
+                    crewai_tokens=crewai_metrics['tokens'],
+                    crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
+                    crewai_completion_tokens=crewai_metrics['completion_tokens'],
+                    
+                    # Browser-use breakdown
+                    browser_use_llm_calls=browser_llm_calls,
+                    browser_use_cost=browser_cost,
+                    browser_use_tokens=browser_metrics.get('tokens', 0),
+                    
+                    # Browser-use specific
+                    total_elements=total_elements,
+                    successful_elements=browser_metrics.get('successful_elements', 0),
+                    failed_elements=browser_metrics.get('failed_elements', 0),
+                    success_rate=browser_metrics.get('success_rate', 0.0),
+                    avg_llm_calls_per_element=avg_llm_calls,
+                    avg_cost_per_element=avg_cost,
+                    custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
+                    custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
+                    session_id=browser_metrics.get('session_id'),
+                )
+                
+                # 4. Record unified metrics
+                collector = get_workflow_metrics_collector()
+                collector.record_workflow(unified_metrics)
+                
+                # 5. Cleanup temp file
+                temp_storage.delete_temp_file(workflow_id)
+                
+                logging.info(f"✅ Unified metrics recorded successfully")
+                logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
+                logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
+                
+            except Exception as metrics_error:
+                logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)
+                # Don't fail the workflow if metrics recording fails
+                # Try to cleanup temp file anyway
+                try:
+                    temp_storage = get_temp_metrics_storage()
+                    temp_storage.delete_temp_file(workflow_id)
+                except:
+                    pass
+
             # Calculate stats for success message
             lines = len(robot_code.split('\n'))
             
@@ -258,6 +373,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
+        
+        # Cleanup temp metrics file on error
+        try:
+            temp_storage = get_temp_metrics_storage()
+            temp_storage.delete_temp_file(workflow_id)
+        except:
+            pass
+        
         yield {"status": "error", "message": f"An error occurred: {str(e)}"}
     
 

@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv("src/backend/.env")
 
 from src.backend.core.config import settings  # noqa: E402
+from src.backend.core.temp_metrics_storage import get_temp_metrics_storage  # noqa: E402
 
 from crewai.tools import BaseTool  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
@@ -142,6 +143,14 @@ class BatchBrowserUseToolInput(BaseModel):
             "Example: 'Search for shoes on Flipkart and get the first product price'"
         )
     )
+    
+    workflow_id: str = Field(
+        default="",
+        description=(
+            "Unique workflow identifier for metrics tracking. "
+            "This is used internally to correlate browser-use metrics with CrewAI metrics."
+        )
+    )
 
 
 class BatchBrowserUseTool(BaseTool):
@@ -169,7 +178,7 @@ class BatchBrowserUseTool(BaseTool):
     )
     args_schema: Type[BaseModel] = BatchBrowserUseToolInput
 
-    def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
+    def _run(self, elements: list, url: str, user_query: str = "", workflow_id: str = "") -> Dict[str, Any]:
         """Execute batch browser automation to find multiple elements in one session."""
 
         # CRITICAL FIX: Handle case where CrewAI/LLM passes malformed input
@@ -192,6 +201,7 @@ class BatchBrowserUseTool(BaseTool):
                 elements = actual_data.get('elements', [])
                 url = actual_data.get('url', url)
                 user_query = actual_data.get('user_query', user_query)
+                workflow_id = actual_data.get('workflow_id', workflow_id)
 
                 logger.info(
                     f"✅ Extracted correct data: {len(elements)} elements, URL: {url}")
@@ -200,6 +210,7 @@ class BatchBrowserUseTool(BaseTool):
             f"Starting batch browser automation for {len(elements)} elements")
         logger.info(f"Target URL: {url}")
         logger.info(f"User query context: {user_query[:100]}...")
+        logger.info(f"Workflow ID: {workflow_id}")
 
         # Configuration
         api_url = os.environ.get(
@@ -225,17 +236,25 @@ class BatchBrowserUseTool(BaseTool):
         # Submit workflow task (renamed from /batch to /workflow)
         logger.info("Submitting workflow task...")
         try:
+            # Prepare request payload
+            payload = {
+                "elements": elements,
+                "url": url,
+                "user_query": user_query,
+                "session_config": {
+                    "headless": True,
+                    "timeout": timeout
+                }
+            }
+            
+            # Add parent_workflow_id if provided (to prevent duplicate metrics recording)
+            if workflow_id:
+                payload["parent_workflow_id"] = workflow_id
+                logger.info(f"📎 Including parent_workflow_id: {workflow_id} (will skip duplicate metrics)")
+            
             response = requests.post(
                 f"{api_url}/workflow",
-                json={
-                    "elements": elements,
-                    "url": url,
-                    "user_query": user_query,
-                    "session_config": {
-                        "headless": True,
-                        "timeout": timeout
-                    }
-                },
+                json=payload,
                 timeout=15,
                 headers={'Content-Type': 'application/json'}
             )
@@ -307,6 +326,38 @@ class BatchBrowserUseTool(BaseTool):
                 logger.info(f"Batch task completed! Success: {success}")
                 logger.info(f"Summary: {summary}")
                 logger.info(f"Execution time: {execution_time:.1f}s")
+
+                # ============================================
+                # NEW: Store browser-use metrics to temp file
+                # ============================================
+                if workflow_id:
+                    browser_metrics = {
+                        'llm_calls': summary.get('total_llm_calls', 0),
+                        'cost': summary.get('estimated_total_cost', 0.0),
+                        'tokens': summary.get('total_tokens', 0),
+                        'execution_time': execution_time,
+                        'elements_processed': summary.get('total_elements', 0),
+                        'successful_elements': summary.get('successful', 0),
+                        'failed_elements': summary.get('failed', 0),
+                        'success_rate': summary.get('success_rate', 0.0),
+                        'custom_actions_enabled': summary.get('custom_actions_enabled', False),
+                        'custom_action_usage_count': 0,  # Will be calculated if needed
+                        'session_id': results.get('session_id'),  # Browser session ID
+                        'timestamp': time.time()
+                    }
+                    
+                    # Count custom action usage from results
+                    for elem_result in element_results:
+                        if elem_result.get('metrics', {}).get('custom_action_used', False):
+                            browser_metrics['custom_action_usage_count'] += 1
+                    
+                    temp_storage = get_temp_metrics_storage()
+                    temp_storage.write_browser_metrics(workflow_id, browser_metrics)
+                    
+                    logger.info(f"📊 Browser-use metrics saved to temp file for workflow {workflow_id}")
+                    logger.info(f"   LLM calls: {browser_metrics['llm_calls']}, Cost: ${browser_metrics['cost']:.4f}")
+                else:
+                    logger.warning("⚠️ No workflow_id provided, browser-use metrics not saved to temp file")
 
                 # Build element_id -> locator mapping
                 locator_mapping = {}
