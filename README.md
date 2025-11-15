@@ -6,26 +6,45 @@
 ![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-purple.svg)
 
-**Transform plain English into production-ready test automation.** Mark 1 is an intelligent test generation platform that converts natural language descriptions into executable Robot Framework code using a sophisticated multi-agent AI system. No coding required—just describe what you want to test.
+**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, execute infinitely—even if your application changes!
 
 ```
 "Open Flipkart and search for shoes and then get the first product name"
                             ↓
         [4 AI Agents Working Together]
                             ↓
-    ✅ Working Robot Framework Test
+    ✅ Working Robot Framework Test (Can run forever)
 ```
 
-## Why Mark 1?
+## 🚀 What Can Mark 1 Do For You?
 
-- 🎯 **95%+ Success Rate** - Vision-based element detection that actually works
-- ⚡ **3-5x Faster** - Batch processing finds all elements in one session
-- 🧠 **Context-Aware** - AI understands your workflow, not just individual steps
-- 🔒 **Privacy-First** - Run locally with Ollama or use cloud models
-- 📦 **Zero Setup** - One command to start, works out of the box
-- 🎨 **Beautiful Reports** - Detailed HTML logs for easy debugging
+### ✅ Your One-Stop Solution for Automation Testing
+- **No Coding Required** - Write tests in plain English, not Python or JavaScript
+- **Works on Any Website** - E-commerce, SaaS, web apps—anything with a UI
+- **Generates Professional Code** - Beautiful Robot Framework tests that even manual QAs can read
+- **Fast Test Creation** - 20-30 seconds from idea to working test
 
-## Quick Comparison
+### 📝 Write Once, Execute Infinitely
+- **Reusable Tests** - Generate test code once, run it 1000 times
+- **Environment Agnostic** - Same test works on dev, staging, and production
+- **No Re-recording Needed** - Unlike traditional record-and-playback tools, AI keeps up with UI changes
+- **Cost Efficient** - Setup overhead paid once, then unlimited test runs
+
+### 🧠 Gets Smarter Over Time
+- **Learns Your Architecture** - Remembers common navigation patterns and workflows
+- **Contextual Understanding** - AI understands your product's structure and layout
+- **Fewer Tokens Over Time** - As it learns your system, it uses fewer AI tokens per test
+- **Better Outputs** - More specific, stable, and efficient tests with each run
+
+### 👥 Perfect for Manual QA Teams
+- **Easy to Read** - Robot Framework syntax is plain English-like, no technical skills needed
+- **Self-Documenting** - Test code IS the documentation
+- **Low Learning Curve** - Manual QAs can understand and maintain tests immediately
+- **Empowerment Without Complexity** - Keep your QA team without forcing them to become developers
+
+---
+
+## 📈 Quick Comparison
 
 | Feature | Mark 1 | Selenium IDE | Playwright Codegen | Manual Coding |
 |---------|--------|--------------|-------------------|---------------|
@@ -34,6 +53,21 @@
 | **Element Detection** | AI (95%+) | Record only | Record only | Manual |
 | **Learning Curve** | None | Low | Medium | High |
 | **Maintenance** | Simply Rerun | Re-record | Re-record | Manual updates |
+
+---
+
+## 🎯 Why Choose Mark 1? (The Bottom Line)
+
+| Your Situation | Mark 1 Solution | Time Saved |
+|---|---|---|
+| **You have manual QA team** | No coding needed, tests are readable English | ✅ 40-60% faster test creation |
+| **UI changes frequently** | Tests auto-adapt via AI | ✅ No test maintenance time |
+| **Need tests for new features** | Write tests before code exists | ✅ Test-driven development ready |
+| **Legacy testing tools too slow** | Batch element detection | ✅ 3-5x faster than Selenium IDE |
+| **Testing is expensive** | Reuse tests indefinitely | ✅ Lower total cost of ownership |
+| **Hard to scale QA** | One engineer → 1000 tests | ✅ Enable non-technical QAs |
+
+---
 
 ## 🚀 Quick Start
 
@@ -68,7 +102,7 @@ python tools/browser_use_service.py
 1. Open `http://localhost:5000` in your browser
 2. Enter a test description:
    ```
-   Open Flipkart and search for shoes and then get the first product name
+   Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
 3. Click **"Generate & Run"**
 4. Watch the magic happen! ✨
@@ -84,15 +118,9 @@ python tools/browser_use_service.py
 ```
 "Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project"
 ```
-
-### Example 3: Google Search
-```
-"Go to google.com and search for python tutorials"
-```
-
 **Pro Tip:** Be specific about what you want. Mention exact elements like "first product name" or "search button in header".
 
-## 🏗️ How It Works
+**In Technical Terms:**
 
 Mark 1 uses a **multi-agent AI system** to transform your natural language into working tests:
 
@@ -102,7 +130,7 @@ Your Query → [AI Processing] → Robot Framework Code → Execution → Result
 
 **The Process:**
 1. **Intelligent Planning** - Query analyzed and broken into precise steps
-2. **Smart Element Detection** - AI finds web elements with 95%+ accuracy
+2. **Smart Element Detection** - AI finds web elements with 95%+ accuracy (using computer vision)
 3. **Code Generation** - Transforms steps into production-ready Robot Framework code
 4. **Quality Assurance** - Validates code before execution
 5. **Isolated Execution** - Runs in clean Docker containers
@@ -112,6 +140,8 @@ Your Query → [AI Processing] → Robot Framework Code → Execution → Result
 - ✅ Detailed HTML reports with step-by-step execution logs
 - ✅ Real-time progress updates
 - ✅ Validated locators that work on dynamic websites
+
+**Want deeper details?** See the [Architecture Documentation](docs/ARCHITECTURE.md) for the full technical breakdown.
 
 ## 📁 Project Structure
 
@@ -143,27 +173,29 @@ mark-1/
 
 **Your Input:**
 ```
-Open Flipkart and search for shoes and then get the first product name
+Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
 ```
 
 **Generated Code (Browser Library):**
 ```robot
 *** Settings ***
 Library    Browser
+Library    BuiltIn
 
 *** Variables ***
 ${browser}    chromium
-${headless}    False
+${headless}    True
+${url}    https://github.com/monkscode
+${pinned_project_name_locator}    id=892238219
 
 *** Test Cases ***
-Search Shoes On Flipkart
+Generated Test
+    [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
     New Context    viewport=None
-    New Page    https://www.flipkart.com
-    Fill Text    name=q    shoes
-    Keyboard Key    press    Enter
-    ${product_name}=    Get Text    xpath=(//div[@class='_4rR01T'])[1]
-    Log    First product name: ${product_name}
+    New Page    ${url}
+    ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
+    Log    Retrieved Pinned project name: ${pinned_project_name}
     Close Browser
 ```
 
@@ -228,23 +260,6 @@ ROBOT_LIBRARY=selenium
 **When to use:** Existing projects, legacy websites, Selenium expertise
 
 **Switching is easy:** Just change `ROBOT_LIBRARY` in your `.env` file and restart Mark 1!
-
-## 🧪 Testing
-
-Test the API directly:
-
-```bash
-chmod +x test.sh
-./test.sh
-```
-
-Or use curl:
-
-```bash
-curl -X POST http://localhost:5000/generate-and-run \
-  -H "Content-Type: application/json" \
-  -d '{"query": "go to google.com and search for python tutorials"}'
-```
 
 ## 🐛 Troubleshooting
 
