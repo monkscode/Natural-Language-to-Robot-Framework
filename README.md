@@ -44,15 +44,6 @@
 
 ---
 
-## Why Mark 1 Stands Out
-
-- 🎯 **95%+ Success Rate** - Vision-based element detection that actually works
-- ⚡ **3-5x Faster** - Batch processing finds all elements in one session
-- 🧠 **Context-Aware** - AI understands your workflow, not just individual steps
-- 🔒 **Privacy-First** - Run locally with Ollama or use cloud models
-- 📦 **Zero Setup** - One command to start, works out of the box
-- 🎨 **Beautiful Reports** - Detailed HTML logs for easy debugging
-
 ## 📈 Quick Comparison
 
 | Feature | Mark 1 | Selenium IDE | Playwright Codegen | Manual Coding |
@@ -62,48 +53,6 @@
 | **Element Detection** | AI (95%+) | Record only | Record only | Manual |
 | **Learning Curve** | None | Low | Medium | High |
 | **Maintenance** | Simply Rerun | Re-record | Re-record | Manual updates |
-
-## 💼 Real-World Use Cases
-
-### 🛍️ E-commerce & Retail
-**Scenario**: Test search functionality across your product catalog
-```
-"Search for 'blue shoes' on the website, verify results appear, 
-and check that the first product has a price"
-```
-✅ **Benefit**: Catch product page layout changes automatically, no re-recording
-
-### 🏦 Financial Services
-**Scenario**: Test user account workflows
-```
-"Login with credentials admin@company.com, navigate to settings, 
-change password to NewPassword123, and verify success message"
-```
-✅ **Benefit**: Complex flows are easy to describe, maintained as readable code
-
-### 🏥 Healthcare Platforms
-**Scenario**: Test patient data entry flows
-```
-"Fill patient form with John Doe, age 30, select blood type O+, 
-upload medical record, and submit"
-```
-✅ **Benefit**: Non-technical medical staff can verify and understand tests
-
-### ☁️ SaaS Applications
-**Scenario**: Test multi-page workflows
-```
-"Create new project, add 3 team members, set privacy to private, 
-and verify they can access the project"
-```
-✅ **Benefit**: Tests stay valid even after UI redesigns with AI adaptation
-
-### 📱 Cross-Platform Testing
-**Scenario**: Verify workflows on web and mobile-responsive sites
-```
-"Open website on mobile viewport, search for items, 
-add to cart, and proceed to checkout"
-```
-✅ **Benefit**: Single test description works on responsive designs
 
 ---
 
@@ -153,7 +102,7 @@ python tools/browser_use_service.py
 1. Open `http://localhost:5000` in your browser
 2. Enter a test description:
    ```
-   Open Flipkart and search for shoes and then get the first product name
+   Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
 3. Click **"Generate & Run"**
 4. Watch the magic happen! ✨
@@ -169,37 +118,7 @@ python tools/browser_use_service.py
 ```
 "Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project"
 ```
-
-### Example 3: Google Search
-```
-"Go to google.com and search for python tutorials"
-```
-
 **Pro Tip:** Be specific about what you want. Mention exact elements like "first product name" or "search button in header".
-
-## 🏗️ How It Works (Explain Like I'm 5)
-
-**Imagine you're teaching a robot to test your website:**
-
-```
-1. YOU:  "Go to Google and search for 'cats'"
-   
-2. ROBOT THINKS: "OK, let me break that down:
-   - Step 1: Go to Google.com
-   - Step 2: Find the search box
-   - Step 3: Type 'cats'
-   - Step 4: Press Enter"
-   
-3. ROBOT LOOKS: (uses AI eyes to see the website)
-   "I see a search box with id='search'
-    I see a search button with class='submit'"
-   
-4. ROBOT WRITES: (generates test code in Robot Framework)
-   "Open Browser → Fill Text in search box → Click button"
-   
-5. ROBOT TESTS: (runs the test in a clean sandbox)
-   "✅ Test passed! Everything worked!"
-```
 
 **In Technical Terms:**
 
@@ -254,27 +173,29 @@ mark-1/
 
 **Your Input:**
 ```
-Open Flipkart and search for shoes and then get the first product name
+Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
 ```
 
 **Generated Code (Browser Library):**
 ```robot
 *** Settings ***
 Library    Browser
+Library    BuiltIn
 
 *** Variables ***
 ${browser}    chromium
-${headless}    False
+${headless}    True
+${url}    https://github.com/monkscode
+${pinned_project_name_locator}    id=892238219
 
 *** Test Cases ***
-Search Shoes On Flipkart
+Generated Test
+    [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
     New Context    viewport=None
-    New Page    https://www.flipkart.com
-    Fill Text    name=q    shoes
-    Keyboard Key    press    Enter
-    ${product_name}=    Get Text    xpath=(//div[@class='_4rR01T'])[1]
-    Log    First product name: ${product_name}
+    New Page    ${url}
+    ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
+    Log    Retrieved Pinned project name: ${pinned_project_name}
     Close Browser
 ```
 
@@ -339,23 +260,6 @@ ROBOT_LIBRARY=selenium
 **When to use:** Existing projects, legacy websites, Selenium expertise
 
 **Switching is easy:** Just change `ROBOT_LIBRARY` in your `.env` file and restart Mark 1!
-
-## 🧪 Testing
-
-Test the API directly:
-
-```bash
-chmod +x test.sh
-./test.sh
-```
-
-Or use curl:
-
-```bash
-curl -X POST http://localhost:5000/generate-and-run \
-  -H "Content-Type: application/json" \
-  -d '{"query": "go to google.com and search for python tutorials"}'
-```
 
 ## 🐛 Troubleshooting
 
