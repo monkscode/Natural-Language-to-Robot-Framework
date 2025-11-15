@@ -10,8 +10,6 @@ IMAGE_TAG = "robot-test-runner:latest"
 REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:latest')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'true').lower() == 'true'
-# Docker pull timeout - can be overridden by DOCKER_PULL_TIMEOUT env var
-DOCKER_PULL_TIMEOUT = int(os.getenv('DOCKER_PULL_TIMEOUT', '300'))
 
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
