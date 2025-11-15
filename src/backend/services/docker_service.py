@@ -6,6 +6,11 @@ import xml.etree.ElementTree as ET
 from typing import Generator, Dict, Any
 
 IMAGE_TAG = "robot-test-runner:latest"
+# Default remote image - can be overridden by REMOTE_DOCKER_IMAGE env var
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:latest')
+# Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
+PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'true').lower() == 'true'
+
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
 ROBOT_TESTS_DIR = os.path.join(DOCKERFILE_PATH, 'robot_tests')
@@ -71,7 +76,12 @@ def get_docker_client():
 
 
 def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, None]:
+    """
+    Ensure the Docker image is available for test execution.
+    Tries to pull from Docker Hub first, falls back to local build if needed.
+    """
     try:
+        # Check if image already exists locally
         client.images.get(IMAGE_TAG)
         logging.info(
             f"Docker image '{IMAGE_TAG}' already exists. Skipping build.")
@@ -79,9 +89,49 @@ def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, 
         return
     except docker.errors.ImageNotFound:
         logging.info(
-            f"Docker image '{IMAGE_TAG}' not found. Building new image.")
-        yield {"status": "running", "message": "Building container image for test execution (first time only)..."}
+            f"Docker image '{IMAGE_TAG}' not found locally.")
+        
+        # Try to pull pre-built image from Docker Hub first (if enabled)
+        if PREFER_REMOTE_IMAGE:
+            logging.info(f"Attempting to pull pre-built image from Docker Hub: {REMOTE_IMAGE}")
+            yield {"status": "running", "message": "Downloading pre-built container image from Docker Hub..."}
+            
+            try:
+                pull_logs = client.api.pull(REMOTE_IMAGE, stream=True, decode=True)
+                for log in pull_logs:
+                    if 'status' in log:
+                        status_msg = log['status']
+                        if 'progress' in log:
+                            status_msg += f" {log['progress']}"
+                        logging.info(f"🐳 Pull: {status_msg}")
+                        yield {"status": "running", "log": status_msg}
+                    if 'error' in log:
+                        logging.error(f"Docker pull error: {log['error']}")
+                        raise docker.errors.APIError(log['error'])
+                
+                # Tag the pulled image with our local tag
+                remote_image = client.images.get(REMOTE_IMAGE)
+                remote_image.tag(IMAGE_TAG)
+                logging.info(f"✅ Successfully pulled and tagged image from Docker Hub as '{IMAGE_TAG}'")
+                yield {"status": "running", "message": "Pre-built image downloaded successfully!"}
+                return
+                
+            except (docker.errors.APIError, docker.errors.ImageNotFound) as pull_error:
+                logging.warning(f"⚠️ Failed to pull from Docker Hub: {pull_error}")
+                logging.info("Falling back to local image build...")
+                yield {"status": "running", "message": "Pull failed, building container image locally (first time only)..."}
+        else:
+            logging.info("Remote image pull disabled. Building locally...")
+            yield {"status": "running", "message": "Building container image locally (first time only)..."}
+        
+        # Fallback: Build locally if pull failed
         try:
+            # Ensure BuildKit is enabled for modern Dockerfile features and --mount usage.
+            # Some environments (especially Windows) may not have DOCKER_BUILDKIT set,
+            # so we set it in the process environment to avoid build failures.
+            os.environ.setdefault('DOCKER_BUILDKIT', '1')
+            logging.info("🐳 DOCKER_DEBUG: Ensuring DOCKER_BUILDKIT=1 for the build process")
+
             build_logs = client.api.build(
                 path=DOCKERFILE_PATH, tag=IMAGE_TAG, rm=True, decode=True)
             for log in build_logs:
