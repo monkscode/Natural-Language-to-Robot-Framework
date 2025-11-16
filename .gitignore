@@ -23,15 +23,21 @@ robot_tests/
 # Test files
 test.py
 
-# Ignore the AI generated md files
+# Ignore the AI generated md/instruction files
 .kiro
 .cursor
 .claude
 .vscode
 .codex
+.github/copilot-instructions.md
 
 # Ignore the jsonl files
 *.jsonl
 
+# Ignore the database content
+chroma_db/
+data/
+logs/temp_metrics
+
 # Ignore the local browser_service
-tools/browser_service_local/*
+tools/browser_service/*

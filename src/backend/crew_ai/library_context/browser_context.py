@@ -19,6 +19,9 @@ class BrowserLibraryContext(LibraryContext):
     def __init__(self):
         """Initialize with dynamic documentation extractor."""
         self._doc_extractor = DynamicLibraryDocumentation("Browser")
+        # Lazy-loaded caches for contexts
+        self._planning_context_cache = None
+        self._code_assembly_context_cache = None
 
     @property
     def library_name(self) -> str:
@@ -46,59 +49,74 @@ class BrowserLibraryContext(LibraryContext):
         return "    New Context    viewport=None"
 
     @property
-    def planning_context(self) -> str:
+    def core_rules(self) -> str:
         """
-        Context for Step Planner Agent.
-        Combines dynamic keywords with static best practices.
+        Core Browser Library rules that must always be included (~300 tokens).
+        
+        These critical rules ensure correct code generation even in optimized mode.
         """
-        # Get dynamic keywords from installed library (top 25 most common)
-        dynamic_keywords = self._doc_extractor.get_keywords_summary(
-            max_keywords=25)
+        return """
+**BROWSER LIBRARY CORE RULES:**
 
-        # Add complete keyword list (lightweight - just names)
-        from .dynamic_context import get_all_keywords_list
-        all_keywords = get_all_keywords_list("Browser")
+1. **CRITICAL SEQUENCE (MUST FOLLOW):**
+   New Browser → New Context viewport=None → New Page
+   
+   Example:
+   ```robot
+   New Browser    chromium    headless=True
+   New Context    viewport=None    ← REQUIRED!
+   New Page    https://example.com
+   ```
 
-        # Add static best practices
-        best_practices = """
+2. **VIEWPORT REQUIREMENT:**
+   - ALWAYS include "New Context    viewport=None" after New Browser
+   - Default viewport (800x600) causes element detection failures
+   - This is the #1 cause of Browser Library test failures
 
-**BEST PRACTICES:**
+3. **PARAMETER RULES:**
+   - Browser Library uses: browser=chromium, headless=True
+   - NOT SeleniumLibrary syntax (no 'options' parameter)
+   - Valid browsers: chromium, firefox, webkit
 
-1. **Browser Initialization:**
-   - Always use "New Browser" before "New Page"
-   - Browser types: chromium (recommended), firefox, webkit
-   - Set headless=True for CI/CD environments
+4. **AUTO-WAITING:**
+   - Browser Library auto-waits for elements (built-in)
+   - Explicit waits rarely needed
+   - Elements must be visible, enabled, stable
 
-2. **Auto-Waiting:**
-   - Browser Library automatically waits for elements to be actionable
-   - Explicit waits rarely needed (unlike SeleniumLibrary)
-   - Elements must be visible, enabled, and stable before interaction
+5. **LOCATOR PRIORITY:**
+   text > role > data-testid > id > css > xpath
+   - text=<value> → Most stable
+   - role=<role>[name="<name>"] → Accessibility-first
+   - CSS selectors need no prefix
 
-3. **Locator Strategy (Browser Library Advantages):**
-   - **text=<value>** → Find by visible text (most stable!)
-   - **role=<role>[name="<name>"]** → Find by ARIA role (accessibility-first)
-   - **data-testid=<value>** → Find by test ID
-   - **id=<value>** → Find by ID
-   - **<css_selector>** → CSS selector (no prefix needed)
-   - **xpath=<expression>** → XPath (no prefix needed)
-
-4. **Priority Order:**
-   - text > role > data-testid > id > css > xpath
-   - Text and role selectors are more stable than CSS/XPath
-
-**KEY DIFFERENCES FROM SELENIUM:**
-- ✅ Auto-waiting built-in (no explicit waits needed)
-- ✅ Strict mode ensures locators are unique
-- ✅ Better locator strategies (text, role)
-- ✅ Faster execution (Playwright engine)
+6. **COMMON PITFALLS:**
+   ❌ Missing viewport config → Elements not found
+   ❌ Using SeleniumLibrary syntax → Keyword errors
+   ❌ Wrong sequence → Browser not initialized
 """
 
-        return dynamic_keywords + all_keywords + best_practices
+    @property
+    def planning_context(self) -> str:
+        """
+        Minimal context for Test Automation Planner Agent.
+        Returns high-level action categories without detailed keyword information.
+        Uses lazy loading with caching for performance.
+        """
+        if self._planning_context_cache is None:
+            self._planning_context_cache = self._doc_extractor.get_minimal_planning_context()
+        return self._planning_context_cache
 
     @property
     def code_assembly_context(self) -> str:
-        """Context for Code Assembler Agent - Browser Library specific"""
-        return """
+        """
+        Detailed context for Code Assembler Agent.
+        Focuses on code structure and syntax rules.
+        Keyword details are available via keyword_search_tool.
+        Uses lazy loading with caching for performance.
+        """
+        if self._code_assembly_context_cache is None:
+            # Code structure template with critical syntax rules
+            code_structure = """
 --- BROWSER LIBRARY CODE STRUCTURE ---
 
 **MANDATORY STRUCTURE:**
@@ -175,42 +193,24 @@ Close Browser:
 4. Browser Library auto-waits, so explicit waits are rarely needed
 5. Locators can be CSS selectors without prefix
 6. Text and role selectors are preferred for stability
+
+**KEYWORD REFERENCE:**
+Use the keyword_search_tool to look up specific keyword details when needed.
+Common keywords: New Browser, New Context, New Page, Fill Text, Click, Get Text, 
+Keyboard Key, Wait For Elements State, Close Browser
 """
+            
+            self._code_assembly_context_cache = code_structure
+        
+        return self._code_assembly_context_cache
 
     @property
     def validation_context(self) -> str:
-        """Context for Code Validator Agent - Browser Library specific"""
+        """Context for Code Validator Agent - Browser Library specific (OPTIMIZED)"""
         return """
---- BROWSER LIBRARY VALIDATION RULES ---
-
-**VALIDATION CHECKLIST:**
-1. Library Browser is imported
-2. New Browser is called before New Page
-3. All keywords have correct arguments
-4. Variables are properly declared
-5. Locators use valid Browser Library format
-
-**COMMON ERRORS TO CHECK:**
-
-1. **Missing New Browser**
-   ❌ WRONG: New Page    https://example.com
-   ✅ CORRECT:
-      New Browser    chromium    headless=True
-      New Page    https://example.com
-
-2. **Incorrect Assignment Syntax**
-   ❌ WRONG: Get Text    ${locator}    ${result}
-   ✅ CORRECT: ${result}=    Get Text    ${locator}
-
-3. **Missing Library Import**
-   ❌ WRONG: (no *** Settings *** section)
-   ✅ CORRECT:
-      *** Settings ***
-      Library    Browser
-
-4. **Using SeleniumLibrary keywords**
-   ❌ WRONG: Open Browser    https://example.com
-   ✅ CORRECT: 
-      New Browser    chromium    headless=True
-      New Page    https://example.com
+**BROWSER LIBRARY RULES:**
+• Library Browser must be imported
+• New Browser before New Page
+• Variable assignment: ${var}= Get Text ${loc}
+• No SeleniumLibrary keywords (use New Browser, not Open Browser)
 """

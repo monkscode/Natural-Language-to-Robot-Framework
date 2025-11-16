@@ -118,6 +118,27 @@ class LibraryContext(ABC):
         """
         pass
 
+    @property
+    @abstractmethod
+    def core_rules(self) -> str:
+        """
+        Return core library rules that must always be included in agent context.
+        
+        These are critical rules that should never be omitted, even in optimized mode.
+        Target: ~300 tokens
+        
+        Should include:
+        - Critical keyword sequences (e.g., New Browser → New Context → New Page)
+        - Parameter rules (e.g., viewport=None requirement)
+        - Auto-waiting behavior
+        - Locator priorities
+        - Common pitfalls to avoid
+        
+        Returns:
+            str: Core rules text (~300 tokens)
+        """
+        pass
+
     def get_full_context(self, agent_role: str) -> str:
         """
         Get complete context for a specific agent role.
