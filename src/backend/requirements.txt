@@ -10,6 +10,8 @@ PyYAML
 ollama
 crewai
 crewai[tools]
+chromadb
+sentence-transformers
 langchain-google-genai
 langchain_community
 beautifulsoup4

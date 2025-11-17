@@ -64,10 +64,14 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
       are now used without wrappers as Google Gemini API has sufficient rate limits.
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
     - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
+    - Knowledge base RAG system provides Robot Framework keywords to Code Assembler and
+      Code Validator agents, reducing token usage from ~6-8k to ~500-1k per query.
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
     from src.backend.crew_ai.library_context import get_library_context
+    from src.backend.crew_ai.knowledge.embedder_config import get_default_embedder_config
+    from crewai.knowledge.source.string_knowledge_source import StringKnowledgeSource
 
     # Use provided library_type or fall back to config setting
     if library_type is None:
@@ -78,8 +82,39 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     logger.info(
         f"✅ Loaded {library_context.library_name} context with dynamic keywords")
 
-    # Initialize agents and tasks with library context and workflow_id
-    agents = RobotAgents(model_provider, model_name, library_context)
+    # Initialize knowledge base embedder configuration
+    # Automatically selects Google if GOOGLE_API_KEY is available, else falls back to Ollama
+    logger.info("🧠 Initializing knowledge base embedder configuration...")
+    embedder_config = get_default_embedder_config()
+    logger.info(f"✅ Using embedder: {embedder_config.provider_name}")
+
+    # Create knowledge sources from library context
+    # These will be retrieved semantically during agent execution (RAG)
+    logger.info("📚 Creating knowledge sources for RAG system...")
+    
+    assembler_knowledge = StringKnowledgeSource(
+        content=library_context.code_assembly_context,
+        chunk_size=4000,    # Optimal for embeddings (fits most keyword docs)
+        chunk_overlap=200   # Preserve context at chunk boundaries
+    )
+    logger.info(f"  ✅ Code Assembler knowledge source created")
+    
+    validator_knowledge = StringKnowledgeSource(
+        content=library_context.validation_context,
+        chunk_size=4000,    # Optimal for validation rules
+        chunk_overlap=200   # Preserve context at chunk boundaries
+    )
+    logger.info(f"  ✅ Code Validator knowledge source created")
+
+    # Initialize agents with knowledge sources and embedder config
+    agents = RobotAgents(
+        model_provider, 
+        model_name, 
+        library_context,
+        assembler_knowledge_source=assembler_knowledge,
+        validator_knowledge_source=validator_knowledge,
+        embedder_config=embedder_config
+    )
     tasks = RobotTasks(library_context, workflow_id=workflow_id)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)

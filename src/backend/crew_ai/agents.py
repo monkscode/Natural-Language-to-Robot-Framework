@@ -50,7 +50,9 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 
 class RobotAgents:
-    def __init__(self, model_provider, model_name, library_context=None):
+    def __init__(self, model_provider, model_name, library_context=None, 
+                 assembler_knowledge_source=None, validator_knowledge_source=None,
+                 embedder_config=None):
         """
         Initialize Robot Framework agents.
 
@@ -58,16 +60,18 @@ class RobotAgents:
             model_provider: "local" or "online"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
+            assembler_knowledge_source: StringKnowledgeSource for code assembler agent
+            validator_knowledge_source: StringKnowledgeSource for code validator agent
+            embedder_config: EmbedderConfig instance for knowledge base embeddings
         """
         self.llm = get_llm(model_provider, model_name)
         self.library_context = library_context
+        self.assembler_knowledge_source = assembler_knowledge_source
+        self.validator_knowledge_source = validator_knowledge_source
+        self.embedder_config = embedder_config
 
     def step_planner_agent(self) -> Agent:
-        # Get library-specific context if available
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.planning_context}"
-
+        """Step Planner agent - no library knowledge needed as per user requirements."""
         return Agent(
             role="Test Automation Planner",
             goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {self.library_context.library_name if self.library_context else 'Robot Framework'}. ONLY include elements and actions explicitly mentioned in the user's query.",
@@ -82,7 +86,6 @@ class RobotAgents:
                 "5. If user says 'search for shoes', create steps for: search input + enter. Nothing else.\n"
                 "6. If user says 'get product name', create step for: get product name. Nothing else.\n"
                 "7. Be meticulous but ONLY for what user explicitly asked for."
-                f"{library_knowledge}"
             ),
             llm=self.llm,
             verbose=True,
@@ -234,15 +237,20 @@ class RobotAgents:
         )
 
     def code_assembler_agent(self) -> Agent:
-        # Get library-specific context if available
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.code_assembly_context}"
-
-        return Agent(
-            role="Robot Framework Code Generator (Output ONLY Code)",
-            goal=f"Generate ONLY raw Robot Framework code using {self.library_context.library_name if self.library_context else 'Robot Framework'}. NO explanations, NO thinking process, ONLY code.",
-            backstory=(
+        """Code Assembler agent with RAG-based knowledge retrieval."""
+        from crewai.knowledge.knowledge_config import KnowledgeConfig
+        
+        # Configure knowledge retrieval settings
+        knowledge_config = KnowledgeConfig(
+            results_limit=10,      # Top 10 most relevant keyword chunks
+            score_threshold=0.35   # Minimum relevance score
+        )
+        
+        # Prepare agent configuration
+        agent_kwargs = {
+            "role": "Robot Framework Code Generator (Output ONLY Code)",
+            "goal": f"Generate ONLY raw Robot Framework code using {self.library_context.library_name if self.library_context else 'Robot Framework'}. NO explanations, NO thinking process, ONLY code.",
+            "backstory": (
                 "You are a CODE PRINTER, not a code explainer. Your ONLY job is to output raw Robot Framework code.\n\n"
                 
                 "🚫 **ABSOLUTELY FORBIDDEN IN YOUR OUTPUT** 🚫\n"
@@ -300,26 +308,40 @@ class RobotAgents:
                 "- Missing variable assignments for keywords that return values\n"
                 "- Proper indentation and formatting\n\n"
                 "Your goal is to learn from validation feedback and produce corrected code that passes validation."
-                f"{library_knowledge}"
             ),
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=True,
-        )
+            "llm": self.llm,
+            "verbose": True,
+            "allow_delegation": True,
+        }
+        
+        # Add knowledge source if available
+        if self.assembler_knowledge_source:
+            agent_kwargs["knowledge_sources"] = [self.assembler_knowledge_source]
+            agent_kwargs["knowledge_config"] = knowledge_config
+            
+            # Add embedder configuration if available
+            if self.embedder_config:
+                agent_kwargs["embedder"] = self.embedder_config.to_crewai_config()
+        
+        return Agent(**agent_kwargs)
 
     def code_validator_agent(self) -> Agent:
+        """Code Validator agent with RAG-based knowledge retrieval."""
         # Import settings to access MAX_AGENT_ITERATIONS
         from ..core.config import settings
-
-        # Get library-specific context if available
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.validation_context}"
-
-        return Agent(
-            role="Robot Framework Linter and Quality Assurance Engineer",
-            goal=f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules, and delegate fixes to Code Assembly Agent if errors are found.",
-            backstory=(
+        from crewai.knowledge.knowledge_config import KnowledgeConfig
+        
+        # Configure knowledge retrieval settings
+        knowledge_config = KnowledgeConfig(
+            results_limit=10,      # Top 10 most relevant validation rules
+            score_threshold=0.35   # Minimum relevance score
+        )
+        
+        # Prepare agent configuration
+        agent_kwargs = {
+            "role": "Robot Framework Linter and Quality Assurance Engineer",
+            "goal": f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules, and delegate fixes to Code Assembly Agent if errors are found.",
+            "backstory": (
                 "You are an expert Robot Framework linter. Your sole task is to validate the provided "
                 "Robot Framework code for syntax errors, correct keyword usage, and adherence to critical rules. "
                 "You must be thorough and provide a clear validation result.\n\n"
@@ -348,11 +370,23 @@ class RobotAgents:
                 "- Valid locator formats\n"
                 "- Correct test case structure\n\n"
                 "If the code is valid, clearly state 'VALID' and provide a brief summary. "
-                "If errors are found, immediately delegate to Code Assembly Agent with detailed fix instructions."
-                f"{library_knowledge}"
+                "If errors are found, delegate to Code Assembly Agent with detailed correction instructions.\n\n"
+                "**ITERATION LIMIT IMPORTANT:**\n"
+                f"Maximum iterations are controlled by MAX_AGENT_ITERATIONS={settings.MAX_AGENT_ITERATIONS}. "
+                "Make each validation thorough to minimize iterations needed."
             ),
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=True,
-            max_iter=settings.MAX_AGENT_ITERATIONS,
-        )
+            "llm": self.llm,
+            "verbose": True,
+            "allow_delegation": True,
+        }
+        
+        # Add knowledge source if available
+        if self.validator_knowledge_source:
+            agent_kwargs["knowledge_sources"] = [self.validator_knowledge_source]
+            agent_kwargs["knowledge_config"] = knowledge_config
+            
+            # Add embedder configuration if available
+            if self.embedder_config:
+                agent_kwargs["embedder"] = self.embedder_config.to_crewai_config()
+        
+        return Agent(**agent_kwargs)

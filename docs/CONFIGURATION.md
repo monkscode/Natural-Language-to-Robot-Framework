@@ -150,6 +150,260 @@ ROBOT_LIBRARY=browser  # Recommended
 - `browser` - Browser Library (Playwright-based) - **Recommended** ⭐
 - `selenium` - SeleniumLibrary (legacy support)
 
+## Knowledge Base Settings
+
+### Overview
+
+Mark 1 uses a **RAG (Retrieval-Augmented Generation)** knowledge base system to provide Robot Framework keyword information to agents. This dramatically reduces token usage while maintaining accuracy.
+
+**How it works:**
+1. Robot Framework keywords are dynamically extracted from installed libraries
+2. Keywords are chunked and embedded using your chosen embedding provider
+3. During test generation, agents semantically retrieve only relevant keywords
+4. Result: **~85% reduction in token usage** (from 6-8k to 500-1k tokens per query)
+
+### EMBEDDER_PROVIDER
+
+Which embedding provider to use for the knowledge base.
+
+```env
+EMBEDDER_PROVIDER=google  # Default if GOOGLE_API_KEY is set
+```
+
+**Options:**
+- `google` - Google text-embedding-004 (recommended, requires GOOGLE_API_KEY) ⭐
+- `ollama` - Local Ollama embeddings (privacy-first, requires Ollama running)
+- `sentence_transformers` - Local SentenceTransformers (future support)
+
+**Auto-selection:** If not specified:
+1. Uses `google` if `GOOGLE_API_KEY` is available
+2. Falls back to `ollama` if running locally
+
+**Google Embeddings (Recommended):**
+```env
+EMBEDDER_PROVIDER=google
+GOOGLE_API_KEY=your-api-key  # Reuses same key as Gemini
+```
+
+✅ **Advantages:**
+- High quality embeddings
+- Works seamlessly with Gemini LLMs
+- Reliable API with good rate limits
+- No local setup required
+- Same API key as your Gemini LLM
+
+❌ **Considerations:**
+- Requires internet connection
+- API calls for embedding (minimal cost)
+
+**Ollama Embeddings (Privacy-First):**
+```env
+EMBEDDER_PROVIDER=ollama
+```
+
+✅ **Advantages:**
+- Fully local (no API calls)
+- Zero costs
+- Privacy-preserving
+- Works offline
+
+❌ **Considerations:**
+- Requires Ollama installation
+- Need to pull embedding model: `ollama pull mxbai-embed-large`
+- Slower than Google embeddings
+- Requires ~400MB disk space for model
+
+**Setup for Ollama embeddings:**
+```bash
+# 1. Install Ollama (if not already)
+curl https://ollama.ai/install.sh | sh
+
+# 2. Pull embedding model
+ollama pull mxbai-embed-large
+
+# 3. Ensure Ollama is running
+ollama serve  # Starts on http://localhost:11434
+
+# 4. Set environment variable
+EMBEDDER_PROVIDER=ollama
+```
+
+### Knowledge Storage Location
+
+The knowledge base stores embedded keywords in ChromaDB, a local vector database.
+
+**Storage locations by platform:**
+
+**Windows:**
+```
+C:\Users\{username}\AppData\Local\CrewAI\Natural-Language-to-Robot-Framework\knowledge\
+```
+
+**Linux:**
+```
+~/.local/share/CrewAI/Natural-Language-to-Robot-Framework/knowledge/
+```
+
+**macOS:**
+```
+~/Library/Application Support/CrewAI/Natural-Language-to-Robot-Framework/knowledge/
+```
+
+**Contents:**
+- `chroma.sqlite3` - ChromaDB metadata database
+- `Robot Framework Code Generator (Output ONLY Code)/` - Code Assembler agent's knowledge
+- `Robot Framework Linter and Quality Assurance Engineer/` - Code Validator agent's knowledge
+
+### CREWAI_STORAGE_DIR (Advanced)
+
+Customize knowledge base storage location.
+
+```env
+CREWAI_STORAGE_DIR=/path/to/custom/storage
+```
+
+**Default:** Platform-specific (see above)
+
+**Use cases:**
+- Shared storage across team
+- Network-attached storage
+- Custom backup location
+- Docker volume mounts
+
+**Example:**
+```env
+# Store in project directory for version control backup
+CREWAI_STORAGE_DIR=./knowledge_storage
+
+# Store on network drive (team sharing)
+CREWAI_STORAGE_DIR=/mnt/shared/mark1_knowledge
+```
+
+### Knowledge Base Management
+
+**Viewing storage size:**
+```bash
+# Windows
+dir "%LOCALAPPDATA%\CrewAI\Natural-Language-to-Robot-Framework\knowledge" /s
+
+# Linux/macOS
+du -sh ~/.local/share/CrewAI/Natural-Language-to-Robot-Framework/knowledge/
+```
+
+**Expected size:** ~5-10 MB (depends on library keyword count)
+
+**Clearing knowledge cache:**
+
+Use this when:
+- Robot Framework library version changes
+- Switching between libraries (Browser ↔ Selenium)
+- Troubleshooting embedding issues
+
+```bash
+# Method 1: CrewAI CLI (recommended)
+crewai reset-memories --knowledge
+
+# Method 2: Manual deletion
+# Windows
+rmdir /s "%LOCALAPPDATA%\CrewAI\Natural-Language-to-Robot-Framework\knowledge"
+
+# Linux/macOS
+rm -rf ~/.local/share/CrewAI/Natural-Language-to-Robot-Framework/knowledge/
+```
+
+**When knowledge is regenerated:**
+- First run after clearing cache
+- First run after library version update
+- After changing `ROBOT_LIBRARY` setting
+
+### Knowledge Retrieval Configuration
+
+These settings control how agents retrieve keywords (advanced tuning).
+
+**Built-in defaults** (optimized, no configuration needed):
+```python
+# Code Assembler & Validator agents
+results_limit = 10        # Return top 10 relevant keyword chunks
+score_threshold = 0.35    # Minimum relevance score
+chunk_size = 4000        # Optimal embedding size
+chunk_overlap = 200      # Context preservation
+```
+
+**How retrieval works:**
+1. Agent needs keyword information (e.g., "How to click a button?")
+2. Query is semantically compared to all keyword chunks
+3. Top 10 most relevant chunks are returned (e.g., Click, Click Element, Click Button)
+4. Agent uses only relevant keywords instead of all 142+ keywords
+
+**Token savings example:**
+```
+Before (String Concatenation):
+- All 142 SeleniumLibrary keywords injected: ~6,000 tokens
+- Every query, every time
+
+After (RAG Knowledge Base):
+- Only 10 relevant keywords retrieved: ~800 tokens
+- 85% reduction in token usage!
+- More focused, better code quality
+```
+
+### Knowledge Base Workflow
+
+**First Run (Knowledge Creation):**
+```
+1. User starts Mark 1
+2. Library context loaded (SeleniumLibrary or Browser)
+3. Keywords extracted dynamically via libdoc
+4. Keywords chunked (4000 chars, 200 overlap)
+5. Chunks embedded using configured provider
+6. Stored in ChromaDB (platform-specific location)
+7. Ready for semantic retrieval!
+```
+
+**Subsequent Runs (Knowledge Retrieval):**
+```
+1. User submits query
+2. Code Assembler agent needs keyword info
+3. Query semantically compared to stored chunks
+4. Top 10 relevant chunks retrieved
+5. Agent generates code using only relevant keywords
+6. Code Validator validates using relevant rules
+7. Fast and token-efficient!
+```
+
+### Troubleshooting Knowledge Base
+
+**"Embedding dimension mismatch" error:**
+```bash
+# You switched embedding providers
+# Clear cache and restart:
+crewai reset-memories --knowledge
+```
+
+**"GOOGLE_API_KEY not found" warning:**
+```env
+# Add to .env:
+GOOGLE_API_KEY=your-key
+
+# Or switch to Ollama:
+EMBEDDER_PROVIDER=ollama
+```
+
+**"ChromaDB permission denied":**
+```bash
+# Fix permissions (Linux/macOS)
+chmod -R 755 ~/.local/share/CrewAI/
+
+# Windows: Run as administrator or check folder permissions
+```
+
+**Knowledge not persisting:**
+```env
+# Ensure consistent storage location
+# Add to .env if using custom location:
+CREWAI_STORAGE_DIR=./knowledge_storage
+```
+
 **Browser Library (Recommended):**
 - ✅ **2-3x faster** execution than Selenium
 - ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
