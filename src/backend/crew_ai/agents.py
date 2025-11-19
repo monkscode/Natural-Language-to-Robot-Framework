@@ -52,8 +52,8 @@ batch_browser_use_tool = BatchBrowserUseTool()
 class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None, 
                  optimized_context=None, keyword_search_tool=None,
-                 planner_context=None, identifier_context=None, 
-                 validator_context=None):
+                 planner_context=None, identifier_context=None,
+                 assembler_context=None, validator_context=None):
         """
         Initialize Robot Framework agents.
 
@@ -61,21 +61,78 @@ class RobotAgents:
             model_provider: "local" or "online"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            optimized_context: Optimized context string (optional, overrides library_context for code assembler) - DEPRECATED, use assembler_context
+            optimized_context: DEPRECATED - Use assembler_context instead (kept for backward compatibility)
             keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
             planner_context: Optimized context for Test Automation Planner (optional)
-            identifier_context: Optimized context for Element Identifier (optional)
+            identifier_context: Optimized context for Element Identifier (optional, currently unused)
+            assembler_context: Optimized context for Code Assembler (optional)
             validator_context: Optimized context for Code Validator (optional)
         """
         self.llm = get_llm(model_provider, model_name)
         self.library_context = library_context
-        self.optimized_context = optimized_context  # Keep for backward compatibility
         self.keyword_search_tool = keyword_search_tool
         
-        # New: Role-specific optimized contexts
+        # Handle backward compatibility for optimized_context (deprecated)
+        if optimized_context is not None and assembler_context is None:
+            logger.warning(
+                "⚠️ DEPRECATION WARNING: 'optimized_context' parameter is deprecated. "
+                "Use 'assembler_context' instead for clarity and consistency."
+            )
+            assembler_context = optimized_context
+        
+        # Role-specific optimized contexts
         self.planner_context = planner_context
-        self.identifier_context = identifier_context
+        self.identifier_context = identifier_context  # Currently unused by element_identifier_agent
+        self.assembler_context = assembler_context
         self.validator_context = validator_context
+
+    def _get_agent_context(self, agent_type: str) -> str:
+        """
+        Unified context retrieval with consistent priority chain.
+        
+        Priority:
+        1. Optimized context (from SmartKeywordProvider - pattern learning/zero-context+tool)
+        2. Library context (static context from library_context)
+        3. Empty string (graceful degradation)
+        
+        Args:
+            agent_type: "planner", "assembler", or "validator"
+        
+        Returns:
+            Context string with appropriate formatting
+        """
+        # Map agent type to optimized context attribute
+        optimized_context_map = {
+            "planner": self.planner_context,
+            "assembler": self.assembler_context,
+            "validator": self.validator_context
+        }
+        
+        # Map agent type to library context property
+        library_context_map = {
+            "planner": "planning_context",
+            "assembler": "code_assembly_context",
+            "validator": "validation_context"
+        }
+        
+        optimized_context = optimized_context_map.get(agent_type)
+        
+        # Priority 1: Use optimized context if available
+        if optimized_context:
+            logger.info(f"🎯 {agent_type.capitalize()} using optimized context")
+            return f"\n\n{optimized_context}"
+        
+        # Priority 2: Fall back to library context
+        if self.library_context:
+            library_property = library_context_map.get(agent_type)
+            if library_property:
+                static_context = getattr(self.library_context, library_property)
+                logger.info(f"📚 {agent_type.capitalize()} using static library context (optimization not available)")
+                return f"\n\n{static_context}"
+        
+        # Priority 3: Graceful degradation
+        logger.warning(f"⚠️ {agent_type.capitalize()} has no context available - using minimal validation")
+        return ""
 
     def step_planner_agent(self) -> Agent:
         # Step Planner needs MINIMAL context - just library name and core principles
@@ -134,14 +191,8 @@ class RobotAgents:
         )
 
     def code_assembler_agent(self) -> Agent:
-        # Use optimized context if available, otherwise use full library context
-        library_knowledge = ""
-        if self.optimized_context:
-            library_knowledge = f"\n\n{self.optimized_context}"
-            logger.info("🎯 Using optimized context for code assembler agent")
-        elif self.library_context:
-            library_knowledge = f"\n\n{self.library_context.code_assembly_context}"
-            logger.info("📚 Using full context for code assembler agent")
+        # Get context via unified method with consistent priority chain
+        library_knowledge = self._get_agent_context("assembler")
 
         return Agent(
             role="Robot Framework Code Generator (Output ONLY Code)",
@@ -216,20 +267,27 @@ class RobotAgents:
         # Import settings to access MAX_AGENT_ITERATIONS
         from ..core.config import settings
 
-        # Get library-specific context if available (OPTIMIZED - minimal rules)
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.validation_context}"
+        # Get context via unified method with consistent priority chain
+        library_knowledge = self._get_agent_context("validator")
+
+        # Build tools list - add keyword_search_tool if available
+        # This allows validator to look up keyword details for validation
+        tools = []
+        if self.keyword_search_tool:
+            tools.append(self.keyword_search_tool)
+            logger.info("🔧 Validator has keyword_search_tool access for keyword verification")
 
         return Agent(
             role="Robot Framework Linter and Quality Assurance Engineer",
             goal=f"Validate Robot Framework code for {self.library_context.library_name if self.library_context else 'Robot Framework'} correctness. Delegate fixes if errors found.",
             backstory=(
                 "Expert Robot Framework validator. Check: syntax, keyword usage, variable assignments, locator formats, test structure. "
+                "Use keyword_search tool to verify keyword details (arguments, return values, syntax) when needed. "
                 "If VALID: Return JSON {\"valid\": true, \"reason\": \"...\"}. "
                 "If INVALID: Document errors with line numbers, then delegate to Code Assembly Agent with fix instructions."
                 f"{library_knowledge}"
             ),
+            tools=tools,
             llm=self.llm,
             verbose=True,
             allow_delegation=True,

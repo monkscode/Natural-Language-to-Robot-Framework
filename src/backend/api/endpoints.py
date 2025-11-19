@@ -54,7 +54,7 @@ async def execute_test_only(request: ExecuteRequest):
     if user_query:
         logging.info(f"[EXECUTE ONLY] ✅ User query provided for pattern learning: {user_query[:50]}...")
     else:
-        logging.warning(f"[EXECUTE ONLY] ⚠️ No user query provided - pattern learning will be skipped")
+        logging.warning("[EXECUTE ONLY] ⚠️ No user query provided - pattern learning will be skipped")
 
     return StreamingResponse(stream_execute_only(robot_code, user_query), media_type="text/event-stream")
 

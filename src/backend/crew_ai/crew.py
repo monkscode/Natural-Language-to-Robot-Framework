@@ -155,18 +155,20 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             # Get optimized contexts for ALL agents
             logger.info("🎯 Generating optimized contexts for all agents...")
             planner_context = smart_provider.get_agent_context(query, "planner")
-            identifier_context = smart_provider.get_agent_context(query, "identifier")
+            # Identifier context skipped - element_identifier_agent doesn't use context
+            # It only needs batch_browser_automation tool, no keyword knowledge required
+            identifier_context = None
             assembler_context = smart_provider.get_agent_context(query, "assembler")
             validator_context = smart_provider.get_agent_context(query, "validator")
             
-            # Calculate total optimized tokens
+            # Calculate total optimized tokens (skip None values)
             planner_tokens = count_tokens(planner_context)
-            identifier_tokens = count_tokens(identifier_context)
+            identifier_tokens = 0  # Not generated, saves ~50-100ms per workflow
             assembler_tokens = count_tokens(assembler_context)
             validator_tokens = count_tokens(validator_context)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
             
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Identifier={identifier_tokens}, Assembler={assembler_tokens}, Validator={validator_tokens}")
+            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Identifier=N/A (skipped), Assembler={assembler_tokens}, Validator={validator_tokens}")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -206,7 +208,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         model_provider, 
         model_name, 
         library_context,
-        optimized_context=assembler_context,  # For backward compatibility
+        assembler_context=assembler_context,  # Use consistent naming with other contexts
         keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
         identifier_context=identifier_context,

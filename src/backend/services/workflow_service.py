@@ -502,7 +502,7 @@ async def stream_execute_only(robot_code: str, user_query: str = None) -> Genera
                         # Initialize components
                         library_context = get_library_context(settings.ROBOT_LIBRARY)
                         chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-                        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH)
+                        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
                         smart_provider = SmartKeywordProvider(
                             library_context=library_context,
                             pattern_matcher=pattern_matcher,
@@ -605,7 +605,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
                     # Initialize components
                     library_context = get_library_context(settings.ROBOT_LIBRARY)
                     chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-                    pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH)
+                    pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
                     smart_provider = SmartKeywordProvider(
                         library_context=library_context,
                         pattern_matcher=pattern_matcher,
@@ -613,7 +613,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
                     )
                     
                     # Learn from the successful execution
-                    smart_provider.learn_from_execution(natural_language_query, robot_code)
+                    smart_provider.learn_from_execution(user_query, robot_code)
                     logging.info("✅ Pattern learning completed - learned from PASSED test")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to learn from execution: {e}")

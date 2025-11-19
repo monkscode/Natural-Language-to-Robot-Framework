@@ -206,7 +206,26 @@ Keyboard Key, Wait For Elements State, Close Browser
 
     @property
     def validation_context(self) -> str:
-        """Context for Code Validator Agent - Browser Library specific (OPTIMIZED)"""
+        """
+        Context for Code Validator Agent - Browser Library specific (OPTIMIZED)
+        
+        PURPOSE: Provide LIBRARY-SPECIFIC syntax rules that differ from SeleniumLibrary.
+        This is the "what changes between libraries" context.
+        
+        SCOPE: Minimal, focused rules (~50 tokens)
+        - Library imports (Browser vs SeleniumLibrary)
+        - Browser initialization keywords (New Browser vs Open Browser)
+        - Parameter differences (browser/headless vs options)
+        - Keyword naming differences (Fill Text vs Input Text)
+        
+        NOT INCLUDED: Generic validation workflow, error reporting format, delegation logic
+        (That's in tasks.py validate_code_task description - ~500 tokens)
+        
+        SEPARATION OF CONCERNS:
+        - validation_context = Library-specific SYNTAX rules (here)
+        - Task description = Generic validation WORKFLOW (tasks.py)
+        - Optimized context = Query-specific KEYWORDS (smart_provider)
+        """
         return """
 **BROWSER LIBRARY RULES:**
 • Library Browser must be imported

@@ -235,7 +235,26 @@ Wait Until Element Is Visible, Should Be True, Close Browser
 
     @property
     def validation_context(self) -> str:
-        """Context for Code Validator Agent - SeleniumLibrary (OPTIMIZED)"""
+        """
+        Context for Code Validator Agent - SeleniumLibrary (OPTIMIZED)
+        
+        PURPOSE: Provide LIBRARY-SPECIFIC syntax rules that differ from Browser Library.
+        This is the "what changes between libraries" context.
+        
+        SCOPE: Minimal, focused rules (~50 tokens)
+        - Library imports (SeleniumLibrary, BuiltIn)
+        - Variable assignment syntax
+        - Locator prefix requirements (id=, name=, xpath=)
+        - Conditional keyword syntax (Run Keyword If)
+        
+        NOT INCLUDED: Generic validation workflow, error reporting format, delegation logic
+        (That's in tasks.py validate_code_task description - ~500 tokens)
+        
+        SEPARATION OF CONCERNS:
+        - validation_context = Library-specific SYNTAX rules (here)
+        - Task description = Generic validation WORKFLOW (tasks.py)
+        - Optimized context = Query-specific KEYWORDS (smart_provider)
+        """
         return """
 **SELENIUMLIBRARY RULES:**
 • Import SeleniumLibrary, BuiltIn
