@@ -7,9 +7,10 @@ while maintaining code generation accuracy.
 """
 
 import logging
-import numpy as np
 from typing import List, Dict
-from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +19,9 @@ class ContextPruner:
     """
     Classify queries and prune context to relevant keyword categories.
     
-    Uses semantic similarity to classify queries into action categories
-    (navigation, input, interaction, extraction, assertion, wait) and
-    filters keywords to only those in relevant categories.
+    Uses ChromaDB for semantic similarity to classify queries into action 
+    categories (navigation, input, interaction, extraction, assertion, wait) 
+    and filters keywords to only those in relevant categories.
     """
     
     # Keyword category mappings
@@ -51,26 +52,59 @@ class ContextPruner:
         ]
     }
     
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(
+        self, 
+        model_name: str = "all-MiniLM-L6-v2",
+        persist_directory: str = "./chroma_db"
+    ):
         """
-        Initialize with sentence transformer model for classification.
+        Initialize with ChromaDB for semantic classification.
         
         Args:
             model_name: Name of sentence-transformers model to use
+            persist_directory: Path to ChromaDB storage directory
         """
-        logger.info(f"Initializing ContextPruner with model: {model_name}")
-        self.model = SentenceTransformer(model_name)
-        self._init_category_embeddings()
-        logger.info("ContextPruner initialized successfully")
-    
-    def _init_category_embeddings(self):
-        """
-        Pre-compute embeddings for category descriptions.
+        logger.info(f"Initializing ContextPruner with ChromaDB at {persist_directory}")
         
-        Creates semantic representations of each category for fast
+        try:
+            # Initialize ChromaDB client (same pattern as KeywordVectorStore)
+            self.client = chromadb.PersistentClient(
+                path=persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
+            )
+            
+            # Initialize embedding function
+            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=model_name
+            )
+            
+            # Create or get category collection
+            self.collection = self.client.get_or_create_collection(
+                name="category_descriptions",
+                embedding_function=self.embedding_function,
+                metadata={"type": "query_categories"}
+            )
+            
+            # Initialize category descriptions in ChromaDB
+            self._init_category_collection()
+            
+            logger.info("ContextPruner initialized successfully with ChromaDB")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize ContextPruner: {e}")
+            raise
+    
+    def _init_category_collection(self):
+        """
+        Initialize ChromaDB collection with category descriptions.
+        
+        Stores semantic representations of each category for fast
         similarity comparison during query classification.
         """
-        logger.debug("Pre-computing category embeddings")
+        logger.debug("Initializing category descriptions in ChromaDB")
         
         # Define category descriptions for semantic matching
         category_descriptions = {
@@ -82,22 +116,43 @@ class ContextPruner:
             "wait": "wait for element visible ready loaded appear timeout"
         }
         
-        # Pre-compute embeddings for all categories
-        self.category_embeddings = {}
-        for category, description in category_descriptions.items():
-            embedding = self.model.encode([description])[0]
-            self.category_embeddings[category] = embedding
-            logger.debug(f"Category '{category}' embedding shape: {embedding.shape}")
+        # Check if collection is already populated
+        existing_count = self.collection.count()
+        if existing_count == len(category_descriptions):
+            logger.debug(f"Category collection already populated with {existing_count} entries")
+            return
         
-        logger.info(f"Pre-computed embeddings for {len(self.category_embeddings)} categories")
+        # Add category descriptions to ChromaDB
+        try:
+            ids = list(category_descriptions.keys())
+            documents = list(category_descriptions.values())
+            metadatas = [{"category": cat} for cat in ids]
+            
+            # Upsert to handle re-initialization
+            self.collection.upsert(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas
+            )
+            
+            logger.info(f"Initialized {len(category_descriptions)} category descriptions in ChromaDB")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize category collection: {e}")
+            raise
     
-    def classify_query(self, user_query: str, confidence_threshold: float = 0.8) -> List[str]:
+    def classify_query(
+        self, 
+        user_query: str, 
+        confidence_threshold: float = 0.8
+    ) -> List[str]:
         """
-        Classify query into action categories using semantic similarity.
+        Classify query into action categories using ChromaDB semantic search.
         
-        Computes similarity between the query and each category description.
-        Returns categories that meet the confidence threshold, or all categories
-        if no category meets the threshold (graceful degradation).
+        Queries the ChromaDB collection to find similar categories based on
+        normalized cosine similarity. Returns categories that meet the 
+        confidence threshold, or all categories if no category meets the 
+        threshold (graceful degradation).
         
         Args:
             user_query: User's natural language query
@@ -109,72 +164,94 @@ class ContextPruner:
         """
         logger.debug(f"Classifying query: {user_query[:50]}...")
         
-        # Encode query
-        query_embedding = self.model.encode([user_query])[0]
-        
-        # Compute similarity with each category
-        similarities = {}
-        for category, category_embedding in self.category_embeddings.items():
-            # Cosine similarity using dot product (embeddings are normalized)
-            similarity = np.dot(query_embedding, category_embedding)
-            similarities[category] = similarity
-            logger.debug(f"Category '{category}' similarity: {similarity:.3f}")
-        
-        # Get categories above threshold
-        relevant_categories = [
-            category for category, similarity in similarities.items()
-            if similarity >= confidence_threshold
-        ]
-        
-        # If no categories meet threshold, return all (fallback)
-        if not relevant_categories:
-            logger.warning(
-                f"No categories met threshold {confidence_threshold}, "
-                f"max similarity: {max(similarities.values()):.3f}. "
-                "Falling back to all categories."
+        try:
+            # Query ChromaDB for similar categories
+            # ChromaDB returns normalized cosine distance (0 = identical, 2 = opposite)
+            # We need to convert to similarity: similarity = 1 - (distance / 2)
+            results = self.collection.query(
+                query_texts=[user_query],
+                n_results=len(self.KEYWORD_CATEGORIES)
             )
+            
+            # Extract categories and convert distances to similarities
+            similarities = {}
+            if results['ids'] and len(results['ids'][0]) > 0:
+                for idx, category_id in enumerate(results['ids'][0]):
+                    distance = results['distances'][0][idx]
+                    # Convert cosine distance to similarity (0-1 range)
+                    # ChromaDB cosine distance range: [0, 2]
+                    # Similarity = 1 - (distance / 2) gives us [0, 1] range
+                    similarity = 1.0 - (distance / 2.0)
+                    similarities[category_id] = similarity
+                    logger.debug(f"Category '{category_id}': distance={distance:.4f}, similarity={similarity:.4f}")
+            
+            # Filter categories by confidence threshold
+            relevant_categories = [
+                cat for cat, sim in similarities.items() 
+                if sim >= confidence_threshold
+            ]
+            
+            if relevant_categories:
+                logger.info(
+                    f"Classified query into {len(relevant_categories)} categories: "
+                    f"{relevant_categories} (threshold={confidence_threshold})"
+                )
+                return relevant_categories
+            else:
+                # Graceful degradation: return all categories if none meet threshold
+                all_categories = list(self.KEYWORD_CATEGORIES.keys())
+                logger.warning(
+                    f"No categories met threshold {confidence_threshold}. "
+                    f"Highest similarity: {max(similarities.values()):.4f}. "
+                    f"Falling back to all categories."
+                )
+                return all_categories
+                
+        except Exception as e:
+            logger.error(f"Classification failed: {e}. Falling back to all categories.")
             return list(self.KEYWORD_CATEGORIES.keys())
-        
-        logger.info(
-            f"Query classified into {len(relevant_categories)} categories: "
-            f"{', '.join(relevant_categories)}"
-        )
-        return relevant_categories
     
-    def prune_keywords(self, all_keywords: List[Dict], categories: List[str]) -> List[Dict]:
+    def prune_keywords(
+        self, 
+        all_keywords: List[Dict], 
+        categories: List[str]
+    ) -> List[Dict]:
         """
         Filter keywords to only those in relevant categories.
         
         Args:
-            all_keywords: All available keywords (list of dicts with 'name' key)
-            categories: Relevant categories from classification
+            all_keywords: List of keyword dicts with 'name' field
+            categories: List of relevant category names
             
         Returns:
-            Filtered list of keywords matching the categories
+            Filtered list of keyword dicts
         """
-        logger.debug(f"Pruning keywords for categories: {', '.join(categories)}")
+        logger.debug(f"Pruning keywords for categories: {categories}")
         
-        # Collect all keyword names from relevant categories
-        relevant_keyword_names = set()
+        # Build set of relevant keyword names
+        relevant_names = set()
         for category in categories:
-            category_keywords = self.KEYWORD_CATEGORIES.get(category, [])
-            relevant_keyword_names.update(category_keywords)
-            logger.debug(f"Category '{category}': {len(category_keywords)} keywords")
+            if category in self.KEYWORD_CATEGORIES:
+                relevant_names.update(self.KEYWORD_CATEGORIES[category])
         
         # Filter keywords
-        pruned_keywords = [
-            kw for kw in all_keywords
-            if kw.get('name') in relevant_keyword_names
+        pruned = [
+            kw for kw in all_keywords 
+            if kw.get("name") in relevant_names
         ]
         
         logger.info(
-            f"Pruned keywords: {len(all_keywords)} -> {len(pruned_keywords)} "
-            f"({len(pruned_keywords)/len(all_keywords)*100:.1f}% retained)"
+            f"Pruned {len(all_keywords)} keywords to {len(pruned)} "
+            f"({len(pruned)/len(all_keywords)*100:.1f}% retained)"
         )
         
-        return pruned_keywords
+        return pruned
     
-    def get_pruning_stats(self, original_count: int, pruned_count: int) -> Dict[str, float]:
+    def get_pruning_stats(
+        self, 
+        original_count: int, 
+        pruned_count: int
+    ) -> Dict[str, float]:
         """
         Calculate pruning statistics.
         
@@ -183,22 +260,15 @@ class ContextPruner:
             pruned_count: Number of keywords after pruning
             
         Returns:
-            Dictionary with pruning statistics
+            Dict with retention_rate and reduction_rate
         """
         if original_count == 0:
-            return {
-                "original_count": 0,
-                "pruned_count": 0,
-                "reduction_percentage": 0.0,
-                "retention_percentage": 0.0
-            }
+            return {"retention_rate": 0.0, "reduction_rate": 0.0}
         
-        reduction_percentage = ((original_count - pruned_count) / original_count) * 100
-        retention_percentage = (pruned_count / original_count) * 100
+        retention = pruned_count / original_count
+        reduction = 1.0 - retention
         
         return {
-            "original_count": original_count,
-            "pruned_count": pruned_count,
-            "reduction_percentage": reduction_percentage,
-            "retention_percentage": retention_percentage
+            "retention_rate": retention,
+            "reduction_rate": reduction
         }

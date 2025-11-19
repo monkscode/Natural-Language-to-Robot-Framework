@@ -131,7 +131,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             if settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED:
                 try:
                     logger.info("🔍 Initializing context pruner...")
-                    context_pruner = ContextPruner()
+                    context_pruner = ContextPruner(
+                        persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+                    )
                     logger.info("✅ Context pruner initialized")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to initialize context pruner: {e}")
