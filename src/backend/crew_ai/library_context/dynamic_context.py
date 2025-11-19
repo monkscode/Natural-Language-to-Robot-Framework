@@ -176,6 +176,41 @@ class DynamicLibraryDocumentation:
             logger.warning(f"Could not generate keywords summary: {e}")
             return f"--- {self.library_name.upper()} KEYWORDS ---\n\nCould not load dynamic documentation.\n"
     
+    def get_minimal_planning_context(self) -> str:
+        """
+        Get minimal keyword guidance for test planning phase.
+        Returns only high-level action categories without detailed keyword info.
+        
+        This method provides conceptual guidance about available actions
+        without listing specific keywords, parameters, or descriptions.
+        Designed to keep token usage under 400 tokens (~1600 characters).
+        
+        Returns:
+            Formatted string with minimal keyword guidance for planning
+        """
+        try:
+            # Verify library is available (uses cache if already loaded)
+            doc_data = self.get_library_documentation()
+            version = doc_data.get('version', 'Unknown')
+            library_display = f"{self.library_name} v{version}"
+        except Exception as e:
+            logger.warning(f"Could not load library documentation for {self.library_name}: {e}")
+            logger.info("Using fallback minimal planning context")
+            library_display = self.library_name
+        
+        # Generate minimal context with action categories only
+        context = f"--- {library_display.upper()} ACTION CATEGORIES ---\n\n"
+        context += "Available action types for test planning:\n\n"
+        context += "• Browser Management: Opening/closing browsers, navigation\n"
+        context += "• Element Interaction: Clicking, inputting text, selecting options\n"
+        context += "• Data Extraction: Getting text, attributes, URLs\n"
+        context += "• Keyboard Actions: Pressing keys, keyboard combinations\n"
+        context += "• Waiting: Waiting for elements, conditions\n"
+        context += "• Validation: Assertions and checks\n\n"
+        context += "Note: Focus on HIGH-LEVEL test steps. The Code Assembler will handle keyword details.\n"
+        
+        return context
+    
     def _get_generic_locator_guide(self) -> str:
         """Fallback locator guide if extraction fails."""
         if self.library_name == 'Browser':

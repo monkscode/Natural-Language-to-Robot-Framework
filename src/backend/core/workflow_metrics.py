@@ -49,10 +49,117 @@ class WorkflowMetrics:
     custom_action_usage_count: int = 0
     session_id: Optional[str] = None
     
+    # Optimization metrics (NEW)
+    token_usage: Dict[str, int] = None
+    keyword_search_stats: Dict[str, Any] = None
+    pattern_learning_stats: Dict[str, Any] = None
+    context_reduction: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        """Initialize optimization metrics with default values if not provided."""
+        if self.token_usage is None:
+            self.token_usage = {
+                "step_planner": 0,
+                "element_identifier": 0,
+                "code_assembler": 0,
+                "code_validator": 0,
+                "total": 0
+            }
+        
+        if self.keyword_search_stats is None:
+            self.keyword_search_stats = {
+                "calls": 0,
+                "total_latency_ms": 0.0,
+                "avg_latency_ms": 0.0,
+                "returned_keywords": [],
+                "accuracy": 0.0
+            }
+        
+        if self.pattern_learning_stats is None:
+            self.pattern_learning_stats = {
+                "prediction_used": False,
+                "predicted_keywords_count": 0,
+                "prediction_accuracy": 0.0
+            }
+        
+        if self.context_reduction is None:
+            self.context_reduction = {
+                "baseline_tokens": 0,
+                "optimized_tokens": 0,
+                "reduction_percentage": 0.0
+            }
+    
+    def track_token_usage(self, agent_name: str, token_count: int) -> None:
+        """
+        Track token usage per agent.
+        
+        Args:
+            agent_name: Name of the agent (step_planner, element_identifier, code_assembler, code_validator)
+            token_count: Number of tokens used by the agent
+        """
+        if agent_name in self.token_usage:
+            self.token_usage[agent_name] = token_count
+            self.token_usage["total"] = sum(
+                v for k, v in self.token_usage.items() if k != "total"
+            )
+    
+    def track_keyword_search(self, latency_ms: float, returned_keywords: List[str]) -> None:
+        """
+        Track keyword search tool usage.
+        
+        Args:
+            latency_ms: Search latency in milliseconds
+            returned_keywords: List of keyword names returned by search
+        """
+        self.keyword_search_stats["calls"] += 1
+        self.keyword_search_stats["total_latency_ms"] += latency_ms
+        self.keyword_search_stats["avg_latency_ms"] = (
+            self.keyword_search_stats["total_latency_ms"] / 
+            self.keyword_search_stats["calls"]
+        )
+        # Store returned keywords for accuracy calculation later
+        self.keyword_search_stats["returned_keywords"].extend(returned_keywords)
+    
+    def track_pattern_learning(self, predicted: bool, keyword_count: int, accuracy: float = 0.0) -> None:
+        """
+        Track pattern learning usage.
+        
+        Args:
+            predicted: Whether prediction was used
+            keyword_count: Number of predicted keywords
+            accuracy: Prediction accuracy (0.0-1.0)
+        """
+        self.pattern_learning_stats["prediction_used"] = predicted
+        self.pattern_learning_stats["predicted_keywords_count"] = keyword_count
+        self.pattern_learning_stats["prediction_accuracy"] = accuracy
+    
+    def track_context_reduction(self, baseline: int, optimized: int) -> None:
+        """
+        Track context size reduction.
+        
+        Args:
+            baseline: Baseline token count (without optimization)
+            optimized: Optimized token count (with optimization)
+        """
+        self.context_reduction["baseline_tokens"] = baseline
+        self.context_reduction["optimized_tokens"] = optimized
+        self.context_reduction["reduction_percentage"] = (
+            ((baseline - optimized) / baseline * 100) if baseline > 0 else 0.0
+        )
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with ISO format timestamp."""
         data = asdict(self)
         data['timestamp'] = self.timestamp.isoformat()
+        
+        # Add optimization metrics section
+        data['optimization'] = {
+            'token_usage': self.token_usage,
+            'keyword_search': self.keyword_search_stats,
+            'pattern_learning': self.pattern_learning_stats,
+            'context_reduction': self.context_reduction
+        }
+        
         return data
     
     @classmethod
@@ -110,6 +217,21 @@ class WorkflowMetrics:
         data.setdefault('custom_actions_enabled', False)
         data.setdefault('custom_action_usage_count', 0)
         data.setdefault('session_id', None)
+        
+        # Handle optimization metrics (backward compatibility)
+        # Check if optimization section exists in data
+        if 'optimization' in data:
+            opt = data.pop('optimization')
+            data.setdefault('token_usage', opt.get('token_usage'))
+            data.setdefault('keyword_search_stats', opt.get('keyword_search'))
+            data.setdefault('pattern_learning_stats', opt.get('pattern_learning'))
+            data.setdefault('context_reduction', opt.get('context_reduction'))
+        else:
+            # Set defaults for optimization metrics if not present
+            data.setdefault('token_usage', None)
+            data.setdefault('keyword_search_stats', None)
+            data.setdefault('pattern_learning_stats', None)
+            data.setdefault('context_reduction', None)
         
         return cls(**data)
 
@@ -259,6 +381,37 @@ def get_workflow_metrics_collector() -> WorkflowMetricsCollector:
     if _metrics_collector is None:
         _metrics_collector = WorkflowMetricsCollector()
     return _metrics_collector
+
+
+def count_tokens(text: str) -> int:
+    """
+    Count tokens in text using simple word-based estimation.
+    
+    This is a simple approximation: 1 token ≈ 0.75 words (or 1 word ≈ 1.33 tokens).
+    For more accurate counting, consider using tiktoken library.
+    
+    Args:
+        text: Text to count tokens for
+    
+    Returns:
+        Estimated token count
+    
+    Example:
+        >>> count_tokens("Hello world, this is a test")
+        8
+    """
+    if not text:
+        return 0
+    
+    # Simple word-based estimation
+    # Split on whitespace and count words
+    words = text.split()
+    
+    # Approximate: 1 word ≈ 1.33 tokens (or 0.75 words per token)
+    # This is a rough estimate based on typical English text
+    estimated_tokens = int(len(words) * 1.33)
+    
+    return estimated_tokens
 
 
 def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.0-flash-exp") -> dict:

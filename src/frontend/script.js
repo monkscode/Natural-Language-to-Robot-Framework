@@ -23,6 +23,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let hasGeneratedCode = false;
     let hasExecutedCode = false;
     
+    // Store the original user query for pattern learning
+    let currentUserQuery = null;
+    
     // Track manual collapse/expand state
     let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
     let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
@@ -381,6 +384,9 @@ document.addEventListener('DOMContentLoaded', () => {
         generationLogsManualState = null;
         executionLogsManualState = null;
         
+        // Clear stored user query
+        currentUserQuery = null;
+        
         // Hide both log sections
         generationLogsSection.style.display = 'none';
         executionLogsSection.style.display = 'none';
@@ -527,6 +533,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
+        // Store the user query for pattern learning when executing
+        currentUserQuery = query;
+        
         updateButtonState(UIState.GENERATING);
         clearCode();
         generationLogsEl.innerHTML = '';
@@ -636,7 +645,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const requestPayload = {
-                robot_code: code
+                robot_code: code,
+                user_query: currentUserQuery  // Pass the original query for pattern learning
             };
 
             const response = await fetch('/execute-test', {

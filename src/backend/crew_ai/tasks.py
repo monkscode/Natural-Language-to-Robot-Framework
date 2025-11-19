@@ -29,22 +29,20 @@ class RobotTasks:
         self.workflow_id = workflow_id
 
     def _get_keyword_guidelines(self) -> str:
-        """Get keyword guidelines from library context or use defaults."""
+        """Get MINIMAL keyword guidelines for planning phase."""
         if self.library_context:
-            # Use dynamic keywords from library context
+            # Use minimal planning context instead of detailed keywords
             return self.library_context.planning_context
         else:
-            # Fallback to basic guidelines (backward compatibility)
+            # Fallback to minimal guidance
             return """
-            *   `Open Browser`: For starting a new browser session.
-            *   `Input Text`: For typing text into input fields.
-            *   `Press Keys`: For pressing keyboard keys (e.g., ENTER, TAB, ESC).
-            *   `Click Element`: For clicking buttons, links, etc.
-            *   `Get Text`: For retrieving text from an element.
-            *   `Close Browser`: For ending the test session.
+            Available action types:
+            • Browser Management: Opening/closing browsers
+            • Element Interaction: Clicking, inputting text
+            • Data Extraction: Getting text from elements
+            • Keyboard Actions: Pressing keys
             
-            --- SEARCH OPTIMIZATION ---
-            *   For search operations: Use `Press Keys` with `RETURN` after `Input Text`.
+            Focus on HIGH-LEVEL steps. Code Assembler handles details.
             """
 
     def _get_code_structure_template(self) -> str:

@@ -14,6 +14,7 @@ class Query(BaseModel):
 
 class ExecuteRequest(BaseModel):
     robot_code: str
+    user_query: str = None  # Optional: original user query for pattern learning
 
 @router.post('/generate-test')
 async def generate_test_only(query: Query):
@@ -40,14 +41,22 @@ async def execute_test_only(request: ExecuteRequest):
     """
     Execute provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
+    
+    Optional: Pass user_query for pattern learning from successful executions.
     """
     robot_code = request.robot_code
+    user_query = request.user_query  # Optional: for pattern learning
+    
     if not robot_code or not robot_code.strip():
         raise HTTPException(status_code=400, detail="Robot code not provided")
 
     logging.info(f"[EXECUTE ONLY] Executing user-provided test code ({len(robot_code)} characters)")
+    if user_query:
+        logging.info(f"[EXECUTE ONLY] ✅ User query provided for pattern learning: {user_query[:50]}...")
+    else:
+        logging.warning("[EXECUTE ONLY] ⚠️ No user query provided - pattern learning will be skipped")
 
-    return StreamingResponse(stream_execute_only(robot_code), media_type="text/event-stream")
+    return StreamingResponse(stream_execute_only(robot_code, user_query), media_type="text/event-stream")
 
 @router.post('/generate-and-run')
 async def generate_and_run_streaming(query: Query):
