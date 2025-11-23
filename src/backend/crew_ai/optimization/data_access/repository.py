@@ -2,7 +2,7 @@
 
 import sqlite3
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 from pathlib import Path
 from .queries import (
     CREATE_KEYWORD_STATS_TABLE,
@@ -51,7 +51,7 @@ class KeywordStatsRepository:
             cursor.execute(INSERT_OR_UPDATE_KEYWORD, (keyword, timestamp, timestamp))
             conn.commit()
     
-    def get_all_stats(self) -> Dict[str, Dict[str, any]]:
+    def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
         """
         Get all keyword statistics.
         
