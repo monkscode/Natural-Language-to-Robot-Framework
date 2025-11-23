@@ -8,13 +8,13 @@ for new queries based on similarity to past queries.
 Uses ChromaDB for semantic similarity search (efficient) and SQLite for usage statistics.
 """
 
-import sqlite3
 import json
 import time
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional
-from pathlib import Path
+
+from .data_access.repository import KeywordStatsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,9 @@ class QueryPatternMatcher:
         self.db_path = db_path
         self.chroma_store = chroma_store
         
-        # Ensure data directory exists
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize database schema (SQLite for statistics only)
-        self._init_database()
+        # Initialize repository for database operations
+        self.repository = KeywordStatsRepository(db_path)
+        self.repository.initialize_schema()
         
         # Get or create ChromaDB collection for query patterns
         if self.chroma_store:
@@ -50,31 +48,6 @@ class QueryPatternMatcher:
             self.pattern_collection = None
         
         logger.info(f"QueryPatternMatcher initialized with database: {db_path}")
-    
-    def _init_database(self):
-        """Create database schema if it doesn't exist (SQLite for statistics only)."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Create keyword_stats table (usage tracking)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS keyword_stats (
-                keyword_name TEXT PRIMARY KEY,
-                usage_count INTEGER DEFAULT 1,
-                last_used TEXT NOT NULL
-            )
-        """)
-        
-        # Create index for performance
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_keyword_stats_name 
-            ON keyword_stats(keyword_name)
-        """)
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info("Database schema initialized successfully")
     
     def _extract_keywords_from_code(self, code: str) -> List[str]:
         """
@@ -173,21 +146,9 @@ class QueryPatternMatcher:
                 )
                 logger.debug(f"Stored pattern in ChromaDB: {pattern_id}")
             
-            # Update keyword statistics in SQLite
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
+            # Update keyword statistics using repository
             for keyword in used_keywords:
-                cursor.execute("""
-                    INSERT INTO keyword_stats (keyword_name, usage_count, last_used)
-                    VALUES (?, 1, ?)
-                    ON CONFLICT(keyword_name) DO UPDATE SET
-                        usage_count = usage_count + 1,
-                        last_used = ?
-                """, (keyword, timestamp, timestamp))
-            
-            conn.commit()
-            conn.close()
+                self.repository.upsert_keyword(keyword, timestamp)
             
             logger.info(f"Learned pattern: query='{user_query[:50]}...', keywords={used_keywords}")
             
@@ -265,24 +226,7 @@ class QueryPatternMatcher:
             Dictionary mapping keyword names to usage statistics
         """
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT keyword_name, usage_count, last_used
-                FROM keyword_stats
-                ORDER BY usage_count DESC
-            """)
-            
-            stats = {}
-            for keyword_name, usage_count, last_used in cursor.fetchall():
-                stats[keyword_name] = {
-                    "usage_count": usage_count,
-                    "last_used": last_used
-                }
-            
-            conn.close()
-            return stats
+            return self.repository.get_all_stats()
             
         except Exception as e:
             logger.error(f"Failed to get keyword stats: {e}", exc_info=True)
