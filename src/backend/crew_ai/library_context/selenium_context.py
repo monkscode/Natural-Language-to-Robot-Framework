@@ -32,6 +32,86 @@ class SeleniumLibraryContext(LibraryContext):
         return "Library    SeleniumLibrary"
 
     @property
+    def browser_init_params(self) -> dict:
+        """Return browser initialization parameters for SeleniumLibrary."""
+        return {
+            'browser': 'chrome',
+            'options': 'add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")'
+        }
+
+    @property
+    def requires_viewport_config(self) -> bool:
+        """SeleniumLibrary does not require viewport configuration."""
+        return False
+
+    def get_viewport_config_code(self) -> str:
+        """Return empty string - SeleniumLibrary doesn't need viewport config."""
+        return ""
+
+    @property
+    def core_rules(self) -> str:
+        """
+        Core SeleniumLibrary rules that must always be included (~300 tokens).
+        
+        These critical rules ensure correct code generation even in optimized mode.
+        """
+        return """
+**SELENIUMLIBRARY CORE RULES:**
+
+1. **CRITICAL SEQUENCE (MUST FOLLOW):**
+   Open Browser → Wait → Interact
+   
+   Example:
+   ```robot
+   Open Browser    https://example.com    chrome    options=${options}
+   Wait Until Element Is Visible    ${locator}
+   Click Element    ${locator}
+   ```
+
+2. **EXPLICIT WAITS REQUIREMENT:**
+   - ALWAYS use "Wait Until Element Is Visible" before interactions
+   - SeleniumLibrary does NOT auto-wait (unlike Browser Library)
+   - Common wait keywords: Wait Until Element Is Visible, Wait Until Page Contains
+   - This is the #1 cause of SeleniumLibrary test failures
+
+3. **PARAMETER RULES:**
+   - SeleniumLibrary uses: browser=chrome, options=${options}
+   - options parameter MUST be used for headless mode
+   - Valid browsers: chrome, firefox, edge, safari
+
+4. **NO AUTO-WAITING:**
+   - Elements must be waited for explicitly
+   - Add wait step before EVERY interaction (click, input, get text)
+   - Timeout defaults to 5 seconds (configurable)
+
+5. **LOCATOR PRIORITY:**
+   id > name > css > xpath
+   - id=<value> → Most stable
+   - name=<value> → Semantic
+   - css=<selector> → Flexible
+   - xpath=<path> → Last resort
+
+6. **COMMON PITFALLS:**
+   ❌ Missing explicit waits → Element not found errors
+   ❌ Using Browser Library syntax → Keyword errors
+   ❌ Missing options parameter → Non-headless execution
+"""
+
+    @property
+    def planning_rules(self) -> str:
+        """
+        Minimal planning-level rules for SeleniumLibrary (~50 tokens).
+        
+        Focuses on critical planning considerations without implementation details.
+        """
+        return """
+- EXPLICIT WAITS REQUIRED: Add "Wait Until Element Is Visible" step before EACH interaction
+- Supports: navigation, input, clicking, text extraction, alerts, frames
+- NO auto-waiting - timing is manual (add wait steps to test plan)
+- Focus on high-level test steps - implementation details handled by Code Assembler
+"""
+
+    @property
     def planning_context(self) -> str:
         """
         Minimal context for Test Automation Planner Agent.
@@ -148,90 +228,10 @@ Use the keyword_search_tool to look up specific keyword details when needed.
 Common keywords: Open Browser, Input Text, Press Keys, Click Element, Get Text,
 Wait Until Element Is Visible, Should Be True, Close Browser
 """
-            
+            # NOTE: keyword_search_tool is available when OPTIMIZATION_ENABLED=true (standard mode)
             self._code_assembly_context_cache = code_structure
         
         return self._code_assembly_context_cache
-
-    @property
-    def browser_init_params(self) -> dict:
-        """
-        Return browser initialization parameters for SeleniumLibrary.
-
-        Returns:
-            dict: Dictionary with 'browser' and 'options' parameters
-        """
-        return {
-            'browser': 'chrome',
-            'options': 'add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")'
-        }
-
-    @property
-    def requires_viewport_config(self) -> bool:
-        """
-        SeleniumLibrary does not require explicit viewport configuration.
-
-        Returns:
-            bool: False - SeleniumLibrary manages viewport automatically
-        """
-        return False
-
-    def get_viewport_config_code(self) -> str:
-        """
-        Return viewport configuration code for SeleniumLibrary.
-
-        Returns:
-            str: Empty string - SeleniumLibrary doesn't need viewport config
-        """
-        return ""
-
-    @property
-    def core_rules(self) -> str:
-        """
-        Core SeleniumLibrary rules that must always be included (~300 tokens).
-        
-        These critical rules ensure correct code generation even in optimized mode.
-        """
-        return """
-**SELENIUMLIBRARY CORE RULES:**
-
-1. **BROWSER INITIALIZATION:**
-   Open Browser    <url>    chrome    options=${options}
-   
-   Example:
-   ```robot
-   ${browser}    chrome
-   ${options}    add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")
-   Open Browser    https://example.com    ${browser}    options=${options}
-   ```
-
-2. **PARAMETER RULES:**
-   - SeleniumLibrary uses: browser=chrome, options=${options}
-   - NOT Browser Library syntax (no separate headless parameter)
-   - Options format: add_argument("--headless");add_argument("--no-sandbox")
-
-3. **WAIT STRATEGY:**
-   - SeleniumLibrary does NOT auto-wait (unlike Browser Library)
-   - Use "Wait Until Element Is Visible" for dynamic content
-   - Default timeout: 10 seconds
-   - Add waits after navigation or AJAX operations
-
-4. **LOCATOR PRIORITY:**
-   id > name > data-* > aria-* > css > xpath
-   - id=<value> → Most reliable
-   - name=<value> → Good for forms
-   - xpath=<expression> → Last resort
-
-5. **VARIABLE ASSIGNMENT:**
-   - Use ${variable}= syntax for assignments
-   - Example: ${text}=    Get Text    ${locator}
-   - NOT: Get Text    ${locator}    ${text}
-
-6. **COMMON PITFALLS:**
-   ❌ Missing options parameter → Browser fails to start
-   ❌ No explicit waits → Elements not found
-   ❌ Wrong assignment syntax → Variables not set
-"""
 
     @property
     def validation_context(self) -> str:

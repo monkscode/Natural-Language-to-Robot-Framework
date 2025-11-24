@@ -96,6 +96,20 @@ class BrowserLibraryContext(LibraryContext):
 """
 
     @property
+    def planning_rules(self) -> str:
+        """
+        Minimal planning-level rules for Browser Library (~50 tokens).
+        
+        Focuses on critical planning considerations without implementation details.
+        """
+        return """
+- AUTO-WAITING: Browser Library has built-in auto-waiting (no explicit wait steps needed)
+- Supports: navigation, input, clicking, text extraction, file uploads
+- Modern web features: Shadow DOM, SPAs, iframes all supported
+- Focus on high-level test steps - implementation details handled by Code Assembler
+"""
+
+    @property
     def planning_context(self) -> str:
         """
         Minimal context for Test Automation Planner Agent.

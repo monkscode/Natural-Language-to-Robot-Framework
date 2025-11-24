@@ -396,7 +396,7 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
 
-def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str):
+def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str) -> None:
     """
     Learn from a successful test execution for pattern optimization.
     

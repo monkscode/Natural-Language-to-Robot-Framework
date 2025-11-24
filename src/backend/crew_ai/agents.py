@@ -135,19 +135,19 @@ class RobotAgents:
         return ""
 
     def step_planner_agent(self) -> Agent:
-        # Step Planner needs MINIMAL context - just library name and core principles
-        # It doesn't need keyword details - that's for the Code Assembler
+        # Step Planner needs MINIMAL context - just library name and planning rules
+        # It doesn't need keyword details or implementation specifics - that's for the Code Assembler
         library_name = self.library_context.library_name if self.library_context else 'Robot Framework'
         
-        # Minimal library-specific guidance (no keyword lists!)
+        # Get library-specific planning rules (timing behavior, capabilities)
         library_guidance = ""
         if self.library_context:
             library_guidance = f"""
 
-**{library_name} CORE PRINCIPLES:**
-- Use appropriate keywords for: navigation, input, clicking, text extraction
-- Browser Library has auto-waiting (no explicit waits needed)
-- Focus on high-level actions, not implementation details
+**{library_name} PLANNING CONSIDERATIONS:**
+{self.library_context.planning_rules}
+
+**Remember:** Create HIGH-LEVEL steps. The Code Assembler handles implementation details.
 """
 
         return Agent(
