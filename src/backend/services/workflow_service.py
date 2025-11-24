@@ -78,7 +78,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results = run_crew(
+        validation_output, crew_with_results, optimization_metrics = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
         
         # Stage 3: Generating (50-75%)
@@ -396,6 +396,50 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
 
+def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str) -> None:
+    """
+    Learn from a successful test execution for pattern optimization.
+    
+    Args:
+        user_query: Original user query (None if not provided)
+        robot_code: Generated robot code
+        test_status: Test execution status
+    """
+    if test_status != 'passed':
+        logging.info(f"⏭️  Skipping pattern learning - test status: {test_status}")
+        return
+    
+    if not user_query:
+        logging.info("⏭️  Test PASSED but skipping pattern learning - no user query provided")
+        return
+    
+    try:
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED:
+            return
+            
+        from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
+        from src.backend.crew_ai.library_context import get_library_context
+        
+        logging.info("📚 Test PASSED - Learning from successful execution...")
+        
+        # Initialize components
+        library_context = get_library_context(settings.ROBOT_LIBRARY)
+        chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
+        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
+        smart_provider = SmartKeywordProvider(
+            library_context=library_context,
+            pattern_matcher=pattern_matcher,
+            vector_store=chroma_store
+        )
+        
+        # Learn from the successful execution
+        smart_provider.learn_from_execution(user_query, robot_code)
+        logging.info("✅ Pattern learning completed - learned from PASSED test")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to learn from execution: {e}")
+
+
 async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
     """
     Generates Robot Framework test code without executing it.
@@ -410,6 +454,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     )
     workflow_thread.start()
 
+    # Wait for workflow to complete and stream events
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
@@ -427,6 +472,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
             yield ": heartbeat\n\n"
             await asyncio.sleep(1)
 
+    # Process remaining events in queue
     if not robot_code:
         while not q.empty():
             event = q.get_nowait()
@@ -446,10 +492,14 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     logging.info("✅ Test generation complete. Ready for user review.")
 
 
-async def stream_execute_only(robot_code: str) -> Generator[str, None, None]:
+async def stream_execute_only(robot_code: str, user_query: str = None) -> Generator[str, None, None]:
     """
     Executes provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
+    
+    Args:
+        robot_code: Robot Framework test code to execute
+        user_query: Optional original user query for pattern learning
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -481,6 +531,9 @@ async def stream_execute_only(robot_code: str) -> Generator[str, None, None]:
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
+        
+        # Pattern learning: ONLY learn from PASSED tests
+        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")
@@ -552,6 +605,9 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
+        
+        # Pattern learning: ONLY learn from PASSED tests
+        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")

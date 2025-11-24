@@ -24,3 +24,11 @@ browser_use==0.7.10
 robotframework-browser[bb]
 playwright
 browser-service>=1.0.0
+
+# ChromaDB Performance Optimization Dependencies (Requirement 7.1)
+# chromadb: Vector database for semantic keyword search and pattern learning storage
+chromadb==0.4.22
+# sentence-transformers: Generate embeddings for semantic similarity search
+sentence-transformers==2.2.2
+# numpy: Required by sentence-transformers for vector operations and similarity calculations
+numpy==1.24.3

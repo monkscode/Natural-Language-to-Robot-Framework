@@ -50,7 +50,10 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 
 class RobotAgents:
-    def __init__(self, model_provider, model_name, library_context=None):
+    def __init__(self, model_provider, model_name, library_context=None, 
+                 optimized_context=None, keyword_search_tool=None,
+                 planner_context=None, identifier_context=None,
+                 assembler_context=None, validator_context=None):
         """
         Initialize Robot Framework agents.
 
@@ -58,19 +61,98 @@ class RobotAgents:
             model_provider: "local" or "online"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
+            optimized_context: DEPRECATED - Use assembler_context instead (kept for backward compatibility)
+            keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
+            planner_context: Optimized context for Test Automation Planner (optional)
+            identifier_context: Optimized context for Element Identifier (optional, currently unused)
+            assembler_context: Optimized context for Code Assembler (optional)
+            validator_context: Optimized context for Code Validator (optional)
         """
         self.llm = get_llm(model_provider, model_name)
         self.library_context = library_context
+        self.keyword_search_tool = keyword_search_tool
+        
+        # Handle backward compatibility for optimized_context (deprecated)
+        if optimized_context is not None and assembler_context is None:
+            logger.warning(
+                "⚠️ DEPRECATION WARNING: 'optimized_context' parameter is deprecated. "
+                "Use 'assembler_context' instead for clarity and consistency."
+            )
+            assembler_context = optimized_context
+        
+        # Role-specific optimized contexts
+        self.planner_context = planner_context
+        self.identifier_context = identifier_context  # Currently unused by element_identifier_agent
+        self.assembler_context = assembler_context
+        self.validator_context = validator_context
+
+    def _get_agent_context(self, agent_type: str) -> str:
+        """
+        Unified context retrieval with consistent priority chain.
+        
+        Priority:
+        1. Optimized context (from SmartKeywordProvider - pattern learning/zero-context+tool)
+        2. Library context (static context from library_context)
+        3. Empty string (graceful degradation)
+        
+        Args:
+            agent_type: "planner", "assembler", or "validator"
+        
+        Returns:
+            Context string with appropriate formatting
+        """
+        # Map agent type to optimized context attribute
+        optimized_context_map = {
+            "planner": self.planner_context,
+            "assembler": self.assembler_context,
+            "validator": self.validator_context
+        }
+        
+        # Map agent type to library context property
+        library_context_map = {
+            "planner": "planning_context",
+            "assembler": "code_assembly_context",
+            "validator": "validation_context"
+        }
+        
+        optimized_context = optimized_context_map.get(agent_type)
+        
+        # Priority 1: Use optimized context if available
+        if optimized_context:
+            logger.info(f"🎯 {agent_type.capitalize()} using optimized context")
+            return f"\n\n{optimized_context}"
+        
+        # Priority 2: Fall back to library context
+        if self.library_context:
+            library_property = library_context_map.get(agent_type)
+            if library_property:
+                static_context = getattr(self.library_context, library_property)
+                logger.info(f"📚 {agent_type.capitalize()} using static library context (optimization not available)")
+                return f"\n\n{static_context}"
+        
+        # Priority 3: Graceful degradation
+        logger.warning(f"⚠️ {agent_type.capitalize()} has no context available - using minimal validation")
+        return ""
 
     def step_planner_agent(self) -> Agent:
-        # Get library-specific context if available
-        library_knowledge = ""
+        # Step Planner needs MINIMAL context - just library name and planning rules
+        # It doesn't need keyword details or implementation specifics - that's for the Code Assembler
+        library_name = self.library_context.library_name if self.library_context else 'Robot Framework'
+        
+        # Get library-specific planning rules (timing behavior, capabilities)
+        library_guidance = ""
         if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.planning_context}"
+            library_guidance = f"""
+
+**{library_name} PLANNING CONSIDERATIONS:**
+{self.library_context.planning_rules}
+
+**Remember:** Create HIGH-LEVEL steps. The Code Assembler handles implementation details.
+"""
 
         return Agent(
             role="Test Automation Planner",
-            goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {self.library_context.library_name if self.library_context else 'Robot Framework'}. ONLY include elements and actions explicitly mentioned in the user's query.",
+            goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {library_name}. ONLY include elements and actions explicitly mentioned in the user's query.",
             backstory=(
                 "You are an expert test automation planner with a strict focus on user requirements. "
                 "Your task is to analyze the user's query and convert ONLY the explicitly mentioned actions into structured test steps. "
@@ -81,8 +163,9 @@ class RobotAgents:
                 "4. The browser automation will handle popups contextually - you don't need to\n"
                 "5. If user says 'search for shoes', create steps for: search input + enter. Nothing else.\n"
                 "6. If user says 'get product name', create step for: get product name. Nothing else.\n"
-                "7. Be meticulous but ONLY for what user explicitly asked for."
-                f"{library_knowledge}"
+                "7. Be meticulous but ONLY for what user explicitly asked for.\n"
+                "8. Create HIGH-LEVEL steps - the Code Assembler will handle keyword details."
+                f"{library_guidance}"
             ),
             llm=self.llm,
             verbose=True,
@@ -92,139 +175,15 @@ class RobotAgents:
     def element_identifier_agent(self) -> Agent:
         return Agent(
             role="Advanced Web Element Locator Specialist with Batch Vision AI",
-            goal="Use the batch_browser_automation tool to find ALL web element locators in ONE browser session with full context. Process all elements together for maximum efficiency and context awareness.",
+            goal="Use batch_browser_automation to find ALL element locators in ONE call.",
             backstory=(
-                "You are an expert in web element identification for Robot Framework automation "
-                "with cutting-edge BATCH vision AI capabilities powered by browser-use. "
-                "\n\n⚠️ **CRITICAL REQUIREMENT - BATCH PROCESSING MODE**\n"
-                "You have ONE PRIMARY TOOL: batch_browser_automation\n"
-                "You MUST collect ALL elements from the test steps and process them in ONE batch call.\n"
-                "This keeps the browser session alive, preserves context, and handles popups intelligently.\n"
-                "\n\n**YOUR WORKFLOW:**\n"
-                "1. **Analyze Context:** Read ALL test steps from the plan\n"
-                "2. **Collect Elements:** Build a list of ALL elements that need locators\n"
-                "3. **Extract URL:** Identify the target URL from the steps (e.g., Open Browser step)\n"
-                "4. **Call Batch Tool ONCE:** Use batch_browser_automation with ALL elements\n"
-                "5. **Map Results:** Add the returned locators to each corresponding step\n"
-                "\n\n**BATCH TOOL FORMAT (USE THIS):**\n"
-                "```\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\n"
-                "    \"elements\": [\n"
-                "        {\"id\": \"element_1\", \"description\": \"search box in header\", \"action\": \"input\"},\n"
-                "        {\"id\": \"element_2\", \"description\": \"first product card\", \"action\": \"click\"},\n"
-                "        {\"id\": \"element_3\", \"description\": \"product price in first card\", \"action\": \"get_text\"}\n"
-                "    ],\n"
-                "    \"url\": \"https://www.flipkart.com\",\n"
-                "    \"user_query\": \"Search for shoes and get first product price\"\n"
-                "}\n"
-                "```\n"
-                "\n\n**CONCRETE EXAMPLE:**\n"
-                "\n**Input Steps:**\n"
-                "```\n"
-                "[\n"
-                "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
-                "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\"},\n"
-                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product name\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product price\"}\n"
-                "]\n"
-                "```\n"
-                "\n**What You Do:**\n"
-                "1. Identify URL: https://www.flipkart.com\n"
-                "2. Collect elements needing locators:\n"
-                "   - search box (for steps 2 & 3)\n"
-                "   - first product name (for step 4)\n"
-                "   - first product price (for step 5)\n"
-                "\n3. Call batch tool:\n"
-                "```\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\n"
-                "    \"elements\": [\n"
-                "        {\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"},\n"
-                "        {\"id\": \"elem_2\", \"description\": \"first product name element in search results\", \"action\": \"get_text\"},\n"
-                "        {\"id\": \"elem_3\", \"description\": \"first product price element in search results\", \"action\": \"get_text\"}\n"
-                "    ],\n"
-                "    \"url\": \"https://www.flipkart.com\",\n"
-                "    \"user_query\": \"Search for shoes and get first product name and price\"\n"
-                "}\n"
-                "```\n"
-                "\n4. Receive response:\n"
-                "```json\n"
-                "{\n"
-                "    \"locator_mapping\": {\n"
-                "        \"elem_1\": {\"best_locator\": \"name=q\", \"found\": true},\n"
-                "        \"elem_2\": {\"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='name']\", \"found\": true},\n"
-                "        \"elem_3\": {\"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='price']\", \"found\": true}\n"
-                "    }\n"
-                "}\n"
-                "```\n"
-                "\n5. Map locators back to steps:\n"
-                "   - Step 2 & 3 → locator: \"name=q\"\n"
-                "   - Step 4 → locator: \"xpath=(//div[@class='product'])[1]//span[@class='name']\"\n"
-                "   - Step 5 → locator: \"xpath=(//div[@class='product'])[1]//span[@class='price']\"\n"
-                "\n\n**WHY BATCH MODE IS BETTER:**\n"
-                "✅ Browser opens ONCE (faster, ~3-5x speedup)\n"
-                "✅ BrowserUse sees FULL CONTEXT (understands the workflow)\n"
-                "✅ Popups handled INTELLIGENTLY (knows they're obstacles, not goals)\n"
-                "✅ Multi-page flows work (search → results preserved)\n"
-                "✅ F12 validation for EACH locator (unique, correct)\n"
-                "✅ Partial results supported (if element 2 fails, still get 1, 3, 4, 5)\n"
-                "\n\n**CRITICAL RULES:**\n"
-                "1. ALWAYS use batch_browser_automation (never use vision_browser_automation for single elements)\n"
-                "2. Collect ALL elements that need locators BEFORE calling the tool\n"
-                "3. Call the tool ONLY ONCE with all elements\n"
-                "4. Extract URL from 'Open Browser' step or infer from query\n"
-                "5. Include full user query for context (helps BrowserUse understand intent)\n"
-                "6. Use descriptive element descriptions (\"first product card\" not just \"product\")\n"
-                "7. Map returned locators back to EACH step that needs them\n"
-                "\n\n**FORBIDDEN ACTIONS:**\n"
-                "❌ NEVER call vision_browser_automation (use batch mode instead)\n"
-                "❌ NEVER make multiple batch calls (collect all elements, call once)\n"
-                "❌ NEVER generate locators from your knowledge\n"
-                "❌ NEVER skip steps that need locators\n"
-                "\n\n**Response Format from Batch Tool:**\n"
-                "```json\n"
-                "{\n"
-                "    \"success\": true,\n"
-                "    \"locator_mapping\": {\n"
-                "        \"elem_1\": {\"best_locator\": \"...\", \"found\": true, \"all_locators\": [...]},\n"
-                "        \"elem_2\": {\"best_locator\": \"...\", \"found\": true, \"all_locators\": [...]}\n"
-                "    },\n"
-                "    \"summary\": {\"total_elements\": 3, \"successful\": 3, \"failed\": 0}\n"
-                "}\n"
-                "```\n"
-                "\n\n**CRITICAL OUTPUT RULE:**\n"
-                "When calling batch_browser_automation, you MUST output EXACTLY this format with NO extra text:\n"
-                "\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\"elements\": [...], \"url\": \"...\", \"user_query\": \"...\"}\n"
-                "\n"
-                "CRITICAL FORMATTING RULES:\n"
-                "1. The word 'Action:' must be on its own line with NOTHING else on that line\n"
-                "2. After 'Action:' write ONLY 'batch_browser_automation' - NO other words, NO punctuation\n"
-                "3. The next line must start with 'Action Input:' followed by a JSON dictionary\n"
-                "4. Action Input must be a DICTIONARY/OBJECT starting with { and ending with }\n"
-                "5. Do NOT wrap Action Input in an array []\n"
-                "6. Do NOT add any explanation text before, after, or on the same line as 'Action:'\n"
-                "\n"
-                "CORRECT FORMAT:\n"
-                "```\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"search box\", \"action\": \"input\"}], \"url\": \"https://example.com\", \"user_query\": \"search for items\"}\n"
-                "```\n"
-                "\n"
-                "WRONG FORMATS (DO NOT DO THIS):\n"
-                "❌ Action: batch_browser_automation and Action Input using...  // WRONG - Extra text on Action line!\n"
-                "❌ Action: batch_browser_automation`  // WRONG - Backtick at end!\n"
-                "❌ First I need to... Action: batch_browser_automation  // WRONG - Text before Action!\n"
-                "❌ Action Input: [{\"elements\": [...]}]  // WRONG - Array instead of dictionary!\n"
-                "❌ Action Input: {\"elements\": [...]} and then...  // WRONG - Text after Action Input!\n"
-                "\n"
-                "REMEMBER: The Action line must contain ONLY 'Action: batch_browser_automation' with NO other text.\n"
-                "\n"
-                "**Remember:** Batch mode is ALWAYS better because BrowserUse works best with full context. "
-                "Even for 1-2 elements, use batch mode. NO EXCEPTIONS."
+                "Expert web element locator using batch vision AI. "
+                "Workflow: (1) Collect ALL elements from test steps, (2) Extract URL, (3) Call batch_browser_automation ONCE with all elements, (4) Map locators to steps. "
+                "Tool format: Action: batch_browser_automation | Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"...\", \"action\": \"input/click/get_text\"}], \"url\": \"...\", \"user_query\": \"...\"}. "
+                "CRITICAL: Action line must have ONLY 'batch_browser_automation' with NO extra text. Action Input must be a dict {}, NOT array []. "
+                "Benefits: Browser opens once (3-5x faster), full context awareness, intelligent popup handling, validated locators. "
+                "⚠️ CRITICAL: Always use the 'best_locator' value from locator_mapping - it has been AI-validated and scored. "
+                "DO NOT analyze or override with your own preference. See task description for detailed rules."
             ),
             # NEW: Batch processing tool for multiple elements
             tools=[batch_browser_use_tool],
@@ -234,10 +193,8 @@ class RobotAgents:
         )
 
     def code_assembler_agent(self) -> Agent:
-        # Get library-specific context if available
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.code_assembly_context}"
+        # Get context via unified method with consistent priority chain
+        library_knowledge = self._get_agent_context("assembler")
 
         return Agent(
             role="Robot Framework Code Generator (Output ONLY Code)",
@@ -302,6 +259,7 @@ class RobotAgents:
                 "Your goal is to learn from validation feedback and produce corrected code that passes validation."
                 f"{library_knowledge}"
             ),
+            tools=[self.keyword_search_tool] if self.keyword_search_tool else [],
             llm=self.llm,
             verbose=True,
             allow_delegation=True,
@@ -311,46 +269,27 @@ class RobotAgents:
         # Import settings to access MAX_AGENT_ITERATIONS
         from ..core.config import settings
 
-        # Get library-specific context if available
-        library_knowledge = ""
-        if self.library_context:
-            library_knowledge = f"\n\n{self.library_context.validation_context}"
+        # Get context via unified method with consistent priority chain
+        library_knowledge = self._get_agent_context("validator")
+
+        # Build tools list - add keyword_search_tool if available
+        # This allows validator to look up keyword details for validation
+        tools = []
+        if self.keyword_search_tool:
+            tools.append(self.keyword_search_tool)
+            logger.info("🔧 Validator has keyword_search_tool access for keyword verification")
 
         return Agent(
             role="Robot Framework Linter and Quality Assurance Engineer",
-            goal=f"Validate the generated Robot Framework code for correctness and adherence to {self.library_context.library_name if self.library_context else 'Robot Framework'} rules, and delegate fixes to Code Assembly Agent if errors are found.",
+            goal=f"Validate Robot Framework code for {self.library_context.library_name if self.library_context else 'Robot Framework'} correctness. Delegate fixes if errors found.",
             backstory=(
-                "You are an expert Robot Framework linter. Your sole task is to validate the provided "
-                "Robot Framework code for syntax errors, correct keyword usage, and adherence to critical rules. "
-                "You must be thorough and provide a clear validation result.\n\n"
-                "**DELEGATION WORKFLOW:**\n"
-                "When you find errors in the code, you MUST follow this workflow:\n"
-                "1. Identify and document all syntax errors, incorrect keyword usage, and rule violations\n"
-                "2. Create a detailed fix request with:\n"
-                "   - Specific line numbers where errors occur\n"
-                "   - Clear description of each error\n"
-                "   - Examples of correct syntax for each issue\n"
-                "   - Relevant Robot Framework rules being violated\n"
-                "3. Delegate the fix request to the Code Assembly Agent with clear, actionable instructions\n"
-                "4. The Code Assembly Agent will regenerate the code incorporating your feedback\n"
-                "5. You will then validate the regenerated code and repeat if necessary\n\n"
-                "**CRITICAL DELEGATION INSTRUCTIONS:**\n"
-                "When you find errors, create a detailed fix request and delegate to Code Assembly Agent.\n"
-                "Your delegation message should include:\n"
-                "- A summary of all errors found\n"
-                "- Specific corrections needed for each error\n"
-                "- Code examples showing the correct implementation\n"
-                "- Priority ranking if multiple errors exist (fix critical syntax errors first)\n\n"
-                "**VALIDATION CRITERIA:**\n"
-                "- Syntax correctness (indentation, spacing, structure)\n"
-                "- Correct keyword usage for the target library\n"
-                "- Proper variable assignments for keywords that return values\n"
-                "- Valid locator formats\n"
-                "- Correct test case structure\n\n"
-                "If the code is valid, clearly state 'VALID' and provide a brief summary. "
-                "If errors are found, immediately delegate to Code Assembly Agent with detailed fix instructions."
+                "Expert Robot Framework validator. Check: syntax, keyword usage, variable assignments, locator formats, test structure. "
+                "Use keyword_search tool to verify keyword details (arguments, return values, syntax) when needed. "
+                "If VALID: Return JSON {\"valid\": true, \"reason\": \"...\"}. "
+                "If INVALID: Document errors with line numbers, then delegate to Code Assembly Agent with fix instructions."
                 f"{library_knowledge}"
             ),
+            tools=tools,
             llm=self.llm,
             verbose=True,
             allow_delegation=True,

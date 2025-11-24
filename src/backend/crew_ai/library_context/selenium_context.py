@@ -19,6 +19,9 @@ class SeleniumLibraryContext(LibraryContext):
     def __init__(self):
         """Initialize with dynamic documentation extractor."""
         self._doc_extractor = DynamicLibraryDocumentation("SeleniumLibrary")
+        # Lazy-loaded caches for contexts
+        self._planning_context_cache = None
+        self._code_assembly_context_cache = None
 
     @property
     def library_name(self) -> str:
@@ -29,52 +32,107 @@ class SeleniumLibraryContext(LibraryContext):
         return "Library    SeleniumLibrary"
 
     @property
-    def planning_context(self) -> str:
+    def browser_init_params(self) -> dict:
+        """Return browser initialization parameters for SeleniumLibrary."""
+        return {
+            'browser': 'chrome',
+            'options': 'add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")'
+        }
+
+    @property
+    def requires_viewport_config(self) -> bool:
+        """SeleniumLibrary does not require viewport configuration."""
+        return False
+
+    def get_viewport_config_code(self) -> str:
+        """Return empty string - SeleniumLibrary doesn't need viewport config."""
+        return ""
+
+    @property
+    def core_rules(self) -> str:
         """
-        Context for Step Planner Agent.
-        Combines dynamic keywords with static best practices.
+        Core SeleniumLibrary rules that must always be included (~300 tokens).
+        
+        These critical rules ensure correct code generation even in optimized mode.
         """
-        # Get dynamic keywords from installed library (top 25 most common)
-        dynamic_keywords = self._doc_extractor.get_keywords_summary(
-            max_keywords=25)
+        return """
+**SELENIUMLIBRARY CORE RULES:**
 
-        # Add complete keyword list (lightweight - just names)
-        from .dynamic_context import get_all_keywords_list
-        all_keywords = get_all_keywords_list("SeleniumLibrary")
+1. **CRITICAL SEQUENCE (MUST FOLLOW):**
+   Open Browser → Wait → Interact
+   
+   Example:
+   ```robot
+   Open Browser    https://example.com    chrome    options=${options}
+   Wait Until Element Is Visible    ${locator}
+   Click Element    ${locator}
+   ```
 
-        # Add static best practices
-        best_practices = """
+2. **EXPLICIT WAITS REQUIREMENT:**
+   - ALWAYS use "Wait Until Element Is Visible" before interactions
+   - SeleniumLibrary does NOT auto-wait (unlike Browser Library)
+   - Common wait keywords: Wait Until Element Is Visible, Wait Until Page Contains
+   - This is the #1 cause of SeleniumLibrary test failures
 
-**BEST PRACTICES:**
+3. **PARAMETER RULES:**
+   - SeleniumLibrary uses: browser=chrome, options=${options}
+   - options parameter MUST be used for headless mode
+   - Valid browsers: chrome, firefox, edge, safari
 
-1. **Search Optimization:**
-   - For search operations: Use "Press Keys" with "RETURN" instead of clicking search button
-   - Works on Google, Flipkart, Amazon, and most modern websites
-   - Faster and more reliable than finding/clicking search buttons
+4. **NO AUTO-WAITING:**
+   - Elements must be waited for explicitly
+   - Add wait step before EVERY interaction (click, input, get text)
+   - Timeout defaults to 5 seconds (configurable)
 
-2. **Locator Strategy:**
-   - Priority: id > name > data-* > aria-* > css > xpath
-   - Avoid dynamic classes (e.g., class names with random numbers)
-   - Use explicit locators from the element identifier agent
+5. **LOCATOR PRIORITY:**
+   id > name > css > xpath
+   - id=<value> → Most stable
+   - name=<value> → Semantic
+   - css=<selector> → Flexible
+   - xpath=<path> → Last resort
 
-3. **Wait Strategy:**
-   - Use "Wait Until Element Is Visible" for dynamic content
-   - Default timeout: 10 seconds
-   - Add waits after navigation or AJAX operations
-
-**LOCATOR FORMATS:**
-- id=<value>          → Find by ID attribute
-- name=<value>        → Find by name attribute  
-- xpath=<expression>  → Find by XPath
-- css=<selector>      → Find by CSS selector
+6. **COMMON PITFALLS:**
+   ❌ Missing explicit waits → Element not found errors
+   ❌ Using Browser Library syntax → Keyword errors
+   ❌ Missing options parameter → Non-headless execution
 """
 
-        return dynamic_keywords + all_keywords + best_practices
+    @property
+    def planning_rules(self) -> str:
+        """
+        Minimal planning-level rules for SeleniumLibrary (~50 tokens).
+        
+        Focuses on critical planning considerations without implementation details.
+        """
+        return """
+- EXPLICIT WAITS REQUIRED: Add "Wait Until Element Is Visible" step before EACH interaction
+- Supports: navigation, input, clicking, text extraction, alerts, frames
+- NO auto-waiting - timing is manual (add wait steps to test plan)
+- Focus on high-level test steps - implementation details handled by Code Assembler
+"""
+
+    @property
+    def planning_context(self) -> str:
+        """
+        Minimal context for Test Automation Planner Agent.
+        Returns high-level action categories without detailed keyword information.
+        Uses lazy loading with caching for performance.
+        """
+        if self._planning_context_cache is None:
+            self._planning_context_cache = self._doc_extractor.get_minimal_planning_context()
+        return self._planning_context_cache
 
     @property
     def code_assembly_context(self) -> str:
-        """Context for Code Assembler Agent - extracted from existing tasks.py"""
-        return """
+        """
+        Detailed context for Code Assembler Agent.
+        Focuses on code structure and syntax rules.
+        Keyword details are available via keyword_search_tool.
+        Uses lazy loading with caching for performance.
+        """
+        if self._code_assembly_context_cache is None:
+            # Code structure template with critical syntax rules
+            code_structure = """
 --- SELENIUMLIBRARY CODE STRUCTURE ---
 
 **MANDATORY STRUCTURE:**
@@ -164,102 +222,44 @@ Use FOR loops for iteration:
 3. Locators must be stored in variables
 4. Include proper indentation (4 spaces)
 5. Add documentation to test cases
+
+**KEYWORD REFERENCE:**
+Use the keyword_search_tool to look up specific keyword details when needed.
+Common keywords: Open Browser, Input Text, Press Keys, Click Element, Get Text,
+Wait Until Element Is Visible, Should Be True, Close Browser
 """
-
-    @property
-    def browser_init_params(self) -> dict:
-        """
-        Return browser initialization parameters for SeleniumLibrary.
-
-        Returns:
-            dict: Dictionary with 'browser' and 'options' parameters
-        """
-        return {
-            'browser': 'chrome',
-            'options': 'add_argument("--headless");add_argument("--no-sandbox");add_argument("--incognito")'
-        }
-
-    @property
-    def requires_viewport_config(self) -> bool:
-        """
-        SeleniumLibrary does not require explicit viewport configuration.
-
-        Returns:
-            bool: False - SeleniumLibrary manages viewport automatically
-        """
-        return False
-
-    def get_viewport_config_code(self) -> str:
-        """
-        Return viewport configuration code for SeleniumLibrary.
-
-        Returns:
-            str: Empty string - SeleniumLibrary doesn't need viewport config
-        """
-        return ""
+            # NOTE: keyword_search_tool is available when OPTIMIZATION_ENABLED=true (standard mode)
+            self._code_assembly_context_cache = code_structure
+        
+        return self._code_assembly_context_cache
 
     @property
     def validation_context(self) -> str:
-        """Context for Code Validator Agent - extracted from existing tasks.py"""
+        """
+        Context for Code Validator Agent - SeleniumLibrary (OPTIMIZED)
+        
+        PURPOSE: Provide LIBRARY-SPECIFIC syntax rules that differ from Browser Library.
+        This is the "what changes between libraries" context.
+        
+        SCOPE: Minimal, focused rules (~50 tokens)
+        - Library imports (SeleniumLibrary, BuiltIn)
+        - Variable assignment syntax
+        - Locator prefix requirements (id=, name=, xpath=)
+        - Conditional keyword syntax (Run Keyword If)
+        
+        NOT INCLUDED: Generic validation workflow, error reporting format, delegation logic
+        (That's in tasks.py validate_code_task description - ~500 tokens)
+        
+        SEPARATION OF CONCERNS:
+        - validation_context = Library-specific SYNTAX rules (here)
+        - Task description = Generic validation WORKFLOW (tasks.py)
+        - Optimized context = Query-specific KEYWORDS (smart_provider)
+        """
         return """
---- SELENIUMLIBRARY VALIDATION RULES ---
-
-**VALIDATION CHECKLIST:**
-1. All required libraries are imported (SeleniumLibrary, BuiltIn, String if needed)
-2. All keywords have the correct number of arguments
-3. Variables are properly declared before use
-4. Should Be True statements have valid expressions
-5. Run Keyword If statements have proper syntax
-6. Price/numeric comparisons use proper conversion (Evaluate)
-
-**COMMON ERRORS TO CHECK:**
-
-1. **Missing Variable Declaration**
-   ❌ WRONG: Get Text    name=q
-   ✅ CORRECT: 
-      *** Variables ***
-      ${search_locator}    name=q
-      
-      *** Test Cases ***
-      Test
-          Get Text    ${search_locator}
-
-2. **Incorrect Assignment Syntax**
-   ❌ WRONG: Get Text    ${locator}    ${result}
-   ✅ CORRECT: ${result}=    Get Text    ${locator}
-
-3. **Missing Library Import**
-   ❌ WRONG: (no *** Settings *** section)
-   ✅ CORRECT:
-      *** Settings ***
-      Library    SeleniumLibrary
-      Library    BuiltIn
-
-4. **Invalid Locator Format**
-   ❌ WRONG: Get Text    search-box
-   ✅ CORRECT: Get Text    id=search-box
-
-5. **Missing Browser Config**
-   ❌ WRONG: Open Browser    https://example.com
-   ✅ CORRECT: Open Browser    https://example.com    chrome    options=${options}
-
-6. **Incorrect Should Be True Syntax**
-   ❌ WRONG: Should Be True    price < 1000
-   ✅ CORRECT: Should Be True    ${price} < 1000
-
-7. **Get Text without locator argument**
-   ❌ WRONG: ${text}=    Get Text
-   ✅ CORRECT: ${text}=    Get Text    ${locator}
-
-8. **Invalid expressions in Should Be True**
-   ❌ WRONG: Should Be True    product_price < 1000
-   ✅ CORRECT: Should Be True    ${product_price} < 1000
-
-9. **Missing variable assignments**
-   ❌ WRONG: Get Text    ${locator}
-   ✅ CORRECT: ${result}=    Get Text    ${locator}
-
-10. **Incorrect conditional syntax**
-    ❌ WRONG: If    ${total} > 100    Input Text    ${locator}    text
-    ✅ CORRECT: Run Keyword If    ${total} > 100    Input Text    ${locator}    text
+**SELENIUMLIBRARY RULES:**
+• Import SeleniumLibrary, BuiltIn
+• Variable assignment: ${var}= Get Text ${loc}
+• Locators need prefix: id=, name=, xpath=, css=
+• Variables in expressions: Should Be True ${price} < 1000
+• Conditionals: Run Keyword If ${cond} Keyword Args
 """

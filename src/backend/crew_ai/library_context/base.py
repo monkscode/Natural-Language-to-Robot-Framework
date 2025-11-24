@@ -118,6 +118,65 @@ class LibraryContext(ABC):
         """
         pass
 
+    @property
+    @abstractmethod
+    def core_rules(self) -> str:
+        """
+        Return core library rules that must always be included in agent context.
+        
+        These are critical rules that should never be omitted, even in optimized mode.
+        Target: ~300 tokens
+        
+        Should include:
+        - Critical keyword sequences (e.g., New Browser → New Context → New Page)
+        - Parameter rules (e.g., viewport=None requirement)
+        - Auto-waiting behavior
+        - Locator priorities
+        - Common pitfalls to avoid
+        
+        Returns:
+            str: Core rules text (~300 tokens)
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def planning_rules(self) -> str:
+        """
+        Return minimal planning-level rules for the Test Automation Planner Agent.
+        
+        These rules help the planner create correct high-level test step sequences.
+        Target: ~50 tokens (minimal, focused guidance)
+        
+        Should include:
+        - Timing behavior (auto-waiting vs explicit waits)
+        - Library capabilities (what actions are supported)
+        - Key planning considerations (not implementation details)
+        
+        Should NOT include:
+        - Keyword syntax (that's for code assembler)
+        - Parameter details (that's for code assembler)
+        - Viewport configuration (that's for code assembler)
+        
+        Returns:
+            str: Planning rules text (~50 tokens)
+        
+        Example for Browser Library:
+            ```
+            - AUTO-WAITING: No explicit wait steps needed
+            - Supports: navigation, input, clicking, text extraction
+            - Modern web features supported
+            ```
+        
+        Example for SeleniumLibrary:
+            ```
+            - EXPLICIT WAITS REQUIRED: Add wait step before each interaction
+            - Supports: navigation, input, clicking, text extraction
+            - Use 'Wait Until Element Is Visible' before actions
+            ```
+        """
+        pass
+
     def get_full_context(self, agent_role: str) -> str:
         """
         Get complete context for a specific agent role.

@@ -2,6 +2,8 @@ from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
 from src.backend.crew_ai.tasks import RobotTasks
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
+from datetime import datetime
 import re
 import logging
 
@@ -64,6 +66,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
       are now used without wrappers as Google Gemini API has sufficient rate limits.
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
     - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
+    - Optimization system (pattern learning, ChromaDB) can be enabled via OPTIMIZATION_ENABLED config.
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
@@ -78,8 +81,141 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     logger.info(
         f"✅ Loaded {library_context.library_name} context with dynamic keywords")
 
+    # Initialize metrics for optimization tracking
+    optimization_metrics = None
+    if settings.OPTIMIZATION_ENABLED:
+        # Create a temporary metrics object for tracking optimization metrics
+        # This will be merged with the main workflow metrics later
+        optimization_metrics = WorkflowMetrics(
+            workflow_id=workflow_id or "temp",
+            timestamp=datetime.now(),
+            url=extract_url_from_query(query),
+            total_llm_calls=0,
+            total_cost=0.0,
+            execution_time=0.0
+        )
+    
+    # Initialize optimization system if enabled
+    optimized_context = None
+    keyword_search_tool = None
+    smart_provider = None
+    baseline_context_tokens = 0
+    optimized_context_tokens = 0
+    
+    if settings.OPTIMIZATION_ENABLED:
+        try:
+            logger.info("🚀 Optimization system enabled - initializing components")
+            from src.backend.crew_ai.optimization import (
+                KeywordVectorStore,
+                QueryPatternMatcher,
+                SmartKeywordProvider,
+                ContextPruner
+            )
+            
+            # Initialize ChromaDB vector store
+            vector_store = KeywordVectorStore(
+                persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+            )
+            
+            # Ensure collection is ready (auto-rebuild if version mismatch)
+            vector_store.ensure_collection_ready(library_context.library_name)
+            
+            # Initialize pattern matcher (with ChromaDB for query embeddings)
+            pattern_matcher = QueryPatternMatcher(
+                db_path=settings.OPTIMIZATION_PATTERN_DB_PATH,
+                chroma_store=vector_store  # Pass ChromaDB store for query embeddings
+            )
+            
+            # Initialize context pruner if enabled
+            context_pruner = None
+            if settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED:
+                try:
+                    logger.info("🔍 Initializing context pruner...")
+                    context_pruner = ContextPruner(
+                        persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+                    )
+                    logger.info("✅ Context pruner initialized")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to initialize context pruner: {e}")
+                    logger.warning("   Context pruning will be disabled")
+            
+            # Initialize smart keyword provider with metrics
+            smart_provider = SmartKeywordProvider(
+                library_context=library_context,
+                pattern_matcher=pattern_matcher,
+                vector_store=vector_store,
+                context_pruner=context_pruner,
+                pruning_enabled=settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED,
+                pruning_threshold=settings.OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD,
+                metrics=optimization_metrics
+            )
+            
+            # Calculate baseline context size (full context)
+            baseline_context = library_context.code_assembly_context
+            baseline_context_tokens = count_tokens(baseline_context)
+            
+            # Get optimized contexts for ALL agents
+            logger.info("🎯 Generating optimized contexts for all agents...")
+            planner_context = smart_provider.get_agent_context(query, "planner")
+            # Identifier context skipped - element_identifier_agent doesn't use context
+            # It only needs batch_browser_automation tool, no keyword knowledge required
+            identifier_context = None
+            assembler_context = smart_provider.get_agent_context(query, "assembler")
+            validator_context = smart_provider.get_agent_context(query, "validator")
+            
+            # Calculate total optimized tokens (skip None values)
+            planner_tokens = count_tokens(planner_context)
+            identifier_tokens = 0  # Not generated, saves ~50-100ms per workflow
+            assembler_tokens = count_tokens(assembler_context)
+            validator_tokens = count_tokens(validator_context)
+            optimized_context_tokens = assembler_tokens  # For backward compatibility metric
+            
+            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Identifier=N/A (skipped), Assembler={assembler_tokens}, Validator={validator_tokens}")
+            
+            # Track context reduction (using assembler as reference)
+            if optimization_metrics:
+                optimization_metrics.track_context_reduction(
+                    baseline=baseline_context_tokens,
+                    optimized=optimized_context_tokens
+                )
+                logger.info(
+                    f"📊 Context reduction (assembler): {baseline_context_tokens} -> {optimized_context_tokens} tokens "
+                    f"({optimization_metrics.context_reduction['reduction_percentage']:.1f}% reduction)"
+                )
+            
+            # Get keyword search tool
+            keyword_search_tool = smart_provider.get_keyword_search_tool()
+            
+            logger.info("✅ Optimization system initialized successfully for ALL agents")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize optimization system: {e}")
+            logger.warning("⚠️ Falling back to baseline behavior (full context)")
+            planner_context = None
+            identifier_context = None
+            assembler_context = None
+            validator_context = None
+            keyword_search_tool = None
+            smart_provider = None
+            optimization_metrics = None
+    else:
+        logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
+        planner_context = None
+        identifier_context = None
+        assembler_context = None
+        validator_context = None
+
     # Initialize agents and tasks with library context and workflow_id
-    agents = RobotAgents(model_provider, model_name, library_context)
+    agents = RobotAgents(
+        model_provider, 
+        model_name, 
+        library_context,
+        assembler_context=assembler_context,  # Use consistent naming with other contexts
+        keyword_search_tool=keyword_search_tool,
+        planner_context=planner_context,
+        identifier_context=identifier_context,
+        validator_context=validator_context
+    )
     tasks = RobotTasks(library_context, workflow_id=workflow_id)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
@@ -101,6 +237,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         tasks=[plan_steps, identify_elements, assemble_code, validate_code],
         process=Process.sequential,
         verbose=True,
+        embedder=None,  # Disable automatic knowledge/embedding system
     )
 
     logger.info("🚀 Starting CrewAI workflow execution...")
@@ -114,7 +251,17 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         logger.info("✅ CrewAI workflow completed successfully")
         logger.info(f"🏁 Crew execution finished - delegation cycle complete")
         logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
-        return result, crew
+        
+        # NOTE: Pattern learning is NOT done here!
+        # Learning should only happen AFTER test execution succeeds (test_status == "passed")
+        # This ensures we only learn from validated, working code.
+        # The learning is triggered in workflow_service.py after Docker execution completes successfully.
+        
+        # Return optimization metrics separately (Crew object doesn't allow dynamic attributes)
+        if optimization_metrics:
+            logger.info("📊 Optimization metrics collected")
+        
+        return result, crew, optimization_metrics
 
     except Exception as e:
         error_msg = str(e)
