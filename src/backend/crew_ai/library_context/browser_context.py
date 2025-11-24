@@ -199,7 +199,7 @@ Use the keyword_search_tool to look up specific keyword details when needed.
 Common keywords: New Browser, New Context, New Page, Fill Text, Click, Get Text, 
 Keyboard Key, Wait For Elements State, Close Browser
 """
-            
+            # NOTE: keyword_search_tool is available when OPTIMIZATION_ENABLED=true (standard mode)
             self._code_assembly_context_cache = code_structure
         
         return self._code_assembly_context_cache

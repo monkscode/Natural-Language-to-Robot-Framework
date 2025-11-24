@@ -181,7 +181,9 @@ class RobotAgents:
                 "Workflow: (1) Collect ALL elements from test steps, (2) Extract URL, (3) Call batch_browser_automation ONCE with all elements, (4) Map locators to steps. "
                 "Tool format: Action: batch_browser_automation | Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"...\", \"action\": \"input/click/get_text\"}], \"url\": \"...\", \"user_query\": \"...\"}. "
                 "CRITICAL: Action line must have ONLY 'batch_browser_automation' with NO extra text. Action Input must be a dict {}, NOT array []. "
-                "Benefits: Browser opens once (3-5x faster), full context awareness, intelligent popup handling, validated locators."
+                "Benefits: Browser opens once (3-5x faster), full context awareness, intelligent popup handling, validated locators. "
+                "⚠️ CRITICAL: Always use the 'best_locator' value from locator_mapping - it has been AI-validated and scored. "
+                "DO NOT analyze or override with your own preference. See task description for detailed rules."
             ),
             # NEW: Batch processing tool for multiple elements
             tools=[batch_browser_use_tool],

@@ -396,6 +396,50 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
 
+def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str):
+    """
+    Learn from a successful test execution for pattern optimization.
+    
+    Args:
+        user_query: Original user query (None if not provided)
+        robot_code: Generated robot code
+        test_status: Test execution status
+    """
+    if test_status != 'passed':
+        logging.info(f"⏭️  Skipping pattern learning - test status: {test_status}")
+        return
+    
+    if not user_query:
+        logging.info("⏭️  Test PASSED but skipping pattern learning - no user query provided")
+        return
+    
+    try:
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED:
+            return
+            
+        from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
+        from src.backend.crew_ai.library_context import get_library_context
+        
+        logging.info("📚 Test PASSED - Learning from successful execution...")
+        
+        # Initialize components
+        library_context = get_library_context(settings.ROBOT_LIBRARY)
+        chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
+        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
+        smart_provider = SmartKeywordProvider(
+            library_context=library_context,
+            pattern_matcher=pattern_matcher,
+            vector_store=chroma_store
+        )
+        
+        # Learn from the successful execution
+        smart_provider.learn_from_execution(user_query, robot_code)
+        logging.info("✅ Pattern learning completed - learned from PASSED test")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to learn from execution: {e}")
+
+
 async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
     """
     Generates Robot Framework test code without executing it.
@@ -410,6 +454,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     )
     workflow_thread.start()
 
+    # Wait for workflow to complete and stream events
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
@@ -427,6 +472,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
             yield ": heartbeat\n\n"
             await asyncio.sleep(1)
 
+    # Process remaining events in queue
     if not robot_code:
         while not q.empty():
             event = q.get_nowait()
@@ -487,37 +533,7 @@ async def stream_execute_only(robot_code: str, user_query: str = None) -> Genera
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
         
         # Pattern learning: ONLY learn from PASSED tests
-        # This ensures we only learn from validated, working code
-        if result.get('test_status') == 'passed':
-            if user_query:
-                try:
-                    from src.backend.core.config import settings
-                    if settings.OPTIMIZATION_ENABLED:
-                        # Initialize optimization components to learn from this successful execution
-                        from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
-                        from src.backend.crew_ai.library_context import get_library_context
-                        
-                        logging.info("📚 Test PASSED - Learning from successful execution...")
-                        
-                        # Initialize components
-                        library_context = get_library_context(settings.ROBOT_LIBRARY)
-                        chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-                        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
-                        smart_provider = SmartKeywordProvider(
-                            library_context=library_context,
-                            pattern_matcher=pattern_matcher,
-                            vector_store=chroma_store
-                        )
-                        
-                        # Learn from the successful execution
-                        smart_provider.learn_from_execution(user_query, robot_code)
-                        logging.info("✅ Pattern learning completed - learned from PASSED test")
-                except Exception as e:
-                    logging.warning(f"⚠️ Failed to learn from execution: {e}")
-            else:
-                logging.info("⏭️  Test PASSED but skipping pattern learning - no user query provided")
-        else:
-            logging.info(f"⏭️  Skipping pattern learning - test status: {result.get('test_status', 'unknown')}")
+        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")
@@ -591,34 +607,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
         
         # Pattern learning: ONLY learn from PASSED tests
-        # This ensures we only learn from validated, working code
-        if result.get('test_status') == 'passed':
-            try:
-                from src.backend.core.config import settings
-                if settings.OPTIMIZATION_ENABLED:
-                    # Initialize optimization components to learn from this successful execution
-                    from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
-                    from src.backend.crew_ai.library_context import get_library_context
-                    
-                    logging.info("📚 Test PASSED - Learning from successful execution...")
-                    
-                    # Initialize components
-                    library_context = get_library_context(settings.ROBOT_LIBRARY)
-                    chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-                    pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
-                    smart_provider = SmartKeywordProvider(
-                        library_context=library_context,
-                        pattern_matcher=pattern_matcher,
-                        vector_store=chroma_store
-                    )
-                    
-                    # Learn from the successful execution
-                    smart_provider.learn_from_execution(user_query, robot_code)
-                    logging.info("✅ Pattern learning completed - learned from PASSED test")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to learn from execution: {e}")
-        else:
-            logging.info(f"⏭️  Skipping pattern learning - test status: {result.get('test_status', 'unknown')}")
+        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")
