@@ -242,7 +242,7 @@ class BatchBrowserUseTool(BaseTool):
                 "url": url,
                 "user_query": user_query,
                 "session_config": {
-                    "headless": True,
+                    "headless": False,
                     "timeout": timeout
                 }
             }
