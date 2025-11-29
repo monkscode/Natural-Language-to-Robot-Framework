@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="professional">
 
 <head>
     <meta charset="UTF-8">
@@ -8,62 +8,70 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;800&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=4.2">
 </head>
 
 <body>
+    <!-- Gen Z Marquee Bar -->
+    <div class="marquee-container">
+        <div class="marquee-content">
+            AI POWERED TEST AUTOMATION • GENERATE CODE IN SECONDS • NO CODE KNOWLEDGE REQUIRED • AI AGENTS AT WORK • FUTURE IS NOW • AUTOMATE EVERYTHING • 
+            AI POWERED TEST AUTOMATION • GENERATE CODE IN SECONDS • NO CODE KNOWLEDGE REQUIRED • AI AGENTS AT WORK • FUTURE IS NOW • AUTOMATE EVERYTHING •
+        </div>
+    </div>
+
     <nav class="navbar">
         <div class="nav-container">
             <div class="logo">
                 <div class="logo-icon">M1</div>
-                <div class="logo-text">Mark 1</div>
+                <div class="logo-text glitch" data-text="MARK 1">Mark 1</div>
             </div>
-            <div class="nav-info">
-                <div class="status-dot"></div>
-                <span>AI System Online</span>
-                <span>•</span>
-                <span>Multi-Agent Pipeline</span>
+            
+            <div class="controls" style="display: flex; gap: 1rem; align-items: center;">
+                <!-- Theme Switcher -->
+                <div class="theme-toggle-group" title="Change Theme">
+                    <button class="control-btn active" onclick="setTheme('professional')" title="Professional">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>
+                    </button>
+                    <button class="control-btn" onclick="setTheme('neobrutalism')" title="Neobrutalism (Gen Z)">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    </button>
+                </div>
+                
+                <!-- Dark Mode Toggle -->
+                <div class="mode-toggle">
+                    <button class="control-btn" id="mode-btn" onclick="toggleDarkMode()" title="Toggle Dark Mode">
+                        <svg id="moon-icon" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="display:none"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                        <svg id="sun-icon" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                    </button>
+                </div>
+
+                <!-- Metrics Link -->
+                <a href="/metrics.html" class="control-btn" title="View Metrics" style="text-decoration: none;">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                </a>
             </div>
         </div>
     </nav>
 
     <main class="main-content">
         <div class="hero">
-            <h1>AI Test Automation Platform</h1>
-            <p>Transform natural language descriptions into executable Robot Framework tests using our advanced
-                multi-agent AI system.</p>
+            <h1 class="glitch" data-text="AI TEST AUTOMATION">AI TEST AUTOMATION</h1>
+            <p>Transform descriptions into Robot Framework tests. Fast. Reliable. Automated.</p>
 
             <div class="capabilities">
                 <div class="capability">
-                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z">
-                        </path>
-                    </svg>
-                    <span>Intelligent Code Generation</span>
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right:6px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    <span>CODE GEN</span>
                 </div>
                 <div class="capability">
-                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                        </path>
-                    </svg>
-                    <span>Self-Correcting Validation</span>
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right:6px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <span>AUTO VALIDATION</span>
                 </div>
                 <div class="capability">
-                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M9 9h6"></path>
-                    </svg>
-                    <span>Containerized Execution</span>
-                </div>
-                <div class="capability">
-                    <svg class="capability-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                    </svg>
-                    <span>Real-time Results</span>
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right:6px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
+                    <span>CONTAINERIZED</span>
                 </div>
             </div>
         </div>

@@ -1,3 +1,46 @@
+/* --- THEME & MODE LOGIC --- */
+function setTheme(themeName) {
+    document.documentElement.setAttribute('data-theme', themeName);
+    localStorage.setItem('theme', themeName);
+    
+    // Update active state
+    document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if(btn.getAttribute('onclick').includes(themeName)) {
+            btn.classList.add('active');
+        }
+    });
+}
+
+function toggleDarkMode() {
+    const currentMode = document.documentElement.getAttribute('data-mode');
+    const newMode = currentMode === 'dark' ? 'light' : 'dark';
+    
+    document.documentElement.setAttribute('data-mode', newMode);
+    localStorage.setItem('mode', newMode);
+    
+    const sunIcon = document.getElementById('sun-icon');
+    const moonIcon = document.getElementById('moon-icon');
+    if (sunIcon && moonIcon) {
+        sunIcon.style.display = newMode === 'dark' ? 'none' : 'block';
+        moonIcon.style.display = newMode === 'dark' ? 'block' : 'none';
+    }
+}
+
+// Initialize theme on page load
+const savedTheme = localStorage.getItem('theme') || 'professional';
+const savedMode = localStorage.getItem('mode') || 'light';
+setTheme(savedTheme);
+if(savedMode === 'dark') {
+    document.documentElement.setAttribute('data-mode', 'dark');
+    const sunIcon = document.getElementById('sun-icon');
+    const moonIcon = document.getElementById('moon-icon');
+    if (sunIcon && moonIcon) {
+        sunIcon.style.display = 'none';
+        moonIcon.style.display = 'block';
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');
     const actionBtn = document.getElementById('action-btn');

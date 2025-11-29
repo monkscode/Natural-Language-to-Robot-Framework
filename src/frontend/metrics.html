@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="professional">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mark 1 - Workflow Metrics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;800&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- Chart.js for Visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        /* --- CORE VARIABLES & RESET (MATCHING MAIN UI) --- */
+        :root {
+            /* Theme: Professional (Default) */
+            --font-main: 'Inter', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-display: 'Inter', sans-serif;
+            
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --primary-text: #ffffff;
+            --secondary: #64748b;
+            --accent: #f59e0b;
+            --success: #10b981;
+            --error: #ef4444;
+            
+            --bg-body: #f8fafc;
+            --bg-surface: #ffffff;
+            --bg-surface-secondary: #f1f5f9;
+            --bg-input: #ffffff;
+            
+            --text-main: #0f172a;
+            --text-secondary: #64748b;
+            
+            --border-color: #e2e8f0;
+            --border-width: 1px;
+            --border-radius: 12px;
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --backdrop-blur: 0px;
+        }
+
+        /* --- DARK MODE --- */
+        [data-mode="dark"] {
+            --bg-body: #0f172a;
+            --bg-surface: #1e293b;
+            --bg-surface-secondary: #334155;
+            --text-main: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --border-color: #334155;
+        }
+
+        /* --- NEOBRUTALISM THEME --- */
+        [data-theme="neobrutalism"] {
+            --font-main: 'Space Grotesk', sans-serif;
+            --font-display: 'JetBrains Mono', monospace;
+            --border-radius: 0px;
+            --border-width: 3px;
+            --border-color: #000000;
+            --shadow-md: 6px 6px 0px 0px #000000;
+            
+            --primary: #ccff00;
+            --primary-text: #000000;
+            --success: #00ff9d;
+            --error: #ff4444;
+            --bg-body: #f0f0f0;
+            --bg-surface: #ffffff;
+            --text-main: #000000;
+        }
+        
+        [data-theme="neobrutalism"][data-mode="dark"] {
+            --bg-body: #1a1a1a;
+            --bg-surface: #2d2d2d;
+            --border-color: #ffffff;
+            --text-main: #ffffff;
+            --shadow-md: 6px 6px 0px 0px #ffffff;
+        }
+
+        /* --- LAYOUT --- */
+        * { box-sizing: border-box; transition: all 0.3s ease; }
+        body { font-family: var(--font-main); background: var(--bg-body); color: var(--text-main); margin: 0; min-height: 100vh; }
+
+        .navbar {
+            position: sticky; top: 0; z-index: 100;
+            background: var(--bg-surface);
+            backdrop-filter: blur(var(--backdrop-blur));
+            border-bottom: var(--border-width) solid var(--border-color);
+            padding: 1rem 2rem;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        .logo { font-size: 1.5rem; font-weight: 800; font-family: var(--font-display); display: flex; align-items: center; gap: 10px; }
+        .logo-icon { background: var(--primary); color: var(--primary-text); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: var(--border-radius); border: var(--border-width) solid transparent; }
+        
+        [data-theme="neobrutalism"] .logo-icon { border-color: var(--text-main); }
+
+        .main-container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+
+        /* --- DASHBOARD GRID --- */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background: var(--bg-surface);
+            border: var(--border-width) solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-md);
+            display: flex; flex-direction: column; justify-content: space-between;
+        }
+
+        .metric-label { font-size: 0.85rem; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.5rem; }
+        .metric-value { font-size: 2rem; font-weight: 800; font-family: var(--font-display); color: var(--text-main); }
+        .metric-trend { font-size: 0.85rem; margin-top: 0.5rem; display: flex; align-items: center; gap: 4px; }
+        .trend-up { color: var(--success); }
+        .trend-down { color: var(--error); }
+
+        /* --- CHARTS SECTION --- */
+        .charts-container {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .chart-card {
+            background: var(--bg-surface);
+            border: var(--border-width) solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-md);
+            height: 400px;
+            position: relative;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: calc(100% - 2rem);
+            width: 100%;
+        }
+
+        /* --- DATA TABLE --- */
+        .table-card {
+            background: var(--bg-surface);
+            border: var(--border-width) solid var(--border-color);
+            border-radius: var(--border-radius);
+            overflow: hidden;
+            box-shadow: var(--shadow-md);
+        }
+
+        .table-header {
+            padding: 1.5rem;
+            border-bottom: var(--border-width) solid var(--border-color);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 1rem 1.5rem; text-align: left; border-bottom: 1px solid var(--border-color); }
+        th { background: var(--bg-surface-secondary); font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background: var(--bg-surface-secondary); }
+
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            display: inline-block;
+        }
+        
+        [data-theme="neobrutalism"] .status-badge { border: 2px solid #000; border-radius: 0; }
+
+        .status-success { background: rgba(16, 185, 129, 0.15); color: var(--success); }
+        .status-fail { background: rgba(239, 68, 68, 0.15); color: var(--error); }
+
+        .nav-btn {
+            padding: 8px 16px;
+            border: var(--border-width) solid var(--border-color);
+            background: var(--bg-surface);
+            color: var(--text-main);
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex; align-items: center; gap: 8px;
+        }
+        
+        [data-theme="neobrutalism"] .nav-btn { border: 3px solid #000; border-radius: 0; box-shadow: 4px 4px 0 0 #000; }
+        [data-theme="neobrutalism"] .nav-btn:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 0 #000; }
+
+        /* Controls from main page */
+        .controls { display: flex; gap: 10px; }
+        .control-btn { padding: 8px; background: transparent; border: var(--border-width) solid var(--border-color); border-radius: var(--border-radius); cursor: pointer; color: var(--text-main); }
+        .control-btn:hover { background: var(--bg-surface-secondary); }
+
+        @media (max-width: 1024px) {
+            .dashboard-grid { grid-template-columns: 1fr 1fr; }
+            .charts-container { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 640px) {
+            .dashboard-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="navbar">
+        <div class="logo">
+            <div class="logo-icon">M1</div>
+            <div>METRICS DASHBOARD</div>
+        </div>
+        <div class="controls">
+            <a href="/" class="nav-btn">
+                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                Back to Runner
+            </a>
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <!-- Theme Switcher -->
+                <div class="theme-toggle-group" title="Change Theme">
+                    <button class="control-btn active" onclick="setTheme('professional')" title="Professional">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>
+                    </button>
+                    <button class="control-btn" onclick="setTheme('neobrutalism')" title="Neobrutalism (Gen Z)">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    </button>
+                </div>
+                
+                <!-- Dark Mode Toggle -->
+                <div class="mode-toggle">
+                    <button class="control-btn" id="mode-btn" onclick="toggleDarkMode()" title="Toggle Dark Mode">
+                        <svg id="moon-icon" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="display:none"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                        <svg id="sun-icon" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <!-- SUMMARY CARDS (Based on AggregateMetricsResponse) -->
+        <div class="dashboard-grid">
+            <div class="metric-card">
+                <div class="metric-label">Total Workflows</div>
+                <div class="metric-value" id="total-workflows">-</div>
+                <div class="metric-trend trend-up">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                    <span>All Time</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Avg Success Rate</div>
+                <div class="metric-value" id="success-rate">-</div>
+                <div class="metric-trend" id="success-trend">
+                    <!-- Trend icon populated by JS -->
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total Spend (USD)</div>
+                <div class="metric-value" id="total-cost">-</div>
+                <div class="metric-trend trend-down">
+                    <span>Platform Total</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Avg Execution Time</div>
+                <div class="metric-value" id="avg-time">-</div>
+                <div class="metric-trend">
+                    <span>Per Workflow</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- CHARTS -->
+        <div class="charts-container">
+            <div class="chart-card">
+                <div class="metric-label" style="margin-bottom: 1rem;">Workflow Volume & Success</div>
+                <div class="chart-wrapper">
+                    <canvas id="volumeChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="metric-label" style="margin-bottom: 1rem;">Cost Breakdown (CrewAI vs Browser)</div>
+                <div class="chart-wrapper">
+                    <canvas id="costChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- DETAILED TABLE (Based on WorkflowMetricsResponse) -->
+        <div class="table-card">
+            <div class="table-header">
+                <div style="font-weight: 700; font-size: 1.1rem;">Recent Executions</div>
+                <button class="nav-btn" style="padding: 4px 12px; font-size: 0.8rem;" onclick="fetchMetrics()">Refresh</button>
+            </div>
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Workflow ID</th>
+                            <th>Timestamp</th>
+                            <th>URL / Task</th>
+                            <th>LLM Calls</th>
+                            <th>Elements</th>
+                            <th>Cost</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body">
+                        <!-- Rows populated by JS -->
+                        <tr><td colspan="8" style="text-align:center; padding: 2rem;">Loading data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- THEME LOGIC (Synced with Index) ---
+        function setTheme(themeName) {
+            document.documentElement.setAttribute('data-theme', themeName);
+            localStorage.setItem('theme', themeName);
+            
+            // Update active state
+            document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if(btn.getAttribute('onclick').includes(themeName)) {
+                    btn.classList.add('active');
+                }
+            });
+            
+            updateChartColors();
+        }
+        
+        function toggleDarkMode() {
+            const currentMode = document.documentElement.getAttribute('data-mode');
+            const newMode = currentMode === 'dark' ? 'light' : 'dark';
+            
+            document.documentElement.setAttribute('data-mode', newMode);
+            localStorage.setItem('mode', newMode);
+            
+            const sunIcon = document.getElementById('sun-icon');
+            const moonIcon = document.getElementById('moon-icon');
+            if (sunIcon && moonIcon) {
+                sunIcon.style.display = newMode === 'dark' ? 'none' : 'block';
+                moonIcon.style.display = newMode === 'dark' ? 'block' : 'none';
+            }
+            
+            updateChartColors();
+        }
+        
+        // Init Theme
+        const savedTheme = localStorage.getItem('theme') || 'professional';
+        const savedMode = localStorage.getItem('mode') || 'light';
+        setTheme(savedTheme);
+        if(savedMode === 'dark') {
+            document.documentElement.setAttribute('data-mode', 'dark');
+            const sunIcon = document.getElementById('sun-icon');
+            const moonIcon = document.getElementById('moon-icon');
+            if (sunIcon && moonIcon) {
+                sunIcon.style.display = 'none';
+                moonIcon.style.display = 'block';
+            }
+        }
+
+        // --- API CONNECTION ---
+        async function fetchMetrics() {
+            try {
+                // Fetch real data from backend API
+                const response = await fetch('/api/workflow-metrics/');
+                const data = await response.json();
+                
+                const aggResponse = await fetch('/api/workflow-metrics/aggregate');
+                const aggData = await aggResponse.json();
+
+                renderDashboard(data, aggData);
+            } catch (e) {
+                console.error("Failed to load metrics", e);
+                // Fallback to mock data if API is not available
+                const data = generateMockData();
+                const aggData = {
+                    total_workflows: 0,
+                    avg_success_rate: 0,
+                    total_cost: 0,
+                    avg_execution_time: 0,
+                    date_range: { start: new Date().toISOString(), end: new Date().toISOString() }
+                };
+                renderDashboard(data, aggData);
+            }
+        }
+
+        // --- MOCK DATA GENERATOR (Fallback) ---
+        function generateMockData() {
+            const runs = [];
+            const now = new Date();
+            
+            for(let i=0; i<20; i++) {
+                const isSuccess = Math.random() > 0.2;
+                const cost = (Math.random() * 0.5 + 0.01).toFixed(4);
+                runs.push({
+                    workflow_id: `wf_${Math.random().toString(36).substr(2, 9)}`,
+                    timestamp: new Date(now - i * 3600000 * (Math.random()*5)).toISOString(),
+                    url: Math.random() > 0.5 ? 'https://google.com/search?q=robot' : 'https://github.com/login',
+                    total_llm_calls: Math.floor(Math.random() * 15) + 2,
+                    total_cost: parseFloat(cost),
+                    execution_time: parseFloat((Math.random() * 45 + 5).toFixed(1)),
+                    success_rate: isSuccess ? 1.0 : Math.random() * 0.5,
+                    // Breakdown mock
+                    crewai_cost: parseFloat((cost * 0.3).toFixed(4)),
+                    browser_use_cost: parseFloat((cost * 0.7).toFixed(4)),
+                    total_elements: Math.floor(Math.random() * 20) + 1
+                });
+            }
+            return runs.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+        }
+
+        // --- RENDER LOGIC ---
+        function renderDashboard(runs, agg) {
+            // 1. Update Summary Cards
+            document.getElementById('total-workflows').textContent = agg.total_workflows;
+            
+            const succRate = (agg.avg_success_rate * 100).toFixed(1);
+            document.getElementById('success-rate').textContent = succRate + '%';
+            
+            const trendEl = document.getElementById('success-trend');
+            if(succRate > 80) {
+                trendEl.innerHTML = `<span class="trend-up">▲ High</span> Reliability`;
+            } else {
+                trendEl.innerHTML = `<span class="trend-down">▼ Low</span> Reliability`;
+            }
+
+            document.getElementById('total-cost').textContent = '$' + agg.total_cost.toFixed(2);
+            document.getElementById('avg-time').textContent = agg.avg_execution_time.toFixed(1) + 's';
+
+            // 2. Render Table
+            const tbody = document.getElementById('table-body');
+            tbody.innerHTML = '';
+            
+            if (!runs || runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 2rem;">No workflow data available yet. Run some tests to see metrics!</td></tr>';
+                renderCharts([]);
+                return;
+            }
+
+            runs.forEach(run => {
+                const statusClass = run.success_rate >= 1.0 ? 'status-success' : 'status-fail';
+                const statusText = run.success_rate >= 1.0 ? 'PASS' : 'FAIL';
+                
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    <td><span style="font-family:var(--font-mono); font-size:0.85rem;">${run.workflow_id}</span></td>
+                    <td>${new Date(run.timestamp).toLocaleString()}</td>
+                    <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${run.url || 'N/A'}</td>
+                    <td>${run.total_llm_calls}</td>
+                    <td>${run.total_elements || 0}</td>
+                    <td>$${run.total_cost.toFixed(4)}</td>
+                    <td>${run.execution_time.toFixed(1)}s</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // 3. Render Charts
+            renderCharts(runs);
+        }
+
+        // --- CHART.JS CONFIG ---
+        let volChart, costChart;
+
+        function renderCharts(runs) {
+            if (!runs || runs.length === 0) {
+                // Don't render charts if no data
+                return;
+            }
+
+            // Process data for charts
+            // Sort by time for line chart
+            const sortedRuns = [...runs].reverse(); // Oldest first
+            const labels = sortedRuns.map(r => new Date(r.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
+            const executionTimes = sortedRuns.map(r => r.execution_time);
+            const llmCalls = sortedRuns.map(r => r.total_llm_calls);
+
+            // Cost Aggregation
+            const totalCrewCost = runs.reduce((acc, r) => acc + (r.crewai_cost || 0), 0);
+            const totalBrowserCost = runs.reduce((acc, r) => acc + (r.browser_use_cost || 0), 0);
+
+            const ctxVol = document.getElementById('volumeChart').getContext('2d');
+            const ctxCost = document.getElementById('costChart').getContext('2d');
+
+            // Colors based on theme (basic logic)
+            const isNeo = document.documentElement.getAttribute('data-theme') === 'neobrutalism';
+            const colorPrimary = isNeo ? '#ccff00' : '#3b82f6';
+            const colorSecondary = isNeo ? '#ff00ff' : '#64748b';
+            const gridColor = isNeo ? '#000000' : '#e2e8f0';
+            const borderWidth = isNeo ? 2 : 1;
+
+            if(volChart) volChart.destroy();
+            if(costChart) costChart.destroy();
+
+            // Volume Chart
+            volChart = new Chart(ctxVol, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Execution Time (s)',
+                            data: executionTimes,
+                            borderColor: colorPrimary,
+                            backgroundColor: isNeo ? 'transparent' : 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: borderWidth + 1,
+                            tension: 0.4,
+                            fill: true
+                        },
+                        {
+                            label: 'LLM Calls',
+                            data: llmCalls,
+                            borderColor: colorSecondary,
+                            borderDash: [5, 5],
+                            borderWidth: borderWidth,
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { grid: { color: gridColor, drawBorder: false }, ticks: { color: '#888' } },
+                        x: { display: false }
+                    },
+                    plugins: { legend: { display: true } }
+                }
+            });
+
+            // Cost Doughnut
+            costChart = new Chart(ctxCost, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Browser Actions', 'CrewAI Logic'],
+                    datasets: [{
+                        data: [totalBrowserCost, totalCrewCost],
+                        backgroundColor: [colorPrimary, colorSecondary],
+                        borderColor: isNeo ? '#000' : '#fff',
+                        borderWidth: borderWidth
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom' } }
+                }
+            });
+        }
+
+        function updateChartColors() {
+            // Simple re-render to pick up new theme vars
+            fetchMetrics();
+        }
+
+        // Initial Load
+        fetchMetrics();
+    </script>
+</body>
+</html>
