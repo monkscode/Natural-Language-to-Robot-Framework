@@ -10,6 +10,9 @@ function setTheme(themeName) {
             btn.classList.add('active');
         }
     });
+    
+    // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
+    window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: themeName } }));
 }
 
 function toggleDarkMode() {
@@ -18,13 +21,10 @@ function toggleDarkMode() {
     
     document.documentElement.setAttribute('data-mode', newMode);
     localStorage.setItem('mode', newMode);
+    // Icon visibility is now controlled by CSS based on data-mode attribute
     
-    const sunIcon = document.getElementById('sun-icon');
-    const moonIcon = document.getElementById('moon-icon');
-    if (sunIcon && moonIcon) {
-        sunIcon.style.display = newMode === 'dark' ? 'none' : 'block';
-        moonIcon.style.display = newMode === 'dark' ? 'block' : 'none';
-    }
+    // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
+    window.dispatchEvent(new CustomEvent('modechange', { detail: { mode: newMode } }));
 }
 
 // Initialize theme on page load (theme/mode can be set before DOM ready)
@@ -39,18 +39,11 @@ if(savedMode === 'dark') {
 
 // Update icons and set up event delegation once DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-    // Update dark mode icons
-    if(savedMode === 'dark') {
-        const sunIcon = document.getElementById('sun-icon');
-        const moonIcon = document.getElementById('moon-icon');
-        if (sunIcon && moonIcon) {
-            sunIcon.style.display = 'none';
-            moonIcon.style.display = 'block';
-        }
-    }
+    // Icon visibility is controlled by CSS based on data-mode attribute
+    // No manual icon manipulation needed
     
-    // Event delegation for theme buttons (Comment #2)
-    document.querySelectorAll('[data-theme]').forEach(btn => {
+    // Event delegation for theme buttons (using specific selector to avoid matching <html> element)
+    document.querySelectorAll('.theme-toggle-group [data-theme]').forEach(btn => {
         btn.addEventListener('click', () => setTheme(btn.dataset.theme));
     });
     

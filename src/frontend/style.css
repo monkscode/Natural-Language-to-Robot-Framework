@@ -61,6 +61,15 @@
     --header-bg: rgba(30, 41, 59, 0.9);
 }
 
+/* --- DARK MODE ICON VISIBILITY (Comment #1 & #3) --- */
+/* Default light mode - show sun, hide moon */
+#sun-icon { display: block; }
+#moon-icon { display: none; }
+
+/* Dark mode - hide sun, show moon */
+[data-mode="dark"] #sun-icon { display: none; }
+[data-mode="dark"] #moon-icon { display: block; }
+
 /* --- THEME: NEOBRUTALISM (GEN Z EDITION) --- */
 [data-theme="neobrutalism"] {
     /* Typography */
@@ -191,6 +200,53 @@ body {
 @keyframes glitch-anim2 {
     0% { clip-path: inset(65px 0 calc(100% - 99px) 0); }
     100% { clip-path: inset(14px 0 calc(100% - 62px) 0); }
+}
+
+/* --- REDUCED MOTION ACCESSIBILITY (Comment #5) --- */
+/* Respect user preferences for reduced motion (WCAG 2.1 SC 2.3.3) */
+@media (prefers-reduced-motion: reduce) {
+    /* Disable glitch animations */
+    [data-theme="neobrutalism"] .glitch::before,
+    [data-theme="neobrutalism"] .glitch::after {
+        animation: none;
+    }
+    
+    /* Disable marquee animation */
+    .marquee-content {
+        animation: none;
+    }
+    
+    /* Disable floating animations */
+    .float-animation {
+        animation: none;
+    }
+    
+    /* Reduce transition durations */
+    .btn, .control-btn, .capability, .section, .metric-card, .nav-btn, 
+    .form-input, .code-block, .navbar, .logo-icon, .status-badge {
+        transition-duration: 0.01ms !important;
+    }
+    
+    /* Disable progress bar shimmer */
+    .progress-fill-global::after {
+        animation: none;
+    }
+    
+    /* Disable pulse animation on status dot */
+    .status-dot {
+        animation: none;
+    }
+    
+    /* Disable log entry slide-in animation */
+    .log-entry {
+        animation: none;
+    }
+    
+    /* Disable spinner animation - use static indicator instead */
+    .btn-spinner {
+        animation: none;
+        border-style: dotted;
+    }
 }
 
 /* --- MARQUEE BAR --- */
