@@ -1,3 +1,58 @@
+/* --- THEME & MODE LOGIC --- */
+function setTheme(themeName) {
+    document.documentElement.setAttribute('data-theme', themeName);
+    localStorage.setItem('theme', themeName);
+    
+    // Update active state using data-theme attribute
+    document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if(btn.dataset.theme === themeName) {
+            btn.classList.add('active');
+        }
+    });
+    
+    // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
+    window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: themeName } }));
+}
+
+function toggleDarkMode() {
+    const currentMode = document.documentElement.getAttribute('data-mode');
+    const newMode = currentMode === 'dark' ? 'light' : 'dark';
+    
+    document.documentElement.setAttribute('data-mode', newMode);
+    localStorage.setItem('mode', newMode);
+    // Icon visibility is now controlled by CSS based on data-mode attribute
+    
+    // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
+    window.dispatchEvent(new CustomEvent('modechange', { detail: { mode: newMode } }));
+}
+
+// Initialize theme on page load (theme/mode can be set before DOM ready)
+const savedTheme = localStorage.getItem('theme') || 'professional';
+const savedMode = localStorage.getItem('mode') || 'light';
+
+// Set theme and mode attributes immediately (works before DOM ready)
+setTheme(savedTheme);
+if(savedMode === 'dark') {
+    document.documentElement.setAttribute('data-mode', 'dark');
+}
+
+// Update icons and set up event delegation once DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    // Icon visibility is controlled by CSS based on data-mode attribute
+    // No manual icon manipulation needed
+    
+    // Event delegation for theme buttons (using specific selector to avoid matching <html> element)
+    document.querySelectorAll('.theme-toggle-group [data-theme]').forEach(btn => {
+        btn.addEventListener('click', () => setTheme(btn.dataset.theme));
+    });
+    
+    // Event delegation for dark mode toggle
+    document.querySelectorAll('[data-action="toggle-dark-mode"]').forEach(btn => {
+        btn.addEventListener('click', toggleDarkMode);
+    });
+});
+
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');
     const actionBtn = document.getElementById('action-btn');
