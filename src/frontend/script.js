@@ -3,10 +3,10 @@ function setTheme(themeName) {
     document.documentElement.setAttribute('data-theme', themeName);
     localStorage.setItem('theme', themeName);
     
-    // Update active state
+    // Update active state using data-theme attribute
     document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
         btn.classList.remove('active');
-        if(btn.getAttribute('onclick').includes(themeName)) {
+        if(btn.dataset.theme === themeName) {
             btn.classList.add('active');
         }
     });
@@ -27,19 +27,38 @@ function toggleDarkMode() {
     }
 }
 
-// Initialize theme on page load
+// Initialize theme on page load (theme/mode can be set before DOM ready)
 const savedTheme = localStorage.getItem('theme') || 'professional';
 const savedMode = localStorage.getItem('mode') || 'light';
+
+// Set theme and mode attributes immediately (works before DOM ready)
 setTheme(savedTheme);
 if(savedMode === 'dark') {
     document.documentElement.setAttribute('data-mode', 'dark');
-    const sunIcon = document.getElementById('sun-icon');
-    const moonIcon = document.getElementById('moon-icon');
-    if (sunIcon && moonIcon) {
-        sunIcon.style.display = 'none';
-        moonIcon.style.display = 'block';
-    }
 }
+
+// Update icons and set up event delegation once DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    // Update dark mode icons
+    if(savedMode === 'dark') {
+        const sunIcon = document.getElementById('sun-icon');
+        const moonIcon = document.getElementById('moon-icon');
+        if (sunIcon && moonIcon) {
+            sunIcon.style.display = 'none';
+            moonIcon.style.display = 'block';
+        }
+    }
+    
+    // Event delegation for theme buttons (Comment #2)
+    document.querySelectorAll('[data-theme]').forEach(btn => {
+        btn.addEventListener('click', () => setTheme(btn.dataset.theme));
+    });
+    
+    // Event delegation for dark mode toggle
+    document.querySelectorAll('[data-action="toggle-dark-mode"]').forEach(btn => {
+        btn.addEventListener('click', toggleDarkMode);
+    });
+});
 
 document.addEventListener('DOMContentLoaded', () => {
     const queryInput = document.getElementById('query-input');

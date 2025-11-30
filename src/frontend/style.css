@@ -125,6 +125,11 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+}
+
+/* Apply transitions only to interactive elements for better performance (Comment #9) */
+.btn, .control-btn, .capability, .section, .metric-card, .nav-btn, 
+.form-input, .code-block, .navbar, .logo-icon, .status-badge {
     transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, 
                 box-shadow 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94), 
                 transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -167,25 +172,25 @@ body {
 [data-theme="neobrutalism"] .glitch::before {
     left: 2px;
     text-shadow: -2px 0 #ff00c1;
-    clip: rect(44px, 450px, 56px, 0);
+    clip-path: inset(44px 0 calc(100% - 56px) 0);
     animation: glitch-anim 5s infinite linear alternate-reverse;
 }
 
 [data-theme="neobrutalism"] .glitch::after {
     left: -2px;
     text-shadow: -2px 0 #00fff9;
-    clip: rect(44px, 450px, 56px, 0);
+    clip-path: inset(44px 0 calc(100% - 56px) 0);
     animation: glitch-anim2 5s infinite linear alternate-reverse;
 }
 
 @keyframes glitch-anim {
-    0% { clip: rect(31px, 9999px, 94px, 0); }
-    100% { clip: rect(3px, 9999px, 90px, 0); }
+    0% { clip-path: inset(31px 0 calc(100% - 94px) 0); }
+    100% { clip-path: inset(3px 0 calc(100% - 90px) 0); }
 }
 
 @keyframes glitch-anim2 {
-    0% { clip: rect(65px, 9999px, 99px, 0); }
-    100% { clip: rect(14px, 9999px, 62px, 0); }
+    0% { clip-path: inset(65px 0 calc(100% - 99px) 0); }
+    100% { clip-path: inset(14px 0 calc(100% - 62px) 0); }
 }
 
 /* --- MARQUEE BAR --- */
@@ -280,7 +285,14 @@ body {
     font-size: 1.8rem;
 }
 
-/* Controls */
+/* Controls Container */
+.controls {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+}
+
+/* Theme Toggle Groups */
 .theme-toggle-group, .mode-toggle {
     display: flex;
     background: var(--bg-surface-secondary);
@@ -340,6 +352,11 @@ body {
     color: var(--primary-text);
     transform: translate(2px, 2px);
     box-shadow: 0 0 0 0 transparent;
+}
+
+/* Metrics Link */
+.metrics-link {
+    text-decoration: none;
 }
 
 /* --- MAIN CONTENT --- */
@@ -577,7 +594,7 @@ body {
 }
 
 [data-theme="neobrutalism"] .form-input:focus {
-    background: #fff;
+    background: var(--bg-input);
     box-shadow: 8px 8px 0 0 var(--primary);
     border-color: var(--text-main);
 }
@@ -975,8 +992,8 @@ body {
 }
 
 .download-success {
-    background: var(--success) !important;
-    color: var(--white) !important;
+    background: var(--success);
+    color: #ffffff;
 }
 
 /* --- ROBOT FRAMEWORK SYNTAX HIGHLIGHTING --- */
