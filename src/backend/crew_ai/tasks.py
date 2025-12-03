@@ -165,19 +165,20 @@ Generated Test
             **EXAMPLE**:
             User query: "search for shoes on Flipkart and get first product name and price"
             
-            ✅ CORRECT steps:
+            ✅ CORRECT steps (with specific, spatially-aware element descriptions):
             1. Open Browser → Flipkart
-            2. Input Text → search box → "shoes"
+            2. Input Text → search input field in the top header → "shoes"
             3. Press Keys → RETURN
-            4. Get Text → first product name
-            5. Get Text → first product price
+            4. Get Text → first item title in the main results list (center content area)
+            5. Get Text → price text below the title in the first result item
             
             ❌ WRONG (DO NOT DO THIS):
             1. Open Browser → Flipkart
             2. Click Element → login popup close button  ← USER NEVER MENTIONED THIS!
             3. Click Element → cookie consent accept  ← USER NEVER MENTIONED THIS!
             4. Input Text → search box → "shoes"
-            5. ...
+            5. Get Text → product name ← TOO GENERIC! Need spatial context
+            6. ...
             
             --- CORE PRINCIPLES ---
             1.  **Explicitness:** Your plan must be explicit. Do not assume any prior context. If a user says "log in", you must include steps for navigating to the login page, entering the username, entering the password, and clicking the submit button.
@@ -192,6 +193,48 @@ Generated Test
             *   For search operations: After `Input Text` into search box, use `Press Keys` with `RETURN` (Enter key) instead of finding/clicking a search button.
             *   Modern websites (Flipkart, Amazon, Google, etc.) trigger search on Enter press.
             *   This is faster, more reliable, and reduces element identification overhead.
+
+            --- ELEMENT DESCRIPTION BEST PRACTICES ---
+            ⚠️ **CRITICAL FOR VISION-BASED ELEMENT DETECTION**:
+            Element descriptions must be SPECIFIC and include SPATIAL/CONTEXTUAL clues to help vision AI accurately locate elements.
+            
+            **BAD (Too Generic - Ambiguous)**:
+            - "button" ❌ (Which button? Where?)
+            - "text field" ❌ (Multiple text fields exist)
+            - "first item" ❌ (First item where? In which container?)
+            - "link" ❌ (Too many links on a page)
+            
+            **GOOD (Specific with Spatial Context)**:
+            - "submit button in the main form area" ✅
+            - "email text field in the login form" ✅
+            - "first item in the main content list (center area)" ✅
+            - "documentation link in the footer navigation" ✅
+            
+            **Key Principles for ALL Scenarios**:
+            1. **Add location context**: Specify WHERE the element is located
+               - Page regions: "in header", "in footer", "in sidebar", "in main content area"
+               - Relative position: "below the title", "next to the image", "above the form"
+               - Container context: "in the navigation menu", "in the product list", "in the dialog box"
+            
+            2. **Exclude ambiguous areas**: Clarify what to avoid
+               - "in main content (not in sidebar)"
+               - "in the form (not in header)"
+               - "in the results area (not in filters)"
+            
+            3. **Be specific about element type and purpose**:
+               - Instead of "button" → "login submit button"
+               - Instead of "text" → "article title text"
+               - Instead of "input" → "search query input field"
+            
+            4. **For lists/grids, specify container and position**:
+               - "first item in the search results list"
+               - "third card in the features grid"
+               - "last option in the dropdown menu"
+            
+            5. **For forms, include field purpose**:
+               - "username input field in login form"
+               - "confirm password field"
+               - "subscribe checkbox at form bottom"
 
             --- HANDLING CONDITIONAL LOGIC ---
             For validation steps that require comparison (like price checks), structure the step as:
@@ -251,15 +294,22 @@ Generated Test
                 "**STEP 3: COLLECT ELEMENTS**\n"
                 "- For each step that needs a locator, extract:\n"
                 "  * Unique ID (e.g., \"elem_1\", \"elem_2\")\n"
-                "  * Element description (from 'element_description' field)\n"
+                "  * Element description (from 'element_description' field) - USE EXACT DESCRIPTION with all spatial context\n"
                 "  * Action keyword (from 'keyword' field: input, click, get_text, etc.)\n"
+                "\n"
+                "⚠️ CRITICAL: Preserve the FULL element description from the plan, including ALL spatial hints like:\n"
+                "- Location context: 'in header', 'in main content', 'in sidebar', 'in footer'\n"
+                "- Relative position: 'below the image', 'next to the button', 'above the form'\n"
+                "- Exclusions: 'not in sidebar', 'not in filters', 'not in navigation'\n"
+                "- Container: 'in the results list', 'in the form', 'in the dialog'\n"
+                "These spatial clues help vision AI accurately locate the correct element!\n"
                 "\n"
                 "Example elements list:\n"
                 "```json\n"
                 "[\n"
-                "    {\"id\": \"elem_1\", \"description\": \"search box in header\", \"action\": \"input\"},\n"
-                "    {\"id\": \"elem_2\", \"description\": \"first product name in search results\", \"action\": \"get_text\"},\n"
-                "    {\"id\": \"elem_3\", \"description\": \"first product price in search results\", \"action\": \"get_text\"}\n"
+                "    {\"id\": \"elem_1\", \"description\": \"search input field in the top header\", \"action\": \"input\"},\n"
+                "    {\"id\": \"elem_2\", \"description\": \"first item title in the main results list (center content area)\", \"action\": \"get_text\"},\n"
+                "    {\"id\": \"elem_3\", \"description\": \"price text below the title in the first result item\", \"action\": \"get_text\"}\n"
                 "]\n"
                 "```\n"
                 "\n"

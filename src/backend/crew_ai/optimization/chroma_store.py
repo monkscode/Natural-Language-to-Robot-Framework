@@ -46,9 +46,15 @@ class KeywordVectorStore:
             )
             
             # Initialize embedding function (sentence-transformers)
-            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2"
-            )
+            # ChromaDB 0.5.x changed the API - now uses default embedding function
+            try:
+                # Try ChromaDB 0.5.x API first (model_name parameter)
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2"
+                )
+            except TypeError:
+                # Fallback for ChromaDB 0.4.x API (no model_name parameter)
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction()
             
             logger.info(f"ChromaDB initialized at {persist_directory}")
             
