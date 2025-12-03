@@ -50,20 +50,28 @@ async def find_unique_locator_at_coordinates(
     if candidate_locator:
         logger.info(f"🔍 Validating candidate locator: {candidate_locator}")
         try:
-            count = await page.locator(candidate_locator).count()
+            # Use shared conversion function from browser_service.locators
+            from browser_service.locators import convert_to_playwright_locator
+            
+            playwright_locator, was_converted = convert_to_playwright_locator(candidate_locator)
+            
+            if was_converted:
+                logger.info(f"   Converted to Playwright format: {playwright_locator}")
+            
+            count = await page.locator(playwright_locator).count()
             
             if count == 1:
-                logger.info(f"✅ Candidate locator is unique: {candidate_locator}")
+                logger.info(f"✅ Candidate locator is unique: {playwright_locator}")
                 return {
                     'element_id': element_id,
                     'description': element_description,
                     'found': True,
-                    'best_locator': candidate_locator,
+                    'best_locator': playwright_locator,  # Use converted locator
                     'all_locators': [{
                         'type': 'candidate',
-                        'locator': candidate_locator,
+                        'locator': playwright_locator,  # Use converted locator
                         'priority': 0,
-                        'strategy': 'Agent-provided candidate',
+                        'strategy': 'Agent-provided candidate' + (' (converted)' if was_converted else ''),
                         'count': count,
                         'unique': True,
                         'valid': True,
@@ -83,7 +91,7 @@ async def find_unique_locator_at_coordinates(
                     }
                 }
             else:
-                logger.info(f"⚠️ Candidate locator not unique (count={count}): {candidate_locator}")
+                logger.info(f"⚠️ Candidate locator not unique (count={count}): {playwright_locator}")
                 logger.info(f"🔄 Continuing with 21 strategies...")
         except Exception as e:
             logger.warning(f"⚠️ Candidate locator validation failed: {e}")
@@ -250,9 +258,10 @@ async def find_unique_locator_at_coordinates(
     if element_data['name']:
         if library_type == "browser":
             # Browser Library: use attribute selector
+            name_escaped = element_data['name'].replace('"', '\\"')
             locator_strategies.append({
                 'type': 'name',
-                'locator': f"[name='{element_data['name']}']",
+                'locator': f'[name="{name_escaped}"]',
                 'priority': 3,
                 'strategy': 'Name attribute'
             })
@@ -267,27 +276,30 @@ async def find_unique_locator_at_coordinates(
 
     # Strategy 6: aria-label (Priority 4)
     if element_data['ariaLabel']:
+        aria_label_escaped = element_data['ariaLabel'].replace('"', '\\"')
         locator_strategies.append({
             'type': 'aria-label',
-            'locator': f"[aria-label='{element_data['ariaLabel']}']",
+            'locator': f'[aria-label="{aria_label_escaped}"]',
             'priority': 4,
             'strategy': 'ARIA label'
         })
 
     # Strategy 7: placeholder (Priority 5)
     if element_data['placeholder']:
+        placeholder_escaped = element_data['placeholder'].replace('"', '\\"')
         locator_strategies.append({
             'type': 'placeholder',
-            'locator': f"[placeholder='{element_data['placeholder']}']",
+            'locator': f'[placeholder="{placeholder_escaped}"]',
             'priority': 5,
             'strategy': 'Placeholder attribute'
         })
 
     # Strategy 8: title (Priority 5)
     if element_data['title']:
+        title_escaped = element_data['title'].replace('"', '\\"')
         locator_strategies.append({
             'type': 'title',
-            'locator': f"[title='{element_data['title']}']",
+            'locator': f'[title="{title_escaped}"]',
             'priority': 5,
             'strategy': 'Title attribute'
         })
