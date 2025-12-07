@@ -235,6 +235,17 @@ Generated Test
                - "username input field in login form"
                - "confirm password field"
                - "subscribe checkbox at form bottom"
+            
+            6. **⚠️ CRITICAL: For checkboxes and radio buttons**:
+               - ALWAYS describe the INPUT element, not just the label text!
+               - Checkboxes/radios have two parts: the clickable INPUT and the text label
+               - Clicking the label text may NOT toggle the checkbox if no <label> association exists
+               - Use explicit INPUT element descriptions:
+                 * "checkbox 1" → "the checkbox INPUT element for 'checkbox 1'" ✅
+                 * "remember me" → "the checkbox INPUT element for 'remember me'" ✅
+                 * "male option" → "the radio button INPUT element for 'male'" ✅
+                 * "agree to terms" → "the checkbox INPUT element for 'agree to terms'" ✅
+               - This ensures the actual clickable input control is targeted, not just text
 
             --- HANDLING CONDITIONAL LOGIC ---
             For validation steps that require comparison (like price checks), structure the step as:
@@ -297,6 +308,17 @@ Generated Test
                 "  * Element description (from 'element_description' field) - USE EXACT DESCRIPTION with all spatial context\n"
                 "  * Action keyword (from 'keyword' field: input, click, get_text, etc.)\n"
                 "\n"
+                "⚠️ **CRITICAL FORM ELEMENT HANDLING** ⚠️\n"
+                "When the description mentions checkboxes, radio buttons, or toggle switches:\n"
+                "- ALWAYS request the actual INPUT element, NOT the label text!\n"
+                "- Modify description to explicitly target the input control:\n"
+                "  * 'checkbox 1' → 'the checkbox INPUT element next to text \"checkbox 1\"'\n"
+                "  * 'remember me checkbox' → 'the checkbox INPUT element for \"remember me\"'\n"
+                "  * 'male radio button' → 'the radio button INPUT element for \"male\"'\n"
+                "  * 'agree to terms' → 'the checkbox INPUT element for \"agree to terms\"'\n"
+                "- This ensures BrowserUse finds the clickable <input> element, not just the text label\n"
+                "- Text labels alone cannot be checked/unchecked - only input elements can!\n"
+                "\n"
                 "⚠️ CRITICAL: Preserve the FULL element description from the plan, including ALL spatial hints like:\n"
                 "- Location context: 'in header', 'in main content', 'in sidebar', 'in footer'\n"
                 "- Relative position: 'below the image', 'next to the button', 'above the form'\n"
@@ -308,8 +330,9 @@ Generated Test
                 "```json\n"
                 "[\n"
                 "    {\"id\": \"elem_1\", \"description\": \"search input field in the top header\", \"action\": \"input\"},\n"
-                "    {\"id\": \"elem_2\", \"description\": \"first item title in the main results list (center content area)\", \"action\": \"get_text\"},\n"
-                "    {\"id\": \"elem_3\", \"description\": \"price text below the title in the first result item\", \"action\": \"get_text\"}\n"
+                "    {\"id\": \"elem_2\", \"description\": \"the checkbox INPUT element next to text 'checkbox 1'\", \"action\": \"click\"},\n"
+                "    {\"id\": \"elem_3\", \"description\": \"the radio button INPUT element for 'male'\", \"action\": \"click\"},\n"
+                "    {\"id\": \"elem_4\", \"description\": \"first item title in the main results list\", \"action\": \"get_text\"}\n"
                 "]\n"
                 "```\n"
                 "\n"
@@ -335,23 +358,24 @@ Generated Test
                 "        \"elem_1\": {\n"
                 "            \"best_locator\": \"name=q\",\n"
                 "            \"found\": true,\n"
-                "            \"all_locators\": [...],\n"
-                "            \"validation\": {\"unique\": true, \"validated\": 3}\n"
-                "        },\n"
-                "        \"elem_2\": {\n"
-                "            \"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='name']\",\n"
-                "            \"found\": true,\n"
+                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"search\", ...},\n"
                 "            \"all_locators\": [...]\n"
                 "        },\n"
-                "        \"elem_3\": {\n"
-                "            \"best_locator\": \"xpath=(//div[@class='product'])[1]//span[@class='price']\",\n"
+                "        \"elem_2\": {\n"
+                "            \"best_locator\": \"id=react-select-4-input\",\n"
                 "            \"found\": true,\n"
+                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"react-select-4-input\", ...},\n"
                 "            \"all_locators\": [...]\n"
                 "        }\n"
                 "    },\n"
-                "    \"summary\": {\"total_elements\": 3, \"successful\": 3, \"failed\": 0}\n"
+                "    \"summary\": {\"total_elements\": 2, \"successful\": 2, \"failed\": 0}\n"
                 "}\n"
                 "```\n"
+                "\n"
+                "⚠️ **IMPORTANT**: The 'element_info.tagName' tells you the HTML element type:\n"
+                "- 'select' = native HTML select dropdown\n"
+                "- 'input', 'div' = custom dropdown (React-Select, Material-UI, etc.)\n"
+                "You MUST include this as 'element_type' when mapping to steps!\n"
                 "\n"
                 "**STEP 7: MAP LOCATORS TO STEPS**\n"
                 "\n"
@@ -374,6 +398,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
+                "  * ALSO add 'element_type' from element_info.tagName (e.g., 'input', 'select', 'div')\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"
@@ -381,10 +406,10 @@ Generated Test
                 "```json\n"
                 "[\n"
                 "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
-                "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\"},\n"
-                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\", \"locator\": \"name=q\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product name\", \"locator\": \"xpath=(//div[@class='product'])[1]//span[@class='name']\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product price\", \"locator\": \"xpath=(//div[@class='product'])[1]//span[@class='price']\"}\n"
+                "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
+                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
+                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product name\", \"locator\": \"xpath=...\", \"element_type\": \"span\"},\n"
+                "    {\"keyword\": \"Select Options By\", \"element_description\": \"dropdown\", \"locator\": \"id=react-select-4-input\", \"element_type\": \"input\", \"value\": \"label    Volvo\"}\n"
                 "]\n"
                 "```\n"
                 "\n"
@@ -491,81 +516,28 @@ Generated Test
         )
 
     def assemble_code_task(self, agent) -> Task:
-        # Check if popup strategy is available
-        popup_strategy_json = os.getenv('POPUP_STRATEGY_JSON')
-        popup_instructions = ""
-
-        if popup_strategy_json:
-            try:
-                popup_strategy = json.loads(popup_strategy_json)
-                dismiss_login = popup_strategy.get('dismiss_login_popup', True)
-                dismiss_cookies = popup_strategy.get(
-                    'dismiss_cookie_consent', False)
-                dismiss_promo = popup_strategy.get(
-                    'dismiss_promotional_popups', True)
-
-                popup_instructions = (
-                    "\n\n"
-                    "--- POPUP HANDLING STRATEGY ---\n"
-                    "Based on popup strategy analysis, you MUST add popup dismissal steps:\n"
-                    "\n"
-                )
-
-                if dismiss_login or dismiss_cookies or dismiss_promo:
-                    popup_instructions += (
-                        "**ADD THESE LINES IMMEDIATELY AFTER 'Open Browser':**\n"
-                        "\n"
-                    )
-
-                    if dismiss_login:
-                        popup_instructions += (
-                            "    # Dismiss login popup if present (non-blocking)\n"
-                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[@aria-label='Close' or contains(text(), '✕') or contains(text(), '×')]    timeout=2s\n"
-                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕') or contains(text(), '×')]\n"
-                            "\n"
-                        )
-
-                    if dismiss_cookies:
-                        popup_instructions += (
-                            "    # Accept cookie consent if present\n"
-                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[contains(text(), 'Accept') or contains(text(), 'OK') or contains(text(), 'Agree')]    timeout=2s\n"
-                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[contains(text(), 'Accept') or contains(text(), 'OK') or contains(text(), 'Agree')]\n"
-                            "\n"
-                        )
-
-                    if dismiss_promo:
-                        popup_instructions += (
-                            "    # Dismiss promotional popups (newsletters, app installs)\n"
-                            "    Run Keyword And Ignore Error    Wait Until Element Is Visible    xpath=//button[contains(@class, 'close') or @data-dismiss='modal']    timeout=2s\n"
-                            "    Run Keyword And Ignore Error    Click Element    xpath=//button[contains(@class, 'close') or @data-dismiss='modal']\n"
-                            "\n"
-                        )
-                else:
-                    popup_instructions += "No popup dismissal needed for this task.\n\n"
-
-            except json.JSONDecodeError:
-                logger.warning("⚠️ Could not parse POPUP_STRATEGY_JSON")
-                popup_instructions = (
-                    "\n\n"
-                    "--- DEFAULT POPUP HANDLING ---\n"
-                    "Add standard popup dismissal after 'Open Browser':\n"
-                    "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕')]\n"
-                    "\n"
-                )
-        else:
-            popup_instructions = (
-                "\n\n"
-                "--- DEFAULT POPUP HANDLING ---\n"
-                "Add standard popup dismissal after 'Open Browser':\n"
-                "    Run Keyword And Ignore Error    Click Element    xpath=//button[@aria-label='Close' or contains(text(), '✕')]\n"
-                "\n"
-            )
 
         return Task(
             description=(
                 "🚨 **YOU ARE A CODE PRINTER - OUTPUT ONLY CODE** 🚨\n\n"
 
                 "Your ONLY task: Generate raw Robot Framework code from the provided steps.\n\n"
+
+                "--- KEYWORD SYNTAX LOOKUP (CRITICAL) ---\n"
+                "⚠️ You have access to 'keyword_search' tool. USE IT when:\n"
+                "- You encounter ANY keyword you're not 100% certain about\n"
+                "- The step value contains '=' pattern (e.g., 'attr=value') - may need splitting\n"
+                "- You need to verify argument count, order, or syntax\n"
+                "- The keyword is NOT in the common list (New Browser, Click, Fill Text, Get Text)\n\n"
+                "**BEFORE generating code for unfamiliar keywords:**\n"
+                "1. Call keyword_search with the EXACT keyword name from the step\n"
+                "2. Review the returned syntax: check argument count and whether they're separate\n"
+                "3. If tool shows args like <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)\n"
+                "4. If step value has 'x=y' format, check if tool expects 2 args: <x> and <y> separately\n\n"
+                "**Pattern Recognition:**\n"
+                "- Step value 'attr=value' → likely needs: Keyword    ${loc}    attr    value (3 args)\n"
+                "- Step value 'just_text' → likely needs: Keyword    ${loc}    just_text (2 args)\n"
+                "- When unsure → ALWAYS search first, then follow the tool's argument structure\n\n"
 
                 "⛔ **ABSOLUTELY FORBIDDEN** ⛔\n"
                 "DO NOT include:\n"
@@ -631,8 +603,6 @@ Generated Test
                 "${browser}    chrome\n"
                 "${options}    add_argument('--headless')\n"
                 "```\n\n"
-
-                f"{popup_instructions}"
 
                 "--- CRITICAL: USE PROVIDED LOCATORS EXACTLY (NO EXCEPTIONS) ---\n"
                 "⚠️ **MOST IMPORTANT RULE FOR LOCATORS** ⚠️\n\n"
@@ -732,6 +702,41 @@ Generated Test
                 "`    FOR    ${link}    IN    @{links}`\n"
                 "`        Click Element    ${link}`\n"
                 "`    END`\n\n"
+                
+                "--- HANDLING CUSTOM DROPDOWNS (React-Select, Material-UI, etc.) ---\n"
+                "⚠️ **CRITICAL**: Check the 'element_type' field for dropdown-related keywords!\n\n"
+                "If keyword is 'Select Options By' (or similar) but element_type is NOT 'select':\n"
+                "- The element is a CUSTOM dropdown (e.g., React-Select, Material-UI)\n"
+                "- 'Select Options By' ONLY works with native <select> elements\n"
+                "- For custom dropdowns, use FILL TEXT + ENTER pattern (simplest and most reliable)\n\n"
+                "**When element_type IS 'select' (native dropdown):**\n"
+                "```robot\n"
+                "Select Options By    ${dropdown_locator}    label    Option Text\n"
+                "```\n\n"
+                "**When element_type is 'input', 'div', or anything other than 'select' (custom dropdown):**\n"
+                "Use FILL TEXT + ENTER pattern (2 steps):\n"
+                "```robot\n"
+                "# Fill Text clears and types the option to filter the dropdown\n"
+                "Fill Text    ${dropdown_locator}    Option Text\n"
+                "# Press Enter to select the filtered/highlighted option\n"
+                "Keyboard Key    press    Enter\n"
+                "```\n"
+                "NOTE: If value is 'label    Option Text', extract just 'Option Text' for Fill Text.\n\n"
+                "**Example with element_type check:**\n"
+                "*Input Step (custom dropdown):*\n"
+                "`{\"keyword\": \"Select Options By\", \"locator\": \"id=react-select-4-input\", \"element_type\": \"input\", \"value\": \"label    Volvo\"}`\n"
+                "*Output Code (Fill Text+Enter pattern because element_type is 'input', not 'select'):*\n"
+                "```robot\n"
+                "    # Custom dropdown (element_type=input) - using Fill Text+Enter pattern\n"
+                "    Fill Text    id=react-select-4-input    Volvo\n"
+                "    Keyboard Key    press    Enter\n"
+                "```\n\n"
+                "*Input Step (native select):*\n"
+                "`{\"keyword\": \"Select Options By\", \"locator\": \"id=country-select\", \"element_type\": \"select\", \"value\": \"label    USA\"}`\n"
+                "*Output Code (Select Options By because element_type is 'select'):*\n"
+                "```robot\n"
+                "    Select Options By    id=country-select    label    USA\n"
+                "```\n\n"
                 f"--- LIBRARIES TO INCLUDE ---\n"
                 f"Always include these libraries in the Settings section:\n"
                 f"- {self.library_context.library_name if self.library_context else 'SeleniumLibrary'} (for web automation)\n"
@@ -796,6 +801,16 @@ Generated Test
 
                 f"{validation_rules}"
 
+                "--- KEYWORD VERIFICATION (CRITICAL - PREVENT FALSE POSITIVES) ---\n"
+                "⚠️ BEFORE flagging ANY keyword as having wrong/missing arguments:\n"
+                "1. **USE keyword_search tool** to look up the actual keyword signature\n"
+                "2. **CHECK required vs optional arguments** - many parameters look required but are optional\n"
+                "3. **ONLY flag an error** if the code truly violates the documented syntax\n\n"
+                "Example false positives to avoid:\n"
+                "- 'Keyboard Key    press    Enter' is VALID (selector is optional)\n"
+                "- 'Click    ${locator}' is VALID (other args are optional)\n"
+                "When in doubt, SEARCH FIRST before flagging!\n\n"
+
                 "--- VALIDATION WORKFLOW ---\n"
                 "1. **Analyze the code thoroughly** - Check syntax, keywords, variables, locators\n"
                 "2. **If code is VALID:**\n"
@@ -853,96 +868,10 @@ Generated Test
                 code_assembler_agent] if code_assembler_agent else None,
         )
 
-    def analyze_popup_strategy_task(self, agent, user_query, target_url) -> Task:
-        return Task(
-            description=f"""
-            You are analyzing a web automation task to determine the optimal popup handling strategy.
-            
-            **USER'S QUERY:** "{user_query}"
-            **TARGET WEBSITE:** {target_url}
-            
-            --- YOUR MISSION ---
-            Analyze the user's intent and determine:
-            1. Does completing this task REQUIRE user login?
-            2. Does completing this task REQUIRE accepting cookies?
-            3. Which popups should be dismissed vs. ignored?
-            
-            --- ANALYSIS GUIDELINES ---
-            
-            **Tasks that REQUIRE LOGIN:**
-            - Adding items to cart
-            - Checkout/payment
-            - Viewing order history
-            - Account settings
-            - Wishlists/favorites
-            - Writing reviews
-            
-            **Tasks that DO NOT require login:**
-            - Searching for products
-            - Viewing product details
-            - Reading product reviews
-            - Comparing prices
-            - Browsing categories
-            - Getting product information (name, price, etc.)
-            
-            **Cookie Consent Guidelines:**
-            - Required for: Form submissions, account actions, tracking
-            - Not required for: Reading public data, viewing products, searching
-            
-            **Popup Dismissal Strategy:**
-            - Login popups: Dismiss if task doesn't require login
-            - Cookie consent: Dismiss if task is read-only
-            - Promotional popups: ALWAYS dismiss (newsletters, offers, app installs)
-            - Chat widgets: ALWAYS dismiss
-            - Location requests: ALWAYS dismiss unless task is location-based
-            
-            --- EXAMPLE ANALYSIS ---
-            
-            **Example 1:**
-            Query: "Search for shoes on Flipkart and get the name and price of the first product"
-            Analysis:
-            - Intent: Public search + data extraction
-            - Login needed: NO (search is public functionality)
-            - Cookies needed: NO (just reading data)
-            - Login popup: DISMISS (blocks search interface)
-            - Cookie consent: DISMISS (not needed for reading)
-            - Promotional: DISMISS (distraction)
-            
-            **Example 2:**
-            Query: "Add iPhone 15 to cart and proceed to checkout"
-            Analysis:
-            - Intent: Cart management + purchase flow
-            - Login needed: YES (cart requires account)
-            - Cookies needed: YES (session management)
-            - Login popup: KEEP (user must login)
-            - Cookie consent: ACCEPT (needed for session)
-            - Promotional: DISMISS (distraction)
-            
-            --- REQUIRED OUTPUT FORMAT ---
-            You MUST return ONLY a valid JSON object (no markdown, no explanation):
-            
-            {{
-                "task_requires_login": boolean,
-                "task_requires_cookies": boolean,
-                "dismiss_login_popup": boolean,
-                "dismiss_cookie_consent": boolean,
-                "dismiss_promotional_popups": boolean,
-                "popup_handling_instructions": "Brief instruction for browser-use",
-                "reasoning": "One-sentence explanation of your decision"
-            }}
-            
-            **popup_handling_instructions examples:**
-            - "Close login modal by clicking X button or 'Maybe Later'"
-            - "Accept cookie consent and close promotional popups"
-            - "No popup dismissal needed"
-            
-            --- CRITICAL RULES ---
-            1. Return ONLY raw JSON (no ```json markers, no explanatory text)
-            2. Be conservative: When unsure, set dismiss flags to true
-            3. Focus on user's goal: What are they trying to accomplish?
-            4. Keep popup_handling_instructions SHORT and ACTIONABLE
-            5. Avoid URL-like text in instructions (e.g., don't write "button.cookie-accept")
-            """,
-            expected_output="A raw JSON object with popup handling strategy",
-            agent=agent,
-        )
+    # NOTE: analyze_popup_strategy_task has been REMOVED
+    # ===================================================
+    # Popup handling is now user-driven:
+    # 1. BrowserUse agent handles popups contextually during element location
+    # 2. If users need specific popup handling, they mention it in their query
+    # 3. The POPUP_STRATEGY_JSON env var and this task are deprecated
+

@@ -240,6 +240,14 @@ class RobotAgents:
                 "If you include ANY text that is not valid Robot Framework syntax, the file will be broken.\n"
                 "Think of yourself as a printer that can ONLY print code, nothing else.\n\n"
                 
+                "🔍 **KEYWORD SYNTAX LOOKUP (CRITICAL)** 🔍\n"
+                "You have access to 'keyword_search' tool. USE IT BEFORE generating code when:\n"
+                "- You see ANY keyword not in common list (New Browser, Click, Fill Text, Get Text)\n"
+                "- Step value contains '=' pattern (e.g., 'something=value') - may need splitting\n"
+                "- You're not 100% sure about argument count or order\n"
+                "Pattern: If value is 'x=y', search the keyword first - tool will show if it needs\n"
+                "separate args <x> <y> or combined 'x=y'. Follow the tool's argument structure exactly.\n\n"
+                
                 "When you receive input, immediately output the code starting with *** Settings ***.\n"
                 "Do NOT explain what you're doing. Do NOT think out loud. Just output the code.\n\n"
                 "**DELEGATION HANDLING:**\n"
@@ -284,7 +292,13 @@ class RobotAgents:
             goal=f"Validate Robot Framework code for {self.library_context.library_name if self.library_context else 'Robot Framework'} correctness. Delegate fixes if errors found.",
             backstory=(
                 "Expert Robot Framework validator. Check: syntax, keyword usage, variable assignments, locator formats, test structure. "
-                "Use keyword_search tool to verify keyword details (arguments, return values, syntax) when needed. "
+                "\n\n⚠️ **KEYWORD VERIFICATION (CRITICAL):**\n"
+                "BEFORE flagging any keyword as having wrong arguments or missing parameters, you MUST:\n"
+                "1. Use keyword_search tool to look up the actual keyword signature\n"
+                "2. Check the REQUIRED vs OPTIONAL arguments in the tool response\n"
+                "3. Only flag an error if the code truly violates the documented syntax\n"
+                "Example: If unsure whether 'Keyboard Key' needs a selector, search for it first!\n"
+                "Many Browser Library keywords have OPTIONAL parameters that look required but aren't.\n\n"
                 "If VALID: Return JSON {\"valid\": true, \"reason\": \"...\"}. "
                 "If INVALID: Document errors with line numbers, then delegate to Code Assembly Agent with fix instructions."
                 f"{library_knowledge}"

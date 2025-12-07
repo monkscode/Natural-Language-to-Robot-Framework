@@ -7,9 +7,471 @@ Given coordinates, systematically tries different approaches to find unique loca
 """
 
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tuple[bool, str]:
+    """
+    Validate that the element found by the locator contains the expected text.
+    
+    This is the KEY validation that prevents "unique but wrong element" bugs.
+    We check if the actual element text contains the expected text (case-insensitive).
+    
+    Args:
+        page: Playwright page object
+        locator: The locator string to validate
+        expected_text: The text AI expects to see on the element
+        
+    Returns:
+        Tuple of (is_match: bool, actual_text: str)
+        - is_match: True if expected_text is found in actual text (case-insensitive)
+        - actual_text: The actual text content of the element
+    """
+    if not expected_text:
+        return True, ""  # No expected text means no validation needed
+    
+    try:
+        element = page.locator(locator)
+        count = await element.count()
+        
+        if count != 1:
+            return False, f"[Element count={count}, expected 1]"
+        
+        # Get the actual text content
+        actual_text = await element.text_content() or ""
+        actual_text = actual_text.strip()
+        
+        # Also try inner_text which may be more accurate for visible text
+        try:
+            inner_text = await element.inner_text() or ""
+            inner_text = inner_text.strip()
+            # Use inner_text if it's shorter (usually more relevant)
+            if inner_text and len(inner_text) < len(actual_text):
+                actual_text = inner_text
+        except Exception:
+            pass
+        
+        # Check for placeholder/value for inputs
+        try:
+            tag = await element.evaluate("el => el.tagName.toLowerCase()")
+            if tag == 'input':
+                placeholder = await element.get_attribute('placeholder') or ""
+                value = await element.get_attribute('value') or ""
+                # For inputs, check placeholder or value as well
+                if placeholder and expected_text.lower() in placeholder.lower():
+                    return True, placeholder
+                if value and expected_text.lower() in value.lower():
+                    return True, value
+        except Exception:
+            pass
+        
+        # Case-insensitive substring match
+        expected_lower = expected_text.lower().strip()
+        actual_lower = actual_text.lower()
+        
+        is_match = expected_lower in actual_lower
+        
+        if is_match:
+            logger.info(f"   ✅ Semantic match: expected '{expected_text}' found in '{actual_text[:50]}...'")
+        else:
+            logger.warning(f"   ❌ Semantic MISMATCH: expected '{expected_text}', got '{actual_text[:100]}'")
+        
+        return is_match, actual_text
+        
+    except Exception as e:
+        logger.warning(f"   ⚠️ Semantic validation error: {e}")
+        return False, f"[Error: {e}]"
+
+
+async def _find_checkbox_or_radio_by_label(page, label_text: str) -> Optional[dict]:
+    """
+    Find a checkbox or radio input element associated with the given label text.
+    
+    This handles multiple scenarios:
+    1. <label for="id">text</label> <input id="id" type="checkbox">
+    2. <label><input type="checkbox"> text</label>
+    3. <input type="checkbox"> text (no label, adjacent text)
+    4. Text is inside a container with a nearby checkbox
+    
+    Args:
+        page: Playwright page object
+        label_text: The visible text near the checkbox/radio
+        
+    Returns:
+        Dict with 'locator' and 'element_type' if found, None otherwise
+    """
+    if not label_text:
+        return None
+    
+    text = label_text.strip()
+    logger.info(f"🔍 CHECKBOX-FINDER: Looking for checkbox/radio with label '{text}'")
+    
+    # Strategy 1: Find <label> with matching text, get its 'for' attribute
+    try:
+        label_locator = f'label:has-text("{text}")'
+        label_count = await page.locator(label_locator).count()
+        
+        if label_count >= 1:
+            # Get the 'for' attribute of the label
+            for_attr = await page.locator(label_locator).first.get_attribute('for')
+            
+            if for_attr:
+                # Label has 'for' attribute - find the associated input
+                input_locator = f'input[id="{for_attr}"]'
+                input_count = await page.locator(input_locator).count()
+                
+                if input_count == 1:
+                    # Verify it's a checkbox or radio
+                    input_type = await page.locator(input_locator).first.get_attribute('type')
+                    if input_type in ['checkbox', 'radio']:
+                        # Use id-based locator for stability
+                        final_locator = f'id={for_attr}'
+                        logger.info(f"   ✅ Found {input_type} via label[for]: {final_locator}")
+                        return {'locator': final_locator, 'element_type': input_type}
+            else:
+                # No 'for' attribute - check for nested input inside label
+                nested_input_locator = f'{label_locator} >> input[type="checkbox"], {label_locator} >> input[type="radio"]'
+                try:
+                    # Try checkbox first
+                    nested_checkbox = f'{label_locator} >> input[type="checkbox"]'
+                    if await page.locator(nested_checkbox).count() == 1:
+                        # Get a stable locator for this nested checkbox
+                        checkbox_id = await page.locator(nested_checkbox).first.get_attribute('id')
+                        checkbox_name = await page.locator(nested_checkbox).first.get_attribute('name')
+                        
+                        if checkbox_id:
+                            final_locator = f'id={checkbox_id}'
+                        elif checkbox_name:
+                            final_locator = f'[name="{checkbox_name}"]'
+                        else:
+                            # Use the label-relative locator
+                            final_locator = nested_checkbox
+                        
+                        logger.info(f"   ✅ Found nested checkbox inside label: {final_locator}")
+                        return {'locator': final_locator, 'element_type': 'checkbox'}
+                    
+                    # Try radio button
+                    nested_radio = f'{label_locator} >> input[type="radio"]'
+                    if await page.locator(nested_radio).count() == 1:
+                        radio_id = await page.locator(nested_radio).first.get_attribute('id')
+                        radio_name = await page.locator(nested_radio).first.get_attribute('name')
+                        radio_value = await page.locator(nested_radio).first.get_attribute('value')
+                        
+                        if radio_id:
+                            final_locator = f'id={radio_id}'
+                        elif radio_name and radio_value:
+                            final_locator = f'[name="{radio_name}"][value="{radio_value}"]'
+                        elif radio_name:
+                            final_locator = f'[name="{radio_name}"]'
+                        else:
+                            final_locator = nested_radio
+                        
+                        logger.info(f"   ✅ Found nested radio inside label: {final_locator}")
+                        return {'locator': final_locator, 'element_type': 'radio'}
+                except Exception as e:
+                    logger.debug(f"   ⚠️ Error checking nested input: {e}")
+    except Exception as e:
+        logger.debug(f"   ⚠️ Error in label-based search: {e}")
+    
+    # Strategy 2: Find text element and look for adjacent checkbox/radio
+    # This handles: <input type="checkbox"> checkbox 1
+    try:
+        # Look for checkboxes/radios that are siblings or near the text
+        adjacent_patterns = [
+            # Pattern: checkbox followed by text
+            f'input[type="checkbox"]:left-of(:text("{text}"):visible)',
+            f'input[type="radio"]:left-of(:text("{text}"):visible)',
+            # Pattern: text node in same parent as checkbox
+            f':text("{text}") >> xpath=preceding-sibling::input[@type="checkbox"]',
+            f':text("{text}") >> xpath=preceding-sibling::input[@type="radio"]',
+        ]
+        
+        for pattern in adjacent_patterns:
+            try:
+                count = await page.locator(pattern).count()
+                if count == 1:
+                    element = page.locator(pattern).first
+                    input_type = await element.get_attribute('type')
+                    input_id = await element.get_attribute('id')
+                    input_name = await element.get_attribute('name')
+                    input_value = await element.get_attribute('value')
+                    
+                    if input_id:
+                        final_locator = f'id={input_id}'
+                    elif input_name and input_value:
+                        final_locator = f'[name="{input_name}"][value="{input_value}"]'
+                    elif input_name:
+                        final_locator = f'[name="{input_name}"]'
+                    else:
+                        # Use index-based locator as last resort
+                        continue
+                    
+                    logger.info(f"   ✅ Found adjacent {input_type}: {final_locator}")
+                    return {'locator': final_locator, 'element_type': input_type}
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"   ⚠️ Error in adjacent search: {e}")
+    
+    # Strategy 3: Use nth-of-type pattern for checkbox lists
+    # Common pattern: the-internet.herokuapp.com/checkboxes has checkbox 1, checkbox 2
+    try:
+        # Extract number if text ends with a number (e.g., "checkbox 1" -> 1)
+        number_match = re.search(r'(\d+)\s*$', text)
+        if number_match:
+            index = int(number_match.group(1))
+            # Try to find all checkboxes on page and pick the nth one
+            all_checkboxes = 'input[type="checkbox"]'
+            checkbox_count = await page.locator(all_checkboxes).count()
+            
+            if checkbox_count >= index:
+                # Use nth-of-type or nth() for Playwright
+                nth_locator = f'input[type="checkbox"] >> nth={index - 1}'  # 0-indexed
+                if await page.locator(nth_locator).count() == 1:
+                    # Try to get a more stable locator
+                    element = page.locator(nth_locator).first
+                    input_id = await element.get_attribute('id')
+                    input_name = await element.get_attribute('name')
+                    
+                    if input_id:
+                        final_locator = f'id={input_id}'
+                    elif input_name:
+                        final_locator = f'[name="{input_name}"]'
+                    else:
+                        final_locator = f'input[type="checkbox"]:nth-of-type({index})'
+                    
+                    logger.info(f"   ✅ Found checkbox by index ({index}): {final_locator}")
+                    return {'locator': final_locator, 'element_type': 'checkbox'}
+            
+            # Same for radio buttons
+            all_radios = 'input[type="radio"]'
+            radio_count = await page.locator(all_radios).count()
+            
+            if radio_count >= index:
+                nth_locator = f'input[type="radio"] >> nth={index - 1}'
+                if await page.locator(nth_locator).count() == 1:
+                    element = page.locator(nth_locator).first
+                    input_id = await element.get_attribute('id')
+                    input_name = await element.get_attribute('name')
+                    input_value = await element.get_attribute('value')
+                    
+                    if input_id:
+                        final_locator = f'id={input_id}'
+                    elif input_name and input_value:
+                        final_locator = f'[name="{input_name}"][value="{input_value}"]'
+                    else:
+                        final_locator = f'input[type="radio"]:nth-of-type({index})'
+                    
+                    logger.info(f"   ✅ Found radio by index ({index}): {final_locator}")
+                    return {'locator': final_locator, 'element_type': 'radio'}
+    except Exception as e:
+        logger.debug(f"   ⚠️ Error in index-based search: {e}")
+    
+    logger.info(f"   ⚠️ CHECKBOX-FINDER: No checkbox/radio found for '{text}'")
+    return None
+
+
+async def _find_element_by_expected_text(page, expected_text: str, element_description: str) -> Optional[dict]:
+    """
+    Try to find element directly by the expected visible text.
+    This is the TEXT-FIRST approach - more reliable than coordinates.
+    
+    ENHANCED: Now detects checkbox/radio context and returns the actual input element
+    instead of just the text label. This fixes issues where clicking text labels
+    doesn't toggle checkboxes without proper <label> association.
+    
+    Args:
+        page: Playwright page object
+        expected_text: The actual text AI sees on the element
+        element_description: Human-readable description (for context)
+        
+    Returns:
+        Dict with 'locator' and optionally 'element_type' if found, None otherwise.
+        For backward compatibility, returns string locator for non-checkbox elements.
+    """
+    if not expected_text or len(expected_text.strip()) < 2:
+        return None
+    
+    text = expected_text.strip()
+    desc_lower = element_description.lower() if element_description else ""
+    
+    logger.info(f"🔍 TEXT-FIRST: Searching for element with text '{text}'")
+    
+    # ========================================
+    # SPECIAL HANDLING: Checkbox/Radio Elements
+    # ========================================
+    # Detect if we're looking for a checkbox or radio button based on:
+    # 1. Description mentions checkbox/radio/toggle/check/select
+    # 2. Expected text looks like a checkbox label (short text, often with numbers)
+    is_checkbox_context = any(keyword in desc_lower for keyword in [
+        'checkbox', 'check box', 'radio', 'toggle', 'check the', 'select the',
+        'tick', 'untick', 'check mark', 'input element for'
+    ])
+    
+    # Also detect common checkbox label patterns
+    is_checkbox_like_text = (
+        text.lower().startswith('checkbox') or
+        text.lower().startswith('option') or
+        text.lower().startswith('select') or
+        text.lower() in ['yes', 'no', 'agree', 'accept', 'remember me', 'terms', 'newsletter'] or
+        len(text) < 30  # Short text near form elements often indicates checkbox labels
+    )
+    
+    if is_checkbox_context or is_checkbox_like_text:
+        logger.info(f"   🎯 Checkbox/Radio context detected - checking for input element")
+        checkbox_result = await _find_checkbox_or_radio_by_label(page, text)
+        
+        if checkbox_result:
+            # Return the checkbox/radio input locator instead of text
+            logger.info(f"   ✅ Returning checkbox/radio locator: {checkbox_result['locator']}")
+            return checkbox_result
+        else:
+            logger.info(f"   ⚠️ No checkbox/radio found, falling back to text-based search")
+    
+    # ========================================
+    # Standard Text-Based Search
+    # ========================================
+    # Build list of selectors to try based on expected_text
+    selectors_to_try = []
+    
+    # Exact text match (highest priority)
+    selectors_to_try.append(f'text="{text}"')
+    
+    # Role-based with exact name (very reliable for buttons/links)
+    if "button" in desc_lower or any(word in text.lower() for word in ['submit', 'add', 'delete', 'save', 'cancel', 'ok', 'yes', 'no']):
+        selectors_to_try.extend([
+            f'role=button[name="{text}"]',
+            f'button:has-text("{text}")',
+        ])
+    
+    if "link" in desc_lower:
+        selectors_to_try.extend([
+            f'role=link[name="{text}"]',
+            f'a:has-text("{text}")',
+        ])
+    
+    # Generic text-based selectors
+    selectors_to_try.extend([
+        f'*:has-text("{text}")',  # Any element containing the text
+        f'[aria-label="{text}"]',
+        f'[title="{text}"]',
+        f'[placeholder="{text}"]',
+    ])
+    
+    # Try partial matches if text is long
+    if len(text) > 20:
+        short_text = text[:20]
+        selectors_to_try.extend([
+            f'text="{short_text}"',
+            f'*:has-text("{short_text}")',
+        ])
+    
+    # Try each selector
+    for selector in selectors_to_try:
+        try:
+            count = await page.locator(selector).count()
+            if count == 1:
+                logger.info(f"   ✅ TEXT-FIRST SUCCESS: Found unique element with '{selector}'")
+                # Return as dict for consistency, but no special element_type
+                return {'locator': selector}
+            elif count > 1:
+                logger.debug(f"   ⚠️ Multiple matches ({count}) for: {selector}")
+            # count == 0: no matches, try next
+        except Exception as e:
+            logger.debug(f"   ⚠️ Selector failed: {selector} - {e}")
+            pass
+    
+    logger.info(f"   ⚠️ TEXT-FIRST: No unique element found for text '{text}'")
+    return None
+
+
+async def _find_element_by_description(page, description: str) -> Optional[str]:
+    """
+    Fallback: Try to find element by its description when coordinates fail.
+    Returns the unique locator string if found, None otherwise.
+    
+    This is used when document.elementFromPoint() returns BODY/HTML,
+    which happens when coordinates land in empty space (common with centered layouts).
+    
+    Strategy: Use Playwright's semantic locators based on the element description.
+    This is more reliable than coordinate-based approach since it matches what
+    the AI "sees" (text, role, label) rather than pixel positions.
+    """
+    if not description:
+        return None
+    
+    # Extract key words from description (e.g., "Add Element button" -> ["Add", "Element"])
+    # Also handle common variations
+    desc_lower = description.lower()
+    keywords = description.replace("button", "").replace("link", "").replace("input", "").replace("field", "").strip().split()
+    search_text = " ".join(keywords[:3])  # Use first 3 words max
+    
+    # Also try the full description as-is (without role words)
+    full_text = " ".join(keywords)
+    
+    try:
+        # Priority-ordered selectors based on Playwright best practices
+        # Using semantic locators that match what the AI "sees"
+        selectors_to_try = []
+        
+        # If description mentions "button", prioritize button locators
+        if "button" in desc_lower:
+            selectors_to_try.extend([
+                f'role=button[name="{search_text}"]',
+                f'role=button[name="{full_text}"]',
+                f'button:has-text("{search_text}")',
+                f'button >> text="{search_text}"',
+            ])
+        
+        # If description mentions "link", prioritize link locators
+        if "link" in desc_lower:
+            selectors_to_try.extend([
+                f'role=link[name="{search_text}"]',
+                f'role=link[name="{full_text}"]',
+                f'a:has-text("{search_text}")',
+            ])
+        
+        # If description mentions input/field, prioritize input locators
+        if "input" in desc_lower or "field" in desc_lower:
+            selectors_to_try.extend([
+                f'role=textbox[name="{search_text}"]',
+                f'input[placeholder*="{search_text}"]',
+                f'input[name*="{search_text}"]',
+            ])
+        
+        # Generic selectors that work for any element type
+        selectors_to_try.extend([
+            f'text="{search_text}"',
+            f'text="{full_text}"',
+            f'[aria-label*="{search_text}"]',
+            f'[title*="{search_text}"]',
+            f'[role="button"]:has-text("{search_text}")',
+            f'button:has-text("{search_text}")',
+            f'a:has-text("{search_text}")',
+        ])
+        
+        # Try each selector
+        for selector in selectors_to_try:
+            try:
+                count = await page.locator(selector).count()
+                if count == 1:
+                    logger.info(f"   ✅ Found unique element with semantic locator: {selector}")
+                    return selector
+                elif count > 1:
+                    logger.debug(f"   ⚠️ Multiple matches ({count}) for: {selector}")
+                # count == 0: no matches, try next
+            except Exception as e:
+                logger.debug(f"   ⚠️ Selector failed: {selector} - {e}")
+                pass
+        
+        logger.warning(f"   ❌ No unique element found for description: {description}")
+        return None
+    except Exception as e:
+        logger.debug(f"   Error in fallback search: {e}")
+        return None
 
 
 async def find_unique_locator_at_coordinates(
@@ -18,37 +480,55 @@ async def find_unique_locator_at_coordinates(
     y: float,
     element_id: str,
     element_description: str,
+    expected_text: Optional[str] = None,
     candidate_locator: Optional[str] = None,
     library_type: str = "browser"
 ) -> Dict:
     """
-    Given coordinates, systematically try multiple strategies to find a unique locator.
+    Find a unique locator for an element using a semantic-first approach.
 
-    Strategy Priority:
-    1. Native attributes (id, name, data-testid) - Most stable
-    2. ARIA attributes (aria-label, role) - Semantic
-    3. Text content - Content-based
-    4. CSS with context - Structural
-    5. XPath with context - Last resort
+    Strategy Priority (Semantic-First):
+    1. Candidate locator (if provided) - Agent's suggestion
+    2. Semantic locators from expected_text - Most reliable, uses actual visible text
+    3. Semantic locators from description - Fallback when expected_text not available
+    4. Coordinate-based extraction + 21 strategies - Last resort when semantic fails
+
+    The semantic-first approach is more reliable because:
+    - Doesn't depend on viewport size or layout (centered layouts won't break it)
+    - Matches what the AI "sees" (text, role, label)
+    - Produces more stable locators (text=, role=, aria-label)
+
+    SEMANTIC VALIDATION (NEW):
+    - If expected_text is provided, we validate that the found element's actual text
+      matches the expected text (case-insensitive, substring match)
+    - This prevents "unique but wrong element" bugs where coordinates land on wrong element
 
     Args:
         page: Playwright page object
-        x: X coordinate of element center
-        y: Y coordinate of element center
+        x: X coordinate of element center (used as fallback)
+        y: Y coordinate of element center (used as fallback)
         element_id: Element identifier (elem_1, elem_2, etc.)
-        element_description: Human-readable description
+        element_description: Human-readable description (primary source for semantic locators)
+        expected_text: The actual visible text AI sees on the element (e.g., "Submit", "Nike Air Max 270").
+                      Used for semantic validation AND for text-first locator search.
         candidate_locator: Optional locator to validate first (e.g., "id=search-input")
         library_type: "browser" or "selenium" - determines locator format
 
     Returns:
-        Dict with best_locator, all_locators, validation_summary, validation_method
+        Dict with best_locator, all_locators, validation_summary, validation_method, semantic_match
     """
 
-    logger.info(f"🎯 Finding unique locator for {element_id} at ({x}, {y})")
+    logger.info(f"🎯 Finding unique locator for {element_id}")
+    logger.info(f"   Description: '{element_description}'")
+    if expected_text:
+        logger.info(f"   Expected text: '{expected_text}'")
+    logger.info(f"   Coordinates: ({x}, {y}) [fallback]")
     
-    # Step 0: If candidate locator provided, validate it first
+    # ========================================
+    # STEP 0: Validate candidate locator (if provided)
+    # ========================================
     if candidate_locator:
-        logger.info(f"🔍 Validating candidate locator: {candidate_locator}")
+        logger.info(f"🔍 Step 0: Validating candidate locator: {candidate_locator}")
         try:
             # Use shared conversion function from browser_service.locators
             from browser_service.locators import convert_to_playwright_locator
@@ -61,43 +541,196 @@ async def find_unique_locator_at_coordinates(
             count = await page.locator(playwright_locator).count()
             
             if count == 1:
-                logger.info(f"✅ Candidate locator is unique: {playwright_locator}")
+                # SEMANTIC VALIDATION: Verify we found the RIGHT element
+                semantic_match = True
+                actual_text = ""
+                if expected_text:
+                    semantic_match, actual_text = await _validate_semantic_match(page, playwright_locator, expected_text)
+                    if not semantic_match:
+                        logger.warning(f"⚠️ Candidate locator is unique BUT text doesn't match!")
+                        logger.warning(f"   Expected: '{expected_text}'")
+                        logger.warning(f"   Actual: '{actual_text}'")
+                        logger.info("   Continuing to find correct element...")
+                        # Don't return - continue to try other approaches
+                    else:
+                        logger.info(f"✅ Candidate locator is unique AND semantically correct")
+                
+                if semantic_match:
+                    logger.info(f"✅ Candidate locator is unique: {playwright_locator}")
+                    return {
+                        'element_id': element_id,
+                        'description': element_description,
+                        'found': True,
+                        'best_locator': playwright_locator,
+                        'all_locators': [{
+                            'type': 'candidate',
+                            'locator': playwright_locator,
+                            'priority': 0,
+                            'strategy': 'Agent-provided candidate' + (' (converted)' if was_converted else ''),
+                            'count': count,
+                            'unique': True,
+                            'valid': True,
+                            'validated': True,
+                            'semantic_match': semantic_match,
+                            'validation_method': 'playwright'
+                        }],
+                        'element_info': {'actual_text': actual_text} if actual_text else {},
+                        'coordinates': {'x': x, 'y': y},
+                        'validation_summary': {
+                            'total_generated': 1,
+                            'valid': 1,
+                            'unique': 1,
+                            'validated': 1,
+                            'best_type': 'candidate',
+                            'best_strategy': 'Agent-provided candidate',
+                            'validation_method': 'playwright'
+                        },
+                        'semantic_match': semantic_match
+                    }
+            else:
+                logger.info(f"⚠️ Candidate locator not unique (count={count}): {playwright_locator}")
+        except Exception as e:
+            logger.warning(f"⚠️ Candidate locator validation failed: {e}")
+    
+    # ========================================
+    # STEP 1: Try TEXT-FIRST approach (using expected_text)
+    # ========================================
+    # This is the MOST RELIABLE approach - uses the actual text AI sees
+    if expected_text and expected_text.strip():
+        logger.info(f"🔍 Step 1: Trying TEXT-FIRST locators from expected_text: '{expected_text}'")
+        
+        text_result = await _find_element_by_expected_text(page, expected_text, element_description)
+        
+        if text_result:
+            # text_result is now a dict with 'locator' and optionally 'element_type'
+            text_locator = text_result.get('locator')
+            element_type = text_result.get('element_type')  # 'checkbox', 'radio', or None
+            
+            logger.info(f"✅ TEXT-FIRST locator found: {text_locator}" + (f" (element_type={element_type})" if element_type else ""))
+            
+            # Determine strategy name based on whether it's a checkbox/radio
+            if element_type:
+                strategy_name = f'Checkbox/Radio INPUT locator (type={element_type})'
+                locator_type = f'{element_type}-input'
+            else:
+                strategy_name = 'Text-first locator from expected_text'
+                locator_type = 'text-first'
+            
+            return {
+                'element_id': element_id,
+                'description': element_description,
+                'found': True,
+                'best_locator': text_locator,
+                'element_type': element_type,  # NEW: Pass element_type to caller
+                'all_locators': [{
+                    'type': locator_type,
+                    'locator': text_locator,
+                    'priority': 0,
+                    'strategy': strategy_name,
+                    'count': 1,
+                    'unique': True,
+                    'valid': True,
+                    'validated': True,
+                    'semantic_match': True,  # By definition, text-first is semantically correct
+                    'validation_method': 'playwright'
+                }],
+                'element_info': {'expected_text': expected_text, 'element_type': element_type} if element_type else {'expected_text': expected_text},
+                'coordinates': {'x': x, 'y': y, 'note': 'Not used - text-first approach succeeded'},
+                'validation_summary': {
+                    'total_generated': 1,
+                    'valid': 1,
+                    'unique': 1,
+                    'validated': 1,
+                    'best_type': locator_type,
+                    'best_strategy': strategy_name,
+                    'validation_method': 'playwright'
+                },
+                # Top-level validation fields (required by workflow validation)
+                'validated': True,
+                'count': 1,
+                'unique': True,
+                'valid': True,
+                'semantic_match': True,
+                'validation_method': 'playwright'
+            }
+        else:
+            logger.info(f"⚠️ TEXT-FIRST approach failed - trying description-based semantic locators")
+    else:
+        logger.info(f"⚠️ No expected_text provided - skipping TEXT-FIRST approach")
+    
+    # ========================================
+    # STEP 2: Try SEMANTIC LOCATORS from description (fallback)
+    # ========================================
+    # This is a fallback when expected_text is not available or didn't work
+    if element_description and element_description.strip():
+        logger.info(f"🔍 Step 2: Trying SEMANTIC locators from description: '{element_description}'")
+        
+        semantic_locator = await _find_element_by_description(page, element_description)
+        
+        if semantic_locator:
+            # If expected_text provided, validate that we found the right element
+            semantic_match = True
+            actual_text = ""
+            if expected_text:
+                semantic_match, actual_text = await _validate_semantic_match(page, semantic_locator, expected_text)
+                if not semantic_match:
+                    logger.warning(f"⚠️ Description-based locator found BUT text doesn't match!")
+                    logger.warning(f"   Expected: '{expected_text}'")
+                    logger.warning(f"   Actual: '{actual_text}'")
+                    logger.info("   Continuing to coordinate-based approach...")
+                    # Don't return - continue to try coordinates
+                else:
+                    logger.info(f"✅ Semantic locator is correct (text matches)")
+            
+            if semantic_match:
+                logger.info(f"✅ Semantic locator found: {semantic_locator}")
                 return {
                     'element_id': element_id,
                     'description': element_description,
                     'found': True,
-                    'best_locator': playwright_locator,  # Use converted locator
+                    'best_locator': semantic_locator,
                     'all_locators': [{
-                        'type': 'candidate',
-                        'locator': playwright_locator,  # Use converted locator
+                        'type': 'semantic',
+                        'locator': semantic_locator,
                         'priority': 0,
-                        'strategy': 'Agent-provided candidate' + (' (converted)' if was_converted else ''),
-                        'count': count,
+                        'strategy': 'Semantic locator from description',
+                        'count': 1,
                         'unique': True,
                         'valid': True,
                         'validated': True,
+                        'semantic_match': semantic_match,
                         'validation_method': 'playwright'
                     }],
-                    'element_info': {},
-                    'coordinates': {'x': x, 'y': y},
+                    'element_info': {'description': element_description, 'actual_text': actual_text} if actual_text else {'description': element_description},
+                    'coordinates': {'x': x, 'y': y, 'note': 'Not used - semantic approach succeeded'},
                     'validation_summary': {
                         'total_generated': 1,
                         'valid': 1,
                         'unique': 1,
                         'validated': 1,
-                        'best_type': 'candidate',
-                        'best_strategy': 'Agent-provided candidate',
+                        'best_type': 'semantic',
+                        'best_strategy': 'Semantic locator from description',
                         'validation_method': 'playwright'
-                    }
+                    },
+                    # Top-level validation fields (required by workflow validation)
+                    'validated': True,
+                    'count': 1,
+                    'unique': True,
+                    'valid': True,
+                    'semantic_match': semantic_match,
+                    'validation_method': 'playwright'
                 }
-            else:
-                logger.info(f"⚠️ Candidate locator not unique (count={count}): {playwright_locator}")
-                logger.info(f"🔄 Continuing with 21 strategies...")
-        except Exception as e:
-            logger.warning(f"⚠️ Candidate locator validation failed: {e}")
-            logger.info(f"🔄 Continuing with 21 strategies...")
-
-    # Step 1: Get the element at coordinates
+        else:
+            logger.info(f"⚠️ Semantic approach failed - falling back to coordinate-based approach")
+    else:
+        logger.info(f"⚠️ No description provided - skipping semantic approach, using coordinates")
+    
+    # ========================================
+    # STEP 3: FALLBACK - Coordinate-based approach (21 strategies)
+    # ========================================
+    logger.info(f"🔍 Step 3: Using COORDINATE-based approach at ({x}, {y})")
+    
+    # Get the element at coordinates
     try:
         # Use Playwright to get element at coordinates
         element_handle = await page.evaluate_handle(
@@ -111,8 +744,39 @@ async def find_unique_locator_at_coordinates(
             logger.error(f"❌ No element found at coordinates ({x}, {y})")
             return {
                 "element_id": element_id,
+                "description": element_description,
                 "found": False,
-                "error": "No element at coordinates"
+                "error": f"No element at coordinates ({x}, {y}) and semantic approach also failed"
+            }
+        
+        # Check if we got BODY or HTML (coordinates landed in empty space)
+        tag_check = await page.evaluate(
+            """(coords) => {
+                const el = document.elementFromPoint(coords.x, coords.y);
+                return el ? el.tagName.toLowerCase() : null;
+            }""",
+            {"x": x, "y": y}
+        )
+        
+        if tag_check in ['body', 'html']:
+            # Both semantic AND coordinate approaches failed
+            logger.error(f"❌ Coordinates ({x}, {y}) landed on {tag_check.upper()} (empty space)")
+            logger.error(f"   Both semantic and coordinate approaches failed for: {element_description}")
+            return {
+                'element_id': element_id,
+                'description': element_description,
+                'found': False,
+                'error': f"Semantic approach failed and coordinates ({x}, {y}) landed on {tag_check.upper()} (empty space)",
+                'coordinates': {'x': x, 'y': y},
+                'validation_summary': {
+                    'total_generated': 0,
+                    'valid': 0,
+                    'unique': 0,
+                    'validated': 0,
+                    'best_type': None,
+                    'best_strategy': None,
+                    'validation_method': 'playwright'
+                }
             }
 
     except Exception as e:
@@ -198,6 +862,7 @@ async def find_unique_locator_at_coordinates(
             logger.error(f"❌ Could not extract element data")
             return {
                 "element_id": element_id,
+                "description": element_description,
                 "found": False,
                 "error": "Could not extract element data"
             }
@@ -209,6 +874,7 @@ async def find_unique_locator_at_coordinates(
         logger.error(f"❌ Error extracting element data: {e}")
         return {
             "element_id": element_id,
+            "description": element_description,
             "found": False,
             "error": str(e)
         }
@@ -504,33 +1170,72 @@ async def find_unique_locator_at_coordinates(
             })
 
     # Step 5: Select best locator (unique, lowest priority number)
+    # WITH SEMANTIC VALIDATION if expected_text is provided
     unique_locators = [loc for loc in validated_locators if loc.get(
         'valid') and loc.get('unique')]
 
     best_locator_obj = None  # Initialize to None
+    semantic_match = True  # Assume match unless expected_text is provided
+    actual_text = ""
+    
     if unique_locators:
-        best_locator_obj = sorted(
-            unique_locators, key=lambda x: x['priority'])[0]
-        best_locator = best_locator_obj['locator']
+        # Sort by priority (lowest = best)
+        sorted_locators = sorted(unique_locators, key=lambda x: x['priority'])
         
-        # Log final selected locator with complete details
-        logger.info(f"")
-        logger.info(f"{'='*80}")
-        logger.info(f"✅ FINAL SELECTED LOCATOR for {element_id}")
-        logger.info(f"{'='*80}")
-        logger.info(f"   Locator: {best_locator}")
-        logger.info(f"   Type: {best_locator_obj['type']}")
-        logger.info(f"   Priority: {best_locator_obj['priority']} (1=best, 18=worst)")
-        logger.info(f"   Strategy: {best_locator_obj['strategy']}")
-        logger.info(f"   Validation Results:")
-        logger.info(f"      - count: {best_locator_obj['count']}")
-        logger.info(f"      - unique: {best_locator_obj['unique']}")
-        logger.info(f"      - valid: {best_locator_obj['valid']}")
-        logger.info(f"      - validated: {best_locator_obj['validated']}")
-        logger.info(f"      - validation_method: {best_locator_obj['validation_method']}")
-        logger.info(f"   Total unique locators found: {len(unique_locators)}")
-        logger.info(f"{'='*80}")
-        logger.info(f"")
+        # If expected_text is provided, find a locator that ALSO matches semantically
+        if expected_text:
+            logger.info(f"🔍 Checking semantic match for {len(sorted_locators)} unique locators...")
+            
+            for loc in sorted_locators:
+                is_match, text = await _validate_semantic_match(page, loc['locator'], expected_text)
+                loc['semantic_match'] = is_match
+                loc['actual_text'] = text
+                
+                if is_match and best_locator_obj is None:
+                    best_locator_obj = loc
+                    semantic_match = True
+                    actual_text = text
+                    logger.info(f"   ✅ Found semantically matching locator: {loc['locator']}")
+            
+            # If no semantic match found, use the first unique locator but flag it
+            if best_locator_obj is None and sorted_locators:
+                best_locator_obj = sorted_locators[0]
+                semantic_match = False
+                actual_text = sorted_locators[0].get('actual_text', '')
+                logger.warning(f"   ⚠️ No locator matched expected text '{expected_text}'")
+                logger.warning(f"   Using first unique locator (semantic mismatch!): {best_locator_obj['locator']}")
+                logger.warning(f"   Actual text: '{actual_text}'")
+        else:
+            # No expected_text, just use first unique locator
+            best_locator_obj = sorted_locators[0]
+        
+        if best_locator_obj:
+            best_locator = best_locator_obj['locator']
+            
+            # Log final selected locator with complete details
+            logger.info(f"")
+            logger.info(f"{'='*80}")
+            logger.info(f"✅ FINAL SELECTED LOCATOR for {element_id}")
+            logger.info(f"{'='*80}")
+            logger.info(f"   Locator: {best_locator}")
+            logger.info(f"   Type: {best_locator_obj['type']}")
+            logger.info(f"   Priority: {best_locator_obj['priority']} (1=best, 18=worst)")
+            logger.info(f"   Strategy: {best_locator_obj['strategy']}")
+            logger.info(f"   Validation Results:")
+            logger.info(f"      - count: {best_locator_obj['count']}")
+            logger.info(f"      - unique: {best_locator_obj['unique']}")
+            logger.info(f"      - valid: {best_locator_obj['valid']}")
+            logger.info(f"      - validated: {best_locator_obj['validated']}")
+            logger.info(f"      - semantic_match: {semantic_match}")
+            if expected_text:
+                logger.info(f"      - expected_text: '{expected_text}'")
+                logger.info(f"      - actual_text: '{actual_text[:50]}...' " if len(actual_text) > 50 else f"      - actual_text: '{actual_text}'")
+            logger.info(f"      - validation_method: {best_locator_obj['validation_method']}")
+            logger.info(f"   Total unique locators found: {len(unique_locators)}")
+            logger.info(f"{'='*80}")
+            logger.info(f"")
+        else:
+            best_locator = None
     else:
         best_locator = None
         
@@ -575,8 +1280,9 @@ async def find_unique_locator_at_coordinates(
         'not_found': sum(1 for loc in validated_locators if loc.get('validated') and loc.get('count', 0) == 0),
         'not_unique': sum(1 for loc in validated_locators if loc.get('validated') and loc.get('count', 0) > 1),
         'errors': sum(1 for loc in validated_locators if not loc.get('validated')),
-        'best_type': best_locator_obj['type'] if unique_locators else None,
-        'best_strategy': best_locator_obj['strategy'] if unique_locators else None,
+        'best_type': best_locator_obj['type'] if best_locator_obj else None,
+        'best_strategy': best_locator_obj['strategy'] if best_locator_obj else None,
+        'semantic_match': semantic_match,
         'validation_method': 'playwright'
     }
     
@@ -592,11 +1298,17 @@ async def find_unique_locator_at_coordinates(
             'text': element_data['textContent'],
             'className': element_data['className'],
             'name': element_data['name'],
-            'testId': element_data['dataTestId']
+            'testId': element_data['dataTestId'],
+            'actual_text': actual_text,  # Add actual text for debugging
         },
         'coordinates': element_data['coordinates'],
-        'validation_summary': validation_summary
+        'validation_summary': validation_summary,
+        'semantic_match': semantic_match  # NEW: Flag indicating if actual text matches expected
     }
+    
+    # If semantic mismatch, add warning
+    if expected_text and not semantic_match:
+        result['semantic_warning'] = f"Expected '{expected_text}' but element contains '{actual_text}'"
     
     # Add validation data to the result itself for easy access
     if best_locator_obj:
@@ -622,6 +1334,9 @@ async def find_unique_locator_at_coordinates(
     logger.info(f"   Not unique (count>1): {validation_summary['not_unique']}")
     logger.info(f"   Validation errors: {validation_summary['errors']}")
     logger.info(f"   Successfully validated: {validation_summary['validated']}")
+    logger.info(f"   Semantic match: {semantic_match}")
+    if expected_text and not semantic_match:
+        logger.warning(f"   ⚠️ SEMANTIC MISMATCH: Expected '{expected_text}', got '{actual_text[:50]}...'")
     if best_locator_obj:
         logger.info(f"   Best locator type: {validation_summary['best_type']}")
         logger.info(f"   Best strategy: {validation_summary['best_strategy']}")
