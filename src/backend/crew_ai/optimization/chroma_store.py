@@ -185,9 +185,12 @@ class KeywordVectorStore:
             keywords = doc_data.get('keywords', [])
             
             # Filter out internal/deprecated keywords
+            # NOTE: Only filter if keyword ITSELF is deprecated (mentioned in first ~100 chars)
+            # Some keywords have deprecated PARAMETERS but are still valid (e.g., Click With Options)
             public_keywords = [
                 kw for kw in keywords 
-                if not kw['name'].startswith('_') and 'deprecated' not in kw.get('doc', '').lower()
+                if not kw['name'].startswith('_') and 
+                   'deprecated' not in kw.get('doc', '')[:150].lower()  # Only check first 150 chars
             ]
             
             logger.info(f"Found {len(public_keywords)} public keywords in {library_name}")
