@@ -90,9 +90,37 @@
             position: relative;
         }
 
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .chart-select {
+            padding: 6px 12px;
+            border: var(--border-width) solid var(--border-color);
+            background: var(--bg-surface-secondary);
+            color: var(--text-main);
+            border-radius: var(--border-radius);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .chart-select:hover {
+            background: var(--bg-surface);
+        }
+
+        [data-theme="neobrutalism"] .chart-select {
+            border: 2px solid var(--border-color);
+            border-radius: 0;
+        }
+
         .chart-wrapper {
             position: relative;
-            height: calc(100% - 2rem);
+            height: calc(100% - 3.5rem);
             width: 100%;
         }
 
@@ -212,15 +240,33 @@
         <!-- CHARTS ROW 1 -->
         <div class="charts-container">
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Workflow Volume & Success</div>
+                <div class="chart-header">
+                    <div class="metric-label">Primary Metrics</div>
+                    <select id="chart1-select" class="chart-select">
+                        <option value="execution-llm">Execution Time & LLM Calls</option>
+                        <option value="cost-trend">Cost Trend Over Time</option>
+                        <option value="success-trend">Success Rate Trend</option>
+                        <option value="multi-metric">Multi-Metric Comparison</option>
+                        <option value="token-usage">Token Usage (Prompt vs Completion)</option>
+                        <option value="cost-efficiency">Cost Efficiency ($/Element)</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="volumeChart"></canvas>
+                    <canvas id="chart1"></canvas>
                 </div>
             </div>
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Cost Breakdown (CrewAI vs Browser)</div>
+                <div class="chart-header">
+                    <div class="metric-label">Cost Analysis</div>
+                    <select id="chart2-select" class="chart-select">
+                        <option value="cost-breakdown">Cost Breakdown (Pie)</option>
+                        <option value="cost-stacked">Cost Stack Over Time</option>
+                        <option value="cost-comparison">Browser vs CrewAI</option>
+                        <option value="domain-cost">Cost by Domain</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="costChart"></canvas>
+                    <canvas id="chart2"></canvas>
                 </div>
             </div>
         </div>
@@ -228,15 +274,31 @@
         <!-- CHARTS ROW 2 -->
         <div class="charts-container">
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Cost Trend Over Time</div>
+                <div class="chart-header">
+                    <div class="metric-label">Element & Performance</div>
+                    <select id="chart3-select" class="chart-select">
+                        <option value="elements-bar">Elements Found (Bar)</option>
+                        <option value="success-elements">Success vs Failed Elements</option>
+                        <option value="element-efficiency">LLM Calls per Element</option>
+                        <option value="performance-scatter">Time vs Cost Scatter</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="costTrendChart"></canvas>
+                    <canvas id="chart3"></canvas>
                 </div>
             </div>
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Elements Found per Workflow</div>
+                <div class="chart-header">
+                    <div class="metric-label">Advanced Analysis</div>
+                    <select id="chart4-select" class="chart-select">
+                        <option value="llm-distribution">LLM Call Distribution</option>
+                        <option value="workflow-radar">Workflow Metrics Radar</option>
+                        <option value="domain-performance">Domain Performance</option>
+                        <option value="time-distribution">Execution Time Distribution</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="elementsChart"></canvas>
+                    <canvas id="chart4"></canvas>
                 </div>
             </div>
         </div>
@@ -280,6 +342,9 @@
 
     <!-- Import shared theme logic from main script -->
     <script src="script.js"></script>
+    
+    <!-- Import modular chart system -->
+    <script src="metrics-charts.js"></script>
     
     <script>
         // --- METRICS PAGE SPECIFIC LOGIC ---
@@ -422,217 +487,8 @@
                 tbody.appendChild(tr);
             });
 
-            // 3. Render Charts
-            renderCharts(runs);
-        }
-
-        // --- CHART.JS CONFIG ---
-        let volChart, costChart, costTrendChart, elementsChart;
-
-        function renderCharts(runs) {
-            const volCanvas = document.getElementById('volumeChart');
-            const costCanvas = document.getElementById('costChart');
-            const costTrendCanvas = document.getElementById('costTrendChart');
-            const elementsCanvas = document.getElementById('elementsChart');
-            
-            // Destroy existing charts
-            if(volChart) { volChart.destroy(); volChart = null; }
-            if(costChart) { costChart.destroy(); costChart = null; }
-            if(costTrendChart) { costTrendChart.destroy(); costTrendChart = null; }
-            if(elementsChart) { elementsChart.destroy(); elementsChart = null; }
-            
-            if (!runs || runs.length === 0) {
-                // Show "not enough data" message for charts
-                showChartPlaceholder(volCanvas, 'Not enough data for chart');
-                showChartPlaceholder(costCanvas, 'Not enough data for chart');
-                showChartPlaceholder(costTrendCanvas, 'Not enough data for chart');
-                showChartPlaceholder(elementsCanvas, 'Not enough data for chart');
-                return;
-            }
-            
-            // Clear any placeholder messages
-            clearChartPlaceholder(volCanvas);
-            clearChartPlaceholder(costCanvas);
-            clearChartPlaceholder(costTrendCanvas);
-            clearChartPlaceholder(elementsCanvas);
-
-            // Process data for charts
-            // Sort by time for line chart
-            const sortedRuns = [...runs].reverse(); // Oldest first
-            const labels = sortedRuns.map(r => formatDateForTooltip(r.timestamp));
-            const executionTimes = sortedRuns.map(r => r.execution_time);
-            const llmCalls = sortedRuns.map(r => r.total_llm_calls);
-            const costs = sortedRuns.map(r => r.total_cost);
-            const elements = sortedRuns.map(r => r.total_elements || 0);
-
-            // Cost Aggregation
-            const totalCrewCost = runs.reduce((acc, r) => acc + (r.crewai_cost || 0), 0);
-            const totalBrowserCost = runs.reduce((acc, r) => acc + (r.browser_use_cost || 0), 0);
-
-            const ctxVol = volCanvas.getContext('2d');
-            const ctxCost = costCanvas.getContext('2d');
-            const ctxCostTrend = costTrendCanvas.getContext('2d');
-            const ctxElements = elementsCanvas.getContext('2d');
-
-            // Colors based on theme (basic logic)
-            const isNeo = document.documentElement.getAttribute('data-theme') === 'neobrutalism';
-            const colorPrimary = isNeo ? '#ccff00' : '#3b82f6';
-            const colorSecondary = isNeo ? '#ff00ff' : '#64748b';
-            const colorSuccess = isNeo ? '#00ff9d' : '#10b981';
-            const colorWarning = isNeo ? '#ffff00' : '#f59e0b';
-            const gridColor = isNeo ? '#000000' : '#e2e8f0';
-            const borderWidth = isNeo ? 2 : 1;
-            
-            // Common tooltip configuration with MM/DD HH:mm:ss format
-            const tooltipConfig = {
-                callbacks: {
-                    title: function(tooltipItems) {
-                        return tooltipItems[0].label; // Already formatted as MM/DD HH:mm:ss
-                    }
-                }
-            };
-
-            // Volume Chart (Execution Time & LLM Calls)
-            volChart = new Chart(ctxVol, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [
-                        {
-                            label: 'Execution Time (s)',
-                            data: executionTimes,
-                            borderColor: colorPrimary,
-                            backgroundColor: isNeo ? 'transparent' : 'rgba(59, 130, 246, 0.1)',
-                            borderWidth: borderWidth + 1,
-                            tension: 0.4,
-                            fill: true
-                        },
-                        {
-                            label: 'LLM Calls',
-                            data: llmCalls,
-                            borderColor: colorSecondary,
-                            borderDash: [5, 5],
-                            borderWidth: borderWidth,
-                            tension: 0.4
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: { grid: { color: gridColor, drawBorder: false }, ticks: { color: '#888' } },
-                        x: { display: false }
-                    },
-                    plugins: { 
-                        legend: { display: true },
-                        tooltip: tooltipConfig
-                    }
-                }
-            });
-
-            // Cost Doughnut
-            costChart = new Chart(ctxCost, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Browser Actions', 'CrewAI Logic'],
-                    datasets: [{
-                        data: [totalBrowserCost, totalCrewCost],
-                        backgroundColor: [colorPrimary, colorSecondary],
-                        borderColor: isNeo ? '#000' : '#fff',
-                        borderWidth: borderWidth
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { 
-                        legend: { position: 'bottom' },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    return `${context.label}: $${context.parsed.toFixed(4)}`;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            
-            // Cost Trend Chart (new)
-            costTrendChart = new Chart(ctxCostTrend, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Cost ($)',
-                        data: costs,
-                        borderColor: colorSuccess,
-                        backgroundColor: isNeo ? 'transparent' : 'rgba(16, 185, 129, 0.1)',
-                        borderWidth: borderWidth + 1,
-                        tension: 0.4,
-                        fill: true
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: { 
-                            grid: { color: gridColor, drawBorder: false }, 
-                            ticks: { 
-                                color: '#888',
-                                callback: function(value) { return '$' + value.toFixed(4); }
-                            } 
-                        },
-                        x: { display: false }
-                    },
-                    plugins: { 
-                        legend: { display: true },
-                        tooltip: {
-                            callbacks: {
-                                title: function(tooltipItems) {
-                                    return tooltipItems[0].label;
-                                },
-                                label: function(context) {
-                                    return `Cost: $${context.parsed.y.toFixed(4)}`;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            
-            // Elements Found Chart (new)
-            elementsChart = new Chart(ctxElements, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Elements Found',
-                        data: elements,
-                        backgroundColor: colorWarning,
-                        borderColor: isNeo ? '#000' : colorWarning,
-                        borderWidth: borderWidth
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: { 
-                            grid: { color: gridColor, drawBorder: false }, 
-                            ticks: { color: '#888' },
-                            beginAtZero: true
-                        },
-                        x: { display: false }
-                    },
-                    plugins: { 
-                        legend: { display: true },
-                        tooltip: tooltipConfig
-                    }
-                }
-            });
+            // 3. Render Charts using modular system
+            window.metricsCharts.render(runs);
         }
 
         // Helper functions for chart placeholders
@@ -669,7 +525,7 @@
             // Re-render charts with cached data - no API call needed for theme changes
             // Fresh data is fetched on page load and manual refresh (Comment #7)
             if (cachedRuns.length > 0) {
-                renderCharts(cachedRuns);
+                window.metricsCharts.updateColors();
             }
         }
         
@@ -685,6 +541,9 @@
 
         // Time filter change handler
         document.getElementById('time-filter').addEventListener('change', applyFilter);
+
+        // Initialize chart dropdowns
+        window.metricsCharts.initialize();
 
         // Initial Load
         fetchMetrics();
