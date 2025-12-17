@@ -2,15 +2,13 @@
 // This file contains all chart rendering logic with dropdown support
 
 // Chart instances
-let chart1, chart2, chart3, chart4;
+let chart1, chart2;
 let currentChartData = {};
 
 // Initialize chart dropdowns
 function initializeChartDropdowns() {
     document.getElementById('chart1-select').addEventListener('change', () => renderChart1());
     document.getElementById('chart2-select').addEventListener('change', () => renderChart2());
-    document.getElementById('chart3-select').addEventListener('change', () => renderChart3());
-    document.getElementById('chart4-select').addEventListener('change', () => renderChart4());
 }
 
 // Process and store all chart data
@@ -346,6 +344,113 @@ function renderChart1() {
                 }
             });
             break;
+            
+        // ========= ELEMENT & PERFORMANCE OPTIONS (merged from chart3) =========
+        case 'elements-bar':
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.labels,
+                    datasets: [{
+                        label: 'Elements Found',
+                        data: data.elements,
+                        backgroundColor: colors.warning,
+                        borderColor: colors.borderWidth > 1 ? '#000' : colors.warning,
+                        borderWidth: colors.borderWidth
+                    }]
+                },
+                options: getCommonOptions()
+            });
+            break;
+            
+        case 'success-elements':
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'Successful',
+                            data: data.successElements,
+                            backgroundColor: colors.success,
+                            borderWidth: colors.borderWidth
+                        },
+                        {
+                            label: 'Failed',
+                            data: data.failedElements,
+                            backgroundColor: colors.danger,
+                            borderWidth: colors.borderWidth
+                        }
+                    ]
+                },
+                options: {
+                    ...getCommonOptions(),
+                    scales: {
+                        ...getCommonOptions().scales,
+                        x: { stacked: true, display: false },
+                        y: { stacked: true, ...getCommonOptions().scales.y }
+                    }
+                }
+            });
+            break;
+            
+        case 'element-efficiency':
+            chart1 = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.labels,
+                    datasets: [{
+                        label: 'LLM Calls per Element',
+                        data: data.llmPerElement,
+                        borderColor: colors.info,
+                        backgroundColor: `${colors.info}20`,
+                        borderWidth: colors.borderWidth + 1,
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: getCommonOptions()
+            });
+            break;
+            
+        case 'performance-scatter':
+            chart1 = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: 'Workflows',
+                        data: data.sortedRuns.map(r => ({
+                            x: r.execution_time,
+                            y: r.total_cost * 1000 // Convert to cents for better visibility
+                        })),
+                        backgroundColor: colors.primary,
+                        borderColor: colors.borderWidth > 1 ? '#000' : colors.primary,
+                        borderWidth: colors.borderWidth,
+                        pointRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Execution Time (s)' },
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888' }
+                        },
+                        y: {
+                            title: { display: true, text: 'Cost (cents)' },
+                            grid: { color: colors.gridColor },
+                            ticks: { 
+                                color: '#888',
+                                callback: (value) => '¢' + value.toFixed(1)
+                            }
+                        }
+                    }
+                }
+            });
+            break;
     }
 }
 
@@ -507,147 +612,8 @@ function renderChart2() {
                 }
             });
             break;
-    }
-}
-
-// ============= CHART 3: Element & Performance =============
-function renderChart3() {
-    if (!currentChartData.labels) return;
-    
-    const select = document.getElementById('chart3-select');
-    const chartType = select.value;
-    const canvas = document.getElementById('chart3');
-    const ctx = canvas.getContext('2d');
-    const colors = getThemeColors();
-    
-    if (chart3) chart3.destroy();
-    
-    const data = currentChartData;
-    
-    switch(chartType) {
-        case 'elements-bar':
-            chart3 = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: data.labels,
-                    datasets: [{
-                        label: 'Elements Found',
-                        data: data.elements,
-                        backgroundColor: colors.warning,
-                        borderColor: colors.borderWidth > 1 ? '#000' : colors.warning,
-                        borderWidth: colors.borderWidth
-                    }]
-                },
-                options: getCommonOptions()
-            });
-            break;
             
-        case 'success-elements':
-            chart3 = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: data.labels,
-                    datasets: [
-                        {
-                            label: 'Successful',
-                            data: data.successElements,
-                            backgroundColor: colors.success,
-                            borderWidth: colors.borderWidth
-                        },
-                        {
-                            label: 'Failed',
-                            data: data.failedElements,
-                            backgroundColor: colors.danger,
-                            borderWidth: colors.borderWidth
-                        }
-                    ]
-                },
-                options: {
-                    ...getCommonOptions(),
-                    scales: {
-                        ...getCommonOptions().scales,
-                        x: { stacked: true, display: false },
-                        y: { stacked: true, ...getCommonOptions().scales.y }
-                    }
-                }
-            });
-            break;
-            
-        case 'element-efficiency':
-            chart3 = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: data.labels,
-                    datasets: [{
-                        label: 'LLM Calls per Element',
-                        data: data.llmPerElement,
-                        borderColor: colors.info,
-                        backgroundColor: `${colors.info}20`,
-                        borderWidth: colors.borderWidth + 1,
-                        tension: 0.4,
-                        fill: true
-                    }]
-                },
-                options: getCommonOptions()
-            });
-            break;
-            
-        case 'performance-scatter':
-            chart3 = new Chart(ctx, {
-                type: 'scatter',
-                data: {
-                    datasets: [{
-                        label: 'Workflows',
-                        data: data.sortedRuns.map(r => ({
-                            x: r.execution_time,
-                            y: r.total_cost * 1000 // Convert to cents for better visibility
-                        })),
-                        backgroundColor: colors.primary,
-                        borderColor: colors.borderWidth > 1 ? '#000' : colors.primary,
-                        borderWidth: colors.borderWidth,
-                        pointRadius: 6
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: {
-                            title: { display: true, text: 'Execution Time (s)' },
-                            grid: { color: colors.gridColor },
-                            ticks: { color: '#888' }
-                        },
-                        y: {
-                            title: { display: true, text: 'Cost (cents)' },
-                            grid: { color: colors.gridColor },
-                            ticks: { 
-                                color: '#888',
-                                callback: (value) => '¢' + value.toFixed(1)
-                            }
-                        }
-                    }
-                }
-            });
-            break;
-    }
-}
-
-// ============= CHART 4: Advanced Analysis =============
-function renderChart4() {
-    if (!currentChartData.labels) return;
-    
-    const select = document.getElementById('chart4-select');
-    const chartType = select.value;
-    const canvas = document.getElementById('chart4');
-    const ctx = canvas.getContext('2d');
-    const colors = getThemeColors();
-    
-    if (chart4) chart4.destroy();
-    
-    const data = currentChartData;
-    
-    switch(chartType) {
+        // ========= ADVANCED ANALYSIS OPTIONS (merged from chart4) =========
         case 'llm-distribution':
             // Create histogram bins
             const bins = [0, 10, 20, 30, 40, 50, 100];
@@ -662,7 +628,7 @@ function renderChart4() {
                 }
             });
             
-            chart4 = new Chart(ctx, {
+            chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
                     labels: bins.slice(0, -1).map((b, i) => `${b}-${bins[i+1]}`),
@@ -702,7 +668,7 @@ function renderChart4() {
                 success: recent.reduce((a, r) => a + (r.success_rate || 0), 0) / recent.length * 100
             };
             
-            chart4 = new Chart(ctx, {
+            chart2 = new Chart(ctx, {
                 type: 'radar',
                 data: {
                     labels: ['Cost ($x100)', 'Time (/10s)', 'LLM Calls', 'Elements (x10)', 'Success Rate (%)'],
@@ -740,16 +706,16 @@ function renderChart4() {
             break;
             
         case 'domain-performance':
-            const domains = Object.keys(data.domainStats);
-            const domainSuccessRates = domains.map(d => {
+            const domainList = Object.keys(data.domainStats);
+            const domainSuccessRates = domainList.map(d => {
                 const stats = data.domainStats[d];
                 return (stats.successCount / stats.count) * 100;
             });
             
-            chart4 = new Chart(ctx, {
+            chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: domains,
+                    labels: domainList,
                     datasets: [{
                         label: 'Success Rate (%)',
                         data: domainSuccessRates,
@@ -798,7 +764,7 @@ function renderChart4() {
                 }
             });
             
-            chart4 = new Chart(ctx, {
+            chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
                     labels: timeBins.slice(0, -1).map((b, i) => `${b}-${timeBins[i+1]}s`),
@@ -833,21 +799,15 @@ function renderChart4() {
 function renderAllCharts(runs) {
     const chart1Canvas = document.getElementById('chart1');
     const chart2Canvas = document.getElementById('chart2');
-    const chart3Canvas = document.getElementById('chart3');
-    const chart4Canvas = document.getElementById('chart4');
     
     if (!runs || runs.length === 0) {
         showChartPlaceholder(chart1Canvas, 'Not enough data for chart');
         showChartPlaceholder(chart2Canvas, 'Not enough data for chart');
-        showChartPlaceholder(chart3Canvas, 'Not enough data for chart');
-        showChartPlaceholder(chart4Canvas, 'Not enough data for chart');
         return;
     }
     
     clearChartPlaceholder(chart1Canvas);
     clearChartPlaceholder(chart2Canvas);
-    clearChartPlaceholder(chart3Canvas);
-    clearChartPlaceholder(chart4Canvas);
     
     // Process all data
     currentChartData = processChartData(runs);
@@ -855,8 +815,6 @@ function renderAllCharts(runs) {
     // Render all charts with current selections
     renderChart1();
     renderChart2();
-    renderChart3();
-    renderChart4();
 }
 
 // Export functions for use in metrics.html
@@ -867,8 +825,6 @@ window.metricsCharts = {
         if (currentChartData.labels) {
             renderChart1();
             renderChart2();
-            renderChart3();
-            renderChart4();
         }
     }
 };

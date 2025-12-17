@@ -237,18 +237,24 @@
             </div>
         </div>
 
-        <!-- CHARTS ROW 1 -->
+        <!-- MERGED CHARTS -->
         <div class="charts-container">
             <div class="chart-card">
                 <div class="chart-header">
-                    <div class="metric-label">Primary Metrics</div>
+                    <div class="metric-label">Performance & Analysis</div>
                     <select id="chart1-select" class="chart-select">
+                        <!-- Primary Metrics -->
                         <option value="execution-llm">Execution Time & LLM Calls</option>
                         <option value="cost-trend">Cost Trend Over Time</option>
                         <option value="success-trend">Success Rate Trend</option>
                         <option value="multi-metric">Multi-Metric Comparison</option>
                         <option value="token-usage">Token Usage (Prompt vs Completion)</option>
                         <option value="cost-efficiency">Cost Efficiency ($/Element)</option>
+                        <!-- Element & Performance -->
+                        <option value="elements-bar">Elements Found (Bar)</option>
+                        <option value="success-elements">Success vs Failed Elements</option>
+                        <option value="element-efficiency">LLM Calls per Element</option>
+                        <option value="performance-scatter">Time vs Cost Scatter</option>
                     </select>
                 </div>
                 <div class="chart-wrapper">
@@ -257,40 +263,14 @@
             </div>
             <div class="chart-card">
                 <div class="chart-header">
-                    <div class="metric-label">Cost Analysis</div>
+                    <div class="metric-label">Cost & Advanced Analytics</div>
                     <select id="chart2-select" class="chart-select">
+                        <!-- Cost Analysis -->
                         <option value="cost-breakdown">Cost Breakdown (Pie)</option>
                         <option value="cost-stacked">Cost Stack Over Time</option>
                         <option value="cost-comparison">Browser vs CrewAI</option>
                         <option value="domain-cost">Cost by Domain</option>
-                    </select>
-                </div>
-                <div class="chart-wrapper">
-                    <canvas id="chart2"></canvas>
-                </div>
-            </div>
-        </div>
-
-        <!-- CHARTS ROW 2 -->
-        <div class="charts-container">
-            <div class="chart-card">
-                <div class="chart-header">
-                    <div class="metric-label">Element & Performance</div>
-                    <select id="chart3-select" class="chart-select">
-                        <option value="elements-bar">Elements Found (Bar)</option>
-                        <option value="success-elements">Success vs Failed Elements</option>
-                        <option value="element-efficiency">LLM Calls per Element</option>
-                        <option value="performance-scatter">Time vs Cost Scatter</option>
-                    </select>
-                </div>
-                <div class="chart-wrapper">
-                    <canvas id="chart3"></canvas>
-                </div>
-            </div>
-            <div class="chart-card">
-                <div class="chart-header">
-                    <div class="metric-label">Advanced Analysis</div>
-                    <select id="chart4-select" class="chart-select">
+                        <!-- Advanced Analysis -->
                         <option value="llm-distribution">LLM Call Distribution</option>
                         <option value="workflow-radar">Workflow Metrics Radar</option>
                         <option value="domain-performance">Domain Performance</option>
@@ -298,7 +278,7 @@
                     </select>
                 </div>
                 <div class="chart-wrapper">
-                    <canvas id="chart4"></canvas>
+                    <canvas id="chart2"></canvas>
                 </div>
             </div>
         </div>

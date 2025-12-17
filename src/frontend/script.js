@@ -842,11 +842,21 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Log link
         if (logPath) {
-            // Convert Windows path to file:// URL for clickable link
-            const fileUrl = 'file:///' + logPath.replace(/\\/g, '/');
+            // Extract run_id from path (e.g., robot_tests/UUID/log.html)
+            const pathParts = logPath.replace(/\\/g, '/').split('/');
+            const robotTestsIndex = pathParts.findIndex(part => part === 'robot_tests');
+            
+            let logUrl = logPath; // fallback to original path
+            if (robotTestsIndex !== -1 && pathParts.length > robotTestsIndex + 2) {
+                const runId = pathParts[robotTestsIndex + 1];
+                const fileName = pathParts[pathParts.length - 1];
+                // Create HTTP URL using the /reports endpoint
+                logUrl = `/reports/${runId}/${fileName}`;
+            }
+            
             html += `<div class="summary-line" style="margin-top: 0.5rem;">`;
             html += `<span class="summary-label">📄 Detailed logs:</span> `;
-            html += `<a href="${fileUrl}" target="_blank" class="log-link" title="Open log file">${escapeHtml(logPath)}</a>`;
+            html += `<a href="${logUrl}" target="_blank" class="log-link" title="Open log file">View Log</a>`;
             html += `</div>`;
         }
         
