@@ -778,6 +778,101 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Format execution logs into structured, readable HTML
+    function formatExecutionLog(rawLog) {
+        // Pattern: Robot Framework Test Execution (Exit Code: X)
+        // ==== Suite: Test Test: Generated Test - PASS Results: X passed, Y failed
+        // Detailed logs available in: <path>
+        
+        const container = document.createElement('div');
+        container.className = 'execution-summary';
+        
+        // Extract exit code
+        const exitCodeMatch = rawLog.match(/Robot Framework Test Execution \(Exit Code: (\d+)\)/i);
+        const exitCode = exitCodeMatch ? exitCodeMatch[1] : null;
+        
+        // Extract suite name - simplified regex to avoid ReDoS
+        // Changed from: /Suite:\s*([^\s]+(?:\s+[^\s]+)*?)(?=\s+Test:|$)/i
+        const suiteMatch = rawLog.match(/Suite:\s*([^\n]+?)\s+Test:/i);
+        const suiteName = suiteMatch ? suiteMatch[1].trim() : 'Unknown';
+        
+        // Extract test name and status - simplified regex to avoid ReDoS
+        // Changed from: /Test:\s*(.+?)\s*-\s*(PASS|FAIL)/i
+        const testMatch = rawLog.match(/Test:\s*([^-]+)\s*-\s*(PASS|FAIL)/i);
+        const testName = testMatch ? testMatch[1].trim() : 'Unknown';
+        const testStatus = testMatch ? testMatch[2].toUpperCase() : 'UNKNOWN';
+        
+        // Extract results - simplified regex to avoid ReDoS
+        // Changed from: /Results?:\s*(\d+)\s*passed,\s*(\d+)\s*failed/i
+        const resultsMatch = rawLog.match(/Results?:\s*(\d+) passed, (\d+) failed/i);
+        const passed = resultsMatch ? resultsMatch[1] : '0';
+        const failed = resultsMatch ? resultsMatch[2] : '0';
+        
+        // Extract log path
+        const logPathMatch = rawLog.match(/Detailed logs available in:\s*(.+?)(?:\s*$|$)/i);
+        let logPath = logPathMatch ? logPathMatch[1].trim() : null;
+        
+        // Clean up the log path - remove any trailing whitespace or characters
+        if (logPath) {
+            logPath = logPath.replace(/\s+$/, '');
+        }
+        
+        // Build formatted HTML
+        let html = '';
+        
+        // Header with exit code
+        html += '<div class="summary-header">';
+        html += `🤖 Robot Framework Test Execution`;
+        if (exitCode !== null) {
+            html += ` <span class="${exitCode === '0' ? 'summary-pass' : 'summary-fail'}">(Exit Code: ${exitCode})</span>`;
+        }
+        html += '</div>';
+        
+        // Divider
+        html += '<div class="summary-divider">══════════════════════════════════════════════════</div>';
+        
+        // Suite info
+        html += `<div class="summary-line"><span class="summary-label">Suite:</span> ${escapeHtml(suiteName)}</div>`;
+        
+        // Test info
+        html += `<div class="summary-line"><span class="summary-label">Test:</span> ${escapeHtml(testName)} - `;
+        html += `<span class="${testStatus === 'PASS' ? 'summary-pass' : 'summary-fail'}">${testStatus}</span></div>`;
+        
+        // Results
+        html += `<div class="summary-line"><span class="summary-label">Results:</span> `;
+        html += `<span class="summary-pass">${passed} passed</span>, `;
+        html += `<span class="${parseInt(failed) > 0 ? 'summary-fail' : ''}">${failed} failed</span></div>`;
+        
+        // Log link
+        if (logPath) {
+            // Extract run_id from path (e.g., robot_tests/UUID/log.html)
+            const pathParts = logPath.replace(/\\/g, '/').split('/');
+            const robotTestsIndex = pathParts.findIndex(part => part === 'robot_tests');
+            
+            let logUrl = logPath; // fallback to original path
+            if (robotTestsIndex !== -1 && pathParts.length > robotTestsIndex + 2) {
+                const runId = pathParts[robotTestsIndex + 1];
+                const fileName = pathParts[pathParts.length - 1];
+                // Create HTTP URL using the /reports endpoint
+                logUrl = `/reports/${runId}/${fileName}`;
+            }
+            
+            // XSS Protection: Validate URL scheme to prevent javascript: injection
+            const isValidUrl = logUrl.startsWith('/') || logUrl.startsWith('http://') || logUrl.startsWith('https://');
+            if (!isValidUrl) {
+                logUrl = '#'; // Fallback to safe value
+            }
+            
+            html += `<div class="summary-line" style="margin-top: 0.5rem;">`;
+            html += `<span class="summary-label">📄 Detailed logs:</span> `;
+            html += `<a href="${logUrl}" target="_blank" class="log-link" title="Open log file">View Log</a>`;
+            html += `</div>`;
+        }
+        
+        container.innerHTML = html;
+        return container;
+    }
+
     function handleExecutionData(data) {
         updateStatus('processing', data.message);
         
@@ -787,7 +882,11 @@ document.addEventListener('DOMContentLoaded', () => {
             routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.result) {
             const logs = data.result.logs || 'No execution logs available';
-            executionLogsEl.textContent = logs;
+            
+            // Format the execution logs into structured HTML
+            const formattedLog = formatExecutionLog(logs);
+            executionLogsEl.innerHTML = '';
+            executionLogsEl.appendChild(formattedLog);
 
             const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
             const timeText = executionTime ? ` (${executionTime}s)` : '';

@@ -90,9 +90,37 @@
             position: relative;
         }
 
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .chart-select {
+            padding: 6px 12px;
+            border: var(--border-width) solid var(--border-color);
+            background: var(--bg-surface-secondary);
+            color: var(--text-main);
+            border-radius: var(--border-radius);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .chart-select:hover {
+            background: var(--bg-surface);
+        }
+
+        [data-theme="neobrutalism"] .chart-select {
+            border: 2px solid var(--border-color);
+            border-radius: 0;
+        }
+
         .chart-wrapper {
             position: relative;
-            height: calc(100% - 2rem);
+            height: calc(100% - 3.5rem);
             width: 100%;
         }
 
@@ -209,18 +237,48 @@
             </div>
         </div>
 
-        <!-- CHARTS -->
+        <!-- MERGED CHARTS -->
         <div class="charts-container">
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Workflow Volume & Success</div>
+                <div class="chart-header">
+                    <div class="metric-label">Performance & Analysis</div>
+                    <select id="chart1-select" class="chart-select">
+                        <!-- Primary Metrics -->
+                        <option value="execution-llm">Execution Time & LLM Calls</option>
+                        <option value="cost-trend">Cost Trend Over Time</option>
+                        <option value="success-trend">Success Rate Trend</option>
+                        <option value="multi-metric">Multi-Metric Comparison</option>
+                        <option value="token-usage">Token Usage (Prompt vs Completion)</option>
+                        <option value="cost-efficiency">Cost Efficiency ($/Element)</option>
+                        <!-- Element & Performance -->
+                        <option value="elements-bar">Elements Found (Bar)</option>
+                        <option value="success-elements">Success vs Failed Elements</option>
+                        <option value="element-efficiency">LLM Calls per Element</option>
+                        <option value="performance-scatter">Time vs Cost Scatter</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="volumeChart"></canvas>
+                    <canvas id="chart1"></canvas>
                 </div>
             </div>
             <div class="chart-card">
-                <div class="metric-label" style="margin-bottom: 1rem;">Cost Breakdown (CrewAI vs Browser)</div>
+                <div class="chart-header">
+                    <div class="metric-label">Cost & Advanced Analytics</div>
+                    <select id="chart2-select" class="chart-select">
+                        <!-- Cost Analysis -->
+                        <option value="cost-breakdown">Cost Breakdown (Pie)</option>
+                        <option value="cost-stacked">Cost Stack Over Time</option>
+                        <option value="cost-comparison">Browser vs CrewAI</option>
+                        <option value="domain-cost">Cost by Domain</option>
+                        <!-- Advanced Analysis -->
+                        <option value="llm-distribution">LLM Call Distribution</option>
+                        <option value="workflow-radar">Workflow Metrics Radar</option>
+                        <option value="domain-performance">Domain Performance</option>
+                        <option value="time-distribution">Execution Time Distribution</option>
+                    </select>
+                </div>
                 <div class="chart-wrapper">
-                    <canvas id="costChart"></canvas>
+                    <canvas id="chart2"></canvas>
                 </div>
             </div>
         </div>
@@ -229,7 +287,15 @@
         <div class="table-card">
             <div class="table-header">
                 <div style="font-weight: 700; font-size: 1.1rem;">Recent Executions</div>
-                <button class="nav-btn" style="padding: 4px 12px; font-size: 0.8rem;" onclick="fetchMetrics()">Refresh</button>
+                <div style="display: flex; gap: 0.75rem; align-items: center;">
+                    <select id="time-filter" class="nav-btn" style="padding: 4px 12px; font-size: 0.8rem; cursor: pointer;">
+                        <option value="all">All Time</option>
+                        <option value="30">Past 30 Days</option>
+                        <option value="7">Past 7 Days</option>
+                        <option value="1">Today</option>
+                    </select>
+                    <button class="nav-btn" style="padding: 4px 12px; font-size: 0.8rem;" onclick="fetchMetrics()">Refresh</button>
+                </div>
             </div>
             <div style="overflow-x: auto;">
                 <table>
@@ -255,7 +321,10 @@
     </div>
 
     <!-- Import shared theme logic from main script -->
-    <script src="script.js"></script>
+    <script src="script.js?v=4.3"></script>
+    
+    <!-- Import modular chart system -->
+    <script src="metrics-charts.js?v=1.0"></script>
     
     <script>
         // --- METRICS PAGE SPECIFIC LOGIC ---
@@ -263,6 +332,47 @@
         // Cache for chart data - only used when re-rendering charts on theme change
         // Fresh data is still fetched on page load and manual refresh
         let cachedRuns = [];
+        let allRuns = []; // Store all runs for filtering
+        
+        // --- DATE FORMATTING HELPER ---
+        function formatDateForTooltip(dateStr) {
+            const d = new Date(dateStr);
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            const hours = String(d.getHours()).padStart(2, '0');
+            const minutes = String(d.getMinutes()).padStart(2, '0');
+            const seconds = String(d.getSeconds()).padStart(2, '0');
+            return `${month}/${day} ${hours}:${minutes}:${seconds}`;
+        }
+        
+        // --- TIME FILTER LOGIC ---
+        function filterRunsByDays(runs, days) {
+            if (days === 'all' || !runs) return runs;
+            
+            const now = new Date();
+            const cutoff = new Date(now.getTime() - (parseInt(days) * 24 * 60 * 60 * 1000));
+            
+            return runs.filter(run => new Date(run.timestamp) >= cutoff);
+        }
+        
+        function applyFilter() {
+            const filterValue = document.getElementById('time-filter').value;
+            const filteredRuns = filterRunsByDays(allRuns, filterValue);
+            
+            // Recalculate aggregate data for filtered runs
+            const agg = {
+                total_workflows: filteredRuns.length,
+                avg_success_rate: filteredRuns.length > 0 
+                    ? filteredRuns.reduce((acc, r) => acc + (r.success_rate || 0), 0) / filteredRuns.length 
+                    : 0,
+                total_cost: filteredRuns.reduce((acc, r) => acc + (r.total_cost || 0), 0),
+                avg_execution_time: filteredRuns.length > 0 
+                    ? filteredRuns.reduce((acc, r) => acc + (r.execution_time || 0), 0) / filteredRuns.length 
+                    : 0
+            };
+            
+            renderDashboard(filteredRuns, agg);
+        }
         
         // --- API CONNECTION ---
         async function fetchMetrics() {
@@ -274,7 +384,26 @@
                 const aggResponse = await fetch('/api/workflow-metrics/aggregate');
                 const aggData = await aggResponse.json();
 
-                renderDashboard(data, aggData);
+                // Store all runs for filtering
+                allRuns = data || [];
+                
+                // Apply current filter
+                const filterValue = document.getElementById('time-filter').value;
+                const filteredRuns = filterRunsByDays(allRuns, filterValue);
+                
+                // Recalculate aggregate for filtered data
+                const filteredAgg = filterValue === 'all' ? aggData : {
+                    total_workflows: filteredRuns.length,
+                    avg_success_rate: filteredRuns.length > 0 
+                        ? filteredRuns.reduce((acc, r) => acc + (r.success_rate || 0), 0) / filteredRuns.length 
+                        : 0,
+                    total_cost: filteredRuns.reduce((acc, r) => acc + (r.total_cost || 0), 0),
+                    avg_execution_time: filteredRuns.length > 0 
+                        ? filteredRuns.reduce((acc, r) => acc + (r.execution_time || 0), 0) / filteredRuns.length 
+                        : 0
+                };
+                
+                renderDashboard(filteredRuns, filteredAgg);
             } catch (e) {
                 console.error("Failed to load metrics", e);
                 // Show "not enough data" message instead of mock data
@@ -338,107 +467,8 @@
                 tbody.appendChild(tr);
             });
 
-            // 3. Render Charts
-            renderCharts(runs);
-        }
-
-        // --- CHART.JS CONFIG ---
-        let volChart, costChart;
-
-        function renderCharts(runs) {
-            const volCanvas = document.getElementById('volumeChart');
-            const costCanvas = document.getElementById('costChart');
-            
-            // Destroy existing charts
-            if(volChart) { volChart.destroy(); volChart = null; }
-            if(costChart) { costChart.destroy(); costChart = null; }
-            
-            if (!runs || runs.length === 0) {
-                // Show "not enough data" message for charts
-                showChartPlaceholder(volCanvas, 'Not enough data for chart');
-                showChartPlaceholder(costCanvas, 'Not enough data for chart');
-                return;
-            }
-            
-            // Clear any placeholder messages
-            clearChartPlaceholder(volCanvas);
-            clearChartPlaceholder(costCanvas);
-
-            // Process data for charts
-            // Sort by time for line chart
-            const sortedRuns = [...runs].reverse(); // Oldest first
-            const labels = sortedRuns.map(r => new Date(r.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
-            const executionTimes = sortedRuns.map(r => r.execution_time);
-            const llmCalls = sortedRuns.map(r => r.total_llm_calls);
-
-            // Cost Aggregation
-            const totalCrewCost = runs.reduce((acc, r) => acc + (r.crewai_cost || 0), 0);
-            const totalBrowserCost = runs.reduce((acc, r) => acc + (r.browser_use_cost || 0), 0);
-
-            const ctxVol = volCanvas.getContext('2d');
-            const ctxCost = costCanvas.getContext('2d');
-
-            // Colors based on theme (basic logic)
-            const isNeo = document.documentElement.getAttribute('data-theme') === 'neobrutalism';
-            const colorPrimary = isNeo ? '#ccff00' : '#3b82f6';
-            const colorSecondary = isNeo ? '#ff00ff' : '#64748b';
-            const gridColor = isNeo ? '#000000' : '#e2e8f0';
-            const borderWidth = isNeo ? 2 : 1;
-
-            // Volume Chart
-            volChart = new Chart(ctxVol, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [
-                        {
-                            label: 'Execution Time (s)',
-                            data: executionTimes,
-                            borderColor: colorPrimary,
-                            backgroundColor: isNeo ? 'transparent' : 'rgba(59, 130, 246, 0.1)',
-                            borderWidth: borderWidth + 1,
-                            tension: 0.4,
-                            fill: true
-                        },
-                        {
-                            label: 'LLM Calls',
-                            data: llmCalls,
-                            borderColor: colorSecondary,
-                            borderDash: [5, 5],
-                            borderWidth: borderWidth,
-                            tension: 0.4
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: { grid: { color: gridColor, drawBorder: false }, ticks: { color: '#888' } },
-                        x: { display: false }
-                    },
-                    plugins: { legend: { display: true } }
-                }
-            });
-
-            // Cost Doughnut
-            costChart = new Chart(ctxCost, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Browser Actions', 'CrewAI Logic'],
-                    datasets: [{
-                        data: [totalBrowserCost, totalCrewCost],
-                        backgroundColor: [colorPrimary, colorSecondary],
-                        borderColor: isNeo ? '#000' : '#fff',
-                        borderWidth: borderWidth
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { position: 'bottom' } }
-                }
-            });
+            // 3. Render Charts using modular system
+            window.metricsCharts.render(runs);
         }
 
         // Helper functions for chart placeholders
@@ -475,7 +505,7 @@
             // Re-render charts with cached data - no API call needed for theme changes
             // Fresh data is fetched on page load and manual refresh (Comment #7)
             if (cachedRuns.length > 0) {
-                renderCharts(cachedRuns);
+                window.metricsCharts.updateColors();
             }
         }
         
@@ -488,6 +518,12 @@
         window.addEventListener('modechange', () => {
             updateChartColors();
         });
+
+        // Time filter change handler
+        document.getElementById('time-filter').addEventListener('change', applyFilter);
+
+        // Initialize chart dropdowns
+        window.metricsCharts.initialize();
 
         // Initial Load
         fetchMetrics();
