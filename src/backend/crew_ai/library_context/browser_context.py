@@ -246,4 +246,18 @@ Keyboard Key, Wait For Elements State, Close Browser
 • New Browser before New Page
 • Variable assignment: ${var}= Get Text ${loc}
 • No SeleniumLibrary keywords (use New Browser, not Open Browser)
+
+**CRITICAL - INVALID KEYWORDS FOR BROWSER LIBRARY:**
+These SeleniumLibrary keywords are INVALID in Browser Library. If you see them, the code is INVALID:
+• 'Input Text' → INVALID! Use 'Type Text' or 'Fill Text' instead
+• 'Open Browser' → INVALID! Use 'New Browser' + 'New Context' + 'New Page' instead
+• 'Close All Browsers' → INVALID! Use 'Close Browser' instead
+• 'Wait Until Element Is Visible' → INVALID! Use 'Wait For Elements State' instead
+
+**CRITICAL - REQUIRED SEQUENCE:**
+If code uses 'New Browser' but is missing 'New Context    viewport=None' BEFORE 'New Page', it's INVALID.
+Correct sequence:
+1. New Browser    chromium    headless=True
+2. New Context    viewport=None  ← REQUIRED!
+3. New Page    ${url}
 """
