@@ -224,10 +224,11 @@ class RobotAgents:
                 "Library    Browser\n"
                 "Library    BuiltIn\n\n"
                 "*** Variables ***\n"
-                "${browser}    chromium\n\n"
+                "${browser}    chromium\n"
+                "${channel}    chrome\n\n"
                 "*** Test Cases ***\n"
                 "Generated Test\n"
-                "    New Browser    ${browser}\n"
+                "    New Browser    ${browser}    channel=${channel}\n"
                 "    Close Browser\n\n"
                 
                 "❌ **EXAMPLE OF WRONG OUTPUT** ❌\n"

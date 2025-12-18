@@ -36,6 +36,7 @@ class BrowserLibraryContext(LibraryContext):
         """Return browser initialization parameters for Browser Library."""
         return {
             'browser': 'chromium',
+            'channel': 'chrome',
             'headless': 'True'
         }
 
@@ -63,7 +64,7 @@ class BrowserLibraryContext(LibraryContext):
    
    Example:
    ```robot
-   New Browser    chromium    headless=True
+   New Browser    chromium    channel=chrome    headless=True
    New Context    viewport=None    ← REQUIRED!
    New Page    https://example.com
    ```
@@ -74,7 +75,8 @@ class BrowserLibraryContext(LibraryContext):
    - This is the #1 cause of Browser Library test failures
 
 3. **PARAMETER RULES:**
-   - Browser Library uses: browser=chromium, headless=True
+   - Browser Library uses: browser=chromium, channel=chrome, headless=True
+   - MUST usage channel=chrome to use system-installed browser
    - NOT SeleniumLibrary syntax (no 'options' parameter)
    - Valid browsers: chromium, firefox, webkit
 
@@ -141,13 +143,14 @@ Library    Browser
 
 *** Variables ***
 ${browser}    chromium
+${channel}    chrome
 ${headless}    True
 # Declare all locators and variables here
 
 *** Test Cases ***
 Generated Test
     [Documentation]    Auto-generated test case
-    New Browser    ${browser}    headless=${headless}
+    New Browser    ${browser}    channel=${channel}    headless=${headless}
     New Context    viewport=None
     New Page    ${url}
     # Test steps here
@@ -159,21 +162,21 @@ Browser Library uses a small default viewport (800x600) which causes element det
 You MUST include "New Context    viewport=None" after "New Browser" and before "New Page".
 
 **Correct Order:**
-1. New Browser    ${browser}    headless=${headless}
+1. New Browser    ${browser}    channel=${channel}    headless=${headless}
 2. New Context    viewport=None    ← REQUIRED
 3. New Page    ${url}
 
 **VARIABLE DECLARATION RULES:**
 1. ALL variables must be declared in *** Variables *** section
-2. Browser config: ${browser}, ${headless}
+2. Browser config: ${browser}, ${channel}, ${headless}
 3. Locators: ${element_name_locator}
 4. Retrieved values: ${variable_name}
 
 **KEYWORD SYNTAX:**
 
 New Browser (NO options parameter):
-    New Browser    chromium    headless=True
-    Note: Browser Library uses 'browser' and 'headless' parameters, NOT 'options'
+    New Browser    chromium    channel=chrome    headless=True
+    Note: Browser Library uses 'browser', 'channel' and 'headless' parameters
 
 New Context (viewport configuration):
     New Context    viewport=None
@@ -203,10 +206,11 @@ Close Browser:
 **CRITICAL RULES:**
 1. Always use New Browser before New Context before New Page
 2. MUST include "New Context    viewport=None" for proper element detection
-3. Browser Library uses 'browser' and 'headless' parameters (NOT 'options')
-4. Browser Library auto-waits, so explicit waits are rarely needed
-5. Locators can be CSS selectors without prefix
-6. Text and role selectors are preferred for stability
+3. Browser Library uses 'browser', 'channel' and 'headless' parameters
+4. MUST use channel=chrome to utilize the aggressive Docker optimization
+5. Browser Library auto-waits, so explicit waits are rarely needed
+6. Locators can be CSS selectors without prefix
+7. Text and role selectors are preferred for stability
 
 **KEYWORD REFERENCE:**
 Use the keyword_search_tool to look up specific keyword details when needed.

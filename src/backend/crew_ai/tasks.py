@@ -83,7 +83,7 @@ class RobotTasks:
                 return f"""
     - For Browser Library: Use "New Browser" keyword
     - Include these parameters: {param_list}
-    - Example: {{"keyword": "New Browser", "browser": "{params.get('browser', 'chromium')}", "headless": "{params.get('headless', 'True')}"}}
+    - Example: {{"keyword": "New Browser", "browser": "{params.get('browser', 'chromium')}", "channel": "{params.get('channel', 'chrome')}", "headless": "{params.get('headless', 'True')}"}}
     - DO NOT include 'options' parameter for Browser Library
                 """
             else:
@@ -556,7 +556,7 @@ Generated Test
                 "   - For Get Text results → ${variable_name}    (no initial value needed)\n\n"
 
                 "3. **Variable Naming Convention:**\n"
-                "   - Browser config: ${browser}, ${options}\n"
+                "   - Browser config: ${browser}, ${channel}, ${options}\n"
                 "   - Element locators: ${search_box_locator}, ${product_name_locator}\n"
                 "   - Retrieved values: ${product_name}, ${product_price}, ${result}\n\n"
 
@@ -571,15 +571,17 @@ Generated Test
                 "{\n"
                 "  \"keyword\": \"Open Browser\",\n"
                 "  \"value\": \"https://www.flipkart.com\",\n"
-                "  \"browser\": \"chrome\",\n"
-                "  \"options\": \"add_argument('--headless')\"\n"
+                "  \"browser\": \"chromium\",\n"
+                "  \"channel\": \"chrome\",\n"
+                "  \"headless\": \"True\"\n"
                 "}\n"
                 "```\n"
                 "You MUST declare:\n"
                 "```robot\n"
                 "*** Variables ***\n"
-                "${browser}    chrome\n"
-                "${options}    add_argument('--headless')\n"
+                "${browser}    chromium\n"
+                "${channel}    chrome\n"
+                "${headless}    True\n"
                 "```\n\n"
 
                 f"{popup_instructions}"
@@ -699,10 +701,11 @@ Generated Test
                 "*** Settings ***\n"
                 "Library    Browser\n\n"
                 "*** Variables ***\n"
-                "${browser}    chromium\n\n"
+                "${browser}    chromium\n"
+                "${channel}    chrome\n\n"
                 "*** Test Cases ***\n"
                 "Generated Test\n"
-                "    New Browser    ${browser}\n"
+                "    New Browser    ${browser}    channel=${channel}\n"
                 "    Close Browser"
             ),
             expected_output=(
