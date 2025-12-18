@@ -12,6 +12,41 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Configuration Constants
+# These values control the behavior of locator finding strategies
+
+# Text validation thresholds
+MIN_TEXT_LENGTH = 2  # Minimum text length to use for text-based locators
+MAX_TEXT_DISPLAY_LENGTH = 50  # Maximum text length to display in logs (for actual text)
+MAX_TEXT_CONTENT_LENGTH = 100  # Maximum text content to extract from elements
+
+# Text comparison thresholds  
+INNER_TEXT_PREFERENCE_THRESHOLD = 1.0  # Use inner_text if shorter (more relevant); 1.0 = always prefer if shorter
+
+# Checkbox label matching
+MAX_CHECKBOX_LABEL_LENGTH = 30  # Maximum label length for checkbox/radio detection heuristic
+
+# Locator priorities (lower = better)
+PRIORITY_CANDIDATE = 0  # Agent-provided candidate locators
+PRIORITY_ID = 1  # Native ID attribute
+PRIORITY_TEST_ID = 2  # data-testid, data-test, data-qa
+PRIORITY_NAME = 3  # name attribute
+PRIORITY_ARIA_LABEL = 4  # aria-label
+PRIORITY_PLACEHOLDER = 5  # placeholder, title
+PRIORITY_TEXT = 6  # Visible text content
+PRIORITY_ROLE = 7  # ARIA role with name
+PRIORITY_CSS_PARENT_ID = 8  # CSS with parent ID context
+PRIORITY_CSS_NTH_CHILD = 9  # CSS with nth-child
+PRIORITY_CSS_CLASS = 10  # Simple CSS class
+PRIORITY_XPATH_PARENT_ID = 11  # XPath with parent ID
+PRIORITY_XPATH_PARENT_CLASS = 12  # XPath with parent class and position
+PRIORITY_XPATH_TEXT = 13  # XPath with text content
+PRIORITY_XPATH_TITLE = 14  # XPath with title
+PRIORITY_XPATH_HREF = 15  # XPath with href (for links)
+PRIORITY_XPATH_CLASS_POSITION = 16  # XPath with class and position
+PRIORITY_XPATH_MULTI_ATTR = 17  # XPath with multiple attributes
+PRIORITY_XPATH_FIRST_OF_CLASS = 18  # XPath - first element with class
+
 
 async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tuple[bool, str]:
     """
@@ -49,7 +84,7 @@ async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tu
             inner_text = await element.inner_text() or ""
             inner_text = inner_text.strip()
             # Use inner_text if it's shorter (usually more relevant)
-            if inner_text and len(inner_text) < len(actual_text):
+            if inner_text and len(inner_text) < len(actual_text) * INNER_TEXT_PREFERENCE_THRESHOLD:
                 actual_text = inner_text
         except Exception:
             pass
@@ -75,9 +110,9 @@ async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tu
         is_match = expected_lower in actual_lower
         
         if is_match:
-            logger.info(f"   ✅ Semantic match: expected '{expected_text}' found in '{actual_text[:50]}...'")
+            logger.info(f"   ✅ Semantic match: expected '{expected_text}' found in '{actual_text[:MAX_TEXT_DISPLAY_LENGTH]}...'")
         else:
-            logger.warning(f"   ❌ Semantic MISMATCH: expected '{expected_text}', got '{actual_text[:100]}'")
+            logger.warning(f"   ❌ Semantic MISMATCH: expected '{expected_text}', got '{actual_text[:MAX_TEXT_CONTENT_LENGTH]}'")
         
         return is_match, actual_text
         
@@ -292,7 +327,7 @@ async def _find_element_by_expected_text(page, expected_text: str, element_descr
         Dict with 'locator' and optionally 'element_type' if found, None otherwise.
         For backward compatibility, returns string locator for non-checkbox elements.
     """
-    if not expected_text or len(expected_text.strip()) < 2:
+    if not expected_text or len(expected_text.strip()) < MIN_TEXT_LENGTH:
         return None
     
     text = expected_text.strip()
@@ -306,30 +341,42 @@ async def _find_element_by_expected_text(page, expected_text: str, element_descr
     # Detect if we're looking for a checkbox or radio button based on:
     # 1. Description mentions checkbox/radio/toggle/check/select
     # 2. Expected text looks like a checkbox label (short text, often with numbers)
-    is_checkbox_context = any(keyword in desc_lower for keyword in [
-        'checkbox', 'check box', 'radio', 'toggle', 'check the', 'select the',
-        'tick', 'untick', 'check mark', 'input element for'
-    ])
     
-    # Also detect common checkbox label patterns
-    is_checkbox_like_text = (
-        text.lower().startswith('checkbox') or
-        text.lower().startswith('option') or
-        text.lower().startswith('select') or
-        text.lower() in ['yes', 'no', 'agree', 'accept', 'remember me', 'terms', 'newsletter'] or
-        len(text) < 30  # Short text near form elements often indicates checkbox labels
-    )
+    # OPTIMIZATION: Early exit for obvious non-form elements
+    # Skip checkbox detection entirely if description indicates non-input elements
+    skip_checkbox_check = False
+    if element_description:
+        # Keywords that clearly indicate non-form elements
+        non_form_keywords = ['button', 'link', 'heading', 'title', 'paragraph', 'span', 'div text', 'label text', 'banner', 'menu item']
+        if any(keyword in desc_lower for keyword in non_form_keywords):
+            skip_checkbox_check = True
+            logger.debug(f"   ⏩ Skipping checkbox detection - element is clearly not a form input")
     
-    if is_checkbox_context or is_checkbox_like_text:
-        logger.info(f"   🎯 Checkbox/Radio context detected - checking for input element")
-        checkbox_result = await _find_checkbox_or_radio_by_label(page, text)
+    if not skip_checkbox_check:
+        is_checkbox_context = any(keyword in desc_lower for keyword in [
+            'checkbox', 'check box', 'radio', 'toggle', 'check the', 'select the',
+            'tick', 'untick', 'check mark', 'input element for'
+        ])
         
-        if checkbox_result:
-            # Return the checkbox/radio input locator instead of text
-            logger.info(f"   ✅ Returning checkbox/radio locator: {checkbox_result['locator']}")
-            return checkbox_result
-        else:
-            logger.info(f"   ⚠️ No checkbox/radio found, falling back to text-based search")
+        # Also detect common checkbox label patterns
+        is_checkbox_like_text = (
+            text.lower().startswith('checkbox') or
+            text.lower().startswith('option') or
+            text.lower().startswith('select') or
+            text.lower() in ['yes', 'no', 'agree', 'accept', 'remember me', 'terms', 'newsletter'] or
+            len(text) < MAX_CHECKBOX_LABEL_LENGTH  # Short text near form elements often indicates checkbox labels
+        )
+        
+        if is_checkbox_context or is_checkbox_like_text:
+            logger.info(f"   🎯 Checkbox/Radio context detected - checking for input element")
+            checkbox_result = await _find_checkbox_or_radio_by_label(page, text)
+            
+            if checkbox_result:
+                # Return the checkbox/radio input locator instead of text
+                logger.info(f"   ✅ Returning checkbox/radio locator: {checkbox_result['locator']}")
+                return checkbox_result
+            else:
+                logger.info(f"   ⚠️ No checkbox/radio found, falling back to text-based search")
     
     # ========================================
     # Standard Text-Based Search
@@ -828,6 +875,96 @@ async def _find_table_cell_by_structured_info(
     return None
 
 
+async def _validate_candidate_locator(
+    page,
+    candidate_locator: str,
+    element_id: str,
+    element_description: str,
+    expected_text: Optional[str],
+    x: float,
+    y: float
+) -> Optional[Dict]:
+    """
+    Validate an agent-provided candidate locator.
+    
+    Args:
+        page: Playwright page object
+        candidate_locator: The locator suggested by the agent
+        element_id: Element identifier
+        element_description: Element description
+        expected_text: Expected text for semantic validation
+        x, y: Coordinates (for result dict)
+        
+    Returns:
+        Complete result dict if valid, None if invalid/failed
+    """
+    logger.info(f"🔍 Step 0: Validating candidate locator: {candidate_locator}")
+    try:
+        # Use shared conversion function from browser_service.locators
+        from browser_service.locators import convert_to_playwright_locator
+        
+        playwright_locator, was_converted = convert_to_playwright_locator(candidate_locator)
+        
+        if was_converted:
+            logger.info(f"   Converted to Playwright format: {playwright_locator}")
+        
+        count = await page.locator(playwright_locator).count()
+        
+        if count == 1:
+            # SEMANTIC VALIDATION: Verify we found the RIGHT element
+            semantic_match = True
+            actual_text = ""
+            if expected_text:
+                semantic_match, actual_text = await _validate_semantic_match(page, playwright_locator, expected_text)
+                if not semantic_match:
+                    logger.warning(f"⚠️ Candidate locator is unique BUT text doesn't match!")
+                    logger.warning(f"   Expected: '{expected_text}'")
+                    logger.warning(f"   Actual: '{actual_text}'")
+                    logger.info("   Continuing to find correct element...")
+                    return None  # Continue to try other approaches
+                else:
+                    logger.info(f"✅ Candidate locator is unique AND semantically correct")
+            
+            if semantic_match:
+                logger.info(f"✅ Candidate locator is unique: {playwright_locator}")
+                return {
+                    'element_id': element_id,
+                    'description': element_description,
+                    'found': True,
+                    'best_locator': playwright_locator,
+                    'all_locators': [{
+                        'type': 'candidate',
+                        'locator': playwright_locator,
+                        'priority': PRIORITY_CANDIDATE,
+                        'strategy': 'Agent-provided candidate' + (' (converted)' if was_converted else ''),
+                        'count': count,
+                        'unique': True,
+                        'valid': True,
+                        'validated': True,
+                        'semantic_match': semantic_match,
+                        'validation_method': 'playwright'
+                    }],
+                    'element_info': {'actual_text': actual_text} if actual_text else {},
+                    'coordinates': {'x': x, 'y': y},
+                    'validation_summary': {
+                        'total_generated': 1,
+                        'valid': 1,
+                        'unique': 1,
+                        'validated': 1,
+                        'best_type': 'candidate',
+                        'best_strategy': 'Agent-provided candidate',
+                        'validation_method': 'playwright'
+                    },
+                    'semantic_match': semantic_match
+                }
+        else:
+            logger.info(f"⚠️ Candidate locator not unique (count={count}): {playwright_locator}")
+    except Exception as e:
+        logger.warning(f"⚠️ Candidate locator validation failed: {e}")
+    
+    return None
+
+
 async def find_unique_locator_at_coordinates(
     page,
     x: float,
@@ -888,69 +1025,12 @@ async def find_unique_locator_at_coordinates(
     # STEP 0: Validate candidate locator (if provided)
     # ========================================
     if candidate_locator:
-        logger.info(f"🔍 Step 0: Validating candidate locator: {candidate_locator}")
-        try:
-            # Use shared conversion function from browser_service.locators
-            from browser_service.locators import convert_to_playwright_locator
-            
-            playwright_locator, was_converted = convert_to_playwright_locator(candidate_locator)
-            
-            if was_converted:
-                logger.info(f"   Converted to Playwright format: {playwright_locator}")
-            
-            count = await page.locator(playwright_locator).count()
-            
-            if count == 1:
-                # SEMANTIC VALIDATION: Verify we found the RIGHT element
-                semantic_match = True
-                actual_text = ""
-                if expected_text:
-                    semantic_match, actual_text = await _validate_semantic_match(page, playwright_locator, expected_text)
-                    if not semantic_match:
-                        logger.warning(f"⚠️ Candidate locator is unique BUT text doesn't match!")
-                        logger.warning(f"   Expected: '{expected_text}'")
-                        logger.warning(f"   Actual: '{actual_text}'")
-                        logger.info("   Continuing to find correct element...")
-                        # Don't return - continue to try other approaches
-                    else:
-                        logger.info(f"✅ Candidate locator is unique AND semantically correct")
-                
-                if semantic_match:
-                    logger.info(f"✅ Candidate locator is unique: {playwright_locator}")
-                    return {
-                        'element_id': element_id,
-                        'description': element_description,
-                        'found': True,
-                        'best_locator': playwright_locator,
-                        'all_locators': [{
-                            'type': 'candidate',
-                            'locator': playwright_locator,
-                            'priority': 0,
-                            'strategy': 'Agent-provided candidate' + (' (converted)' if was_converted else ''),
-                            'count': count,
-                            'unique': True,
-                            'valid': True,
-                            'validated': True,
-                            'semantic_match': semantic_match,
-                            'validation_method': 'playwright'
-                        }],
-                        'element_info': {'actual_text': actual_text} if actual_text else {},
-                        'coordinates': {'x': x, 'y': y},
-                        'validation_summary': {
-                            'total_generated': 1,
-                            'valid': 1,
-                            'unique': 1,
-                            'validated': 1,
-                            'best_type': 'candidate',
-                            'best_strategy': 'Agent-provided candidate',
-                            'validation_method': 'playwright'
-                        },
-                        'semantic_match': semantic_match
-                    }
-            else:
-                logger.info(f"⚠️ Candidate locator not unique (count={count}): {playwright_locator}")
-        except Exception as e:
-            logger.warning(f"⚠️ Candidate locator validation failed: {e}")
+        result = await _validate_candidate_locator(
+            page, candidate_locator, element_id, element_description, 
+            expected_text, x, y
+        )
+        if result:
+            return result
     
     # ========================================
     # STEP 0.5: Check if this is a TABLE-ROW scenario (BEFORE TEXT-FIRST)
@@ -1204,92 +1284,6 @@ async def find_unique_locator_at_coordinates(
             logger.info(f"⚠️ TABLE-CELL approach failed - trying table row detection")
     
     # ========================================
-    # STEP 1.6: Try TABLE ROW locators (when description mentions table rows)
-    # ========================================
-    # This handles cases like "all visible data rows", "filtered table rows", etc.
-    # where we need to find table rows, not individual cells
-    if element_description:
-        table_row_result = await _find_table_rows_by_description(
-            page,
-            description=element_description,
-            expected_text=expected_text
-        )
-        
-        if table_row_result:
-            row_locator = table_row_result.get('locator')
-            row_count = table_row_result.get('count', 0)
-            locator_type = table_row_result.get('locator_type', 'table-rows')
-            element_type = table_row_result.get('element_type', 'table-rows')
-            filter_text = table_row_result.get('filter_text')
-            filtered_locator = table_row_result.get('filtered_locator')
-            matching_count = table_row_result.get('matching_count', 0)
-            
-            # Log based on element type
-            if element_type == 'table-verification':
-                logger.info(f"✅ TABLE-VERIFICATION locator found:")
-                logger.info(f"   Base locator: {row_locator} ({row_count} total rows)")
-                logger.info(f"   Filtered locator: {filtered_locator} ({matching_count} matching rows)")
-                logger.info(f"   Filter text: '{filter_text}'")
-            else:
-                logger.info(f"✅ TABLE-ROWS locator found: {row_locator} ({row_count} rows)")
-            
-            # Build element_info with all relevant metadata
-            element_info = {
-                'expected_text': expected_text,
-                'element_type': element_type,
-                'row_count': row_count
-            }
-            
-            # Add verification-specific fields if present
-            if filter_text:
-                element_info['filter_text'] = filter_text
-            if filtered_locator:
-                element_info['filtered_locator'] = filtered_locator
-            if matching_count:
-                element_info['matching_count'] = matching_count
-            
-            return {
-                'element_id': element_id,
-                'description': element_description,
-                'found': True,
-                'best_locator': row_locator,  # Base locator - matches ALL visible rows
-                'element_type': element_type,
-                'row_count': row_count,
-                'filter_text': filter_text,  # Text to verify in each row (NOT in locator)
-                'all_locators': [{
-                    'type': element_type,
-                    'locator': row_locator,  # Base locator for getting all rows
-                    'filtered_locator': filtered_locator,  # For reference only
-                    'priority': 0,
-                    'strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type})',
-                    'count': matching_count if matching_count else row_count,
-                    'unique': True,
-                    'valid': True,
-                    'validated': True,
-                    'semantic_match': True,
-                    'validation_method': 'playwright'
-                }],
-                'element_info': element_info,
-                'coordinates': {'x': x, 'y': y, 'note': 'Not used - table row detection succeeded'},
-                'validation_summary': {
-                    'total_generated': 1,
-                    'valid': 1,
-                    'unique': 1,
-                    'validated': 1,
-                    'best_type': element_type,
-                    'best_strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type})',
-                    'validation_method': 'playwright'
-                },
-                # Top-level validation fields
-                'validated': True,
-                'count': matching_count if matching_count else row_count,
-                'unique': True,
-                'valid': True,
-                'semantic_match': True,
-                'validation_method': 'playwright'
-            }
-    
-    # ========================================
     # STEP 2: Try SEMANTIC LOCATORS from description (fallback)
     # ========================================
     # This is a fallback when expected_text is not available or didn't work
@@ -1518,7 +1512,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'id',
             'locator': f"id={element_data['id']}",
-            'priority': 1,
+            'priority': PRIORITY_ID,
             'strategy': 'Native ID attribute'
         })
 
@@ -1527,7 +1521,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'data-testid',
             'locator': f"data-testid={element_data['dataTestId']}",
-            'priority': 2,
+            'priority': PRIORITY_TEST_ID,
             'strategy': 'Test ID attribute'
         })
 
@@ -1536,7 +1530,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'data-test',
             'locator': f"data-test={element_data['dataTest']}",
-            'priority': 2,
+            'priority': PRIORITY_TEST_ID,
             'strategy': 'Test attribute'
         })
 
@@ -1545,7 +1539,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'data-qa',
             'locator': f"data-qa={element_data['dataQa']}",
-            'priority': 2,
+            'priority': PRIORITY_TEST_ID,
             'strategy': 'QA attribute'
         })
 
@@ -1559,7 +1553,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'name',
                 'locator': f'[name="{name_escaped}"]',
-                'priority': 3,
+                'priority': PRIORITY_NAME,
                 'strategy': 'Name attribute'
             })
         else:
@@ -1567,7 +1561,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'name',
                 'locator': f"name={element_data['name']}",
-                'priority': 3,
+                'priority': PRIORITY_NAME,
                 'strategy': 'Name attribute'
             })
 
@@ -1577,7 +1571,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'aria-label',
             'locator': f'[aria-label="{aria_label_escaped}"]',
-            'priority': 4,
+            'priority': PRIORITY_ARIA_LABEL,
             'strategy': 'ARIA label'
         })
 
@@ -1587,7 +1581,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'placeholder',
             'locator': f'[placeholder="{placeholder_escaped}"]',
-            'priority': 5,
+            'priority': PRIORITY_PLACEHOLDER,
             'strategy': 'Placeholder attribute'
         })
 
@@ -1597,18 +1591,18 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'title',
             'locator': f'[title="{title_escaped}"]',
-            'priority': 5,
+            'priority': PRIORITY_PLACEHOLDER,
             'strategy': 'Title attribute'
         })
 
     # Strategy 9: Text content (Priority 6)
-    if element_data['innerText'] and len(element_data['innerText']) > 2:
+    if element_data['innerText'] and len(element_data['innerText']) > MIN_TEXT_LENGTH:
         # Escape quotes in text
         text = element_data['innerText'].replace('"', '\\"')
         locator_strategies.append({
             'type': 'text',
             'locator': f'text="{text}"',
-            'priority': 6,
+            'priority': PRIORITY_TEXT,
             'strategy': 'Visible text content'
         })
 
@@ -1618,7 +1612,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'role',
             'locator': f'role={element_data["role"]}[name="{text}"]',
-            'priority': 7,
+            'priority': PRIORITY_ROLE,
             'strategy': 'ARIA role with name'
         })
 
@@ -1630,7 +1624,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'css-parent-id',
                 'locator': f"#{element_data['parentId']} {element_data['tagName']}.{first_class}",
-                'priority': 8,
+                'priority': PRIORITY_CSS_PARENT_ID,
                 'strategy': 'CSS with parent ID context'
             })
 
@@ -1642,7 +1636,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'css-nth-child',
                 'locator': f".{first_parent_class} > {element_data['tagName']}:nth-child({element_data['siblingIndex']})",
-                'priority': 9,
+                'priority': PRIORITY_CSS_NTH_CHILD,
                 'strategy': 'CSS with nth-child'
             })
 
@@ -1654,7 +1648,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'css-class',
                 'locator': f"{element_data['tagName']}.{first_class}",
-                'priority': 10,
+                'priority': PRIORITY_CSS_CLASS,
                 'strategy': 'Simple CSS class'
             })
 
@@ -1663,7 +1657,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'xpath-parent-id',
             'locator': f"xpath=//*[@id='{element_data['parentId']}']//{element_data['tagName']}",
-            'priority': 11,
+            'priority': PRIORITY_XPATH_PARENT_ID,
             'strategy': 'XPath with parent ID'
         })
 
@@ -1675,17 +1669,17 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'xpath-parent-class-position',
                 'locator': f"xpath=//*[contains(@class, '{first_parent_class}')]//{element_data['tagName']}[{element_data['siblingIndex']}]",
-                'priority': 12,
+                'priority': PRIORITY_XPATH_PARENT_CLASS,
                 'strategy': 'XPath with parent class and position'
             })
 
     # Strategy 16: XPath with text (Priority 13)
-    if element_data['innerText'] and len(element_data['innerText']) > 2:
+    if element_data['innerText'] and len(element_data['innerText']) > MIN_TEXT_LENGTH:
         text = element_data['innerText'].replace("'", "\\'")
         locator_strategies.append({
             'type': 'xpath-text',
-            'locator': f"xpath=//{element_data['tagName']}[contains(text(), '{text[:50]}')]",
-            'priority': 13,
+            'locator': f"xpath=//{element_data['tagName']}[contains(text(), '{text[:MAX_TEXT_DISPLAY_LENGTH]}')]",
+            'priority': PRIORITY_XPATH_TEXT,
             'strategy': 'XPath with text content'
         })
 
@@ -1695,7 +1689,7 @@ async def find_unique_locator_at_coordinates(
         locator_strategies.append({
             'type': 'xpath-title',
             'locator': f"xpath=//{element_data['tagName']}[@title='{title}']",
-            'priority': 14,
+            'priority': PRIORITY_XPATH_TITLE,
             'strategy': 'XPath with title attribute'
         })
 
@@ -1706,8 +1700,8 @@ async def find_unique_locator_at_coordinates(
         if href_part:
             locator_strategies.append({
                 'type': 'xpath-href',
-                'locator': f"xpath=//a[contains(@href, '{href_part[-50:]}')]",
-                'priority': 15,
+                'locator': f"xpath=//a[contains(@href, '{href_part[-MAX_TEXT_DISPLAY_LENGTH]}')]",
+                'priority': PRIORITY_XPATH_HREF,
                 'strategy': 'XPath with href'
             })
 
@@ -1719,7 +1713,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'xpath-class-position',
                 'locator': f"xpath=(//{element_data['tagName']}[contains(@class, '{first_class}')])[{element_data['siblingIndex']}]",
-                'priority': 16,
+                'priority': PRIORITY_XPATH_CLASS_POSITION,
                 'strategy': 'XPath with class and position'
             })
 
@@ -1732,7 +1726,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'xpath-multi-attr',
                 'locator': f"xpath=//{element_data['tagName']}[contains(@class, '{first_class}') and contains(text(), '{text}')]",
-                'priority': 17,
+                'priority': PRIORITY_XPATH_MULTI_ATTR,
                 'strategy': 'XPath with class and text'
             })
 
@@ -1744,7 +1738,7 @@ async def find_unique_locator_at_coordinates(
             locator_strategies.append({
                 'type': 'xpath-first-of-class',
                 'locator': f"xpath=(//{element_data['tagName']}[contains(@class, '{first_class}')])[1]",
-                'priority': 18,
+                'priority': PRIORITY_XPATH_FIRST_OF_CLASS,
                 'strategy': 'XPath - first element with class'
             })
 
@@ -1753,13 +1747,17 @@ async def find_unique_locator_at_coordinates(
 
     # Step 4: Validate each strategy
     validated_locators = []
+    
+    # Sort strategies by priority for optimal early exit
+    # Lower priority number = better locator (1=ID is best, 18=XPath-first-of-class is worst)
+    sorted_strategies = sorted(locator_strategies, key=lambda x: x['priority'])
 
-    for idx, strategy in enumerate(locator_strategies, 1):
+    for idx, strategy in enumerate(sorted_strategies, 1):
         try:
-            # Log strategy attempt
-            logger.info(f"🔍 Strategy {idx}/{len(locator_strategies)}: {strategy['type']} (priority={strategy['priority']})")
-            logger.info(f"   Locator: {strategy['locator']}")
-            logger.info(f"   Strategy: {strategy['strategy']}")
+            # Log strategy attempt (DEBUG level - verbose details)
+            logger.debug(f"🔍 Strategy {idx}/{len(sorted_strategies)}: {strategy['type']} (priority={strategy['priority']})")
+            logger.debug(f"   Locator: {strategy['locator']}")
+            logger.debug(f"   Strategy: {strategy['strategy']}")
             
             # Validate with Playwright
             count = await page.locator(strategy['locator']).count()
@@ -1780,6 +1778,15 @@ async def find_unique_locator_at_coordinates(
             # Log validation result with detailed status
             if is_unique:
                 logger.info(f"   ✅ VALID & UNIQUE: count={count}, unique={is_unique}, valid={is_valid}")
+                
+                # OPTIMIZATION: Early exit for high-priority unique locators
+                # If we found a high-priority unique locator (ID, test-id, name), stop searching
+                # Priority 1-3 are considered "high-priority" (ID, test attributes, name)
+                if strategy['priority'] <= PRIORITY_NAME:  # PRIORITY_NAME = 3
+                    logger.info(f"   ⚡ EARLY EXIT: High-priority unique locator found (priority={strategy['priority']})")
+                    logger.info(f"   Skipping validation of {len(sorted_strategies) - idx} remaining strategies")
+                    break  # Exit the loop early
+                    
             elif count > 1:
                 logger.info(f"   ❌ NOT UNIQUE: count={count}, unique={is_unique}, valid={is_valid}")
             elif count == 0:
