@@ -791,17 +791,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const exitCodeMatch = rawLog.match(/Robot Framework Test Execution \(Exit Code: (\d+)\)/i);
         const exitCode = exitCodeMatch ? exitCodeMatch[1] : null;
         
-        // Extract suite name
-        const suiteMatch = rawLog.match(/Suite:\s*([^\s]+(?:\s+[^\s]+)*?)(?=\s+Test:|$)/i);
+        // Extract suite name - simplified regex to avoid ReDoS
+        // Changed from: /Suite:\s*([^\s]+(?:\s+[^\s]+)*?)(?=\s+Test:|$)/i
+        const suiteMatch = rawLog.match(/Suite:\s*([^\n]+?)\s+Test:/i);
         const suiteName = suiteMatch ? suiteMatch[1].trim() : 'Unknown';
         
-        // Extract test name and status
-        const testMatch = rawLog.match(/Test:\s*(.+?)\s*-\s*(PASS|FAIL)/i);
+        // Extract test name and status - simplified regex to avoid ReDoS
+        // Changed from: /Test:\s*(.+?)\s*-\s*(PASS|FAIL)/i
+        const testMatch = rawLog.match(/Test:\s*([^-]+)\s*-\s*(PASS|FAIL)/i);
         const testName = testMatch ? testMatch[1].trim() : 'Unknown';
         const testStatus = testMatch ? testMatch[2].toUpperCase() : 'UNKNOWN';
         
-        // Extract results
-        const resultsMatch = rawLog.match(/Results?:\s*(\d+)\s*passed,\s*(\d+)\s*failed/i);
+        // Extract results - simplified regex to avoid ReDoS
+        // Changed from: /Results?:\s*(\d+)\s*passed,\s*(\d+)\s*failed/i
+        const resultsMatch = rawLog.match(/Results?:\s*(\d+) passed, (\d+) failed/i);
         const passed = resultsMatch ? resultsMatch[1] : '0';
         const failed = resultsMatch ? resultsMatch[2] : '0';
         
@@ -852,6 +855,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const fileName = pathParts[pathParts.length - 1];
                 // Create HTTP URL using the /reports endpoint
                 logUrl = `/reports/${runId}/${fileName}`;
+            }
+            
+            // XSS Protection: Validate URL scheme to prevent javascript: injection
+            const isValidUrl = logUrl.startsWith('/') || logUrl.startsWith('http://') || logUrl.startsWith('https://');
+            if (!isValidUrl) {
+                logUrl = '#'; // Fallback to safe value
             }
             
             html += `<div class="summary-line" style="margin-top: 0.5rem;">`;

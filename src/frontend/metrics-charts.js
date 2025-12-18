@@ -5,6 +5,17 @@
 let chart1, chart2;
 let currentChartData = {};
 
+// Date formatting helper - moved here to avoid global dependency
+function formatDateForTooltip(dateStr) {
+    const d = new Date(dateStr);
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+    return `${month}/${day} ${hours}:${minutes}:${seconds}`;
+}
+
 // Initialize chart dropdowns
 function initializeChartDropdowns() {
     document.getElementById('chart1-select').addEventListener('change', () => renderChart1());
@@ -237,7 +248,7 @@ function renderChart1() {
             });
             break;
             
-        case 'multi-metric':
+        case 'multi-metric': {
             // Normalize all metrics to 0-100 scale for comparison
             const normalize = (arr) => {
                 const max = Math.max(...arr);
@@ -282,6 +293,7 @@ function renderChart1() {
                 options: getCommonOptions()
             });
             break;
+        }
             
         case 'token-usage':
             chart1 = new Chart(ctx, {
@@ -576,7 +588,7 @@ function renderChart2() {
             });
             break;
             
-        case 'domain-cost':
+        case 'domain-cost': {
             const domains = Object.keys(data.domainStats);
             const domainCosts = domains.map(d => data.domainStats[d].totalCost);
             
@@ -612,9 +624,10 @@ function renderChart2() {
                 }
             });
             break;
+        }
             
         // ========= ADVANCED ANALYSIS OPTIONS (merged from chart4) =========
-        case 'llm-distribution':
+        case 'llm-distribution': {
             // Create histogram bins
             const bins = [0, 10, 20, 30, 40, 50, 100];
             const binCounts = new Array(bins.length - 1).fill(0);
@@ -656,8 +669,9 @@ function renderChart2() {
                 }
             });
             break;
+        }
             
-        case 'workflow-radar':
+        case 'workflow-radar': {
             // Take average of last 5 workflows
             const recent = data.sortedRuns.slice(-5);
             const avgMetrics = {
@@ -704,8 +718,9 @@ function renderChart2() {
                 }
             });
             break;
+        }
             
-        case 'domain-performance':
+        case 'domain-performance': {
             const domainList = Object.keys(data.domainStats);
             const domainSuccessRates = domainList.map(d => {
                 const stats = data.domainStats[d];
@@ -748,8 +763,9 @@ function renderChart2() {
                 }
             });
             break;
+        }
             
-        case 'time-distribution':
+        case 'time-distribution': {
             // Create time bins
             const maxTime = Math.max(...data.executionTimes);
             const timeBins = [0, 20, 40, 60, 80, 100, maxTime + 1];
@@ -792,6 +808,7 @@ function renderChart2() {
                 }
             });
             break;
+        }
     }
 }
 
