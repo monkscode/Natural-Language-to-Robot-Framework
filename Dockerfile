@@ -1,5 +1,5 @@
-# Optimized Dockerfile - 50% smaller size, 75-85% faster rebuilds
-# Python 3.12 + UV package manager + BuildKit caching
+# Optimized Dockerfile - Aggressive Size Reduction
+# Python 3.12 + UV package manager + BuildKit caching + System Chrome Only
 FROM python:3.12-slim
 
 # Set working directory
@@ -8,12 +8,14 @@ WORKDIR /app
 # Prevent Python from writing pyc files and enable unbuffered output
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright \
+    CHROME_BIN=/usr/bin/google-chrome
 
 # Install UV package manager (10-100x faster than pip)
 RUN pip install --no-cache-dir uv
 
 # Install system dependencies with BuildKit cache support for faster rebuilds
+# Combined layer for install + cleanup to reduce image size
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -24,6 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     xvfb \
     dbus-x11 \
     curl \
+    # Required system libraries for Chrome/Playwright
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -42,11 +45,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxfixes3 \
     libxkbcommon0 \
     libxrandr2 \
-    xdg-utils && \
+    xdg-utils \
+    nodejs \
+    npm && \
+    # Install Google Chrome
     wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends google-chrome-stable && \
+    # Cleanup build tools and lists to reduce layer size
+    apt-get purge -y --auto-remove wget gnupg curl && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
 
 # Install Robot Framework packages using UV (much faster than pip)
@@ -56,8 +64,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     robotframework-seleniumlibrary \
     robotframework-browser[bb]
 
-# Install Playwright Chromium browser (must persist to image, not cached)
-RUN rfbrowser install chromium
+# Initialize rfbrowser node dependencies but SKIP browser binary download
+# We use the system-installed google-chrome-stable instead
+RUN rfbrowser init --skip-browsers
 
 # Create optimized virtual display script using sh (smaller than bash)
 RUN printf '#!/bin/sh\n\
