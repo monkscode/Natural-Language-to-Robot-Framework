@@ -474,6 +474,360 @@ async def _find_element_by_description(page, description: str) -> Optional[str]:
         return None
 
 
+async def _find_table_rows_by_description(
+    page,
+    description: str,
+    expected_text: Optional[str] = None
+) -> Optional[dict]:
+    """
+    Find table rows when the description indicates we're looking for table rows.
+    
+    This handles scenarios like:
+    - "all visible data rows"
+    - "table rows after filtering"
+    - "filtered results in table"
+    
+    Common table row patterns for different frameworks:
+    - React-Table: .rt-tbody .rt-tr-group
+    - Standard HTML: table tbody tr
+    - ARIA grids: [role="grid"] [role="row"]
+    
+    Args:
+        page: Playwright page object
+        description: Element description from CrewAI
+        expected_text: Optional text that should appear in the rows
+        
+    Returns:
+        Dict with 'locator', 'count', and 'element_type' if found, None otherwise
+    """
+    if not description:
+        return None
+    
+    desc_lower = description.lower()
+    
+    # Keywords that indicate we're looking for table rows (not individual cells)
+    table_row_keywords = [
+        # Explicit row keywords
+        'table row', 'data row', 'table body', 'visible row', 'filtered row',
+        'all rows', 'row result', 'matching row', 'search result', 'result row',
+        'rows in table', 'rows within', 'data rows',
+        # Table-related keywords (when user wants to verify table data)
+        'data table', 'main table', 'content table', 'result table',
+        'table on', 'table after', 'filtered table', 'search table',
+        # Content area patterns (table displaying results)
+        'table displaying', 'displaying results', 'content area of the table',
+        'table content', 'table results', 'results in table'
+    ]
+    
+    # Check if description mentions table rows
+    is_table_row_request = any(keyword in desc_lower for keyword in table_row_keywords)
+    
+    if not is_table_row_request:
+        return None
+    
+    logger.info(f"🔍 TABLE-ROW-FINDER: Description mentions table rows")
+    
+    # Common table row locators for different frameworks (ordered by specificity)
+    table_row_locators = [
+        # React-Table (demoqa, etc.)
+        ('.rt-tbody .rt-tr-group', 'react-table-rows'),
+        ('.rt-tbody > .rt-tr-group', 'react-table-rows-direct'),
+        # Standard HTML tables
+        ('table tbody tr', 'html-table-rows'),
+        ('table > tbody > tr', 'html-table-rows-direct'),
+        # ARIA grids
+        ('[role="grid"] [role="row"]:not([role="columnheader"])', 'aria-grid-rows'),
+        ('[role="rowgroup"] [role="row"]', 'aria-rowgroup-rows'),
+        # Common data table classes
+        ('.table-body tr', 'table-body-rows'),
+        ('.data-table tbody tr', 'data-table-rows'),
+        # AG Grid
+        ('.ag-body-viewport .ag-row', 'ag-grid-rows'),
+        # Material UI Table
+        ('.MuiTableBody-root .MuiTableRow-root', 'mui-table-rows'),
+    ]
+    
+    for locator, locator_type in table_row_locators:
+        try:
+            count = await page.locator(locator).count()
+            
+            if count >= 1:
+                logger.info(f"   📋 Found {count} rows with: {locator}")
+                
+                # If expected_text provided, this is a TABLE VERIFICATION scenario
+                if expected_text:
+                    # Get first word of expected text for partial matching
+                    first_word = expected_text.split()[0] if expected_text.split() else expected_text
+                    
+                    # Build a filtered locator that matches only rows with the text
+                    filtered_locator = f'{locator}:has-text("{first_word}")'
+                    
+                    # Check if any row contains the expected text
+                    matching_rows = page.locator(filtered_locator)
+                    matching_count = await matching_rows.count()
+                    
+                    if matching_count >= 1:
+                        logger.info(f"   ✅ {matching_count} rows contain '{first_word}'")
+                        logger.info(f"   🔍 This is a TABLE-VERIFICATION scenario")
+                        
+                        # Return enriched metadata for table verification
+                        return {
+                            'locator': locator,  # Base row locator (matches all rows)
+                            'filtered_locator': filtered_locator,  # Locator for rows with text
+                            'count': count,  # Total row count
+                            'matching_count': matching_count,  # Rows matching filter
+                            'filter_text': first_word,  # The text to verify
+                            'element_type': 'table-verification',  # Special type for verification
+                            'locator_type': locator_type
+                        }
+                    else:
+                        logger.debug(f"   ⚠️ Rows found but none contain '{first_word}'")
+                        continue
+                else:
+                    # No expected_text, return basic table-rows type
+                    return {
+                        'locator': locator,
+                        'count': count,
+                        'element_type': 'table-rows',
+                        'locator_type': locator_type
+                    }
+                    
+        except Exception as e:
+            logger.debug(f"   ⚠️ Locator failed: {locator} - {e}")
+            continue
+    
+    logger.info(f"   ⚠️ TABLE-ROW-FINDER: No table rows found on page")
+    return None
+
+
+async def _refine_cell_to_clickable_element(
+    page,
+    cell_locator: str,
+    expected_text: str
+) -> Optional[str]:
+    """
+    Refine a table cell locator to find a specific clickable element inside.
+    
+    When a td contains multiple elements (e.g., "edit" and "delete" links),
+    this function attempts to find the exact element matching expected_text.
+    
+    Refinement Priority (for QA automation best practices):
+    1. Links (<a>) - Most common for table actions
+    2. Buttons (<button>) - Standard clickable elements
+    3. ARIA buttons ([role="button"]) - Custom button implementations
+    4. Elements with aria-label (icon buttons)
+    5. Elements with title attribute (tooltip elements)
+    6. Any element with matching text (last resort)
+    
+    Args:
+        page: Playwright page object
+        cell_locator: The td cell locator
+        expected_text: The text to find inside the cell
+        
+    Returns:
+        Refined locator string if found, None otherwise
+    """
+    if not expected_text or not expected_text.strip():
+        return None
+    
+    text = expected_text.strip()
+    
+    # Refinement strategies in priority order
+    # Using >> for Playwright's chained locator syntax
+    refinement_strategies = [
+        # 1. Links - most common for table actions like "edit", "delete", "view"
+        (f'{cell_locator} >> a:has-text("{text}")', 'link'),
+        (f'{cell_locator} >> a:text("{text}")', 'link-exact'),
+        
+        # 2. Buttons - standard clickable elements
+        (f'{cell_locator} >> button:has-text("{text}")', 'button'),
+        (f'{cell_locator} >> button:text("{text}")', 'button-exact'),
+        
+        # 3. ARIA buttons - custom button implementations
+        (f'{cell_locator} >> [role="button"]:has-text("{text}")', 'aria-button'),
+        
+        # 4. Icon buttons with aria-label
+        (f'{cell_locator} >> [aria-label="{text}" i]', 'aria-label'),
+        (f'{cell_locator} >> [aria-label*="{text}" i]', 'aria-label-partial'),
+        
+        # 5. Elements with title attribute (tooltips)
+        (f'{cell_locator} >> [title="{text}" i]', 'title'),
+        (f'{cell_locator} >> [title*="{text}" i]', 'title-partial'),
+        
+        # 6. Input elements with matching value
+        (f'{cell_locator} >> input[value="{text}" i]', 'input-value'),
+        
+        # 7. Any clickable element with text (span, div with onclick, etc.)
+        (f'{cell_locator} >> :text("{text}")', 'any-text'),
+    ]
+    
+    logger.info(f"   🔍 Refining cell locator to find clickable element with text '{text}'")
+    
+    for refined_locator, strategy_name in refinement_strategies:
+        try:
+            count = await page.locator(refined_locator).count()
+            
+            if count == 1:
+                logger.info(f"   ✅ Refined to {strategy_name}: {refined_locator}")
+                return refined_locator
+            elif count > 1:
+                logger.debug(f"   ⚠️ Multiple matches ({count}) for {strategy_name}")
+            # count == 0: no matches, try next strategy
+            
+        except Exception as e:
+            logger.debug(f"   ⚠️ Refinement failed for {strategy_name}: {e}")
+            continue
+    
+    logger.info(f"   ⚠️ Could not refine cell to specific element, using cell locator")
+    return None
+
+
+async def _find_table_cell_by_structured_info(
+    page, 
+    table_cell_info: Optional[Dict] = None,
+    description: str = "",
+    expected_text: Optional[str] = None
+) -> Optional[dict]:
+    """
+    Find a table cell element using structured table_cell_info from BrowserUse agent.
+    
+    This function uses STRUCTURED INPUT from BrowserUse (preferred) rather than parsing
+    natural language descriptions with regex (brittle).
+    
+    ENHANCED: When expected_text is provided and matches content inside the cell,
+    attempts to refine the locator to target the specific clickable element (link, button)
+    rather than the entire cell. This is critical for cells with multiple actions.
+    
+    Structured Format (from BrowserUse agent):
+    {
+        "table_heading": "Example 1",   # Text near/above the table (primary identifier)
+        "table_index": 1,               # Fallback: nth table on page (1-indexed)
+        "row": 1,                        # Row number (1-indexed)
+        "column": 2,                     # Column number (1-indexed)
+    }
+    
+    Args:
+        page: Playwright page object
+        table_cell_info: Structured dict with table/row/column info (from BrowserUse)
+        description: Human-readable description (for logging only)
+        expected_text: Optional expected text content for validation AND refinement
+        
+    Returns:
+        Dict with 'locator' and 'element_type' keys if found, None otherwise
+    """
+    if not table_cell_info:
+        logger.debug(f"   ⚠️ No structured table_cell_info provided for: {description}")
+        return None
+    
+    # Extract structured info
+    table_heading = table_cell_info.get('table_heading')
+    table_index = table_cell_info.get('table_index', 1)
+    row = table_cell_info.get('row')
+    column = table_cell_info.get('column')
+    
+    # Validate required fields
+    if row is None or column is None:
+        logger.warning(f"   ⚠️ Missing row ({row}) or column ({column}) in table_cell_info")
+        return None
+    
+    logger.info(f"🔍 TABLE-CELL-FINDER: Using structured info")
+    logger.info(f"   📋 Table heading: {table_heading or 'N/A'}, Index: {table_index}")
+    logger.info(f"   📋 Row: {row}, Column: {column}")
+    if expected_text:
+        logger.info(f"   📋 Expected text: '{expected_text}'")
+    
+    # ========================================
+    # Build Locator Strategies for the Cell
+    # ========================================
+    locators_to_try = []
+    
+    # Strategy 1: If table_heading provided, find table near that heading
+    if table_heading:
+        # XPath to find table following a heading with specific text
+        locators_to_try.extend([
+            # Table following h3 with text
+            f'xpath=//h3[contains(text(), "{table_heading}")]/following-sibling::table[1]//tbody/tr[{row}]/td[{column}]',
+            # Table following any heading with text
+            f'xpath=//*[self::h1 or self::h2 or self::h3 or self::h4][contains(text(), "{table_heading}")]/following-sibling::table[1]//tbody/tr[{row}]/td[{column}]',
+            # Table with caption containing text
+            f'xpath=//table[.//caption[contains(text(), "{table_heading}")]]//tbody/tr[{row}]/td[{column}]',
+        ])
+    
+    # Strategy 2: Use table_index (nth table on page)
+    table_num = table_index if table_index else 1
+    locators_to_try.extend([
+        # CSS selector with nth-of-type (works with tables having tbody)
+        f'table:nth-of-type({table_num}) tbody tr:nth-child({row}) td:nth-child({column})',
+        # XPath selector (very reliable for tables)
+        f'xpath=(//table)[{table_num}]//tbody/tr[{row}]/td[{column}]',
+        # CSS without tbody (some tables don't use tbody)
+        f'table:nth-of-type({table_num}) tr:nth-child({row}) td:nth-child({column})',
+        # Direct XPath without tbody
+        f'xpath=(//table)[{table_num}]//tr[{row}]/td[{column}]',
+    ])
+    
+    # Strategy 3: Using role=table with nth-of-type
+    locators_to_try.append(
+        f'[role="table"]:nth-of-type({table_num}) [role="row"]:nth-child({row}) [role="cell"]:nth-child({column})'
+    )
+    
+    # Try each locator to find the cell
+    for cell_locator in locators_to_try:
+        try:
+            count = await page.locator(cell_locator).count()
+            
+            if count == 1:
+                # Cell found! Now determine what to return
+                
+                if expected_text:
+                    # Validate that expected_text is somewhere in this cell
+                    is_match, actual_text = await _validate_semantic_match(page, cell_locator, expected_text)
+                    
+                    if not is_match:
+                        logger.debug(f"   ⚠️ Locator found but text mismatch: {cell_locator}")
+                        continue  # Try next locator
+                    
+                    logger.info(f"   ✅ TABLE-CELL found with text match: {cell_locator}")
+                    
+                    # ========================================
+                    # REFINEMENT: Try to find specific clickable element inside
+                    # ========================================
+                    # This handles cases like <td><a>edit</a> <a>delete</a></td>
+                    # where we want to target the specific "edit" link, not the whole cell
+                    
+                    refined_locator = await _refine_cell_to_clickable_element(
+                        page, cell_locator, expected_text
+                    )
+                    
+                    if refined_locator:
+                        # Successfully refined to a specific element inside the cell
+                        return {
+                            'locator': refined_locator, 
+                            'element_type': 'table-cell-element',
+                            'cell_locator': cell_locator  # Keep original cell for reference
+                        }
+                    else:
+                        # Refinement failed, return the cell locator
+                        # This is correct for cells where the text IS the content (e.g., <td>$45.00</td>)
+                        logger.info(f"   📝 Using cell locator (no refinable inner element)")
+                        return {'locator': cell_locator, 'element_type': 'table-cell'}
+                else:
+                    # No expected_text, just return the cell locator
+                    logger.info(f"   ✅ TABLE-CELL locator found: {cell_locator}")
+                    return {'locator': cell_locator, 'element_type': 'table-cell'}
+            
+            elif count > 1:
+                logger.debug(f"   ⚠️ Multiple matches ({count}) for: {cell_locator}")
+            # count == 0: no matches, try next
+            
+        except Exception as e:
+            logger.debug(f"   ⚠️ Locator failed: {cell_locator} - {e}")
+            continue
+    
+    logger.info(f"   ⚠️ TABLE-CELL-FINDER: No unique locator found for Row {row}, Col {column}")
+    return None
+
+
 async def find_unique_locator_at_coordinates(
     page,
     x: float,
@@ -482,16 +836,18 @@ async def find_unique_locator_at_coordinates(
     element_description: str,
     expected_text: Optional[str] = None,
     candidate_locator: Optional[str] = None,
-    library_type: str = "browser"
+    library_type: str = "browser",
+    table_cell_info: Optional[Dict] = None
 ) -> Dict:
     """
     Find a unique locator for an element using a semantic-first approach.
 
     Strategy Priority (Semantic-First):
-    1. Candidate locator (if provided) - Agent's suggestion
-    2. Semantic locators from expected_text - Most reliable, uses actual visible text
-    3. Semantic locators from description - Fallback when expected_text not available
-    4. Coordinate-based extraction + 21 strategies - Last resort when semantic fails
+    0. Candidate locator (if provided) - Agent's suggestion
+    1. TEXT-FIRST: Semantic locators from expected_text - Most reliable, uses actual visible text
+    1.5. TABLE-CELL: Table cell locators using STRUCTURED info from CrewAI (row/column/table indices)
+    2. SEMANTIC: Locators from description - Fallback when expected_text not available
+    3. COORDINATE: Coordinate-based extraction + 21 strategies - Last resort when semantic fails
 
     The semantic-first approach is more reliable because:
     - Doesn't depend on viewport size or layout (centered layouts won't break it)
@@ -513,6 +869,8 @@ async def find_unique_locator_at_coordinates(
                       Used for semantic validation AND for text-first locator search.
         candidate_locator: Optional locator to validate first (e.g., "id=search-input")
         library_type: "browser" or "selenium" - determines locator format
+        table_cell_info: Optional structured dict for table cells from BrowserUse agent:
+                        {"table_heading": "Example 1", "table_index": 1, "row": 1, "column": 2}
 
     Returns:
         Dict with best_locator, all_locators, validation_summary, validation_method, semantic_match
@@ -522,6 +880,8 @@ async def find_unique_locator_at_coordinates(
     logger.info(f"   Description: '{element_description}'")
     if expected_text:
         logger.info(f"   Expected text: '{expected_text}'")
+    if table_cell_info:
+        logger.info(f"   Table cell info: {table_cell_info}")
     logger.info(f"   Coordinates: ({x}, {y}) [fallback]")
     
     # ========================================
@@ -593,9 +953,114 @@ async def find_unique_locator_at_coordinates(
             logger.warning(f"⚠️ Candidate locator validation failed: {e}")
     
     # ========================================
+    # STEP 0.5: Check if this is a TABLE-ROW scenario (BEFORE TEXT-FIRST)
+    # ========================================
+    # If description mentions table rows, we should NOT use TEXT-FIRST
+    # because it would return `text="Cierra"` instead of the table row locator
+    table_row_keywords = [
+        'table row', 'data row', 'table body', 'visible row', 'filtered row',
+        'all rows', 'row result', 'matching row', 'search result', 'result row',
+        'rows in table', 'rows within', 'data rows',
+        'data table', 'main table', 'content table', 'result table',
+        'table on', 'table after', 'filtered table', 'search table',
+        'table displaying', 'displaying results', 'content area of the table',
+        'table content', 'table results', 'results in table'
+    ]
+    
+    is_table_row_scenario = False
+    if element_description:
+        desc_lower = element_description.lower()
+        is_table_row_scenario = any(keyword in desc_lower for keyword in table_row_keywords)
+        
+        if is_table_row_scenario:
+            logger.info(f"🔍 Step 0.5: TABLE-ROW scenario detected - running TABLE-ROW-FINDER FIRST")
+            table_row_result = await _find_table_rows_by_description(
+                page,
+                description=element_description,
+                expected_text=expected_text
+            )
+            
+            if table_row_result:
+                row_locator = table_row_result.get('locator')
+                row_count = table_row_result.get('count', 0)
+                locator_type = table_row_result.get('locator_type', 'table-rows')
+                element_type = table_row_result.get('element_type', 'table-rows')
+                filter_text = table_row_result.get('filter_text')
+                filtered_locator = table_row_result.get('filtered_locator')
+                matching_count = table_row_result.get('matching_count', 0)
+                
+                # Log based on element type
+                if element_type == 'table-verification':
+                    logger.info(f"✅ TABLE-VERIFICATION locator found (prioritized over TEXT-FIRST):")
+                    logger.info(f"   Base locator: {row_locator} ({row_count} total rows)")
+                    logger.info(f"   Filtered locator: {filtered_locator} ({matching_count} matching rows)")
+                    logger.info(f"   Filter text: '{filter_text}'")
+                else:
+                    logger.info(f"✅ TABLE-ROWS locator found: {row_locator} ({row_count} rows)")
+                
+                # Build element_info with all relevant metadata
+                element_info = {
+                    'expected_text': expected_text,
+                    'element_type': element_type,
+                    'row_count': row_count
+                }
+                
+                # Add verification-specific fields if present
+                if filter_text:
+                    element_info['filter_text'] = filter_text
+                if filtered_locator:
+                    element_info['filtered_locator'] = filtered_locator
+                if matching_count:
+                    element_info['matching_count'] = matching_count
+                
+                return {
+                    'element_id': element_id,
+                    'description': element_description,
+                    'found': True,
+                    'best_locator': row_locator,  # Base locator - matches ALL visible rows
+                    'element_type': element_type,
+                    'row_count': row_count,
+                    'filter_text': filter_text,  # Text to verify in each row (NOT in locator)
+                    'all_locators': [{
+                        'type': element_type,
+                        'locator': row_locator,  # Base locator for getting all rows
+                        'filtered_locator': filtered_locator,  # For reference only
+                        'priority': 0,
+                        'strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type}) - prioritized',
+                        'count': matching_count if matching_count else row_count,
+                        'unique': True,
+                        'valid': True,
+                        'validated': True,
+                        'semantic_match': True,
+                        'validation_method': 'playwright'
+                    }],
+                    'element_info': element_info,
+                    'coordinates': {'x': x, 'y': y, 'note': 'Not used - table row detection succeeded'},
+                    'validation_summary': {
+                        'total_generated': 1,
+                        'valid': 1,
+                        'unique': 1,
+                        'validated': 1,
+                        'best_type': element_type,
+                        'best_strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type}) - prioritized',
+                        'validation_method': 'playwright'
+                    },
+                    # Top-level validation fields
+                    'validated': True,
+                    'count': matching_count if matching_count else row_count,
+                    'unique': True,
+                    'valid': True,
+                    'semantic_match': True,
+                    'validation_method': 'playwright'
+                }
+            else:
+                logger.info(f"⚠️ TABLE-ROW scenario detected but no table rows found - falling back to TEXT-FIRST")
+    
+    # ========================================
     # STEP 1: Try TEXT-FIRST approach (using expected_text)
     # ========================================
     # This is the MOST RELIABLE approach - uses the actual text AI sees
+    # (only runs if not a table-row scenario, or if table-row detection failed)
     if expected_text and expected_text.strip():
         logger.info(f"🔍 Step 1: Trying TEXT-FIRST locators from expected_text: '{expected_text}'")
         
@@ -654,9 +1119,175 @@ async def find_unique_locator_at_coordinates(
                 'validation_method': 'playwright'
             }
         else:
-            logger.info(f"⚠️ TEXT-FIRST approach failed - trying description-based semantic locators")
+            logger.info(f"⚠️ TEXT-FIRST approach failed - trying table cell locators")
     else:
         logger.info(f"⚠️ No expected_text provided - skipping TEXT-FIRST approach")
+    
+    # ========================================
+    # STEP 1.5: Try TABLE CELL locators (using structured info from CrewAI)
+    # ========================================
+    # This handles table cells using STRUCTURED info from CrewAI:
+    # {"table_heading": "Example 1", "table_index": 1, "row": 1, "column": 2}
+    # This is more reliable than parsing natural language descriptions with regex.
+    if table_cell_info:
+        logger.info(f"🔍 Step 1.5: Trying TABLE-CELL locators from structured info")
+        
+        table_cell_result = await _find_table_cell_by_structured_info(
+            page, 
+            table_cell_info=table_cell_info,
+            description=element_description,
+            expected_text=expected_text
+        )
+        
+        if table_cell_result:
+            table_locator = table_cell_result.get('locator')
+            element_type = table_cell_result.get('element_type', 'table-cell')
+            cell_locator = table_cell_result.get('cell_locator')  # Original cell (if refined)
+            
+            # Determine strategy description based on whether we refined inside the cell
+            is_refined = element_type == 'table-cell-element'
+            if is_refined:
+                strategy_desc = 'Refined element inside table cell'
+                logger.info(f"✅ TABLE-CELL-ELEMENT locator found: {table_locator}")
+                logger.info(f"   (Cell: {cell_locator})")
+            else:
+                strategy_desc = 'Table cell locator from structured info'
+                logger.info(f"✅ TABLE-CELL locator found: {table_locator}")
+            
+            # Build element_info with all relevant data
+            element_info = {
+                'expected_text': expected_text, 
+                'element_type': element_type, 
+                'table_cell_info': table_cell_info
+            }
+            if cell_locator:
+                element_info['cell_locator'] = cell_locator
+            
+            return {
+                'element_id': element_id,
+                'description': element_description,
+                'found': True,
+                'best_locator': table_locator,
+                'element_type': element_type,
+                'all_locators': [{
+                    'type': element_type,
+                    'locator': table_locator,
+                    'priority': 0,
+                    'strategy': strategy_desc,
+                    'count': 1,
+                    'unique': True,
+                    'valid': True,
+                    'validated': True,
+                    'semantic_match': True,
+                    'validation_method': 'playwright'
+                }],
+                'element_info': element_info,
+                'coordinates': {'x': x, 'y': y, 'note': 'Not used - table cell approach succeeded'},
+                'validation_summary': {
+                    'total_generated': 1,
+                    'valid': 1,
+                    'unique': 1,
+                    'validated': 1,
+                    'best_type': element_type,
+                    'best_strategy': strategy_desc,
+                    'validation_method': 'playwright'
+                },
+                # Top-level validation fields (required by workflow validation)
+                'validated': True,
+                'count': 1,
+                'unique': True,
+                'valid': True,
+                'semantic_match': True,
+                'validation_method': 'playwright'
+            }
+        else:
+            logger.info(f"⚠️ TABLE-CELL approach failed - trying table row detection")
+    
+    # ========================================
+    # STEP 1.6: Try TABLE ROW locators (when description mentions table rows)
+    # ========================================
+    # This handles cases like "all visible data rows", "filtered table rows", etc.
+    # where we need to find table rows, not individual cells
+    if element_description:
+        table_row_result = await _find_table_rows_by_description(
+            page,
+            description=element_description,
+            expected_text=expected_text
+        )
+        
+        if table_row_result:
+            row_locator = table_row_result.get('locator')
+            row_count = table_row_result.get('count', 0)
+            locator_type = table_row_result.get('locator_type', 'table-rows')
+            element_type = table_row_result.get('element_type', 'table-rows')
+            filter_text = table_row_result.get('filter_text')
+            filtered_locator = table_row_result.get('filtered_locator')
+            matching_count = table_row_result.get('matching_count', 0)
+            
+            # Log based on element type
+            if element_type == 'table-verification':
+                logger.info(f"✅ TABLE-VERIFICATION locator found:")
+                logger.info(f"   Base locator: {row_locator} ({row_count} total rows)")
+                logger.info(f"   Filtered locator: {filtered_locator} ({matching_count} matching rows)")
+                logger.info(f"   Filter text: '{filter_text}'")
+            else:
+                logger.info(f"✅ TABLE-ROWS locator found: {row_locator} ({row_count} rows)")
+            
+            # Build element_info with all relevant metadata
+            element_info = {
+                'expected_text': expected_text,
+                'element_type': element_type,
+                'row_count': row_count
+            }
+            
+            # Add verification-specific fields if present
+            if filter_text:
+                element_info['filter_text'] = filter_text
+            if filtered_locator:
+                element_info['filtered_locator'] = filtered_locator
+            if matching_count:
+                element_info['matching_count'] = matching_count
+            
+            return {
+                'element_id': element_id,
+                'description': element_description,
+                'found': True,
+                'best_locator': row_locator,  # Base locator - matches ALL visible rows
+                'element_type': element_type,
+                'row_count': row_count,
+                'filter_text': filter_text,  # Text to verify in each row (NOT in locator)
+                'all_locators': [{
+                    'type': element_type,
+                    'locator': row_locator,  # Base locator for getting all rows
+                    'filtered_locator': filtered_locator,  # For reference only
+                    'priority': 0,
+                    'strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type})',
+                    'count': matching_count if matching_count else row_count,
+                    'unique': True,
+                    'valid': True,
+                    'validated': True,
+                    'semantic_match': True,
+                    'validation_method': 'playwright'
+                }],
+                'element_info': element_info,
+                'coordinates': {'x': x, 'y': y, 'note': 'Not used - table row detection succeeded'},
+                'validation_summary': {
+                    'total_generated': 1,
+                    'valid': 1,
+                    'unique': 1,
+                    'validated': 1,
+                    'best_type': element_type,
+                    'best_strategy': f'Table {"verification" if element_type == "table-verification" else "row"} detection ({locator_type})',
+                    'validation_method': 'playwright'
+                },
+                # Top-level validation fields
+                'validated': True,
+                'count': matching_count if matching_count else row_count,
+                'unique': True,
+                'valid': True,
+                'semantic_match': True,
+                'validation_method': 'playwright'
+            }
     
     # ========================================
     # STEP 2: Try SEMANTIC LOCATORS from description (fallback)
