@@ -455,12 +455,13 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 
     PLANNING_OUTPUT_RULES = """
 --- FINAL OUTPUT RULES ---
-1.  You MUST respond with ONLY a valid JSON array of objects.
-2.  Each object in the array represents a single test step and MUST have the following keys: "step_description", "element_description", "value", and "keyword".
+1.  You MUST respond with ONLY valid JSON in this exact format: {"steps": [...]}
+2.  The "steps" array contains objects, each representing a single test step with keys: "step_description", "element_description", "value", and "keyword".
 3.  For validation steps, use "Should Be True" keyword with a "condition_expression" key.
 4.  The keys `condition_type`, `condition_value`, `loop_type`, and `loop_source` are OPTIONAL and should only be included for steps with conditional logic or loops.
 5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
-6.  When generating a browser initialization step, you MUST include library-specific parameters.
+6.  When generating a browser initialization step, you MUST include library-specific parameters:
+{browser_init_placeholder}
 7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "RETURN" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
 8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """

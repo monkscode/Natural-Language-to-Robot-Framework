@@ -32,23 +32,16 @@ class PlanOutput(BaseModel):
     steps: List[PlannedStep] = Field(description="List of planned test steps")
 
 
-class IdentifiedElement(BaseModel):
-    """Schema for an element with an identified locator from identify_elements_task."""
-    step_description: str = Field(description="Original step description")
-    element_description: str = Field(description="Description of the element")
-    value: str = Field(description="Value to use in the action")
-    keyword: str = Field(description="Robot Framework keyword")
-    # Locator information from browser automation
+class IdentifiedElement(PlannedStep):
+    """Schema for an element with an identified locator from identify_elements_task.
+    
+    Inherits all fields from PlannedStep and adds locator-specific fields.
+    """
+    # Locator information from browser automation (new fields only)
     locator: Optional[str] = Field(default=None, description="Best locator for the element")
     found: bool = Field(default=False, description="Whether locator was found")
     element_type: Optional[str] = Field(default=None, description="Element type (input, select, etc.)")
     filter_text: Optional[str] = Field(default=None, description="Filter text for table verification")
-    # Inherited optional fields
-    condition_type: Optional[str] = Field(default=None)
-    condition_value: Optional[str] = Field(default=None)
-    loop_type: Optional[str] = Field(default=None)
-    loop_source: Optional[str] = Field(default=None)
-    condition_expression: Optional[str] = Field(default=None)
 
 
 class IdentificationOutput(BaseModel):
@@ -225,16 +218,7 @@ Generated Test
 
             {PromptComponents.PLANNING_LOOP_HANDLING}
 
-            --- FINAL OUTPUT RULES ---
-            1.  You MUST respond with ONLY valid JSON in this exact format: {{"steps": [...]}}
-            2.  The "steps" array contains objects, each representing a single test step with keys: "step_description", "element_description", "value", and "keyword".
-            3.  For validation steps, use "Should Be True" keyword with a "condition_expression" key.
-            4.  The keys `condition_type`, `condition_value`, `loop_type`, and `loop_source` are OPTIONAL and should only be included for steps with conditional logic or loops.
-            5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
-            6.  When generating a browser initialization step, you MUST include library-specific parameters:
-            {self._cached_browser_init}
-            7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "RETURN" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
-            8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
+            {PromptComponents.PLANNING_OUTPUT_RULES.replace("{browser_init_placeholder}", self._cached_browser_init)}
 
             """
         return Task(
@@ -275,24 +259,8 @@ Generated Test
                 "  * Element description (from 'element_description' field) - USE EXACT DESCRIPTION with all spatial context\n"
                 "  * Action keyword (from 'keyword' field: input, click, get_text, etc.)\n"
                 "\n"
-                "⚠️ **CRITICAL FORM ELEMENT HANDLING** ⚠️\n"
-                "When the description mentions checkboxes, radio buttons, or toggle switches:\n"
-                "- ALWAYS request the actual INPUT element, NOT the label text!\n"
-                "- Modify description to explicitly target the input control:\n"
-                "  * 'checkbox 1' → 'the checkbox INPUT element next to text \"checkbox 1\"'\n"
-                "  * 'remember me checkbox' → 'the checkbox INPUT element for \"remember me\"'\n"
-                "  * 'male radio button' → 'the radio button INPUT element for \"male\"'\n"
-                "  * 'agree to terms' → 'the checkbox INPUT element for \"agree to terms\"'\n"
-                "- This ensures BrowserUse finds the clickable <input> element, not just the text label\n"
-                "- Text labels alone cannot be checked/unchecked - only input elements can!\n"
-                "\n"
-                "⚠️ CRITICAL: Preserve the FULL element description from the plan, including ALL spatial hints like:\n"
-                "- Location context: 'in header', 'in main content', 'in sidebar', 'in footer'\n"
-                "- Relative position: 'below the image', 'next to the button', 'above the form'\n"
-                "- Exclusions: 'not in sidebar', 'not in filters', 'not in navigation'\n"
-                "- Container: 'in the results list', 'in the form', 'in the dialog'\n"
-                "These spatial clues help vision AI accurately locate the correct element!\n"
-                "\n"
+                f"{PromptComponents.FORM_ELEMENT_HANDLING}\n"
+                f"{PromptComponents.SPATIAL_CONTEXT_PRESERVATION}\n"
                 "Example elements list:\n"
                 "```json\n"
                 "[\n"
