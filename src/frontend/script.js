@@ -2,15 +2,15 @@
 function setTheme(themeName) {
     document.documentElement.setAttribute('data-theme', themeName);
     localStorage.setItem('theme', themeName);
-    
+
     // Update active state using data-theme attribute
     document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
         btn.classList.remove('active');
-        if(btn.dataset.theme === themeName) {
+        if (btn.dataset.theme === themeName) {
             btn.classList.add('active');
         }
     });
-    
+
     // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
     window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: themeName } }));
 }
@@ -18,11 +18,11 @@ function setTheme(themeName) {
 function toggleDarkMode() {
     const currentMode = document.documentElement.getAttribute('data-mode');
     const newMode = currentMode === 'dark' ? 'light' : 'dark';
-    
+
     document.documentElement.setAttribute('data-mode', newMode);
     localStorage.setItem('mode', newMode);
     // Icon visibility is now controlled by CSS based on data-mode attribute
-    
+
     // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
     window.dispatchEvent(new CustomEvent('modechange', { detail: { mode: newMode } }));
 }
@@ -33,7 +33,7 @@ const savedMode = localStorage.getItem('mode') || 'light';
 
 // Set theme and mode attributes immediately (works before DOM ready)
 setTheme(savedTheme);
-if(savedMode === 'dark') {
+if (savedMode === 'dark') {
     document.documentElement.setAttribute('data-mode', 'dark');
 }
 
@@ -41,12 +41,12 @@ if(savedMode === 'dark') {
 document.addEventListener('DOMContentLoaded', () => {
     // Icon visibility is controlled by CSS based on data-mode attribute
     // No manual icon manipulation needed
-    
+
     // Event delegation for theme buttons (using specific selector to avoid matching <html> element)
     document.querySelectorAll('.theme-toggle-group [data-theme]').forEach(btn => {
         btn.addEventListener('click', () => setTheme(btn.dataset.theme));
     });
-    
+
     // Event delegation for dark mode toggle
     document.querySelectorAll('[data-action="toggle-dark-mode"]').forEach(btn => {
         btn.addEventListener('click', toggleDarkMode);
@@ -73,18 +73,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let robotCodeContent = '';
     let executionStartTime = null;
     let currentState = 'idle'; // idle, ready_generate, ready_execute, generating, executing
-    
+
     // Track generation and execution history
     let hasGeneratedCode = false;
     let hasExecutedCode = false;
-    
+
     // Store the original user query for pattern learning
     let currentUserQuery = null;
-    
+
     // Track manual collapse/expand state
     let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
     let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
-    
+
     // Get log section containers
     const generationLogsSection = document.getElementById('generation-logs-section');
     const executionLogsSection = document.getElementById('execution-logs-section');
@@ -134,17 +134,17 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateButtonState(state) {
         currentState = state;
         const config = buttonConfig[state];
-        
+
         actionBtnText.textContent = config.text;
         actionBtn.disabled = config.disabled;
-        
+
         if (config.icon) {
             actionBtnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${config.icon}"></path>`;
             actionBtnIcon.style.display = 'block';
         } else {
             actionBtnIcon.style.display = 'none';
         }
-        
+
         // Show/hide spinner
         const btnSpinner = actionBtn.querySelector('.btn-spinner');
         if (state === UIState.GENERATING || state === UIState.EXECUTING) {
@@ -159,11 +159,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function determineState() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (currentState === UIState.GENERATING || currentState === UIState.EXECUTING) {
             return currentState; // Don't change state during operations
         }
-        
+
         if (hasCode) {
             return UIState.READY_TO_EXECUTE;
         } else if (hasQuery) {
@@ -183,7 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updatePlaceholder() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (!hasCode && codePlaceholder) {
             if (hasQuery) {
                 codePlaceholder.querySelector('p').textContent = "⚡ Click 'Generate Test' to create code from your query";
@@ -196,7 +196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateNewTestButton() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         // Show "New Test" button if there's any content
         if (hasQuery || hasCode) {
             newTestBtn.style.display = 'inline-flex';
@@ -215,25 +215,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function setCodeContent(code, highlighted = false) {
         robotCodeContent = code;
-        
+
         // Remove placeholder if exists
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
             robotCodeEl.removeChild(codePlaceholder);
         }
-        
+
         if (highlighted) {
             robotCodeEl.innerHTML = code;
         } else {
             robotCodeEl.textContent = code;
         }
-        
+
         if (code.trim()) {
             copyCodeBtn.style.display = 'flex';
             codeLanguageLabel.style.display = 'block';
             downloadBtn.style.display = 'inline-flex';
             editHint.style.display = 'block';
         }
-        
+
         updateUI();
     }
 
@@ -273,7 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function createLogEntry(logEvent, stage) {
         const logEntry = document.createElement('div');
         logEntry.className = 'log-entry';
-        
+
         // Determine log level styling based on message content or status
         let logLevel = 'info';
         if (logEvent.status === 'error' || logEvent.message.includes('⚠️') || logEvent.message.includes('ERROR')) {
@@ -288,30 +288,30 @@ document.addEventListener('DOMContentLoaded', () => {
             logLevel = 'insight';
         }
         logEntry.classList.add(`log-${logLevel}`);
-        
+
         // Build the log message HTML
         let html = `<div class="log-timestamp">[${new Date().toLocaleTimeString()}]</div>`;
         html += `<div class="log-message">${escapeHtml(logEvent.message)}`;
-        
+
         // Add step info if present (no individual progress bars)
         if (logEvent.step) {
             html += ` <span class="log-step-info">(Step ${logEvent.step})</span>`;
         }
-        
+
         html += `</div>`;
-        
+
         logEntry.innerHTML = html;
-        
+
         // Update global progress bar if progress is present
         if (logEvent.progress !== undefined) {
             updateGlobalProgress(stage, logEvent.progress);
         }
-        
+
         return logEntry;
     }
-    
+
     function updateGlobalProgress(stage, progress) {
-        const progressContainer = stage === 'generation' 
+        const progressContainer = stage === 'generation'
             ? document.getElementById('generation-progress-container')
             : document.getElementById('execution-progress-container');
         const progressFill = stage === 'generation'
@@ -320,14 +320,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const progressText = stage === 'generation'
             ? document.getElementById('generation-progress-text')
             : document.getElementById('execution-progress-text');
-        
+
         // Show progress container
         progressContainer.style.display = 'block';
-        
+
         // Update progress bar and text
         progressFill.style.width = `${progress}%`;
         progressText.textContent = `${progress}%`;
-        
+
         // Hide progress bar when complete (100%)
         if (progress >= 100) {
             setTimeout(() => {
@@ -339,19 +339,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function routeLogToContainer(logEntry, stage) {
         // Route log to the correct container based on stage
         const targetContainer = stage === 'generation' ? generationLogsEl : executionLogsEl;
-        const contentEl = stage === 'generation' 
+        const contentEl = stage === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
-        
+
         // Remove empty state if present
         const emptyState = targetContainer.querySelector('.empty-state');
         if (emptyState) {
             targetContainer.innerHTML = '';
         }
-        
+
         // Append log entry
         targetContainer.appendChild(logEntry);
-        
+
         // Only auto-scroll if section is expanded
         if (!contentEl.classList.contains('collapsed')) {
             targetContainer.scrollTop = targetContainer.scrollHeight;
@@ -381,7 +381,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Handle paste to preserve user's formatting and apply syntax highlighting
         e.preventDefault();
         const text = e.clipboardData.getData('text/plain');
-        
+
         if (text.trim()) {
             // Remove placeholder if present
             if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
@@ -390,7 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Apply syntax highlighting to pasted code (preserves original formatting)
             applySyntaxHighlighting(text);
             // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
-            
+
             // User pasted code directly - don't show generation logs
             // Execution logs will show when user clicks execute
         }
@@ -413,7 +413,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // New Test Button Handler
     newTestBtn.addEventListener('click', () => {
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (hasCode) {
             // Show confirmation dialog
             if (confirm('⚠️ This will clear your current test. Are you sure you want to start a new test?')) {
@@ -432,29 +432,29 @@ document.addEventListener('DOMContentLoaded', () => {
         executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
-        
+
         // Reset tracking flags
         hasGeneratedCode = false;
         hasExecutedCode = false;
         generationLogsManualState = null;
         executionLogsManualState = null;
-        
+
         // Clear stored user query
         currentUserQuery = null;
-        
+
         // Hide both log sections
         generationLogsSection.style.display = 'none';
         executionLogsSection.style.display = 'none';
-        
+
         updateUI();
     }
-    
+
     // Manage log section visibility
     function updateLogSectionsVisibility() {
         // Generation logs visibility
         if (hasGeneratedCode) {
             generationLogsSection.style.display = 'block';
-            
+
             // Auto-collapse during execution unless manually overridden
             if (generationLogsManualState === null) {
                 if (currentState === UIState.EXECUTING || hasExecutedCode) {
@@ -473,11 +473,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             generationLogsSection.style.display = 'none';
         }
-        
+
         // Execution logs visibility
         if (hasExecutedCode || currentState === UIState.EXECUTING) {
             executionLogsSection.style.display = 'block';
-            
+
             // Auto-expand during execution unless manually overridden
             if (executionLogsManualState === null) {
                 expandSection('execution', false);
@@ -494,21 +494,21 @@ document.addEventListener('DOMContentLoaded', () => {
             executionLogsSection.style.display = 'none';
         }
     }
-    
+
     function collapseSection(section, isManual = true) {
-        const content = section === 'generation' 
+        const content = section === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
         const button = section === 'generation'
             ? document.getElementById('toggle-generation-logs')
             : document.getElementById('toggle-execution-logs');
         const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
-        
+
         content.classList.add('collapsed');
         sectionEl.classList.add('collapsed-section');
         button.querySelector('span').textContent = 'Expand';
         button.querySelector('svg path').setAttribute('d', 'M5 15l7-7 7 7');
-        
+
         if (isManual) {
             if (section === 'generation') {
                 generationLogsManualState = false;
@@ -517,9 +517,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
-    
+
     function expandSection(section, isManual = true) {
-        const content = section === 'generation' 
+        const content = section === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
         const button = section === 'generation'
@@ -527,16 +527,16 @@ document.addEventListener('DOMContentLoaded', () => {
             : document.getElementById('toggle-execution-logs');
         const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
         const logsEl = section === 'generation' ? generationLogsEl : executionLogsEl;
-        
+
         content.classList.remove('collapsed');
         sectionEl.classList.remove('collapsed-section');
         button.querySelector('span').textContent = 'Collapse';
         button.querySelector('svg path').setAttribute('d', 'M19 9l-7 7-7-7');
-        
+
         // Auto-scroll to latest log when expanding
         if (isManual) {
             logsEl.scrollTop = logsEl.scrollHeight;
-            
+
             if (section === 'generation') {
                 generationLogsManualState = true;
             } else {
@@ -544,7 +544,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
-    
+
     // Toggle button handlers
     document.getElementById('toggle-generation-logs').addEventListener('click', () => {
         const content = document.getElementById('generation-logs-content');
@@ -554,7 +554,7 @@ document.addEventListener('DOMContentLoaded', () => {
             collapseSection('generation', true);
         }
     });
-    
+
     document.getElementById('toggle-execution-logs').addEventListener('click', () => {
         const content = document.getElementById('execution-logs-content');
         if (content.classList.contains('collapsed')) {
@@ -567,9 +567,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Main Action Button Handler
     actionBtn.addEventListener('click', async () => {
         const config = buttonConfig[currentState];
-        
+
         if (!config.action) return;
-        
+
         if (config.action === 'generate') {
             await handleGenerate();
         } else if (config.action === 'execute') {
@@ -580,24 +580,24 @@ document.addEventListener('DOMContentLoaded', () => {
     async function handleGenerate() {
         const query = queryInput.value.trim();
         const hasExistingCode = getCodeContent().trim().length > 0;
-        
+
         // Confirmation for regeneration
         if (hasExistingCode) {
             if (!confirm('⚠️ This will replace your current code. Continue?')) {
                 return;
             }
         }
-        
+
         // Store the user query for pattern learning when executing
         currentUserQuery = query;
-        
+
         updateButtonState(UIState.GENERATING);
         clearCode();
         generationLogsEl.innerHTML = '';
         downloadBtn.style.display = 'none';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
-        
+
         // Reset progress bar
         const generationProgressContainer = document.getElementById('generation-progress-container');
         const generationProgressFill = document.getElementById('generation-progress-fill');
@@ -605,13 +605,13 @@ document.addEventListener('DOMContentLoaded', () => {
         generationProgressContainer.style.display = 'none';
         generationProgressFill.style.width = '0%';
         generationProgressText.textContent = '0%';
-        
+
         // Mark that generation has started
         hasGeneratedCode = true;
-        
+
         // Reset manual state for generation logs (allow auto-management)
         generationLogsManualState = null;
-        
+
         // Update log sections visibility
         updateLogSectionsVisibility();
 
@@ -669,18 +669,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function handleExecute() {
         const code = getCodeContent().trim();
-        
+
         if (!code) {
             alert('No code to execute');
             return;
         }
-        
+
         updateButtonState(UIState.EXECUTING);
         executionLogsEl.innerHTML = '';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
         executionStartTime = Date.now();
-        
+
         // Reset progress bar
         const executionProgressContainer = document.getElementById('execution-progress-container');
         const executionProgressFill = document.getElementById('execution-progress-fill');
@@ -688,13 +688,13 @@ document.addEventListener('DOMContentLoaded', () => {
         executionProgressContainer.style.display = 'none';
         executionProgressFill.style.width = '0%';
         executionProgressText.textContent = '0%';
-        
+
         // Mark that execution has started
         hasExecutedCode = true;
-        
+
         // Reset manual state for execution logs (allow auto-management)
         executionLogsManualState = null;
-        
+
         // Update log sections visibility (will auto-collapse generation, show execution)
         updateLogSectionsVisibility();
 
@@ -783,43 +783,44 @@ document.addEventListener('DOMContentLoaded', () => {
         // Pattern: Robot Framework Test Execution (Exit Code: X)
         // ==== Suite: Test Test: Generated Test - PASS Results: X passed, Y failed
         // Detailed logs available in: <path>
-        
+
         const container = document.createElement('div');
         container.className = 'execution-summary';
-        
+
         // Extract exit code
         const exitCodeMatch = rawLog.match(/Robot Framework Test Execution \(Exit Code: (\d+)\)/i);
         const exitCode = exitCodeMatch ? exitCodeMatch[1] : null;
-        
+
         // Extract suite name - simplified regex to avoid ReDoS
         // Changed from: /Suite:\s*([^\s]+(?:\s+[^\s]+)*?)(?=\s+Test:|$)/i
         const suiteMatch = rawLog.match(/Suite:\s*([^\n]+?)\s+Test:/i);
         const suiteName = suiteMatch ? suiteMatch[1].trim() : 'Unknown';
-        
+
         // Extract test name and status - simplified regex to avoid ReDoS
         // Changed from: /Test:\s*(.+?)\s*-\s*(PASS|FAIL)/i
         const testMatch = rawLog.match(/Test:\s*([^-]+)\s*-\s*(PASS|FAIL)/i);
         const testName = testMatch ? testMatch[1].trim() : 'Unknown';
-        const testStatus = testMatch ? testMatch[2].toUpperCase() : 'UNKNOWN';
-        
+        // BUG FIX: Derive testStatus from failed count (below) instead of testMatch[2]
+        // because the Test line can incorrectly show PASS when results show failures
+
         // Extract results - simplified regex to avoid ReDoS
         // Changed from: /Results?:\s*(\d+)\s*passed,\s*(\d+)\s*failed/i
         const resultsMatch = rawLog.match(/Results?:\s*(\d+) passed, (\d+) failed/i);
         const passed = resultsMatch ? resultsMatch[1] : '0';
         const failed = resultsMatch ? resultsMatch[2] : '0';
-        
+        const testStatus = parseInt(failed) > 0 ? 'FAIL' : (testMatch ? testMatch[2].toUpperCase() : 'UNKNOWN');
         // Extract log path
         const logPathMatch = rawLog.match(/Detailed logs available in:\s*(.+?)(?:\s*$|$)/i);
         let logPath = logPathMatch ? logPathMatch[1].trim() : null;
-        
+
         // Clean up the log path - remove any trailing whitespace or characters
         if (logPath) {
             logPath = logPath.replace(/\s+$/, '');
         }
-        
+
         // Build formatted HTML
         let html = '';
-        
+
         // Header with exit code
         html += '<div class="summary-header">';
         html += `🤖 Robot Framework Test Execution`;
@@ -827,28 +828,28 @@ document.addEventListener('DOMContentLoaded', () => {
             html += ` <span class="${exitCode === '0' ? 'summary-pass' : 'summary-fail'}">(Exit Code: ${exitCode})</span>`;
         }
         html += '</div>';
-        
+
         // Divider
         html += '<div class="summary-divider">══════════════════════════════════════════════════</div>';
-        
+
         // Suite info
         html += `<div class="summary-line"><span class="summary-label">Suite:</span> ${escapeHtml(suiteName)}</div>`;
-        
+
         // Test info
         html += `<div class="summary-line"><span class="summary-label">Test:</span> ${escapeHtml(testName)} - `;
         html += `<span class="${testStatus === 'PASS' ? 'summary-pass' : 'summary-fail'}">${testStatus}</span></div>`;
-        
+
         // Results
         html += `<div class="summary-line"><span class="summary-label">Results:</span> `;
         html += `<span class="summary-pass">${passed} passed</span>, `;
         html += `<span class="${parseInt(failed) > 0 ? 'summary-fail' : ''}">${failed} failed</span></div>`;
-        
+
         // Log link
         if (logPath) {
             // Extract run_id from path (e.g., robot_tests/UUID/log.html)
             const pathParts = logPath.replace(/\\/g, '/').split('/');
             const robotTestsIndex = pathParts.findIndex(part => part === 'robot_tests');
-            
+
             let logUrl = logPath; // fallback to original path
             if (robotTestsIndex !== -1 && pathParts.length > robotTestsIndex + 2) {
                 const runId = pathParts[robotTestsIndex + 1];
@@ -856,33 +857,33 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Create HTTP URL using the /reports endpoint
                 logUrl = `/reports/${runId}/${fileName}`;
             }
-            
+
             // XSS Protection: Validate URL scheme to prevent javascript: injection
             const isValidUrl = logUrl.startsWith('/') || logUrl.startsWith('http://') || logUrl.startsWith('https://');
             if (!isValidUrl) {
                 logUrl = '#'; // Fallback to safe value
             }
-            
+
             html += `<div class="summary-line" style="margin-top: 0.5rem;">`;
             html += `<span class="summary-label">📄 Detailed logs:</span> `;
             html += `<a href="${logUrl}" target="_blank" class="log-link" title="Open log file">View Log</a>`;
             html += `</div>`;
         }
-        
+
         container.innerHTML = html;
         return container;
     }
 
     function handleExecutionData(data) {
         updateStatus('processing', data.message);
-        
+
         if (data.status === 'running') {
             const stage = data.stage || 'execution';
             const logEntry = createLogEntry(data, stage);
             routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.result) {
             const logs = data.result.logs || 'No execution logs available';
-            
+
             // Format the execution logs into structured HTML
             const formattedLog = formatExecutionLog(logs);
             executionLogsEl.innerHTML = '';
@@ -1041,7 +1042,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (line.match(/^\s+\S/)) {
                 const leadingSpaces = line.match(/^(\s+)/)[1];
                 const trimmed = line.trimStart();
-                
+
                 const escapedLeadingSpaces = escapeHtml(leadingSpaces);
                 if (trimmed.startsWith('${')) {
                     const varMatch = trimmed.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
@@ -1055,7 +1056,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 } else {
                     const keywordMatch = trimmed.match(/^([^\s]+(?:\s+[^\s]+)*?)(\s{2,}|\t)/);
-                    
+
                     if (keywordMatch) {
                         const keyword = keywordMatch[1];
                         const separator = keywordMatch[2];
