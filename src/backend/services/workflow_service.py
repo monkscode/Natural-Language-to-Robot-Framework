@@ -89,17 +89,40 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         yield {"status": "running", "message": f"{EMOJI['validate']} Validating code...", "progress": 85}
         yield {"status": "info", "message": "🔬 Validating syntax, structure, and best practices", "progress": 85}
 
-        # Extract robot code from task[2] (code_assembler - no more popup task)
-        robot_code = crew_with_results.tasks[2].output.raw
+        # Extract robot code from task[2] (code_assembler)
+        # With output_pydantic=AssemblyOutput, code is in output.pydantic.code
+        # Fall back to output.raw for backward compatibility
+        task_output = crew_with_results.tasks[2].output
+        
+        # Strategy 1: Try Pydantic output (new format with output_pydantic)
+        if hasattr(task_output, 'pydantic') and task_output.pydantic:
+            robot_code = task_output.pydantic.code
+            logging.info("✅ Extracted robot code from output.pydantic.code (AssemblyOutput)")
+        # Strategy 2: Try json_dict output
+        elif hasattr(task_output, 'json_dict') and task_output.json_dict and 'code' in task_output.json_dict:
+            robot_code = task_output.json_dict['code']
+            logging.info("✅ Extracted robot code from output.json_dict['code']")
+        # Strategy 3: Try parsing raw output as JSON ({"code": "..."})
+        else:
+            raw_output = task_output.raw
+            try:
+                parsed_json = json.loads(raw_output)
+                if isinstance(parsed_json, dict) and 'code' in parsed_json:
+                    robot_code = parsed_json['code']
+                    logging.info("✅ Extracted robot code from parsed JSON in raw output")
+                else:
+                    # Fallback: use raw output directly (legacy format)
+                    robot_code = raw_output
+                    logging.info("✅ Using raw output as robot code (legacy format)")
+            except json.JSONDecodeError:
+                # Raw output is not JSON, use as-is (legacy format)
+                robot_code = raw_output
+                logging.info("✅ Using raw output as robot code (not JSON)")
 
         # Simplified cleaning logic - prompt now handles most cases
         # Keep only essential defensive measures
         
-        # Step 1: Remove markdown code fences (defensive - LLMs sometimes add these)
-        robot_code = re.sub(r'^```[a-zA-Z]*\n', '', robot_code)
-        robot_code = re.sub(r'\n```$', '', robot_code)
-        
-        # Step 2: Handle multiple Settings blocks (LLM might output code multiple times)
+        # Step 1: Handle multiple Settings blocks (LLM might output code multiple times)
         # Find ALL occurrences of *** Settings ***
         settings_matches = list(re.finditer(
             r'\*\*\*\s+Settings\s+\*\*\*', robot_code, re.IGNORECASE))
@@ -133,7 +156,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             else:
                 logging.error("❌ No Robot Framework sections found in output!")
         
-        # Step 3: Final cleanup - remove any trailing non-Robot content
+        # Step 2: Final cleanup - remove any trailing non-Robot content
         # Split into lines and keep only content that's part of Robot Framework
         lines = robot_code.split('\n')
         cleaned_lines = []
