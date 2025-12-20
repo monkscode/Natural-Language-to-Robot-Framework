@@ -677,8 +677,8 @@ body {
 .form-input {
     width: 100%;
     flex: 1;
-    min-height: 140px;
-    max-height: 180px;
+    min-height: 350px;
+    max-height: 400px;
     padding: 1rem;
     background: var(--bg-input);
     border: var(--border-width) solid var(--border-color);
@@ -852,8 +852,8 @@ body {
     flex: 1;
     overflow-y: auto;
     overflow-x: auto;
-    min-height: 160px;
-    max-height: 280px;
+    min-height: 500px;
+    max-height: 800px;
     outline: none;
 }
 
@@ -1217,6 +1217,7 @@ body {
     text-align: center;
     padding: 3rem 1rem;
     color: var(--text-muted);
+    white-space: pre-wrap;
 }
 
 /* Ensure empty state in code block is always visible */
@@ -1226,6 +1227,10 @@ body {
 
 .code-block .empty-state p {
     color: #808080;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 90%;
+    margin: 0 auto;
 }
 
 .empty-state-icon {

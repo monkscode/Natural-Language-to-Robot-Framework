@@ -1,4 +1,6 @@
 import logging
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -14,7 +16,7 @@ class Query(BaseModel):
 
 class ExecuteRequest(BaseModel):
     robot_code: str
-    user_query: str = None  # Optional: original user query for pattern learning
+    user_query: Optional[str] = None  # Optional: original user query for pattern learning
 
 @router.post('/generate-test')
 async def generate_test_only(query: Query):
