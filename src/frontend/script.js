@@ -593,7 +593,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         updateButtonState(UIState.GENERATING);
         clearCode();
-        generationLogsEl.innerHTML = '';
+        // Show loading placeholder while generation is in progress
+        generationLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🧠</div><p>AI is generating your test code... Please wait.</p></div>';
         downloadBtn.style.display = 'none';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
@@ -614,6 +615,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Update log sections visibility
         updateLogSectionsVisibility();
+
+        // Auto-scroll to generation logs so user can see progress
+        setTimeout(() => {
+            generationLogsSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
 
         try {
             const requestPayload = {
@@ -676,7 +682,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         updateButtonState(UIState.EXECUTING);
-        executionLogsEl.innerHTML = '';
+        // Show loading placeholder while execution is in progress
+        executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⏳</div><p>Execution in progress... Please wait.</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
         executionStartTime = Date.now();
@@ -697,6 +704,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Update log sections visibility (will auto-collapse generation, show execution)
         updateLogSectionsVisibility();
+
+        // Auto-scroll to execution logs so user can see progress
+        setTimeout(() => {
+            executionLogsSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
 
         try {
             const requestPayload = {
@@ -765,6 +777,10 @@ document.addEventListener('DOMContentLoaded', () => {
             currentState = UIState.IDLE;
             updateUI();
             updateLogSectionsVisibility();
+            // Auto-scroll back to code area so user can see the generated code
+            setTimeout(() => {
+                document.querySelector('.section:has(#robot-code)')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 200);
         } else if (data.status === 'error') {
             updateStatus('error', 'Generation failed');
             const stage = data.stage || 'generation';
@@ -920,6 +936,10 @@ document.addEventListener('DOMContentLoaded', () => {
             currentState = UIState.IDLE;
             updateUI();
             updateLogSectionsVisibility();
+            // Auto-scroll to execution logs to show the results
+            setTimeout(() => {
+                executionLogsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 200);
         } else if (data.status === 'error') {
             updateStatus('error', 'Execution failed');
             const errorEntry = document.createElement('div');
