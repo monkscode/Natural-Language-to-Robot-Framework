@@ -250,6 +250,9 @@
                         <option value="multi-metric">Multi-Metric Comparison</option>
                         <option value="token-usage">Token Usage (Prompt vs Completion)</option>
                         <option value="cost-efficiency">Cost Efficiency ($/Element)</option>
+                        <!-- Per-Agent & Per-Task -->
+                        <option value="per-agent-tokens">Per-Agent Token Usage</option>
+                        <option value="per-task-tokens">Per-Task Token Usage</option>
                         <!-- Element & Performance -->
                         <option value="elements-bar">Elements Found (Bar)</option>
                         <option value="success-elements">Success vs Failed Elements</option>
@@ -445,7 +448,7 @@
             
             if (!runs || runs.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 2rem;">No workflow data available yet. Run some tests to see metrics!</td></tr>';
-                renderCharts([]);
+                window.metricsCharts.render([]);
                 return;
             }
 

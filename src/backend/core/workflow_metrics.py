@@ -33,6 +33,10 @@ class WorkflowMetrics:
     crewai_prompt_tokens: int = 0
     crewai_completion_tokens: int = 0
     
+    # NEW: Per-agent token tracking
+    per_agent_tokens: Dict[str, Dict[str, int]] = None
+    per_task_tokens: Dict[str, Dict[str, int]] = None
+    
     # Browser-use breakdown
     browser_use_llm_calls: int = 0
     browser_use_cost: float = 0.0
@@ -57,6 +61,12 @@ class WorkflowMetrics:
     
     def __post_init__(self):
         """Initialize optimization metrics with default values if not provided."""
+        if self.per_agent_tokens is None:
+            self.per_agent_tokens = {}
+        
+        if self.per_task_tokens is None:
+            self.per_task_tokens = {}
+        
         if self.token_usage is None:
             self.token_usage = {
                 "step_planner": 0,

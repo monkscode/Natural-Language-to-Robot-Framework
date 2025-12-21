@@ -52,6 +52,7 @@ function processChartData(runs) {
     
     return {
         sortedRuns,
+        latestRun: runs.find(r => r.per_agent_tokens && Object.keys(r.per_agent_tokens).length > 0) || runs[0], // Find first workflow WITH token data (API returns newest first)
         labels: sortedRuns.map(r => formatDateForTooltip(r.timestamp)),
         executionTimes: sortedRuns.map(r => r.execution_time),
         llmCalls: sortedRuns.map(r => r.total_llm_calls),
@@ -352,6 +353,192 @@ function renderChart1() {
                             }
                         },
                         x: { display: false }
+                    }
+                }
+            });
+            break;
+            
+        // ========= PER-AGENT & PER-TASK TOKEN TRACKING =========
+        case 'per-agent-tokens':
+            // Filter runs that have per-agent data
+            const runsWithAgentData = data.sortedRuns.filter(run => 
+                run.per_agent_tokens && Object.keys(run.per_agent_tokens).length > 0
+            );
+            
+            if (runsWithAgentData.length === 0) {
+                chart1 = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['No Data'],
+                        datasets: [{
+                            label: 'No per-agent data available',
+                            data: [0],
+                            backgroundColor: colors.gridColor
+                        }]
+                    },
+                    options: getCommonOptions()
+                });
+                break;
+            }
+            
+            // Get all unique agent names across all runs
+            const allAgents = new Set();
+            runsWithAgentData.forEach(run => {
+                Object.keys(run.per_agent_tokens).forEach(agent => allAgents.add(agent));
+            });
+            const agentList = Array.from(allAgents);
+            
+            // Create datasets (one per agent) - stacked bars
+            const agentColorPalette = [colors.primary, colors.secondary, colors.success, colors.warning, colors.purple, colors.orange];
+            const agentDatasets = agentList.map((agentName, i) => ({
+                label: agentName.length > 30 ? agentName.substring(0, 30) + '...' : agentName,
+                data: runsWithAgentData.map(run => {
+                    const agentData = run.per_agent_tokens[agentName];
+                    return agentData ? agentData.total_tokens : 0;
+                }),
+                backgroundColor: agentColorPalette[i % agentColorPalette.length] + '99',
+                borderColor: colors.borderWidth > 1 ? '#000' : agentColorPalette[i % agentColorPalette.length],
+                borderWidth: colors.borderWidth
+            }));
+            
+            // Labels: workflow IDs (shortened) + timestamp
+            const workflowLabels = runsWithAgentData.map(run => {
+                const date = new Date(run.timestamp);
+                return `${date.getMonth()+1}/${date.getDate()} ${date.getHours()}:${String(date.getMinutes()).padStart(2,'0')}`;
+            });
+            
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: workflowLabels,
+                    datasets: agentDatasets
+                },
+                options: {
+                    ...getCommonOptions(),
+                    scales: {
+                        x: {
+                            stacked: true,
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888', maxRotation: 45, minRotation: 45 }
+                        },
+                        y: {
+                            stacked: true,
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888' },
+                            title: { display: true, text: 'Tokens', color: '#888' }
+                        }
+                    },
+                    plugins: {
+                        ...getCommonOptions().plugins,
+                        title: {
+                            display: true,
+                            text: `Per-Agent Token Usage Across ${runsWithAgentData.length} Workflows`,
+                            color: '#888'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                footer: function(tooltipItems) {
+                                    const runIndex = tooltipItems[0].dataIndex;
+                                    const run = runsWithAgentData[runIndex];
+                                    const total = Object.values(run.per_agent_tokens).reduce((sum, a) => sum + a.total_tokens, 0);
+                                    return `Total: ${total.toLocaleString()} tokens`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            break;
+            
+        case 'per-task-tokens':
+            // Show latest workflow only (tasks are unique per workflow)
+            if (!data.latestRun || !data.latestRun.per_task_tokens || Object.keys(data.latestRun.per_task_tokens).length === 0) {
+                chart1 = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['No Data'],
+                        datasets: [{
+                            label: 'No per-task data available',
+                            data: [0],
+                            backgroundColor: colors.gridColor
+                        }]
+                    },
+                    options: getCommonOptions()
+                });
+                break;
+            }
+            
+            const taskKeys = Object.keys(data.latestRun.per_task_tokens);
+            const taskData = taskKeys.map(key => data.latestRun.per_task_tokens[key]);
+            
+            // Group by agent for color coding
+            const tasksByAgent = {};
+            taskData.forEach((task, i) => {
+                const agent = task.agent_name;
+                if (!tasksByAgent[agent]) tasksByAgent[agent] = [];
+                tasksByAgent[agent].push({ index: i, task: task, key: taskKeys[i] });
+            });
+            
+            const uniqueTaskAgents = Object.keys(tasksByAgent);
+            
+            // Create stacked datasets (prompt + completion per task)
+            const promptDataset = {
+                label: 'Prompt Tokens',
+                data: taskData.map(t => t.prompt_tokens),
+                backgroundColor: colors.primary + '99',
+                borderColor: colors.borderWidth > 1 ? '#000' : colors.primary,
+                borderWidth: colors.borderWidth
+            };
+            
+            const completionDataset = {
+                label: 'Completion Tokens',
+                data: taskData.map(t => t.completion_tokens),
+                backgroundColor: colors.secondary + '99',
+                borderColor: colors.borderWidth > 1 ? '#000' : colors.secondary,
+                borderWidth: colors.borderWidth
+            };
+            
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: taskData.map((t, i) => `Task ${i + 1}\n(${t.agent_name.substring(0, 15)}...)`),
+                    datasets: [promptDataset, completionDataset]
+                },
+                options: {
+                    ...getCommonOptions(),
+                    scales: {
+                        x: {
+                            stacked: true,
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888', maxRotation: 45, minRotation: 45 }
+                        },
+                        y: {
+                            stacked: true,
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888' },
+                            title: { display: true, text: 'Tokens', color: '#888' }
+                        }
+                    },
+                    plugins: {
+                        ...getCommonOptions().plugins,
+                        title: {
+                            display: true,
+                            text: `Per-Task Token Breakdown (Latest Workflow)`,
+                            color: '#888'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const taskIndex = context.dataIndex;
+                                    const task = taskData[taskIndex];
+                                    return [
+                                        `${context.dataset.label}: ${context.parsed.y.toLocaleString()}`,
+                                        `Agent: ${task.agent_name}`,
+                                        `Total: ${task.total_tokens.toLocaleString()} tokens`
+                                    ];
+                                }
+                            }
+                        }
                     }
                 }
             });

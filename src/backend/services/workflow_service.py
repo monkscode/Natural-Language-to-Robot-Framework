@@ -78,7 +78,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results, optimization_metrics = run_crew(
+        crew_result, crew_object, optimization_metrics = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
         
         # Stage 3: Generating (50-75%)
@@ -90,7 +90,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         yield {"status": "info", "message": "🔬 Validating syntax, structure, and best practices", "progress": 85}
 
         # Extract robot code from task[2] (code_assembler - no more popup task)
-        robot_code = crew_with_results.tasks[2].output.raw
+        robot_code = crew_result.tasks_output[2].raw
 
         # Simplified cleaning logic - prompt now handles most cases
         # Keep only essential defensive measures
@@ -150,7 +150,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         robot_code = '\n'.join(cleaned_lines).strip()
 
         # Extract validation output from task[3] (code_validator)
-        raw_validation_output = crew_with_results.tasks[3].output.raw
+        raw_validation_output = crew_result.tasks_output[3].raw
 
         # Try multiple strategies to extract JSON
         validation_data = None
@@ -158,14 +158,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Strategy 1: Try to use output.pydantic or output.json_dict (CrewAI structured output)
         try:
             # First try pydantic attribute (when output_json is a Pydantic model)
-            if hasattr(crew_with_results.tasks[3].output, 'pydantic') and crew_with_results.tasks[3].output.pydantic:
-                validation_data = crew_with_results.tasks[3].output.pydantic.model_dump(
+            if hasattr(crew_result.tasks_output[3], 'pydantic') and crew_result.tasks_output[3].pydantic:
+                validation_data = crew_result.tasks_output[3].pydantic.model_dump(
                 )
                 logging.info(
                     "✅ Parsed validation output from output.pydantic (Pydantic model)")
             # Fallback to json_dict
-            elif hasattr(crew_with_results.tasks[3].output, 'json_dict') and crew_with_results.tasks[3].output.json_dict:
-                validation_data = crew_with_results.tasks[3].output.json_dict
+            elif hasattr(crew_result.tasks_output[3], 'json_dict') and crew_result.tasks_output[3].json_dict:
+                validation_data = crew_result.tasks_output[3].json_dict
                 logging.info(
                     "✅ Parsed validation output from output.json_dict")
         except (AttributeError, TypeError) as e:
@@ -242,13 +242,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 "CrewAI workflow complete. Code validation successful.")
 
             # ============================================
-            # NEW: Collect and merge metrics
+            # NEW: Collect and merge metrics with per-agent tracking
             # ============================================
             try:
-                # 1. Extract CrewAI metrics
-                # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
+                # 1. Extract CrewAI metrics with per-agent and per-task breakdown
+                # Note: Using crewai-token-tracking package with enhanced metrics
                 try:
-                    usage_metrics_obj = crew_with_results.calculate_usage_metrics()
+                    # Get overall crew metrics from the result object
+                    usage_metrics_obj = crew_result.token_usage
                     
                     # Convert UsageMetrics object to dict
                     usage_metrics_dict = {
@@ -260,6 +261,48 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     
                     logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
                     
+                    # Extract per-agent token metrics from crew_result.token_metrics
+                    per_agent_tokens = {}
+                    per_task_tokens = {}
+                    
+                    if hasattr(crew_result, 'token_metrics') and crew_result.token_metrics:
+                        token_metrics = crew_result.token_metrics
+                        
+                        # Extract per-agent metrics
+                        if hasattr(token_metrics, 'per_agent') and token_metrics.per_agent:
+                            for agent_name, agent_metrics in token_metrics.per_agent.items():
+                                per_agent_tokens[agent_name] = {
+                                    'total_tokens': agent_metrics.total_tokens,
+                                    'prompt_tokens': agent_metrics.prompt_tokens,
+                                    'completion_tokens': agent_metrics.completion_tokens,
+                                    'successful_requests': agent_metrics.successful_requests
+                                }
+                                logging.info(f"📊 Agent '{agent_name}': {agent_metrics.total_tokens} tokens")
+                        
+                        # Extract per-task metrics
+                        if hasattr(token_metrics, 'per_task') and token_metrics.per_task:
+                            for task_name, task_metrics in token_metrics.per_task.items():
+                                per_task_tokens[task_name] = {
+                                    'total_tokens': task_metrics.total_tokens,
+                                    'prompt_tokens': task_metrics.prompt_tokens,
+                                    'completion_tokens': task_metrics.completion_tokens,
+                                    'agent_name': task_metrics.agent_name
+                                }
+                                logging.info(f"📊 Task '{task_name}': {task_metrics.total_tokens} tokens (Agent: {task_metrics.agent_name})")
+                    
+                    # Also extract from individual task outputs
+                    if not per_task_tokens:
+                        for i, task_output in enumerate(crew_result.tasks_output):
+                            if hasattr(task_output, 'usage_metrics') and task_output.usage_metrics:
+                                metrics = task_output.usage_metrics
+                                task_key = f"task_{i+1}_{metrics.task_name if hasattr(metrics, 'task_name') else 'unknown'}"
+                                per_task_tokens[task_key] = {
+                                    'total_tokens': metrics.total_tokens,
+                                    'prompt_tokens': metrics.prompt_tokens,
+                                    'completion_tokens': metrics.completion_tokens,
+                                    'agent_name': metrics.agent_name if hasattr(metrics, 'agent_name') else 'unknown'
+                                }
+                    
                 except Exception as e:
                     logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
                     # Fallback to empty metrics
@@ -269,6 +312,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                         'completion_tokens': 0,
                         'successful_requests': 0
                     }
+                    per_agent_tokens = {}
+                    per_task_tokens = {}
                 
                 crewai_metrics = calculate_crewai_cost(
                     usage_metrics_dict,
@@ -281,7 +326,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
                 logging.info(f"📊 Browser-use metrics: {browser_metrics}")
                 
-                # 3. Create unified metrics
+                # 3. Create unified metrics with per-agent tracking
                 # Calculate averages
                 total_elements = browser_metrics.get('elements_processed', 0)
                 browser_llm_calls = browser_metrics.get('llm_calls', 0)
@@ -306,6 +351,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     crewai_tokens=crewai_metrics['tokens'],
                     crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
                     crewai_completion_tokens=crewai_metrics['completion_tokens'],
+                    
+                    # NEW: Per-agent and per-task token tracking
+                    per_agent_tokens=per_agent_tokens,
+                    per_task_tokens=per_task_tokens,
                     
                     # Browser-use breakdown
                     browser_use_llm_calls=browser_llm_calls,
@@ -334,6 +383,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 logging.info(f"✅ Unified metrics recorded successfully")
                 logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
                 logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
+                
+                # Log per-agent metrics
+                if per_agent_tokens:
+                    logging.info("📊 Per-Agent Token Usage:")
+                    for agent_name, metrics in per_agent_tokens.items():
+                        logging.info(f"   {agent_name}: {metrics['total_tokens']} tokens (Prompt: {metrics['prompt_tokens']}, Completion: {metrics['completion_tokens']})")
+                
+                # Log per-task metrics
+                if per_task_tokens:
+                    logging.info("📊 Per-Task Token Usage:")
+                    for task_name, metrics in per_task_tokens.items():
+                        logging.info(f"   {task_name}: {metrics['total_tokens']} tokens (Agent: {metrics['agent_name']})")
                 
             except Exception as metrics_error:
                 logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)

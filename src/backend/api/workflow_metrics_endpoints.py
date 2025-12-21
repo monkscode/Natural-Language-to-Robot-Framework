@@ -46,6 +46,10 @@ class WorkflowMetricsResponse(BaseModel):
     custom_actions_enabled: bool
     custom_action_usage_count: int
     session_id: Optional[str] = None
+    
+    # Per-agent and per-task token tracking
+    per_agent_tokens: Dict[str, Dict[str, int]] = {}
+    per_task_tokens: Dict[str, Dict[str, Any]] = {}
 
 
 class AggregateMetricsResponse(BaseModel):
@@ -174,7 +178,11 @@ async def get_workflow_metrics(
                 avg_cost_per_element=m.avg_cost_per_element,
                 custom_actions_enabled=m.custom_actions_enabled,
                 custom_action_usage_count=m.custom_action_usage_count,
-                session_id=m.session_id
+                session_id=m.session_id,
+                
+                # Per-agent and per-task tokens
+                per_agent_tokens=m.per_agent_tokens,
+                per_task_tokens=m.per_task_tokens
             )
             for m in metrics
         ]
