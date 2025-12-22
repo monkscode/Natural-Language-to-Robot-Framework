@@ -48,6 +48,104 @@ PRIORITY_XPATH_MULTI_ATTR = 17  # XPath with multiple attributes
 PRIORITY_XPATH_FIRST_OF_CLASS = 18  # XPath - first element with class
 
 
+# ========================================
+# SHADOW DOM SUPPORT
+# ========================================
+# These JavaScript snippets handle Shadow DOM traversal for element detection.
+# The helper function is defined once and embedded into each snippet to avoid
+# duplication while maintaining self-contained JavaScript execution.
+
+# Shared Shadow DOM traversal helper - embedded into each JS snippet
+# This function recursively pierces through shadow roots to find the actual
+# element at coordinates. Supports Material UI, Salesforce Lightning, etc.
+_SHADOW_DOM_HELPER_JS = """
+    function getElementFromPointWithShadow(root, x, y) {
+        let element = root.elementFromPoint(x, y);
+        if (!element) return null;
+        
+        // Recursively traverse through shadow roots
+        while (element && element.shadowRoot) {
+            const shadowElement = element.shadowRoot.elementFromPoint(x, y);
+            if (shadowElement && shadowElement !== element) {
+                element = shadowElement;
+            } else {
+                break;
+            }
+        }
+        return element;
+    }
+"""
+
+# Check if element exists at coordinates (returns boolean)
+SHADOW_DOM_ELEMENT_FROM_POINT_JS = f"""
+(args) => {{
+    const {{x, y}} = args;
+    {_SHADOW_DOM_HELPER_JS}
+    return getElementFromPointWithShadow(document, x, y) ? true : false;
+}}
+"""
+
+# Get tag name of element at coordinates (returns string or null)
+SHADOW_DOM_TAG_NAME_JS = f"""
+(args) => {{
+    const {{x, y}} = args;
+    {_SHADOW_DOM_HELPER_JS}
+    const el = getElementFromPointWithShadow(document, x, y);
+    return el ? el.tagName.toLowerCase() : null;
+}}
+"""
+
+# Get full element data at coordinates (returns object or null)
+SHADOW_DOM_ELEMENT_DATA_JS = f"""
+(args) => {{
+    const {{x, y}} = args;
+    {_SHADOW_DOM_HELPER_JS}
+    const el = getElementFromPointWithShadow(document, x, y);
+    if (!el) return null;
+    
+    // Get text content, preferring innerText (visible text) over textContent
+    let textContent = '';
+    try {{
+        textContent = (el.innerText || el.textContent || '').trim().substring(0, 100);
+    }} catch (e) {{
+        textContent = '';
+    }}
+    
+    // Get element's bounding rect for coordinates
+    const rect = el.getBoundingClientRect();
+    
+    return {{
+        tagName: el.tagName.toLowerCase(),
+        id: el.id || '',
+        className: el.className || '',
+        name: el.getAttribute('name') || '',
+        placeholder: el.getAttribute('placeholder') || '',
+        ariaLabel: el.getAttribute('aria-label') || '',
+        dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-qa') || '',
+        href: el.getAttribute('href') || '',
+        type: el.getAttribute('type') || '',
+        role: el.getAttribute('role') || '',
+        title: el.getAttribute('title') || '',
+        textContent: textContent,
+        isInShadowDom: el.getRootNode() !== document,
+        parentTagName: el.parentElement ? el.parentElement.tagName.toLowerCase() : '',
+        parentId: el.parentElement ? (el.parentElement.id || '') : '',
+        parentClassName: el.parentElement ? (el.parentElement.className || '') : '',
+        coordinates: {{
+            x: rect.x + rect.width / 2,
+            y: rect.y + rect.height / 2,
+            width: rect.width,
+            height: rect.height,
+            top: rect.top,
+            left: rect.left,
+            right: rect.right,
+            bottom: rect.bottom
+        }}
+    }};
+}}
+"""
+
+
 async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tuple[bool, str]:
     """
     Validate that the element found by the locator contains the expected text.
@@ -309,7 +407,119 @@ async def _find_checkbox_or_radio_by_label(page, label_text: str) -> Optional[di
     return None
 
 
-async def _find_element_by_expected_text(page, expected_text: str, element_description: str) -> Optional[dict]:
+async def _disambiguate_by_coordinates(page, selector: str, x: float, y: float) -> Optional[Dict]:
+    """
+    When multiple elements match a selector, find which one is at or closest to (x, y).
+    
+    Uses 3-layer approach:
+    1. Visible filter - try to reduce to 1 visible element
+    2. Bounding box match - find element containing coordinates
+    3. Closest distance - fallback if coordinates slightly off
+    
+    Args:
+        page: Playwright page object
+        selector: The selector that matched multiple elements
+        x, y: Target coordinates
+        
+    Returns:
+        Dict with 'locator' and 'disambiguated': True if found, None otherwise
+    """
+    import math
+    
+    try:
+        locator = page.locator(selector)
+        count = await locator.count()
+        
+        if count <= 1:
+            return None  # Nothing to disambiguate
+        
+        logger.info(f"   🔍 DISAMBIGUATE: '{selector}' has {count} matches, using coordinates ({x}, {y})")
+        
+        # Track which selector to use for nth indexing
+        base_selector_for_nth = selector
+        
+        # ========================================
+        # Layer 1: Visible Filter
+        # ========================================
+        try:
+            visible_selector = f"{selector} >> visible=true"
+            visible_locator = page.locator(visible_selector)
+            visible_count = await visible_locator.count()
+            
+            if visible_count == 1:
+                logger.info(f"   ✅ DISAMBIGUATED (visible filter): Only 1 visible element")
+                return {'locator': visible_selector, 'disambiguated': True, 'strategy': 'visible_filter'}
+            elif visible_count < count:
+                # Reduced count, use visible locator for next checks
+                # IMPORTANT: Update base_selector_for_nth to use visible filter
+                locator = visible_locator
+                count = visible_count
+                base_selector_for_nth = visible_selector  # FIX: Use visible selector for nth
+                logger.info(f"   📉 Visible filter reduced to {visible_count} elements")
+        except Exception as e:
+            logger.debug(f"   Visible filter failed: {e}")
+        
+        # ========================================
+        # Layer 2: Bounding Box Match (exact hit)
+        # ========================================
+        best_exact_idx = -1
+        for i in range(count):
+            try:
+                element = locator.nth(i)
+                box = await element.bounding_box()
+                
+                if box:
+                    # Check if (x, y) is inside this element's bounding box
+                    if (box['x'] <= x <= box['x'] + box['width'] and
+                        box['y'] <= y <= box['y'] + box['height']):
+                        best_exact_idx = i
+                        logger.info(f"   ✅ DISAMBIGUATED (bounding box): Coordinates inside element {i}")
+                        break
+            except Exception as e:
+                logger.debug(f"   Bounding box check failed for element {i}: {e}")
+        
+        if best_exact_idx >= 0:
+            indexed_selector = f"{base_selector_for_nth} >> nth={best_exact_idx}"
+            return {'locator': indexed_selector, 'disambiguated': True, 'strategy': 'bounding_box'}
+        
+        # ========================================
+        # Layer 3: Closest Distance (fallback)
+        # ========================================
+        min_distance = float('inf')
+        closest_idx = -1
+        DISTANCE_THRESHOLD = 50  # 50px tolerance
+        
+        for i in range(count):
+            try:
+                element = locator.nth(i)
+                box = await element.bounding_box()
+                
+                if box:
+                    # Calculate distance to box center
+                    center_x = box['x'] + box['width'] / 2
+                    center_y = box['y'] + box['height'] / 2
+                    distance = math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_idx = i
+            except Exception as e:
+                logger.debug(f"   Distance check failed for element {i}: {e}")
+        
+        if closest_idx >= 0 and min_distance < DISTANCE_THRESHOLD:
+            indexed_selector = f"{base_selector_for_nth} >> nth={closest_idx}"
+            logger.info(f"   ✅ DISAMBIGUATED (closest distance): Element {closest_idx} is {min_distance:.1f}px away")
+            return {'locator': indexed_selector, 'disambiguated': True, 'strategy': 'closest_distance', 'distance': min_distance}
+        
+        logger.info(f"   ⚠️ DISAMBIGUATION FAILED: No element within {DISTANCE_THRESHOLD}px (closest: {min_distance:.1f}px)")
+        return None
+        
+    except Exception as e:
+        logger.debug(f"   Disambiguation error: {e}")
+        return None
+
+
+async def _find_element_by_expected_text(page, expected_text: str, element_description: str, x: float = None, y: float = None) -> Optional[dict]:
     """
     Try to find element directly by the expected visible text.
     This is the TEXT-FIRST approach - more reliable than coordinates.
@@ -401,8 +611,8 @@ async def _find_element_by_expected_text(page, expected_text: str, element_descr
         ])
     
     # Generic text-based selectors
+    # NOTE: Removed *:has-text() - it's too broad (matches every ancestor container)
     selectors_to_try.extend([
-        f'*:has-text("{text}")',  # Any element containing the text
         f'[aria-label="{text}"]',
         f'[title="{text}"]',
         f'[placeholder="{text}"]',
@@ -413,7 +623,7 @@ async def _find_element_by_expected_text(page, expected_text: str, element_descr
         short_text = text[:20]
         selectors_to_try.extend([
             f'text="{short_text}"',
-            f'*:has-text("{short_text}")',
+            # NOTE: Removed *:has-text() for partial text - same issue as above
         ])
     
     # Try each selector
@@ -425,7 +635,14 @@ async def _find_element_by_expected_text(page, expected_text: str, element_descr
                 # Return as dict for consistency, but no special element_type
                 return {'locator': selector}
             elif count > 1:
-                logger.debug(f"   ⚠️ Multiple matches ({count}) for: {selector}")
+                # NEW: Try to disambiguate using coordinates if available
+                if x is not None and y is not None:
+                    result = await _disambiguate_by_coordinates(page, selector, x, y)
+                    if result:
+                        logger.info(f"   ✅ TEXT-FIRST SUCCESS (disambiguated): {result['locator']}")
+                        return result
+                else:
+                    logger.debug(f"   ⚠️ Multiple matches ({count}) for: {selector} (no coords for disambiguation)")
             # count == 0: no matches, try next
         except Exception as e:
             logger.debug(f"   ⚠️ Selector failed: {selector} - {e}")
@@ -974,17 +1191,19 @@ async def find_unique_locator_at_coordinates(
     expected_text: Optional[str] = None,
     candidate_locator: Optional[str] = None,
     library_type: str = "browser",
-    table_cell_info: Optional[Dict] = None
+    table_cell_info: Optional[Dict] = None,
+    element_data: Optional[Dict] = None  # NEW: Element attributes from browser-use DOM (id, class, text, etc.)
 ) -> Dict:
     """
     Find a unique locator for an element using a semantic-first approach.
 
     Strategy Priority (Semantic-First):
-    0. Candidate locator (if provided) - Agent's suggestion
-    1. TEXT-FIRST: Semantic locators from expected_text - Most reliable, uses actual visible text
-    1.5. TABLE-CELL: Table cell locators using STRUCTURED info from CrewAI (row/column/table indices)
-    2. SEMANTIC: Locators from description - Fallback when expected_text not available
-    3. COORDINATE: Coordinate-based extraction + 21 strategies - Last resort when semantic fails
+    0. ELEMENT DATA: If element_data is provided (from browser-use DOM), generate locators from those attributes
+    1. Candidate locator (if provided) - Agent's suggestion
+    2. TEXT-FIRST: Semantic locators from expected_text - Most reliable, uses actual visible text
+    2.5. TABLE-CELL: Table cell locators using STRUCTURED info from CrewAI (row/column/table indices)
+    3. SEMANTIC: Locators from description - Fallback when expected_text not available
+    4. COORDINATE: Coordinate-based extraction + 21 strategies - Last resort when semantic fails
 
     The semantic-first approach is more reliable because:
     - Doesn't depend on viewport size or layout (centered layouts won't break it)
@@ -1008,6 +1227,8 @@ async def find_unique_locator_at_coordinates(
         library_type: "browser" or "selenium" - determines locator format
         table_cell_info: Optional structured dict for table cells from BrowserUse agent:
                         {"table_heading": "Example 1", "table_index": 1, "row": 1, "column": 2}
+        element_data: Optional dict with element attributes from browser-use DOM:
+                     {"tagName": "a", "id": "", "textContent": "Services", "href": "/services", ...}
 
     Returns:
         Dict with best_locator, all_locators, validation_summary, validation_method, semantic_match
@@ -1019,6 +1240,8 @@ async def find_unique_locator_at_coordinates(
         logger.info(f"   Expected text: '{expected_text}'")
     if table_cell_info:
         logger.info(f"   Table cell info: {table_cell_info}")
+    if element_data:
+        logger.info(f"   Element data from index: <{element_data.get('tagName', '?')}> id='{element_data.get('id', '')}' text='{element_data.get('textContent', '')[:30]}...'")
     logger.info(f"   Coordinates: ({x}, {y}) [fallback]")
     
     # ========================================
@@ -1144,7 +1367,7 @@ async def find_unique_locator_at_coordinates(
     if expected_text and expected_text.strip():
         logger.info(f"🔍 Step 1: Trying TEXT-FIRST locators from expected_text: '{expected_text}'")
         
-        text_result = await _find_element_by_expected_text(page, expected_text, element_description)
+        text_result = await _find_element_by_expected_text(page, expected_text, element_description, x, y)
         
         if text_result:
             # text_result is now a dict with 'locator' and optionally 'element_type'
@@ -1357,15 +1580,13 @@ async def find_unique_locator_at_coordinates(
     
     # Get the element at coordinates
     try:
-        # Use Playwright to get element at coordinates
-        element_handle = await page.evaluate_handle(
-            """(coords) => {
-                return document.elementFromPoint(coords.x, coords.y);
-            }""",
+        # Use Playwright to get element at coordinates (Shadow DOM aware)
+        element_exists = await page.evaluate(
+            SHADOW_DOM_ELEMENT_FROM_POINT_JS,
             {"x": x, "y": y}
         )
 
-        if not element_handle:
+        if not element_exists:
             logger.error(f"❌ No element found at coordinates ({x}, {y})")
             return {
                 "element_id": element_id,
@@ -1374,12 +1595,9 @@ async def find_unique_locator_at_coordinates(
                 "error": f"No element at coordinates ({x}, {y}) and semantic approach also failed"
             }
         
-        # Check if we got BODY or HTML (coordinates landed in empty space)
+        # Check if we got BODY or HTML (coordinates landed in empty space) - Shadow DOM aware
         tag_check = await page.evaluate(
-            """(coords) => {
-                const el = document.elementFromPoint(coords.x, coords.y);
-                return el ? el.tagName.toLowerCase() : null;
-            }""",
+            SHADOW_DOM_TAG_NAME_JS,
             {"x": x, "y": y}
         )
         
@@ -1412,11 +1630,26 @@ async def find_unique_locator_at_coordinates(
             "error": str(e)
         }
 
-    # Step 2: Extract all possible attributes from the element
+    # Step 2: Extract all possible attributes from the element (Shadow DOM aware)
     try:
         element_data = await page.evaluate(
             """(coords) => {
-                const element = document.elementFromPoint(coords.x, coords.y);
+                // Shadow DOM aware element detection
+                function getElementFromPointWithShadow(root, x, y) {
+                    let element = root.elementFromPoint(x, y);
+                    if (!element) return null;
+                    while (element && element.shadowRoot) {
+                        const shadowElement = element.shadowRoot.elementFromPoint(x, y);
+                        if (shadowElement && shadowElement !== element) {
+                            element = shadowElement;
+                        } else {
+                            break;
+                        }
+                    }
+                    return element;
+                }
+                
+                const element = getElementFromPointWithShadow(document, coords.x, coords.y);
                 if (!element) return null;
                 
                 const rect = element.getBoundingClientRect();
@@ -1697,10 +1930,12 @@ async def find_unique_locator_at_coordinates(
     if element_data['href'] and element_data['tagName'] == 'a':
         # Use partial href match
         href_part = element_data['href'].split('?')[0].split('#')[0]
-        if href_part:
+        # Safe slicing to prevent IndexError when href_part is empty or too short
+        if href_part and len(href_part) > 0:
+            href_slice = href_part[-MAX_TEXT_DISPLAY_LENGTH:] if len(href_part) >= MAX_TEXT_DISPLAY_LENGTH else href_part
             locator_strategies.append({
                 'type': 'xpath-href',
-                'locator': f"xpath=//a[contains(@href, '{href_part[-MAX_TEXT_DISPLAY_LENGTH]}')]",
+                'locator': f"xpath=//a[contains(@href, '{href_slice}')]",
                 'priority': PRIORITY_XPATH_HREF,
                 'strategy': 'XPath with href'
             })
@@ -1835,14 +2070,22 @@ async def find_unique_locator_at_coordinates(
                     actual_text = text
                     logger.info(f"   ✅ Found semantically matching locator: {loc['locator']}")
             
-            # If no semantic match found, use the first unique locator but flag it
-            if best_locator_obj is None and sorted_locators:
-                best_locator_obj = sorted_locators[0]
-                semantic_match = False
-                actual_text = sorted_locators[0].get('actual_text', '')
-                logger.warning(f"   ⚠️ No locator matched expected text '{expected_text}'")
-                logger.warning(f"   Using first unique locator (semantic mismatch!): {best_locator_obj['locator']}")
-                logger.warning(f"   Actual text: '{actual_text}'")
+            # If no semantic match found, DO NOT return wrong locator - return failure instead
+            if best_locator_obj is None:
+                logger.error(f"   ❌ SEMANTIC MISMATCH: No locator matched expected text '{expected_text}'")
+                logger.error(f"   All {len(sorted_locators)} unique locators have wrong text content")
+                
+                # Return failure - do not give back a wrong locator
+                return {
+                    'element_id': element_id,
+                    'description': element_description,
+                    'found': False,
+                    'error': f"Semantic mismatch: Expected '{expected_text}' but none of the {len(sorted_locators)} unique locators matched",
+                    'semantic_match': False,
+                    'expected_text': expected_text,
+                    'candidates_found': len(sorted_locators),
+                    'candidate_locators': [loc['locator'] for loc in sorted_locators[:3]]  # Top 3 for debugging
+                }
         else:
             # No expected_text, just use first unique locator
             best_locator_obj = sorted_locators[0]
