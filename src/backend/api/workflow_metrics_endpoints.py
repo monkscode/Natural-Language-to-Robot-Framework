@@ -35,6 +35,10 @@ class WorkflowMetricsResponse(BaseModel):
     browser_use_llm_calls: int
     browser_use_cost: float
     browser_use_tokens: int
+    browser_use_prompt_tokens: int = 0
+    browser_use_completion_tokens: int = 0
+    browser_use_cached_tokens: int = 0
+    browser_use_actual_cost: float = 0.0
     
     # Browser-use specific metrics
     total_elements: int
@@ -85,6 +89,10 @@ class RecordMetricsRequest(BaseModel):
     browser_use_llm_calls: int = 0
     browser_use_cost: float = 0.0
     browser_use_tokens: int = 0
+    browser_use_prompt_tokens: int = 0
+    browser_use_completion_tokens: int = 0
+    browser_use_cached_tokens: int = 0
+    browser_use_actual_cost: float = 0.0
     
     # Browser-use specific
     total_elements: int = 0
@@ -164,6 +172,10 @@ async def get_workflow_metrics(
                 browser_use_llm_calls=m.browser_use_llm_calls,
                 browser_use_cost=m.browser_use_cost,
                 browser_use_tokens=m.browser_use_tokens,
+                browser_use_prompt_tokens=getattr(m, 'browser_use_prompt_tokens', 0),
+                browser_use_completion_tokens=getattr(m, 'browser_use_completion_tokens', 0),
+                browser_use_cached_tokens=getattr(m, 'browser_use_cached_tokens', 0),
+                browser_use_actual_cost=getattr(m, 'browser_use_actual_cost', 0.0),
                 
                 # Browser-use specific
                 total_elements=m.total_elements,

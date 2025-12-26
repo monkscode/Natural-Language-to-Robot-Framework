@@ -37,6 +37,10 @@ class WorkflowMetrics:
     browser_use_llm_calls: int = 0
     browser_use_cost: float = 0.0
     browser_use_tokens: int = 0
+    browser_use_prompt_tokens: int = 0
+    browser_use_completion_tokens: int = 0
+    browser_use_cached_tokens: int = 0
+    browser_use_actual_cost: float = 0.0  # Actual cost from browser-use vs estimated
     
     # Browser-use specific metrics
     total_elements: int = 0
@@ -208,6 +212,10 @@ class WorkflowMetrics:
         data.setdefault('browser_use_llm_calls', 0)
         data.setdefault('browser_use_cost', 0.0)
         data.setdefault('browser_use_tokens', 0)
+        data.setdefault('browser_use_prompt_tokens', 0)
+        data.setdefault('browser_use_completion_tokens', 0)
+        data.setdefault('browser_use_cached_tokens', 0)
+        data.setdefault('browser_use_actual_cost', 0.0)
         data.setdefault('total_elements', 0)
         data.setdefault('successful_elements', 0)
         data.setdefault('failed_elements', 0)

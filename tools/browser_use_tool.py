@@ -331,10 +331,24 @@ class BatchBrowserUseTool(BaseTool):
                 # NEW: Store browser-use metrics to temp file
                 # ============================================
                 if workflow_id:
+                    # Debug: Log what we received from browser-use service
+                    logger.info(f"📊 DEBUG: Received summary from browser-use:")
+                    logger.info(f"   summary keys: {list(summary.keys())}")
+                    logger.info(f"   total_tokens: {summary.get('total_tokens', 'NOT_FOUND')}")
+                    logger.info(f"   input_tokens: {summary.get('input_tokens', 'NOT_FOUND')}")
+                    logger.info(f"   output_tokens: {summary.get('output_tokens', 'NOT_FOUND')}")
+                    logger.info(f"   cached_tokens: {summary.get('cached_tokens', 'NOT_FOUND')}")
+                    logger.info(f"   estimated_total_cost: {summary.get('estimated_total_cost', 'NOT_FOUND')}")
+                    logger.info(f"   actual_cost: {summary.get('actual_cost', 'NOT_FOUND')}")
+                    
                     browser_metrics = {
                         'llm_calls': summary.get('total_llm_calls', 0),
                         'cost': summary.get('estimated_total_cost', 0.0),
+                        'actual_cost': summary.get('actual_cost', 0.0),
                         'tokens': summary.get('total_tokens', 0),
+                        'input_tokens': summary.get('input_tokens', 0),
+                        'output_tokens': summary.get('output_tokens', 0),
+                        'cached_tokens': summary.get('cached_tokens', 0),
                         'execution_time': execution_time,
                         'elements_processed': summary.get('total_elements', 0),
                         'successful_elements': summary.get('successful', 0),
@@ -345,6 +359,11 @@ class BatchBrowserUseTool(BaseTool):
                         'session_id': results.get('session_id'),  # Browser session ID
                         'timestamp': time.time()
                     }
+                    
+                    logger.info(f"📊 DEBUG: browser_metrics being saved:")
+                    logger.info(f"   tokens: {browser_metrics['tokens']}")
+                    logger.info(f"   input_tokens: {browser_metrics['input_tokens']}")
+                    logger.info(f"   output_tokens: {browser_metrics['output_tokens']}")
                     
                     # Count custom action usage from results
                     for elem_result in element_results:
