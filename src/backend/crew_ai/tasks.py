@@ -41,7 +41,6 @@ class IdentifiedElement(PlannedStep):
     locator: Optional[str] = Field(default=None, description="Best locator for the element")
     found: bool = Field(default=False, description="Whether locator was found")
     element_type: Optional[str] = Field(default=None, description="Element type (input, select, etc.)")
-    filter_text: Optional[str] = Field(default=None, description="Filter text for table verification")
 
 
 class IdentificationOutput(BaseModel):
@@ -333,8 +332,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type' from the response (e.g., 'input', 'select', 'table-verification')\n"
-                "  * If 'filter_text' is present in the response, add it to the step JSON\n"
+                "  * ALSO add 'element_type' from the response (e.g., 'input', 'select', 'button')\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"
@@ -343,9 +341,7 @@ Generated Test
                 "[\n"
                 "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
                 "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
-                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"first product name\", \"locator\": \"xpath=...\", \"element_type\": \"span\"},\n"
-                "    {\"keyword\": \"Get Text\", \"element_description\": \"table data\", \"locator\": \".rt-tbody .rt-tr-group:has-text(\\\"Cierra\\\")\", \"element_type\": \"table-verification\", \"filter_text\": \"Cierra\"},\n"
+                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"Enter\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
                 "    {\"keyword\": \"Select Options By\", \"element_description\": \"dropdown\", \"locator\": \"id=react-select-4-input\", \"element_type\": \"input\", \"value\": \"label    Volvo\"}\n"
                 "]\n"
                 "```\n"
@@ -357,7 +353,7 @@ Generated Test
                 "[\n"
                 "    {\"step_description\": \"Open browser to Flipkart\", \"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
                 "    {\"step_description\": \"Input shoes in search\", \"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\"},\n"
-                "    {\"step_description\": \"Press Enter\", \"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"RETURN\"},\n"
+                "    {\"step_description\": \"Press Enter\", \"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"Enter\"},\n"
                 "    {\"step_description\": \"Get first product name\", \"keyword\": \"Get Text\", \"element_description\": \"first product name\"},\n"
                 "    {\"step_description\": \"Get first product price\", \"keyword\": \"Get Text\", \"element_description\": \"first product price\"}\n"
                 "]\n"
@@ -461,7 +457,6 @@ Generated Test
             f"Always include these libraries in the Settings section:\n"
             f"- {library_name} (for web automation)\n"
             f"- BuiltIn (for basic Robot Framework keywords like Should Be True, Evaluate)\n"
-            f"- String (for Strip String - REQUIRED for table verification)\n"
             f"- Collections (for Get Length with lists)\n\n"
         )
         
@@ -490,8 +485,6 @@ Generated Test
             f"{PromptComponents.DROPDOWN_HANDLING}\n"
             
             f"{PromptComponents.CHECKBOX_RADIO_HANDLING}\n"
-            
-            f"{PromptComponents.TABLE_VERIFICATION_HANDLING}\n\n"
             
             f"{libraries_section}"
             
