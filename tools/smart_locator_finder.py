@@ -8,7 +8,7 @@ Given coordinates, systematically tries different approaches to find unique loca
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ SHADOW_DOM_ELEMENT_DATA_JS = f"""
 """
 
 
-async def _validate_semantic_match(page, locator: str, expected_text: str) -> Tuple[bool, str]:
+async def _validate_semantic_match(page, locator: str, expected_text: str) -> tuple[bool, str]:
     """
     Validate that the element found by the locator contains the expected text.
     
@@ -287,7 +287,6 @@ def _extract_collection_class(element_data: dict) -> Optional[str]:
     Returns:
         Most appropriate class for collection matching, or None if not suitable
     """
-    import re
     
     class_name = element_data.get('className', '')
     if not class_name:
@@ -543,7 +542,7 @@ async def _find_collection_by_text_traversal(page, expected_text: str) -> Option
             except Exception as e:
                 logger.info(f"   Locator validation failed: {e}")
         else:
-            logger.info(f"   Could not find row container by traversing from text element")
+            logger.info("   Could not find row container by traversing from text element")
         
         return None
         
@@ -740,7 +739,7 @@ async def _find_checkbox_or_radio_by_label(page, label_text: str) -> Optional[di
     return None
 
 
-async def _disambiguate_by_coordinates(page, selector: str, x: float, y: float) -> Optional[Dict]:
+async def _disambiguate_by_coordinates(page, selector: str, x: float, y: float) -> Optional[dict]:
     """
     When multiple elements match a selector, find which one is at or closest to (x, y).
     
@@ -1281,7 +1280,7 @@ async def _refine_cell_to_clickable_element(
 
 async def _find_table_cell_by_structured_info(
     page, 
-    table_cell_info: Optional[Dict] = None,
+    table_cell_info: Optional[dict] = None,
     description: str = "",
     expected_text: Optional[str] = None
 ) -> Optional[dict]:
@@ -1427,11 +1426,11 @@ async def _find_table_cell_by_structured_info(
 
 async def _generate_locators_from_element_data(
     page,
-    element_data: Dict[str, Any],
+    element_data: dict[str, Any],
     element_id: str,
     element_description: str,
     expected_text: Optional[str] = None
-) -> Optional[Dict]:
+) -> Optional[dict]:
     """
     Generate and validate locators from element_data extracted from browser-use DOM.
     
@@ -1660,7 +1659,7 @@ async def _generate_locators_from_element_data(
         locator_candidates.append({
             'locator': f'[data-testid="{element_data["dataTestId"]}"]',
             'type': 'data-testid',
-            'priority': PRIORITY_DATA_TESTID,
+            'priority': PRIORITY_TEST_ID,
             'strategy': 'data-testid from element_data'
         })
     
@@ -1821,7 +1820,7 @@ async def _validate_candidate_locator(
     expected_text: Optional[str],
     x: float,
     y: float
-) -> Optional[Dict]:
+) -> Optional[dict]:
     """
     Validate an agent-provided candidate locator.
     
@@ -1912,8 +1911,8 @@ async def find_unique_locator_at_coordinates(
     expected_text: Optional[str] = None,
     candidate_locator: Optional[str] = None,
     library_type: str = "browser",
-    element_data: Optional[Dict] = None  # Element attributes from browser-use DOM (id, class, text, etc.)
-) -> Dict:
+    element_data: Optional[dict] = None  # Element attributes from browser-use DOM (id, class, text, etc.)
+) -> dict:
     """
     Find a unique locator for an element using a semantic-first approach.
 
