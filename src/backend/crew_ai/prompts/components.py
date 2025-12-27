@@ -109,8 +109,7 @@ Process:
   * Add 'locator' key to that step's JSON
   * Use the 'best_locator' value EXACTLY from locator_mapping
   * DO NOT modify, analyze, or substitute the locator
-  * ALSO add 'element_type' from the response (e.g., 'input', 'select', 'table-verification')
-  * If 'filter_text' is present in the response, add it to the step JSON
+  * ALSO add 'element_type' from the response (e.g., 'input', 'select')
 - If step didn't need a locator (Open Browser, Close Browser):
   * Leave it as-is (no locator key needed)
 """
@@ -259,16 +258,52 @@ If a step in the context contains the keys `condition_type` and `condition_value
 """
 
     LOOP_HANDLING = """
---- HANDLING LOOPS ---
-If a step in the context contains the keys `loop_type` and `loop_source`, you MUST use a `FOR` loop. The `loop_source` will be a list of elements. You should iterate over this list and perform the specified action on each item.
+--- HANDLING LOOPS AND COLLECTIONS ---
+If a step in the context contains the keys `loop_type` and `loop_source`, you MUST use a `FOR` loop.
 
-**Example:**
+**CRITICAL: Collection Pattern (Get Elements → FOR loop)**
+When you see a "Get Elements" step followed by a step with `loop_type`/`loop_source`, generate:
+
+*Input Steps:*
+```
+Step 1: {"keyword": "Get Elements", "element_description": "all data rows", "locator": ".rt-tr-group"}
+Step 2: {"keyword": "Get Text", "loop_type": "FOR", "loop_source": "table_rows"}
+Step 3: {"keyword": "Should Contain", "value": "expected_text"}
+```
+
+*Output Code:*
+```robot
+    @{elements}=    Get Elements    ${rows_locator}
+    FOR    ${element}    IN    @{elements}
+        ${text}=    Get Text    ${element}
+        Exit For Loop If    len($text.strip()) == 0
+        Should Contain    ${text}    expected_text
+    END
+```
+
+**⚠️ CRITICAL: Newline-Safe Patterns**
+Text from web elements often contains newlines and whitespace. AVOID Python expressions with string literals:
+- ❌ WRONG: `Continue For Loop If    '${text}' == ''`  (breaks with newlines)
+- ❌ WRONG: `Should Be True    'X' in '${text}'`  (breaks with newlines)
+- ✅ CORRECT: `Exit For Loop If    len($text.strip()) == 0`  (uses $var for Python object)
+- ✅ CORRECT: `Should Contain    ${text}    expected_text`
+
+**NOTE:** Use `$variable` (no curly braces) to pass variable as Python object, allowing `.strip()` method.
+
+**Simple Loop Example:**
 *Input Step:*
 `{"keyword": "Click Element", "loop_type": "FOR", "loop_source": "@{links}"}`
 *Output Code:*
 `    FOR    ${link}    IN    @{links}`
 `        Click Element    ${link}`
 `    END`
+
+**Key Rules:**
+1. Use `@{variable}` (list notation) for Get Elements return value
+2. Exit on empty/whitespace: `Exit For Loop If    len($text.strip()) == 0`
+3. Use `Should Contain` for text validation (NOT `Should Be True 'X' in 'Y'`)
+4. Use `${element}` as the loop variable inside FOR
+5. Always close with `END`
 """
 
     DROPDOWN_HANDLING = """
@@ -329,61 +364,6 @@ Standard 'Click' may FAIL because the input is not visible.
 Use standard Click keyword.
 """
 
-    TABLE_VERIFICATION_HANDLING = """
---- HANDLING TABLE VERIFICATION ---
-⚠️ **CRITICAL**: Check the 'element_type' field for table-verification scenarios!
-
-When element_type is 'table-verification', the step is meant to VERIFY table content:
-- The locator matches ALL table rows (including empty placeholder rows)
-- The 'filter_text' field contains the text to verify (e.g., 'Cierra')
-- Generate verification code that checks data rows contain the filter text
-
-⚠️ **MANDATORY EMPTY ROW HANDLING**:
-Tables often have EMPTY PLACEHOLDER ROWS after filtered data rows.
-You MUST exit the loop when encountering an empty row.
-If you don't, the test will FAIL on empty rows!
-
-**When element_type is 'table-verification', you MUST use this EXACT pattern:**
-```robot
-# Get ALL rows (includes empty placeholder rows)
-${rows}=    Get Elements    ${table_locator}
-# Verify at least one row exists
-${row_count}=    Get Length    ${rows}
-Should Be True    ${row_count} >= 1    No visible rows found
-# Verify data rows contain the filter text (MUST exit on empty row!)
-FOR    ${row}    IN    @{rows}
-    ${text}=    Get Text    ${row}
-    ${stripped}=    Strip String    ${text}
-    ${text_length}=    Get Length    ${stripped}
-    Exit For Loop If    ${text_length} == 0    # REQUIRED: Empty row = end of data
-    Should Contain    ${text}    ${filter_text}    Row does not contain expected text
-END
-```
-
-**DO NOT:**
-- Use CSS selectors like `:not(.-padRow)` - they don't work reliably
-- Skip the `Exit For Loop If` - it's MANDATORY
-- Use different patterns - follow the above EXACTLY
-
-**Example with element_type check:**
-*Input Step (table verification):*
-`{"keyword": "Get Text", "locator": ".rt-tbody .rt-tr-group", "element_type": "table-verification", "filter_text": "Cierra"}`
-*Output Code (COPY THIS PATTERN EXACTLY):*
-```robot
-    # Table verification - verify data rows contain filter text
-    ${rows}=    Get Elements    .rt-tbody .rt-tr-group
-    ${row_count}=    Get Length    ${rows}
-    Should Be True    ${row_count} >= 1    No visible rows found after filtering
-    FOR    ${row}    IN    @{rows}
-        ${text}=    Get Text    ${row}
-        ${stripped}=    Strip String    ${text}
-        ${text_length}=    Get Length    ${stripped}
-        Exit For Loop If    ${text_length} == 0    # REQUIRED: Empty row = end of data
-        Should Contain    ${text}    Cierra    Row does not contain expected filter text
-    END
-```
-"""
-
     # ═══════════════════════════════════════════════════════════════════════════
     # PLANNING COMPONENTS - Used in plan_steps_task
     # ═══════════════════════════════════════════════════════════════════════════
@@ -414,7 +394,7 @@ User query: "search for shoes on Flipkart and get first product name and price"
 ✅ CORRECT steps (with specific, spatially-aware element descriptions):
 1. Open Browser → Flipkart
 2. Input Text → search input field in the top header → "shoes"
-3. Press Keys → RETURN
+3. Press Keys → Enter
 4. Get Text → first item title in the main results list (center content area)
 5. Get Text → price text below the title in the first result item
 
@@ -429,7 +409,7 @@ User query: "search for shoes on Flipkart and get first product name and price"
 
     SEARCH_OPTIMIZATION_RULES = """
 --- SEARCH OPTIMIZATION RULES ---
-*   For search operations: After `Input Text` into search box, use `Press Keys` with `RETURN` (Enter key) instead of finding/clicking a search button.
+*   For search operations: After `Input Text` into search box, use `Press Keys` with `Enter` (Enter key) instead of finding/clicking a search button.
 *   Modern websites (Flipkart, Amazon, Google, etc.) trigger search on Enter press.
 *   This is faster, more reliable, and reduces element identification overhead.
 """
@@ -462,7 +442,7 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
 6.  When generating a browser initialization step, you MUST include library-specific parameters:
 {browser_init_placeholder}
-7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "RETURN" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
+7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "Enter" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
 8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """
 
