@@ -961,7 +961,10 @@ document.addEventListener('DOMContentLoaded', () => {
             await navigator.clipboard.writeText(code);
 
             const originalHTML = copyCodeBtn.innerHTML;
+            const originalAriaLabel = copyCodeBtn.getAttribute('aria-label');
+
             copyCodeBtn.classList.add('copied');
+            copyCodeBtn.setAttribute('aria-label', 'Copied successfully');
             copyCodeBtn.innerHTML = `
                 <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
@@ -970,6 +973,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             setTimeout(() => {
                 copyCodeBtn.classList.remove('copied');
+                copyCodeBtn.setAttribute('aria-label', originalAriaLabel);
                 copyCodeBtn.innerHTML = originalHTML;
             }, 2000);
         } catch (err) {
