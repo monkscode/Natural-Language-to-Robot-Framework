@@ -35,12 +35,11 @@ class WorkflowMetrics:
     
     # Browser-use breakdown
     browser_use_llm_calls: int = 0
-    browser_use_cost: float = 0.0
+    browser_use_cost: float = 0.0  # Actual cost from browser-use TokenCostService
     browser_use_tokens: int = 0
     browser_use_prompt_tokens: int = 0
     browser_use_completion_tokens: int = 0
     browser_use_cached_tokens: int = 0
-    browser_use_actual_cost: float = 0.0  # Actual cost from browser-use vs estimated
     
     # Browser-use specific metrics
     total_elements: int = 0
@@ -181,6 +180,17 @@ class WorkflowMetrics:
         # Remove obsolete fields from very old format
         data.pop('execution_id', None)  # Old field, no longer used
         
+        # Backward compatibility: Handle removed fields
+        # If browser_use_actual_cost exists (old format), use it for browser_use_cost
+        if 'browser_use_actual_cost' in data:
+            if data.get('browser_use_cost', 0.0) == 0.0:
+                data['browser_use_cost'] = data['browser_use_actual_cost']
+            data.pop('browser_use_actual_cost')  # Remove the old field
+        
+        # Remove other obsolete fields
+        data.pop('token_usage_detailed', None)  # Old experimental field
+        data.pop('per_agent_tokens', None)  # Old experimental field
+        
         # Backward compatibility: Handle old format without breakdown
         if 'crewai_llm_calls' not in data:
             # Old format - all metrics were from browser-use
@@ -215,7 +225,6 @@ class WorkflowMetrics:
         data.setdefault('browser_use_prompt_tokens', 0)
         data.setdefault('browser_use_completion_tokens', 0)
         data.setdefault('browser_use_cached_tokens', 0)
-        data.setdefault('browser_use_actual_cost', 0.0)
         data.setdefault('total_elements', 0)
         data.setdefault('successful_elements', 0)
         data.setdefault('failed_elements', 0)

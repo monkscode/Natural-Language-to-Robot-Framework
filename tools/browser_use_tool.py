@@ -338,12 +338,11 @@ class BatchBrowserUseTool(BaseTool):
                     logger.info(f"   input_tokens: {summary.get('input_tokens', 'NOT_FOUND')}")
                     logger.info(f"   output_tokens: {summary.get('output_tokens', 'NOT_FOUND')}")
                     logger.info(f"   cached_tokens: {summary.get('cached_tokens', 'NOT_FOUND')}")
-                    logger.info(f"   estimated_total_cost: {summary.get('estimated_total_cost', 'NOT_FOUND')}")
                     logger.info(f"   actual_cost: {summary.get('actual_cost', 'NOT_FOUND')}")
                     
                     browser_metrics = {
                         'llm_calls': summary.get('total_llm_calls', 0),
-                        'cost': summary.get('estimated_total_cost', 0.0),
+                        'cost': summary.get('actual_cost', 0.0),
                         'actual_cost': summary.get('actual_cost', 0.0),
                         'tokens': summary.get('total_tokens', 0),
                         'input_tokens': summary.get('input_tokens', 0),
