@@ -510,6 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         content.classList.add('collapsed');
         sectionEl.classList.add('collapsed-section');
+        button.setAttribute('aria-expanded', 'false');
         button.querySelector('span').textContent = 'Expand';
         button.querySelector('svg path').setAttribute('d', 'M5 15l7-7 7 7');
 
@@ -534,6 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         content.classList.remove('collapsed');
         sectionEl.classList.remove('collapsed-section');
+        button.setAttribute('aria-expanded', 'true');
         button.querySelector('span').textContent = 'Collapse';
         button.querySelector('svg path').setAttribute('d', 'M19 9l-7 7-7-7');
 
