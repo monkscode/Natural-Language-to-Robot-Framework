@@ -13,7 +13,14 @@ from ..core.workflow_metrics import get_workflow_metrics_collector, WorkflowMetr
 router = APIRouter(prefix="/workflow-metrics", tags=["workflow-metrics"])
 
 
-class WorkflowMetricsResponse(BaseModel):
+class BrowserTokenBreakdown(BaseModel):
+    """Shared model for browser-use token breakdown to avoid duplication."""
+    browser_use_prompt_tokens: int = 0
+    browser_use_completion_tokens: int = 0
+    browser_use_cached_tokens: int = 0
+
+
+class WorkflowMetricsResponse(BrowserTokenBreakdown):
     """Response model for individual workflow metrics with CrewAI and Browser-use breakdown."""
     workflow_id: str
     timestamp: str
@@ -33,8 +40,9 @@ class WorkflowMetricsResponse(BaseModel):
     
     # Browser-use breakdown
     browser_use_llm_calls: int
-    browser_use_cost: float
+    browser_use_cost: float  # Actual cost from browser-use (calculated from real token usage)
     browser_use_tokens: int
+    # Token breakdown inherited from BrowserTokenBreakdown
     
     # Browser-use specific metrics
     total_elements: int
@@ -64,7 +72,7 @@ class AggregateMetricsResponse(BaseModel):
     date_range: Dict[str, Optional[str]]
 
 
-class RecordMetricsRequest(BaseModel):
+class RecordMetricsRequest(BrowserTokenBreakdown):
     """Request model for recording workflow metrics (backward compatible)."""
     workflow_id: str
     url: str
@@ -85,6 +93,7 @@ class RecordMetricsRequest(BaseModel):
     browser_use_llm_calls: int = 0
     browser_use_cost: float = 0.0
     browser_use_tokens: int = 0
+    # Token breakdown inherited from BrowserTokenBreakdown
     
     # Browser-use specific
     total_elements: int = 0
@@ -164,6 +173,9 @@ async def get_workflow_metrics(
                 browser_use_llm_calls=m.browser_use_llm_calls,
                 browser_use_cost=m.browser_use_cost,
                 browser_use_tokens=m.browser_use_tokens,
+                browser_use_prompt_tokens=m.browser_use_prompt_tokens,
+                browser_use_completion_tokens=m.browser_use_completion_tokens,
+                browser_use_cached_tokens=m.browser_use_cached_tokens,
                 
                 # Browser-use specific
                 total_elements=m.total_elements,

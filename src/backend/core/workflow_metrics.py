@@ -35,8 +35,11 @@ class WorkflowMetrics:
     
     # Browser-use breakdown
     browser_use_llm_calls: int = 0
-    browser_use_cost: float = 0.0
+    browser_use_cost: float = 0.0  # Actual cost from browser-use TokenCostService
     browser_use_tokens: int = 0
+    browser_use_prompt_tokens: int = 0
+    browser_use_completion_tokens: int = 0
+    browser_use_cached_tokens: int = 0
     
     # Browser-use specific metrics
     total_elements: int = 0
@@ -177,6 +180,18 @@ class WorkflowMetrics:
         # Remove obsolete fields from very old format
         data.pop('execution_id', None)  # Old field, no longer used
         
+        # Backward compatibility: Handle removed fields
+        # If browser_use_actual_cost exists (old format), use it for browser_use_cost
+        if 'browser_use_actual_cost' in data:
+            # Use approximate comparison for floating point (avoid exact == 0.0)
+            if abs(data.get('browser_use_cost', 0.0)) < 1e-9:
+                data['browser_use_cost'] = data['browser_use_actual_cost']
+            data.pop('browser_use_actual_cost')  # Remove the old field
+        
+        # Remove other obsolete fields
+        data.pop('token_usage_detailed', None)  # Old experimental field
+        data.pop('per_agent_tokens', None)  # Old experimental field
+        
         # Backward compatibility: Handle old format without breakdown
         if 'crewai_llm_calls' not in data:
             # Old format - all metrics were from browser-use
@@ -208,6 +223,9 @@ class WorkflowMetrics:
         data.setdefault('browser_use_llm_calls', 0)
         data.setdefault('browser_use_cost', 0.0)
         data.setdefault('browser_use_tokens', 0)
+        data.setdefault('browser_use_prompt_tokens', 0)
+        data.setdefault('browser_use_completion_tokens', 0)
+        data.setdefault('browser_use_cached_tokens', 0)
         data.setdefault('total_elements', 0)
         data.setdefault('successful_elements', 0)
         data.setdefault('failed_elements', 0)
@@ -416,7 +434,10 @@ def count_tokens(text: str) -> int:
 
 def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.0-flash-exp") -> dict:
     """
-    Calculate cost from CrewAI usage_metrics.
+    Calculate cost from CrewAI usage_metrics using LiteLLM pricing database.
+    
+    This function now fetches real-time pricing from LiteLLM's pricing database,
+    the same source used by browser-use, ensuring consistency and always up-to-date pricing.
     
     Args:
         usage_metrics: Usage metrics dict from CrewAI with keys:
@@ -424,7 +445,7 @@ def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.0-fla
             - prompt_tokens: Input tokens
             - completion_tokens: Output tokens
             - successful_requests: Number of successful LLM calls
-        model_name: Model used for pricing
+        model_name: Model used for pricing (e.g., 'gemini-2.0-flash-exp')
     
     Returns:
         Dict with llm_calls, cost, tokens breakdown
@@ -441,25 +462,62 @@ def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.0-fla
         ... }
         >>> metrics = calculate_crewai_cost(usage_dict, "gemini-2.0-flash-exp")
         >>> print(f"Cost: ${metrics['cost']:.4f}")
-    """
-    # Pricing per 1K tokens (update based on your model)
-    PRICING = {
-        "gemini-2.0-flash-exp": {"input": 0.00015, "output": 0.0006},
-        "gemini-1.5-pro": {"input": 0.00125, "output": 0.005},
-        "gemini-1.5-flash": {"input": 0.000075, "output": 0.0003},
-        "gemini-1.5-flash-8b": {"input": 0.0000375, "output": 0.00015},
-    }
     
-    pricing = PRICING.get(model_name, PRICING["gemini-2.0-flash-exp"])
+    Note:
+        Falls back to hardcoded pricing if LiteLLM fetch fails (for reliability).
+    """
+    import logging
     
     prompt_tokens = usage_metrics.get('prompt_tokens', 0)
     completion_tokens = usage_metrics.get('completion_tokens', 0)
     total_tokens = usage_metrics.get('total_tokens', 0)
     
-    cost = (
-        (prompt_tokens / 1000) * pricing["input"] +
-        (completion_tokens / 1000) * pricing["output"]
-    )
+    # Try to fetch pricing from LiteLLM (same as browser-use)
+    try:
+        from litellm import get_model_cost_map
+        
+        # Get LiteLLM pricing database
+        cost_map = get_model_cost_map(url="https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json")
+        
+        # Normalize model name (LiteLLM may use different format)
+        model_key = model_name
+        if model_name not in cost_map:
+            # Try with gemini/ prefix
+            model_key = f"gemini/{model_name}"
+        
+        if model_key in cost_map:
+            model_info = cost_map[model_key]
+            input_cost_per_token = model_info.get('input_cost_per_token', 0)
+            output_cost_per_token = model_info.get('output_cost_per_token', 0)
+            
+            cost = (
+                prompt_tokens * input_cost_per_token +
+                completion_tokens * output_cost_per_token
+            )
+            
+            logging.info(f"💰 CrewAI cost calculated from LiteLLM: ${cost:.6f} (model: {model_key})")
+        else:
+            raise ValueError(f"Model {model_name} not found in LiteLLM pricing")
+    
+    except Exception as e:
+        # Fallback to hardcoded pricing if LiteLLM fetch fails
+        logging.warning(f"Failed to fetch LiteLLM pricing for {model_name}: {e}. Using fallback.")
+        
+        # Fallback pricing (kept for reliability)
+        FALLBACK_PRICING = {
+            "gemini-2.0-flash-exp": {"input": 0.00015, "output": 0.0006},
+            "gemini-1.5-pro": {"input": 0.00125, "output": 0.005},
+            "gemini-1.5-flash": {"input": 0.000075, "output": 0.0003},
+            "gemini-1.5-flash-8b": {"input": 0.0000375, "output": 0.00015},
+            "gemini-2.5-flash": {"input": 0.0003, "output": 0.0012},  # Added gemini-2.5-flash
+        }
+        
+        pricing = FALLBACK_PRICING.get(model_name, FALLBACK_PRICING["gemini-2.0-flash-exp"])
+        
+        cost = (
+            (prompt_tokens / 1000) * pricing["input"] +
+            (completion_tokens / 1000) * pricing["output"]
+        )
     
     return {
         'llm_calls': usage_metrics.get('successful_requests', 0),
