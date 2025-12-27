@@ -81,6 +81,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Store the original user query for pattern learning
     let currentUserQuery = null;
 
+    // Store workflow ID from generation for unified ID tracking
+    let currentWorkflowId = null;
+
     // Track manual collapse/expand state
     let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
     let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
@@ -439,8 +442,9 @@ document.addEventListener('DOMContentLoaded', () => {
         generationLogsManualState = null;
         executionLogsManualState = null;
 
-        // Clear stored user query
+        // Clear stored user query and workflow ID
         currentUserQuery = null;
+        currentWorkflowId = null;  // Reset unified workflow ID
 
         // Hide both log sections
         generationLogsSection.style.display = 'none';
@@ -713,7 +717,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const requestPayload = {
                 robot_code: code,
-                user_query: currentUserQuery  // Pass the original query for pattern learning
+                user_query: currentUserQuery,  // Pass the original query for pattern learning
+                workflow_id: currentWorkflowId  // Pass unified workflow ID from generation
             };
 
             const response = await fetch('/execute-test', {
@@ -771,6 +776,10 @@ document.addEventListener('DOMContentLoaded', () => {
             routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.robot_code) {
             applySyntaxHighlighting(data.robot_code);
+            // Capture workflow_id for unified ID tracking during execution
+            if (data.workflow_id) {
+                currentWorkflowId = data.workflow_id;
+            }
             updateStatus('success', 'Generation complete', false);
             hideStatus();
             // Reset state to allow button update, then update UI

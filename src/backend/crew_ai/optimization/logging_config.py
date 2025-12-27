@@ -73,10 +73,10 @@ def configure_optimization_logging(
     # Remove existing handlers to avoid duplicates
     logger.handlers.clear()
     
-    # Default format string
+    # Default format string (consistent with main.py and browser-service)
     if format_string is None:
         format_string = (
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            "%(asctime)s - %(levelname)-8s [%(name)s] %(message)s"
         )
     
     formatter = logging.Formatter(format_string)

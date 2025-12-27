@@ -233,6 +233,17 @@ Test
 
     VALIDATION_RULES = """
 --- CRITICAL RULES FOR VALIDATION ---
+
+**⚠️ TEXT VALIDATION (Web Element Text)**
+Text from web elements often contains newlines and special characters.
+NEVER use `Should Be True 'X' in "${text}"` - it breaks with newlines!
+
+- ❌ WRONG: `Should Be True    'Cierra' in "${row_text}"`  (SyntaxError if text has \\n)
+- ✅ CORRECT: `Should Contain    ${row_text}    Cierra`  (handles newlines safely)
+
+**Rule:** For ANY text validation from Get Text or Get Elements, use `Should Contain`.
+
+**NUMERIC VALIDATION (Prices, Counts, etc.)**
 When you encounter a step with keyword 'Should Be True' and a 'condition_expression' key:
 1. Generate a proper Should Be True statement with the expression
 2. The expression should be a valid Python expression that Robot Framework can evaluate
