@@ -170,9 +170,9 @@ async def get_workflow_metrics(
                 browser_use_llm_calls=m.browser_use_llm_calls,
                 browser_use_cost=m.browser_use_cost,
                 browser_use_tokens=m.browser_use_tokens,
-                browser_use_prompt_tokens=getattr(m, 'browser_use_prompt_tokens', 0),
-                browser_use_completion_tokens=getattr(m, 'browser_use_completion_tokens', 0),
-                browser_use_cached_tokens=getattr(m, 'browser_use_cached_tokens', 0),
+                browser_use_prompt_tokens=m.browser_use_prompt_tokens,
+                browser_use_completion_tokens=m.browser_use_completion_tokens,
+                browser_use_cached_tokens=m.browser_use_cached_tokens,
                 
                 # Browser-use specific
                 total_elements=m.total_elements,
