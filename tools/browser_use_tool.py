@@ -332,7 +332,7 @@ class BatchBrowserUseTool(BaseTool):
                 # ============================================
                 if workflow_id:
                     # Debug: Log what we received from browser-use service
-                    logger.info(f"📊 DEBUG: Received summary from browser-use:")
+                    logger.info("📊 DEBUG: Received summary from browser-use:")
                     logger.info(f"   summary keys: {list(summary.keys())}")
                     logger.info(f"   total_tokens: {summary.get('total_tokens', 'NOT_FOUND')}")
                     logger.info(f"   input_tokens: {summary.get('input_tokens', 'NOT_FOUND')}")
@@ -359,7 +359,7 @@ class BatchBrowserUseTool(BaseTool):
                         'timestamp': time.time()
                     }
                     
-                    logger.info(f"📊 DEBUG: browser_metrics being saved:")
+                    logger.info("📊 DEBUG: browser_metrics being saved:")
                     logger.info(f"   tokens: {browser_metrics['tokens']}")
                     logger.info(f"   input_tokens: {browser_metrics['input_tokens']}")
                     logger.info(f"   output_tokens: {browser_metrics['output_tokens']}")

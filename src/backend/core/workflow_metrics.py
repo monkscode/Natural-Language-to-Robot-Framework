@@ -183,7 +183,8 @@ class WorkflowMetrics:
         # Backward compatibility: Handle removed fields
         # If browser_use_actual_cost exists (old format), use it for browser_use_cost
         if 'browser_use_actual_cost' in data:
-            if data.get('browser_use_cost', 0.0) == 0.0:
+            # Use approximate comparison for floating point (avoid exact == 0.0)
+            if abs(data.get('browser_use_cost', 0.0)) < 1e-9:
                 data['browser_use_cost'] = data['browser_use_actual_cost']
             data.pop('browser_use_actual_cost')  # Remove the old field
         
