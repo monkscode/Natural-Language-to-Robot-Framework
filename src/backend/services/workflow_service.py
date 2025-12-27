@@ -378,7 +378,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code.", "progress": 100}
             
             # Final completion message (without progress, as it's already at 100%)
-            yield {"status": "complete", "robot_code": robot_code, "message": f"{EMOJI['success']} Test generation complete."}
+            yield {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
         else:
             logging.error(
                 f"CrewAI workflow finished, but code validation failed. Reason: {validation_data.get('reason')}")
@@ -515,7 +515,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     logging.info("✅ Test generation complete. Ready for user review.")
 
 
-async def stream_execute_only(robot_code: str, user_query: str = None) -> Generator[str, None, None]:
+async def stream_execute_only(robot_code: str, user_query: str = None, workflow_id: str = None) -> Generator[str, None, None]:
     """
     Executes provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
@@ -523,12 +523,15 @@ async def stream_execute_only(robot_code: str, user_query: str = None) -> Genera
     Args:
         robot_code: Robot Framework test code to execute
         user_query: Optional original user query for pattern learning
+        workflow_id: Optional workflow ID from generation phase (for unified ID tracking)
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
         return
 
-    run_id = str(uuid.uuid4())
+    # Use provided workflow_id for unified tracking, or generate new one for standalone execution
+    run_id = workflow_id if workflow_id else str(uuid.uuid4())
+    logging.info(f"🆔 Execution ID (unified): {run_id}")
     robot_tests_dir = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
     run_dir = os.path.join(robot_tests_dir, run_id)
@@ -569,6 +572,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
     Kept for backward compatibility.
     """
     robot_code = None
+    workflow_id = None  # Capture workflow_id from generation for unified tracking
     q = Queue()
 
     workflow_thread = Thread(
@@ -585,6 +589,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
 
             if event.get("status") == "complete" and "robot_code" in event:
                 robot_code = event["robot_code"]
+                workflow_id = event.get("workflow_id")  # Capture for unified execution
                 workflow_thread.join()
                 break
             elif event.get("status") == "error":
@@ -601,6 +606,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             yield f"data: {json.dumps(event_data)}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
                 robot_code = event["robot_code"]
+                workflow_id = event.get("workflow_id")  # Capture for unified execution
             elif event.get("status") == "error":
                 return
         if not robot_code:
@@ -609,7 +615,9 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
             return
 
-    run_id = str(uuid.uuid4())
+    # Use workflow_id from generation for unified tracking (same ID for metrics and files)
+    run_id = workflow_id if workflow_id else str(uuid.uuid4())
+    logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
     robot_tests_dir = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
     run_dir = os.path.join(robot_tests_dir, run_id)

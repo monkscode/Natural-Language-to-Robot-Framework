@@ -17,6 +17,7 @@ class Query(BaseModel):
 class ExecuteRequest(BaseModel):
     robot_code: str
     user_query: Optional[str] = None  # Optional: original user query for pattern learning
+    workflow_id: Optional[str] = None  # Optional: workflow ID from generation for unified tracking
 
 @router.post('/generate-test')
 async def generate_test_only(query: Query):
@@ -45,20 +46,24 @@ async def execute_test_only(request: ExecuteRequest):
     Accepts user-edited or manually-written code.
     
     Optional: Pass user_query for pattern learning from successful executions.
+    Optional: Pass workflow_id for unified ID tracking (same ID for metrics and files).
     """
     robot_code = request.robot_code
     user_query = request.user_query  # Optional: for pattern learning
+    workflow_id = request.workflow_id  # Optional: for unified ID tracking
     
     if not robot_code or not robot_code.strip():
         raise HTTPException(status_code=400, detail="Robot code not provided")
 
     logging.info(f"[EXECUTE ONLY] Executing user-provided test code ({len(robot_code)} characters)")
+    if workflow_id:
+        logging.info(f"[EXECUTE ONLY] 🆔 Using unified workflow_id: {workflow_id}")
     if user_query:
         logging.info(f"[EXECUTE ONLY] ✅ User query provided for pattern learning: {user_query[:50]}...")
     else:
         logging.warning("[EXECUTE ONLY] ⚠️ No user query provided - pattern learning will be skipped")
 
-    return StreamingResponse(stream_execute_only(robot_code, user_query), media_type="text/event-stream")
+    return StreamingResponse(stream_execute_only(robot_code, user_query, workflow_id), media_type="text/event-stream")
 
 @router.post('/generate-and-run')
 async def generate_and_run_streaming(query: Query):
