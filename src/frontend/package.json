@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Frontend for Mark 1 AI Test Automation Platform with Self-Healing capabilities",
   "scripts": {
-    "test": "jest --run",
+    "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
   },
