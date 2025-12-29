@@ -369,13 +369,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
-        // When user types or edits, update UI state
-        // Remove placeholder if user starts typing
+        // Force remove placeholder on ANY input
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-            const text = robotCodeEl.textContent.trim();
-            if (text && text !== codePlaceholder.textContent.trim()) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles
+            document.execCommand('fontSize', false, '3'); // Reset to normal
         }
         updateUI();
     });
@@ -384,19 +382,19 @@ document.addEventListener('DOMContentLoaded', () => {
         // Handle paste to preserve user's formatting and apply syntax highlighting
         e.preventDefault();
         const text = e.clipboardData.getData('text/plain');
+        if (!text.trim()) return;
 
-        if (text.trim()) {
-            // Remove placeholder if present
-            if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-            // Apply syntax highlighting to pasted code (preserves original formatting)
+        // Remove placeholder if present
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
             applySyntaxHighlighting(text);
-            // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
-
-            // User pasted code directly - don't show generation logs
-            // Execution logs will show when user clicks execute
+            return;
         }
+
+        // Get existing code and append (or insert at cursor for advanced impl)
+        const existingCode = getCodeContent();
+        const combinedCode = existingCode.trim() ? existingCode + '\n' + text : text;
+        applySyntaxHighlighting(combinedCode);
     });
 
     // Also listen for blur event to apply formatting when user finishes typing
