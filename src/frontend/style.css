@@ -1,7 +1,7 @@
 /* =================================================================
-   MARK 1 - AI TEST AUTOMATION PLATFORM
-   Multi-Theme System with Professional & Neobrutalism
-   ================================================================= */
+  MARK 1 - AI TEST AUTOMATION PLATFORM
+  Multi-Theme System with Professional & Neobrutalism
+  ================================================================= */
 
 /* --- CORE VARIABLES & RESET --- */
 :root {
@@ -857,6 +857,18 @@ body {
     outline: none;
 }
 
+/* Fallback for browsers that don't support :has() */
+.code-block {
+    font-size: 0.85rem !important;
+}
+
+/* Progressive enhancement: Reset only when empty-state is present */
+@supports selector(:has(.empty-state)) {
+    .code-block:has(.empty-state) {
+        font-size: inherit !important;
+    }
+}
+
 .code-language {
     position: absolute;
     top: 0.75rem;
@@ -1220,9 +1232,11 @@ body {
     white-space: pre-wrap;
 }
 
-/* Ensure empty state in code block is always visible */
+/* Ensure empty state in code block is always visible and doesn't block clicks */
 .code-block .empty-state {
     color: #808080;
+    pointer-events: none;
+    /* Allow clicks to pass through to contenteditable */
 }
 
 .code-block .empty-state p {

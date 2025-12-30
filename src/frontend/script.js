@@ -208,12 +208,37 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function getCodeContent() {
+    // Get code content WITHOUT trimming - preserves trailing newlines/spaces
+    function getCodeContentRaw() {
         // Get text content, excluding the placeholder
+        // If placeholder is still in DOM (not focused yet), return empty
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
             return '';
         }
-        return robotCodeEl.textContent || '';
+
+        // Check if content is already highlighted (contains span elements from syntax highlighting)
+        const isHighlighted = robotCodeEl.querySelector('span[class^="rf-"]');
+
+        if (isHighlighted) {
+            // When highlighted, use innerText because it properly interprets <br> elements as newlines
+            // textContent ignores <br> elements which causes Enter key presses to be "lost"
+            return robotCodeEl.innerText || '';
+        }
+
+        // For unhighlighted content (raw paste with divs), use innerText but normalize newlines
+        // Browser's div-wrapping doubles newlines: each line becomes <div>line</div>
+        // and blank lines become <div><br></div> which innerText interprets as 2 newlines
+        let text = robotCodeEl.innerText || '';
+
+        // Normalize: Replace all sequences of 2+ newlines with just 2 (one blank line)
+        text = text.replace(/\n{2,}/g, '\n\n');
+
+        return text;
+    }
+
+    // Get code content with trimming - for UI validation
+    function getCodeContent() {
+        return getCodeContentRaw().trim();
     }
 
     function setCodeContent(code, highlighted = false) {
@@ -369,49 +394,353 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
-        // When user types or edits, update UI state
-        // Remove placeholder if user starts typing
-        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-            const text = robotCodeEl.textContent.trim();
-            if (text && text !== codePlaceholder.textContent.trim()) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-        }
+        // When user types or edits, just update UI state
+        // Placeholder removal is handled by focus event
         updateUI();
+        // Schedule syntax highlighting after any input change
+        scheduleSyntaxHighlighting();
+        // Save history for Undo/Redo
+        scheduleHistorySave();
     });
 
+    // Handle paste events to normalize newlines before browser inserts content
     robotCodeEl.addEventListener('paste', (e) => {
-        // Handle paste to preserve user's formatting and apply syntax highlighting
         e.preventDefault();
-        const text = e.clipboardData.getData('text/plain');
+        e.stopPropagation();
 
-        if (text.trim()) {
-            // Remove placeholder if present
-            if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-            // Apply syntax highlighting to pasted code (preserves original formatting)
-            applySyntaxHighlighting(text);
-            // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
+        // Get plain text from clipboard
+        const text = (e.clipboardData || window.clipboardData).getData('text/plain');
 
-            // User pasted code directly - don't show generation logs
-            // Execution logs will show when user clicks execute
-        }
-    });
+        // Normalize newlines - ensure consistent line endings
+        // Replace Windows-style \r\n with \n
+        let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-    // Also listen for blur event to apply formatting when user finishes typing
-    robotCodeEl.addEventListener('blur', () => {
-        const code = getCodeContent().trim();
-        if (code && !robotCodeEl.querySelector('.rf-section')) {
-            // Code exists but no syntax highlighting - apply it
-            applySyntaxHighlighting(code);
-        }
-    });
+        // Use execCommand to insert text - this is the proper way for contenteditable
+        // It preserves undo functionality and doesn't cause duplication
+        document.execCommand('insertText', false, normalizedText);
 
-    // Keyup event as backup for detecting content changes
-    robotCodeEl.addEventListener('keyup', () => {
+        // Trigger syntax highlighting
         updateUI();
+        scheduleSyntaxHighlighting();
     });
+
+    // Remove placeholder on focus BEFORE typing starts - this prevents first character loss
+    robotCodeEl.addEventListener('focus', () => {
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+        }
+    });
+
+    // Debounced syntax highlighting - apply shortly after user stops typing
+    let syntaxHighlightTimer = null;
+    const SYNTAX_HIGHLIGHT_DELAY = 300; // 300ms for near-immediate formatting
+
+    // Track if Enter key was recently pressed (to adjust cursor position)
+    let enterKeyPressed = false;
+
+    // Track Enter key press to properly adjust cursor position after syntax highlighting
+    robotCodeEl.addEventListener('keydown', (e) => {
+        // Only set true for Enter, reset for any other key to prevent sticky behavior
+        enterKeyPressed = (e.key === 'Enter');
+
+        // Handle Undo/Redo (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
+        if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+            if (e.key.toLowerCase() === 'z') {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    redo();
+                } else {
+                    undo();
+                }
+            } else if (e.key.toLowerCase() === 'y') {
+                e.preventDefault();
+                redo();
+            }
+        }
+    });
+
+    /* --- UNDO/REDO HISTORY SYSTEM --- */
+    const undoStack = [];
+    const redoStack = [];
+    const HISTORY_LIMIT = 100;
+    let historyDebounceTimer = null;
+    let currentSnapshot = {
+        code: '',
+        cursor: 0
+    };
+
+    // Initialize snapshot on load
+    setTimeout(() => {
+        currentSnapshot = {
+            code: getCodeContentRaw(),
+            cursor: 0
+        };
+    }, 100);
+
+    function commitState() {
+        const newCode = getCodeContentRaw();
+        const newCursor = saveCursorPosition(robotCodeEl);
+
+        // Only save if code changed
+        if (newCode !== currentSnapshot.code) {
+            undoStack.push(currentSnapshot);
+            if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+
+            // Clear redo stack on new change
+            redoStack.length = 0;
+
+            // Update current snapshot
+            currentSnapshot = {
+                code: newCode,
+                cursor: newCursor
+            };
+        }
+    }
+
+    // Debounced save triggered by input
+    function scheduleHistorySave() {
+        if (historyDebounceTimer) clearTimeout(historyDebounceTimer);
+        historyDebounceTimer = setTimeout(commitState, 500); // 500ms debounce
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+
+        // Push current state to redo
+        const currentState = {
+            code: getCodeContentRaw(),
+            cursor: saveCursorPosition(robotCodeEl)
+        };
+        redoStack.push(currentState);
+
+        // Pop previous state
+        const prevState = undoStack.pop();
+        currentSnapshot = prevState;
+
+        // Restore
+        applyState(prevState);
+    }
+
+    function redo() {
+        if (redoStack.length === 0) return;
+
+        // Push current state to undo
+        const currentState = {
+            code: getCodeContentRaw(),
+            cursor: saveCursorPosition(robotCodeEl)
+        };
+        undoStack.push(currentState);
+
+        // Pop next state
+        const nextState = redoStack.pop();
+        currentSnapshot = nextState;
+
+        // Restore
+        applyState(nextState);
+    }
+
+    function applyState(state) {
+        // Apply code (triggers highlighting)
+        applySyntaxHighlighting(state.code);
+
+        // Restore cursor
+        if (state.cursor !== null) {
+            restoreCursorPosition(robotCodeEl, state.cursor);
+        }
+
+        updateUI();
+    }
+
+    function scheduleSyntaxHighlighting() {
+        // Clear any existing timer
+        if (syntaxHighlightTimer) {
+            clearTimeout(syntaxHighlightTimer);
+        }
+
+        // Schedule syntax highlighting after delay
+        syntaxHighlightTimer = setTimeout(() => {
+            // Use raw content to preserve trailing newlines/spaces
+            const codeRaw = getCodeContentRaw();
+            const code = codeRaw.trim();
+            if (code) {
+                // Save cursor position before highlighting
+                let cursorPos = saveCursorPosition(robotCodeEl);
+
+                // If Enter was pressed, the cursor should be on the new line
+                // The browser puts the cursor *before* the newline, we want it *after*
+                if (enterKeyPressed && cursorPos !== null) {
+                    cursorPos += 1;
+                    enterKeyPressed = false; // Reset flag after using it
+                }
+
+                // Always re-apply highlighting when content changes
+                // This ensures newly typed keywords get colored
+                // Pass raw code to preserve whitespace structure
+                applySyntaxHighlighting(codeRaw);
+
+                // Restore cursor position after highlighting (don't jump to end)
+                if (cursorPos !== null) {
+                    restoreCursorPosition(robotCodeEl, cursorPos);
+                }
+            }
+        }, SYNTAX_HIGHLIGHT_DELAY);
+    }
+
+    // Helper to calculate node length including implicit newlines
+    function getNodeLength(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.length;
+        } else if (node.nodeName === 'BR') {
+            return 1;
+        } else if (node.childNodes) {
+            let sum = 0;
+            for (const child of node.childNodes) {
+                sum += getNodeLength(child);
+            }
+            // If block element, count implicit newline
+            if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                sum += 1;
+            }
+            return sum;
+        }
+        return 0;
+    }
+
+    // Save cursor position as character offset
+    // Counts newlines for <br> and Block elements (DIV, P)
+    function saveCursorPosition(element) {
+        const selection = window.getSelection();
+        if (!selection.rangeCount) return null;
+
+        const range = selection.getRangeAt(0);
+        const targetNode = range.startContainer;
+        const targetOffset = range.startOffset;
+
+        let charCount = 0;
+        let found = false;
+
+        function traverse(node) {
+            if (found) return;
+
+            if (node === targetNode) {
+                // Check if this is an element node (cursor is between child nodes)
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    // targetOffset is the child index, count all children before it
+                    for (let i = 0; i < targetOffset && i < node.childNodes.length; i++) {
+                        charCount += getNodeLength(node.childNodes[i]);
+                    }
+                } else if (node.nodeType === Node.TEXT_NODE) {
+                    // For text nodes, add the offset within the node
+                    charCount += targetOffset;
+                }
+                found = true;
+                return;
+            }
+
+            if (node.nodeType === Node.TEXT_NODE) {
+                charCount += node.length;
+            } else if (node.nodeName === 'BR') {
+                // Count <br> as a newline character
+                charCount += 1;
+            } else if (node.childNodes) {
+                for (const child of node.childNodes) {
+                    traverse(child);
+                    if (found) return;
+                }
+                // When finishing a block element, add implicit newline
+                if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                    // Note: We don't check 'found' here because if found was true inside, 
+                    // we would have returned already.
+                    charCount += 1;
+                }
+            }
+        }
+
+        traverse(element);
+        return found ? charCount : null;
+    }
+
+    // Restore cursor position from character offset
+    // Counts newlines for <br> and Block elements (DIV, P)
+    function restoreCursorPosition(element, offset) {
+        let charCount = 0;
+        let found = false;
+        let lastNode = null;
+
+        function traverse(node) {
+            if (found) return;
+
+            if (node.nodeType === Node.TEXT_NODE) {
+                const nodeLength = node.length;
+                if (charCount + nodeLength >= offset) {
+                    // Found the target position
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    range.setStart(node, offset - charCount);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    found = true;
+                    return;
+                }
+                charCount += nodeLength;
+                lastNode = node;
+            } else if (node.nodeName === 'BR') {
+                // Count <br> as a newline character
+                charCount += 1;
+                lastNode = node;
+                // If we've now reached or passed the offset, position after the <br>
+                if (charCount >= offset) {
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    range.setStartAfter(node);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    found = true;
+                    return;
+                }
+            } else if (node.childNodes) {
+                for (const child of node.childNodes) {
+                    traverse(child);
+                    if (found) return;
+                }
+                // When finishing a block element, add implicit newline
+                if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                    charCount += 1; // Implicit newline
+                    if (charCount >= offset) {
+                        // Position after the block (which is effectively the start of the next line)
+                        const range = document.createRange();
+                        const selection = window.getSelection();
+                        range.setStartAfter(node);
+                        range.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        found = true;
+                        return;
+                    }
+                }
+            }
+        }
+
+        traverse(element);
+
+        // If offset is beyond content, move to end
+        if (!found) {
+            moveCursorToEnd(element);
+        }
+    }
+
+    function moveCursorToEnd(element) {
+        const range = document.createRange();
+        const selection = window.getSelection();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+
 
     // New Test Button Handler
     newTestBtn.addEventListener('click', () => {
@@ -977,10 +1306,10 @@ document.addEventListener('DOMContentLoaded', () => {
             copyCodeBtn.classList.add('copied');
             copyCodeBtn.setAttribute('aria-label', 'Copied successfully');
             copyCodeBtn.innerHTML = `
-                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
-                </svg>
-            `;
+               <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                   <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
+               </svg>
+           `;
 
             setTimeout(() => {
                 copyCodeBtn.classList.remove('copied');
@@ -1009,11 +1338,11 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadBtn.classList.add('download-success');
         const originalHTML = downloadBtn.innerHTML;
         downloadBtn.innerHTML = `
-            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-            </svg>
-            Downloaded
-        `;
+           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+           </svg>
+           Downloaded
+       `;
 
         setTimeout(() => {
             downloadBtn.classList.remove('download-success');
