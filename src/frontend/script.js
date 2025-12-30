@@ -372,8 +372,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Force remove placeholder on ANY input
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
             robotCodeEl.removeChild(codePlaceholder);
-            // Reset any inherited styles
-            document.execCommand('fontSize', false, '3'); // Reset to normal
+            // Reset any inherited font-size styling
+            robotCodeEl.style.fontSize = '';
         }
         updateUI();
     });
@@ -395,7 +395,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const existingCode = getCodeContent();
         const combinedCode = existingCode.trim() ? existingCode + '\n' + text : text;
         applySyntaxHighlighting(combinedCode);
+        moveCursorToEnd(robotCodeEl);
     });
+
+    function moveCursorToEnd(element) {
+        const range = document.createRange();
+        const selection = window.getSelection();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
 
     // Also listen for blur event to apply formatting when user finishes typing
     robotCodeEl.addEventListener('blur', () => {

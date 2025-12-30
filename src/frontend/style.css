@@ -857,8 +857,16 @@ body {
     outline: none;
 }
 
-.code-block:not(:has(.empty-state)) {
+/* Fallback for browsers that don't support :has() */
+.code-block {
     font-size: 0.85rem !important;
+}
+
+/* Progressive enhancement: Reset only when empty-state is present */
+@supports selector(:has(.empty-state)) {
+    .code-block:has(.empty-state) {
+        font-size: inherit !important;
+    }
 }
 
 .code-language {
