@@ -368,14 +368,35 @@ document.addEventListener('DOMContentLoaded', () => {
         updateUI();
     });
 
+    // Handle first character input to prevent it from being swallowed
+    robotCodeEl.addEventListener('keydown', (e) => {
+        // If placeholder is present and user types a key that produces output
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            // Check for printable characters (length 1, no special modifiers)
+            if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault(); // Prevent default insertion to handle it manually
+
+                // Remove placeholder
+                robotCodeEl.removeChild(codePlaceholder);
+
+                // Reset any inherited styles (fixes large font bug)
+                document.execCommand('fontSize', false, '3'); // Reset to normal
+
+                // Manually insert the character
+                document.execCommand('insertText', false, e.key);
+
+                updateUI();
+            }
+        }
+    });
+
     robotCodeEl.addEventListener('input', () => {
         // When user types or edits, update UI state
-        // Remove placeholder if user starts typing
+        // Remove placeholder if user starts typing (fallback for other input methods)
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-            const text = robotCodeEl.textContent.trim();
-            if (text && text !== codePlaceholder.textContent.trim()) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles (fixes large font bug)
+            document.execCommand('fontSize', false, '3'); // Reset to normal
         }
         updateUI();
     });
@@ -384,19 +405,22 @@ document.addEventListener('DOMContentLoaded', () => {
         // Handle paste to preserve user's formatting and apply syntax highlighting
         e.preventDefault();
         const text = e.clipboardData.getData('text/plain');
+        if (!text.trim()) return;
 
-        if (text.trim()) {
-            // Remove placeholder if present
-            if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-            // Apply syntax highlighting to pasted code (preserves original formatting)
+        // Remove placeholder if present
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
             applySyntaxHighlighting(text);
-            // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
-
-            // User pasted code directly - don't show generation logs
-            // Execution logs will show when user clicks execute
+            return;
         }
+
+        // Get existing code and append
+        const existingCode = getCodeContent();
+        const combinedCode = existingCode.trim() ? existingCode + '\n' + text : text;
+        applySyntaxHighlighting(combinedCode);
+
+        // User pasted code directly - don't show generation logs
+        // Execution logs will show when user clicks execute
     });
 
     // Also listen for blur event to apply formatting when user finishes typing
