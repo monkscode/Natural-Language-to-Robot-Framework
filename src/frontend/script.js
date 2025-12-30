@@ -415,13 +415,26 @@ document.addEventListener('DOMContentLoaded', () => {
         // Replace Windows-style \r\n with \n
         let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-        // Use execCommand to insert text - this is the proper way for contenteditable
-        // It preserves undo functionality and doesn't cause duplication
-        document.execCommand('insertText', false, normalizedText);
+        // Use standard DOM Range API instead of deprecated execCommand
+        const selection = window.getSelection();
+        if (selection.rangeCount) {
+            const range = selection.getRangeAt(0);
+            range.deleteContents();
 
-        // Trigger syntax highlighting
+            const textNode = document.createTextNode(normalizedText);
+            range.insertNode(textNode);
+
+            // Move cursor to end of inserted text
+            range.setStartAfter(textNode);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+
+        // Trigger updates manually since programmatic changes don't fire input events
         updateUI();
         scheduleSyntaxHighlighting();
+        commitState(); // Save immediately to ensure Paste is a distinct undo step
     });
 
     // Remove placeholder on focus BEFORE typing starts - this prevents first character loss
@@ -469,13 +482,11 @@ document.addEventListener('DOMContentLoaded', () => {
         cursor: 0
     };
 
-    // Initialize snapshot on load
-    setTimeout(() => {
-        currentSnapshot = {
-            code: getCodeContentRaw(),
-            cursor: 0
-        };
-    }, 100);
+    // Initialize snapshot on load - synchronous to avoid race conditions
+    currentSnapshot = {
+        code: getCodeContentRaw(),
+        cursor: 0
+    };
 
     function commitState() {
         const newCode = getCodeContentRaw();
@@ -1372,9 +1383,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Syntax highlighting function
     function applySyntaxHighlighting(code) {
         const lines = code.split('\n');
-        let highlightedHTML = '';
 
-        lines.forEach((line, index) => {
+        const highlightedLines = lines.map(line => {
             let highlightedLine = '';
 
             if (line.trim().startsWith('***') && line.trim().endsWith('***')) {
@@ -1437,21 +1447,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 highlightedLine = escapeHtml(line);
             }
 
-            // Add newline only if not the last line
-            if (index < lines.length - 1) {
-                highlightedHTML += highlightedLine + '\n';
-            } else {
-                highlightedHTML += highlightedLine;
-            }
+            return highlightedLine;
         });
 
-        setCodeContent(highlightedHTML, true);
+        setCodeContent(highlightedLines.join('\n'), true);
     }
 
     function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        if (!text) return '';
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
     }
 
     // Initialize UI

@@ -855,17 +855,13 @@ body {
     min-height: 500px;
     max-height: 800px;
     outline: none;
-}
-
-/* Fallback for browsers that don't support :has() */
-.code-block {
-    font-size: 0.85rem !important;
+    white-space: pre;
 }
 
 /* Progressive enhancement: Reset only when empty-state is present */
 @supports selector(:has(.empty-state)) {
     .code-block:has(.empty-state) {
-        font-size: inherit !important;
+        font-size: inherit;
     }
 }
 
