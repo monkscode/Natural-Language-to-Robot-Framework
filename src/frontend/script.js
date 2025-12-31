@@ -394,6 +394,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
+        // Force remove placeholder on ANY input
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles
+            document.execCommand('fontSize', false, '3'); // Reset to normal
+        }
+
         // When user types or edits, just update UI state
         // Placeholder removal is handled by focus event
         updateUI();
@@ -410,6 +417,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Get plain text from clipboard
         const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        if (!text) return;
+
+        // Remove placeholder if present
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+
+            // For empty state paste, we can just highlight and set content directly
+            // This avoids any cursor positioning issues with the initial state
+            applySyntaxHighlighting(text);
+            updateUI();
+            commitState();
+            return;
+        }
 
         // Normalize newlines - ensure consistent line endings
         // Replace Windows-style \r\n with \n
