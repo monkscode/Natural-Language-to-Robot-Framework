@@ -394,8 +394,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
+        // Force remove placeholder on ANY input (fixes Bug #1)
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles (especially font size from empty state icon)
+            document.execCommand('fontSize', false, '3');
+        }
+
         // When user types or edits, just update UI state
-        // Placeholder removal is handled by focus event
         updateUI();
         // Schedule syntax highlighting after any input change
         scheduleSyntaxHighlighting();
@@ -410,10 +416,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Get plain text from clipboard
         const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        if (!text) return;
 
         // Normalize newlines - ensure consistent line endings
         // Replace Windows-style \r\n with \n
         let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+        // Fix Bug #2: Handle paste into empty state explicitly
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+            applySyntaxHighlighting(normalizedText);
+            commitState();
+            updateUI();
+            return;
+        }
 
         // Use standard DOM Range API instead of deprecated execCommand
         const selection = window.getSelection();
