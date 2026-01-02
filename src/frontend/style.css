@@ -865,6 +865,10 @@ body {
     }
 }
 
+.code-block:not(:has(.empty-state)) {
+    font-size: 0.85rem !important;
+}
+
 .code-language {
     position: absolute;
     top: 0.75rem;

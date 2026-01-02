@@ -394,6 +394,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
+        // Force remove placeholder on ANY input
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles
+            document.execCommand('fontSize', false, '3'); // Reset to normal
+        }
+
         // When user types or edits, just update UI state
         // Placeholder removal is handled by focus event
         updateUI();
@@ -414,6 +421,11 @@ document.addEventListener('DOMContentLoaded', () => {
         // Normalize newlines - ensure consistent line endings
         // Replace Windows-style \r\n with \n
         let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+        // Remove placeholder if present
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+        }
 
         // Use standard DOM Range API instead of deprecated execCommand
         const selection = window.getSelection();
