@@ -240,42 +240,25 @@ def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.5-fla
     if cost is not None:
         logger.info(f"💰 CrewAI cost extracted directly: ${cost:.6f} (model: {model_name})")
     else:
-        # Fallback: Calculate via LiteLLM if cost not available (shouldn't happen with modern CrewAI)
-        logger.warning(f"total_cost not found in usage_metrics, calculating via LiteLLM...")
+        # Calculate via LiteLLM's completion_cost() function
+        # LiteLLM caches pricing data internally and is always available when Gemini API is
+        logger.info(f"💰 Calculating CrewAI cost via LiteLLM for model: {model_name}")
         
-        try:
-            from litellm import completion_cost
-            
-            cost = completion_cost(
-                model=model_name,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens
-            )
-            
-            logger.info(f"💰 CrewAI cost calculated from LiteLLM: ${cost:.6f} (model: {model_name})")
+        from litellm import completion_cost
         
-        except Exception as e:
-            # Last resort fallback: Use current Gemini pricing
-            logger.warning(f"Failed to calculate cost via LiteLLM for {model_name}: {e}. Using fallback.")
-            
-            # Updated fallback pricing for current Gemini models (as of Dec 2025)
-            FALLBACK_PRICING = {
-                # Gemini 2.5 series (current)
-                "gemini-2.5-flash": {"input": 0.0003, "output": 0.0012},
-                "gemini-2.5-flash-lite": {"input": 0.00015, "output": 0.0006},
-                "gemini-2.5-pro": {"input": 0.00125, "output": 0.005},
-                
-                # Gemini 3 series (preview)
-                "gemini-3-flash-preview": {"input": 0.0, "output": 0.0},  # Free during preview
-                "gemini-3-pro": {"input": 0.002, "output": 0.008},
+        # completion_cost() expects a completion response object
+        # Create a minimal response object with the token usage
+        completion_response = {
+            "model": model_name,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
             }
-            
-            pricing = FALLBACK_PRICING.get(model_name, FALLBACK_PRICING["gemini-2.5-flash"])
-            
-            cost = (
-                (prompt_tokens / 1000) * pricing["input"] +
-                (completion_tokens / 1000) * pricing["output"]
-            )
+        }
+        
+        cost = completion_cost(completion_response=completion_response)
+        logger.info(f"💰 CrewAI cost calculated: ${cost:.6f} (model: {model_name})")
     
     return {
         'llm_calls': usage_metrics.get('successful_requests', 0),
