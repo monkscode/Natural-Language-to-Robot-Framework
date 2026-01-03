@@ -30,7 +30,7 @@ def _parse_date(date_str: Optional[str], param_name: str) -> Optional[datetime]:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid {param_name} format: {date_str}. Use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"
-        )
+        ) from None
 
 
 @router.get("/", response_model=List[WorkflowMetricsResponse])

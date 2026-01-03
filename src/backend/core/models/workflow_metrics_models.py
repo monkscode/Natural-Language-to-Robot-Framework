@@ -145,7 +145,7 @@ class WorkflowMetrics(WorkflowMetricsBase):
     
     @field_validator('timestamp', mode='before')
     @classmethod
-    def parse_timestamp(cls, v):
+    def parse_timestamp(cls, v) -> datetime:
         """Handle both datetime objects and ISO format strings."""
         if isinstance(v, str):
             return datetime.fromisoformat(v)
@@ -317,7 +317,7 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
 
 class RecordMetricsRequest(WorkflowMetricsBase):
     """API request model for recording workflow metrics."""
-    pass  # All fields inherited from WorkflowMetricsBase with defaults
+    # All fields inherited from WorkflowMetricsBase with defaults
 
 
 class AggregateMetricsResponse(BaseModel):
