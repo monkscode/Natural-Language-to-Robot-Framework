@@ -693,7 +693,7 @@ body {
 .form-input:focus {
     outline: none;
     border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.4); /* Increased opacity for better visibility */
 }
 
 .form-input::placeholder {
@@ -856,6 +856,11 @@ body {
     max-height: 800px;
     outline: none;
     white-space: pre;
+}
+
+/* Fix for Bug #1: Ensure code font size is enforced when content exists */
+.code-block:not(:has(.empty-state)) {
+    font-size: 0.85rem !important;
 }
 
 /* Progressive enhancement: Reset only when empty-state is present */

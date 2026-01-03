@@ -394,8 +394,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
+        // Force remove placeholder on ANY input to prevent Bug #1
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+            // Reset any inherited styles (like large font size from empty state)
+            document.execCommand('fontSize', false, '3'); // Reset to normal
+        }
+
         // When user types or edits, just update UI state
-        // Placeholder removal is handled by focus event
         updateUI();
         // Schedule syntax highlighting after any input change
         scheduleSyntaxHighlighting();
@@ -410,6 +416,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Get plain text from clipboard
         const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        if (!text && !text.trim()) return;
+
+        // Fix for Bug #2: Handle empty state (placeholder) explicitly
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+
+            // If empty, we can just set the content directly to ensure clean state
+            // But we should try to preserve the insertion logic if possible.
+            // However, to be safe against "Replaces All" bug, we treat empty state specially.
+
+            // Normalize text
+            let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+            // Apply highlighting immediately
+            applySyntaxHighlighting(normalizedText);
+
+            // Trigger updates
+            updateUI();
+            commitState();
+            return;
+        }
 
         // Normalize newlines - ensure consistent line endings
         // Replace Windows-style \r\n with \n
@@ -429,6 +456,11 @@ document.addEventListener('DOMContentLoaded', () => {
             range.collapse(true);
             selection.removeAllRanges();
             selection.addRange(range);
+        } else {
+            // Fallback if no selection (shouldn't happen usually)
+            const existingCode = getCodeContent();
+            const combinedCode = existingCode.trim() ? existingCode + '\n' + normalizedText : normalizedText;
+            applySyntaxHighlighting(combinedCode);
         }
 
         // Trigger updates manually since programmatic changes don't fire input events
