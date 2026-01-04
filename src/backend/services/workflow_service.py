@@ -78,7 +78,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results, optimization_metrics = run_crew(
+        validation_output, crew_with_results, optimization_metrics, per_agent_metrics = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
         
         # Stage 3: Generating (50-75%)
@@ -283,6 +283,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     
                     logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
                     
+                    # Log per-agent token breakdown
+                    if per_agent_metrics:
+                        logging.info(f"📊 Per-agent token breakdown:")
+                        for agent_name, metrics in per_agent_metrics.items():
+                            logging.info(f"   • {agent_name}: {metrics['total_tokens']} tokens "
+                                       f"(prompt: {metrics['prompt_tokens']}, completion: {metrics['completion_tokens']})")
+                    
                 except Exception as e:
                     logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
                     # Fallback to empty metrics
@@ -312,6 +319,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 
                 avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
                 avg_cost = browser_cost / total_elements if total_elements > 0 else 0
+                
+                # Prepare token_usage dict from per_agent_metrics
+                token_usage = {
+                    "step_planner": per_agent_metrics.get("step_planner", {}).get("total_tokens", 0),
+                    "element_identifier": per_agent_metrics.get("element_identifier", {}).get("total_tokens", 0),
+                    "code_assembler": per_agent_metrics.get("code_assembler", {}).get("total_tokens", 0),
+                    "code_validator": per_agent_metrics.get("code_validator", {}).get("total_tokens", 0),
+                    "total": sum(
+                        per_agent_metrics.get(agent, {}).get("total_tokens", 0)
+                        for agent in ["step_planner", "element_identifier", "code_assembler", "code_validator"]
+                    )
+                }
                 
                 unified_metrics = WorkflowMetrics(
                     workflow_id=workflow_id,
@@ -345,6 +364,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
                     custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
                     session_id=browser_metrics.get('session_id'),
+                    
+                    # Per-agent token tracking
+                    token_usage=token_usage,
                 )
                 
                 # 4. Record unified metrics
