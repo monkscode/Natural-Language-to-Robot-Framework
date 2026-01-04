@@ -303,15 +303,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 temp_storage = get_temp_metrics_storage()
                 browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
                 logging.info(f"📊 Browser-use metrics: {browser_metrics}")
+                logging.info(f"📊 DEBUG: browser_metrics tokens = {browser_metrics.get('tokens', 'NOT_FOUND')}")
+                logging.info(f"📊 DEBUG: browser_metrics input_tokens = {browser_metrics.get('input_tokens', 'NOT_FOUND')}")
+                logging.info(f"📊 DEBUG: browser_metrics output_tokens = {browser_metrics.get('output_tokens', 'NOT_FOUND')}")
                 
                 # 3. Create unified metrics
                 # Calculate averages
                 total_elements = browser_metrics.get('elements_processed', 0)
                 browser_llm_calls = browser_metrics.get('llm_calls', 0)
-                browser_cost = browser_metrics.get('cost', 0.0)
+                browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
                 
                 avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
-                avg_cost = browser_cost / total_elements if total_elements > 0 else 0
+                avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
                 
                 unified_metrics = WorkflowMetrics(
                     workflow_id=workflow_id,
@@ -320,7 +323,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     
                     # Totals
                     total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
-                    total_cost=crewai_metrics['cost'] + browser_cost,
+                    total_cost=crewai_metrics['cost'] + browser_actual_cost,
                     execution_time=browser_metrics.get('execution_time', 0),
                     
                     # CrewAI breakdown
@@ -330,10 +333,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
                     crewai_completion_tokens=crewai_metrics['completion_tokens'],
                     
-                    # Browser-use breakdown
+                    # Browser-use breakdown (with granular token tracking)
                     browser_use_llm_calls=browser_llm_calls,
-                    browser_use_cost=browser_cost,
+                    browser_use_cost=browser_actual_cost,
                     browser_use_tokens=browser_metrics.get('tokens', 0),
+                    browser_use_prompt_tokens=browser_metrics.get('input_tokens', 0),
+                    browser_use_completion_tokens=browser_metrics.get('output_tokens', 0),
+                    browser_use_cached_tokens=browser_metrics.get('cached_tokens', 0),
                     
                     # Browser-use specific
                     total_elements=total_elements,
