@@ -1,0 +1,143 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'browser_service/**'
+      - 'browser-service/**'
+      - 'Dockerfile.fastapi'
+      - 'Dockerfile.browser-service'
+      - '.github/workflows/build-images.yml'
+
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild all images'
+        required: false
+        default: 'false'
+
+env:
+  REGISTRY: docker.io
+  FASTAPI_IMAGE_NAME: monkscode/nlrf-fastapi
+  BROWSER_SERVICE_IMAGE_NAME: monkscode/nlrf-browser-service
+
+jobs:
+  build-fastapi:
+    name: Build FastAPI Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push FastAPI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.fastapi
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}:buildcache,mode=max
+          platforms: linux/amd64
+
+  build-browser-service:
+    name: Build Browser Service Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push Browser Service image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.browser-service
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}:buildcache,mode=max
+          platforms: linux/amd64
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-fastapi, build-browser-service]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🐳 Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images Built:" >> $GITHUB_STEP_SUMMARY
+          echo "- **FastAPI**: \`${{ env.FASTAPI_IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Browser Service**: \`${{ env.BROWSER_SERVICE_IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build-fastapi.result }}" == "success" ] && [ "${{ needs.build-browser-service.result }}" == "success" ]; then
+            echo "✅ **Status**: All images built successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status**: Some builds failed" >> $GITHUB_STEP_SUMMARY
+            echo "- FastAPI: ${{ needs.build-fastapi.result }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Browser Service: ${{ needs.build-browser-service.result }}" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,42 @@
+# Development mode docker-compose with code hot-reload
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi
+    # Override with development command (hot-reload enabled)
+    command: uvicorn src.backend.main:app --host 0.0.0.0 --port 5000 --reload
+    volumes:
+      # Mount source code for hot-reload
+      - ./src:/app/src:ro
+      # Keep persistent data volumes from base compose
+      - ./robot_tests:/app/robot_tests
+      - ./logs:/app/logs
+      - ./chroma_db:/app/chroma_db
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Development environment
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+    # Override image tag to use locally built version
+    image: nlrf-fastapi:dev
+
+  browser-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.browser-service
+    volumes:
+      # Mount source code for hot-reload
+      - ./tools:/app/tools:ro
+      - ./browser_service:/app/browser_service:ro
+      # Keep logs volume from base compose
+      - ./logs:/app/logs
+    environment:
+      # Development environment
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+    # Override image tag to use locally built version
+    image: nlrf-browser-service:dev

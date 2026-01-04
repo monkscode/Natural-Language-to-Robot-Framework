@@ -1,0 +1,88 @@
+services:
+  fastapi:
+    image: ${FASTAPI_IMAGE_TAG:-monkscode/nlrf-fastapi:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.fastapi
+    container_name: nlrf-fastapi
+    ports:
+      - "5000:5000"
+    volumes:
+      # Persistent data volumes
+      - ./robot_tests:/app/robot_tests
+      - ./logs:/app/logs
+      - ./chroma_db:/app/chroma_db
+      - ./data:/app/data
+      # Docker socket for robot test execution (Docker-in-Docker)
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Application configuration
+      - APP_PORT=5000
+      - BROWSER_SERVICE_URL=http://browser-service:4999
+      # Docker-in-Docker: Host path for volume mounts in spawned containers
+      - HOST_ROBOT_TESTS_DIR=${PWD}/robot_tests
+      - HOST_WORKSPACE_DIR=${PWD}
+      # Load additional env vars from .env file
+    env_file:
+      - ./src/backend/.env
+    depends_on:
+      browser-service:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=fastapi"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - nlrf-network
+
+  browser-service:
+    image: ${BROWSER_SERVICE_IMAGE_TAG:-monkscode/nlrf-browser-service:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.browser-service
+    container_name: nlrf-browser-service
+    ports:
+      - "4999:4999"
+    volumes:
+      # Shared logs directory
+      - ./logs:/app/logs
+    environment:
+      # Browser service configuration
+      - BROWSER_SERVICE_URL=http://browser-service:4999
+      # Load additional env vars from .env file
+    env_file:
+      - ./src/backend/.env
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=browser-service"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4999/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - nlrf-network
+
+networks:
+  nlrf-network:
+    driver: bridge
+
+volumes:
+  robot_tests:
+  logs:
+  chroma_db:
+  data:
