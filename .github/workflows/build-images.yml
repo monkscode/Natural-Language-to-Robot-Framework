@@ -62,8 +62,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch,suffix=-fastapi
-            type=sha,prefix={{branch}}-fastapi-
+            type=ref,event=branch,prefix=fastapi-
+            type=sha,prefix=fastapi-,format=short
             type=raw,value=fastapi-latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=fastapi-develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
@@ -106,8 +106,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch,suffix=-browser-service
-            type=sha,prefix={{branch}}-browser-service-
+            type=ref,event=branch,prefix=browser-service-
+            type=sha,prefix=browser-service-,format=short
             type=raw,value=browser-service-latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=browser-service-develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
