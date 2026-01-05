@@ -1,6 +1,6 @@
 services:
   fastapi:
-    image: ${FASTAPI_IMAGE_TAG:-monkscode/nlrf-fastapi:latest}
+    image: ${FASTAPI_IMAGE_TAG:-devasy23/nlrf:fastapi-latest}
     build:
       context: .
       dockerfile: Dockerfile.fastapi
@@ -45,7 +45,7 @@ services:
       - nlrf-network
 
   browser-service:
-    image: ${BROWSER_SERVICE_IMAGE_TAG:-monkscode/nlrf-browser-service:latest}
+    image: ${BROWSER_SERVICE_IMAGE_TAG:-devasy23/nlrf:browser-service-latest}
     build:
       context: .
       dockerfile: Dockerfile.browser-service

@@ -23,8 +23,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  FASTAPI_IMAGE_NAME: monkscode/nlrf-fastapi
-  BROWSER_SERVICE_IMAGE_NAME: monkscode/nlrf-browser-service
+  IMAGE_NAME: devasy23/nlrf
 
 jobs:
   build-fastapi:
@@ -52,12 +51,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=ref,event=branch,suffix=-fastapi
+            type=sha,prefix={{branch}}-fastapi-
+            type=raw,value=fastapi-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=fastapi-develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build and push FastAPI image
         uses: docker/build-push-action@v5
@@ -67,8 +66,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.FASTAPI_IMAGE_NAME }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache,mode=max
           platforms: linux/amd64
 
   build-browser-service:
@@ -96,12 +95,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=ref,event=branch,suffix=-browser-service
+            type=sha,prefix={{branch}}-browser-service-
+            type=raw,value=browser-service-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=browser-service-develop,enable=${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build and push Browser Service image
         uses: docker/build-push-action@v5
@@ -111,8 +110,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.BROWSER_SERVICE_IMAGE_NAME }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache,mode=max
           platforms: linux/amd64
 
   summary:
@@ -127,8 +126,8 @@ jobs:
           echo "## 🐳 Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images Built:" >> $GITHUB_STEP_SUMMARY
-          echo "- **FastAPI**: \`${{ env.FASTAPI_IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Browser Service**: \`${{ env.BROWSER_SERVICE_IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **FastAPI**: \`${{ env.IMAGE_NAME }}:fastapi-*\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Browser Service**: \`${{ env.IMAGE_NAME }}:browser-service-*\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "### Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
