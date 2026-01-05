@@ -43,10 +43,35 @@ def get_llm(model_provider, model_name):
 
 # Initialize the tools
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
-selenium_tool = SeleniumScrapingTool()
+# SeleniumScrapingTool is initialized lazily to avoid Chrome startup in Docker at import time
+selenium_tool = None  # Will be initialized on first use if needed
 scrape_tool = ScrapeElementFromWebsiteTool()
 # Primary tool: Batch processing for multiple elements with full context
 batch_browser_use_tool = BatchBrowserUseTool()
+
+
+def get_selenium_tool():
+    """Lazy initialization of SeleniumScrapingTool to avoid Chrome startup at import time."""
+    global selenium_tool
+    if selenium_tool is None:
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            
+            # Configure Chrome options for Docker environment
+            chrome_options = Options()
+            chrome_options.add_argument('--headless=new')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            
+            # Initialize with custom options
+            from crewai_tools import SeleniumScrapingTool
+            selenium_tool = SeleniumScrapingTool(options=chrome_options)
+        except Exception as e:
+            logging.warning(f"Failed to initialize SeleniumScrapingTool: {e}")
+            selenium_tool = None
+    return selenium_tool
 
 
 class RobotAgents:

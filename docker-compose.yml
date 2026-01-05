@@ -18,10 +18,13 @@ services:
     environment:
       # Application configuration
       - APP_PORT=5000
-      - BROWSER_SERVICE_URL=http://browser-service:4999
+      - BROWSER_USE_SERVICE_URL=http://browser-service:4999
       # Docker-in-Docker: Host path for volume mounts in spawned containers
       - HOST_ROBOT_TESTS_DIR=${PWD}/robot_tests
       - HOST_WORKSPACE_DIR=${PWD}
+      # Chrome/Selenium configuration for Docker environment
+      - CHROME_BIN=/usr/bin/google-chrome
+      - DISPLAY=:99
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env

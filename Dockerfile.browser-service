@@ -58,6 +58,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install Playwright browsers (Chromium)
 RUN playwright install chromium
 
+# Copy application source code (needed for shared config imports)
+COPY src/ /app/src/
+
 # Copy browser service startup script
 # Note: browser_service package is installed via pip (browser-service>=1.0.0)
 COPY tools/ /app/tools/

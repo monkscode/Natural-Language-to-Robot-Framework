@@ -11,6 +11,7 @@ services:
     volumes:
       # Mount source code for hot-reload
       - ./src:/app/src:ro
+      - ./tools:/app/tools:ro
       # Keep persistent data volumes from base compose
       - ./robot_tests:/app/robot_tests
       - ./logs:/app/logs
@@ -21,6 +22,8 @@ services:
       # Development environment
       - DEBUG=true
       - LOG_LEVEL=DEBUG
+      # Browser service URL for Docker network
+      - BROWSER_USE_SERVICE_URL=http://browser-service:4999
     # Override image tag to use locally built version
     image: nlrf-fastapi:dev
 
@@ -31,7 +34,7 @@ services:
     volumes:
       # Mount source code for hot-reload
       - ./tools:/app/tools:ro
-      - ./browser_service:/app/browser_service:ro
+      - ./src:/app/src:ro
       # Keep logs volume from base compose
       - ./logs:/app/logs
     environment:
