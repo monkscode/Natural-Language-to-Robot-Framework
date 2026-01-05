@@ -15,6 +15,11 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
 ROBOT_TESTS_DIR = os.path.join(DOCKERFILE_PATH, 'robot_tests')
 
+# Docker-in-Docker Support: When running inside a Docker container, we need to use
+# the host's absolute path for volume mounts, not the container's internal path.
+# This env var should be set in docker-compose.yml to the host's robot_tests path.
+HOST_ROBOT_TESTS_DIR = os.getenv('HOST_ROBOT_TESTS_DIR', os.path.abspath(ROBOT_TESTS_DIR))
+
 
 def log_docker_operation(operation: str, details: str = "", level: str = "info"):
     """Centralized logging for all Docker operations to help debug 409 errors."""
@@ -162,17 +167,18 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             f"🤖 DOCKER SERVICE: Robot command: {' '.join(robot_command)}")
 
         # Container configuration
+        # Docker-in-Docker: Use HOST_ROBOT_TESTS_DIR for volume mount to reference host path
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
-            "volumes": {os.path.abspath(ROBOT_TESTS_DIR): {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            "volumes": {HOST_ROBOT_TESTS_DIR: {'bind': '/app/robot_tests', 'mode': 'rw'}},
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
             "name": f"robot-test-{run_id}"  # Give container a unique name
         }
         logging.info(
-            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id}")
+            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {HOST_ROBOT_TESTS_DIR}:/app/robot_tests")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"

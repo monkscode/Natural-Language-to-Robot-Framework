@@ -1,0 +1,95 @@
+# Browser Service Dockerfile - Multi-Stage Build
+# Stage 1: Builder - Install Python dependencies with pip/uv
+# Stage 2: Runtime - Minimal runtime with browsers and runtime libs only
+
+# ============================================================================
+# STAGE 1: Builder
+# ============================================================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Prevent Python from writing pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install UV package manager
+RUN pip install --no-cache-dir uv
+
+# Install browser-service and its dependencies directly
+# The package will handle all indirect dependencies automatically
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --prefix=/build/install --no-cache \
+    flask \
+    playwright \
+    browser-service
+
+# ============================================================================
+# STAGE 2: Runtime
+# ============================================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Prevent Python from writing pyc files and enable unbuffered output
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright \
+    PATH="/opt/venv/bin:$PATH"
+
+# Install system dependencies for Playwright and Chrome (runtime only, no build tools)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    gnupg \
+    ca-certificates \
+    curl \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libatspi2.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libwayland-client0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    xdg-utils && \
+    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends google-chrome-stable && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
+
+# Copy installed Python packages from builder stage
+COPY --from=builder /build/install /usr/local
+
+# Install Playwright browsers (Chromium) - must be after copying Python packages
+RUN playwright install chromium
+
+# Copy application source code (needed for shared config imports)
+COPY src/ /app/src/
+
+# Copy browser service startup script
+# Note: browser_service package is installed via pip (browser-service>=1.0.0)
+COPY tools/ /app/tools/
+
+# Expose browser service port
+EXPOSE 4999
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:4999/health || exit 1
+
+# Run browser service
+CMD ["python", "tools/browser_use_service.py"]
