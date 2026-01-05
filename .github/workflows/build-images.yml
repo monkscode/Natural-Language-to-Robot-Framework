@@ -1,6 +1,15 @@
 name: Build and Push Docker Images
 
 on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'browser_service/**'
+      - 'browser-service/**'
+      - 'Dockerfile.fastapi'
+      - 'Dockerfile.browser-service'
+      - '.github/workflows/build-images.yml'
   push:
     branches:
       - main
