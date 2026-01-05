@@ -15,12 +15,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Install UV package manager
 RUN pip install --no-cache-dir uv
 
-# Copy requirements file
-COPY browser-service/requirements.txt /build/browser-service-requirements.txt
-
-# Install all Python dependencies to /build/install
+# Install browser-service and its dependencies directly
+# The package will handle all indirect dependencies automatically
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --prefix=/build/install --no-cache -r /build/browser-service-requirements.txt
+    uv pip install --prefix=/build/install --no-cache \
+    flask \
+    playwright \
+    browser-service
 
 # ============================================================================
 # STAGE 2: Runtime
