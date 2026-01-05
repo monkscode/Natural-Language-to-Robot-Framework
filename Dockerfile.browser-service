@@ -1,20 +1,42 @@
-# Browser Service Dockerfile
-# Provides browser automation service for element detection and interaction
+# Browser Service Dockerfile - Multi-Stage Build
+# Stage 1: Builder - Install Python dependencies with pip/uv
+# Stage 2: Runtime - Minimal runtime with browsers and runtime libs only
+
+# ============================================================================
+# STAGE 1: Builder
+# ============================================================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Prevent Python from writing pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install UV package manager
+RUN pip install --no-cache-dir uv
+
+# Copy requirements file
+COPY browser-service/requirements.txt /build/browser-service-requirements.txt
+
+# Install all Python dependencies to /build/install
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --prefix=/build/install --no-cache -r /build/browser-service-requirements.txt
+
+# ============================================================================
+# STAGE 2: Runtime
+# ============================================================================
 FROM python:3.12-slim
 
-# Set working directory
 WORKDIR /app
 
 # Prevent Python from writing pyc files and enable unbuffered output
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
-    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright \
+    PATH="/opt/venv/bin:$PATH"
 
-# Install UV package manager (10-100x faster than pip)
-RUN pip install --no-cache-dir uv
-
-# Install system dependencies for Playwright and Chrome
+# Install system dependencies for Playwright and Chrome (runtime only, no build tools)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -48,14 +70,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends google-chrome-stable && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
 
-# Copy requirements file
-COPY browser-service/requirements.txt /app/browser-service-requirements.txt
+# Copy installed Python packages from builder stage
+COPY --from=builder /build/install /usr/local
 
-# Install Python dependencies using UV with cache
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-cache -r /app/browser-service-requirements.txt
-
-# Install Playwright browsers (Chromium)
+# Install Playwright browsers (Chromium) - must be after copying Python packages
 RUN playwright install chromium
 
 # Copy application source code (needed for shared config imports)
