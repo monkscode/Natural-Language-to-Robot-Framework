@@ -342,13 +342,18 @@ These require clicking the trigger first, then clicking the option text:
 ```robot
 # Click the dropdown trigger to open options
 Click    ${dropdown_locator}
-Sleep    0.5s
-# Click the option by its visible text (PRESERVE IFRAME PREFIX if present!)
+# Click the option - Browser Library auto-waits for visibility
 Click    <iframe_prefix> >>> text=<option_text>
 ```
-⚠️ **IMPORTANT**: If the dropdown locator contains `>>>` (iframe syntax), you MUST extract and use the same iframe prefix for the text click!
+
+⚠️ **CRITICAL: `>>` vs `>>>` Syntax**
+- `>>>` = **Frame entry** (enters an iframe context) - USE THIS for iframe prefixes
+- `>>` = **Selector chaining** (combines selectors, stays in same context) - NOT for iframe entry!
+
+⚠️ **IMPORTANT**: If the dropdown locator contains `>>>` (frame entry syntax), you MUST extract and use the same iframe prefix for the text click!
 - Pattern: `<iframe_prefix> >>> <element_selector>` → text click: `<iframe_prefix> >>> text=<value>`
-- Examples of iframe prefixes: `#iframeMain`, `#contentFrame`, `[name='main']`, `iframe >> nth=0`
+- Valid iframe prefix examples: `#iframeMain`, `#contentFrame`, `[name='main']`, `iframe[id='content']`
+- **WRONG**: `iframe >> nth=0` (this uses `>>` which is selector chaining, NOT frame entry)
 
 --- DECISION LOGIC ---
 When you see a dropdown-related step (Select Options By, dropdown, select):
@@ -388,10 +393,8 @@ Output:
 Input: `{"locator": "#iframeMain >>> [role='button']", "element_type": "span", "value": "ConfigAM"}`
 Output:
 ```robot
-    # Custom dropdown (element_type=span) - using Click+Click text pattern
-    Click    ${dropdown_locator}
-    Sleep    0.5s
-    # Extract iframe prefix "#iframeMain" from locator and apply to text click
+    # Custom dropdown (element_type=span) - Click trigger then option
+    Click    #iframeMain >>> [role='button']
     Click    #iframeMain >>> text=ConfigAM
 ```
 
@@ -399,9 +402,7 @@ Output:
 Input: `{"locator": "[name='content'] >>> .dropdown-trigger", "element_type": "button", "value": "Option2"}`
 Output:
 ```robot
-    Click    ${dropdown_locator}
-    Sleep    0.5s
-    # Extract iframe prefix "[name='content']" from locator
+    Click    [name='content'] >>> .dropdown-trigger
     Click    [name='content'] >>> text=Option2
 ```
 
@@ -409,8 +410,7 @@ Output:
 Input: `{"locator": "[role='button']", "element_type": "span", "value": "Option1"}`
 Output:
 ```robot
-    Click    ${dropdown_locator}
-    Sleep    0.5s
+    Click    [role='button']
     Click    text=Option1
 ```
 

@@ -2,6 +2,7 @@
 import json
 import re
 import logging
+from collections import OrderedDict
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Pattern
@@ -30,11 +31,15 @@ class ClientConfig:
 class FileBasedConfigProvider:
     """Load client configs from JSON files with caching."""
     
+    # Maximum number of URL lookups to cache (LRU eviction)
+    MAX_CACHE_SIZE = 100
+    
     def __init__(self):
         self.clients_dir = Path(__file__).parent
         self._configs: Dict[str, ClientConfig] = {}
         self._default: ClientConfig = ClientConfig()
-        self._url_cache: Dict[str, ClientConfig] = {}
+        # OrderedDict for LRU cache behavior (oldest entries evicted first)
+        self._url_cache: OrderedDict[str, ClientConfig] = OrderedDict()
         self._load_all()
     
     def _load_all(self):
@@ -87,36 +92,60 @@ class FileBasedConfigProvider:
             return None
     
     def get_config(self, url: str) -> ClientConfig:
-        """Get config for URL (cached)."""
+        """Get config for URL with LRU caching."""
+        # Check cache first
         if url in self._url_cache:
+            # Move to end for LRU behavior (most recently used)
+            self._url_cache.move_to_end(url)
             return self._url_cache[url]
         
+        # Search for matching pattern
+        result = self._default  # Default if no pattern matches
         for config in self._configs.values():
             for pattern in config._compiled_patterns:
                 if pattern.search(url):
-                    self._url_cache[url] = config
-                    return config
+                    result = config
+                    break
+            if result is not self._default:
+                break
         
-        return self._default
+        # Cache the result (including default matches)
+        self._url_cache[url] = result
+        
+        # Evict oldest entry if cache exceeds max size
+        if len(self._url_cache) > self.MAX_CACHE_SIZE:
+            self._url_cache.popitem(last=False)  # Remove oldest (first) entry
+        
+        return result
     
     def clear_cache(self):
         """Clear URL cache."""
         self._url_cache.clear()
 
 
-# Global instance
+# Global instance with thread-safe lazy initialization
 _provider: Optional[FileBasedConfigProvider] = None
+_provider_lock = __import__('threading').Lock()
 
 
 def get_client_config(url: str) -> ClientConfig:
-    """Get client config for URL."""
+    """Get client config for URL (thread-safe)."""
     global _provider
-    if _provider is None:
-        _provider = FileBasedConfigProvider()
+    # Fast path: if already initialized, skip lock
+    if _provider is not None:
+        return _provider.get_config(url)
+    
+    # Slow path: acquire lock for initialization
+    with _provider_lock:
+        # Double-check after acquiring lock (another thread may have initialized)
+        if _provider is None:
+            _provider = FileBasedConfigProvider()
+    
     return _provider.get_config(url)
 
 
 def reload_configs():
-    """Reload all configs."""
+    """Reload all configs (thread-safe)."""
     global _provider
-    _provider = FileBasedConfigProvider()
+    with _provider_lock:
+        _provider = FileBasedConfigProvider()
