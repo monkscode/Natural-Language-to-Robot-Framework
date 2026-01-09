@@ -318,45 +318,103 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 """
 
     DROPDOWN_HANDLING = """
---- HANDLING CUSTOM DROPDOWNS (React-Select, Material-UI, etc.) ---
-⚠️ **CRITICAL**: Check the 'element_type' field for dropdown-related keywords!
+--- HANDLING DROPDOWNS BASED ON element_type ---
+⚠️ **CRITICAL**: Check the 'element_type' and 'role' fields to choose the correct interaction pattern!
 
-If keyword is 'Select Options By' (or similar) but element_type is NOT 'select':
-- The element is a CUSTOM dropdown (e.g., React-Select, Material-UI)
-- 'Select Options By' ONLY works with native <select> elements
-- For custom dropdowns, use FILL TEXT + ENTER pattern (simplest and most reliable)
+Dropdowns come in 3 types, each requiring different Robot Framework keywords:
 
-**When element_type IS 'select' (native dropdown):**
+**TYPE 1: Native HTML Select (element_type='select')**
+Use standard Select Options By keyword:
 ```robot
 Select Options By    ${dropdown_locator}    label    Option Text
 ```
 
-**When element_type is 'input', 'div', or anything other than 'select' (custom dropdown):**
-Use FILL TEXT + ENTER pattern (2 steps):
+**TYPE 2: Combobox Input (element_type='input', typically role='combobox')**
+These are searchable/filterable dropdowns. Use Fill Text + Enter pattern:
 ```robot
-# Fill Text clears and types the option to filter the dropdown
-Fill Text    ${dropdown_locator}    Option Text
-# Press Enter to select the filtered/highlighted option
+# Type the option text to filter, then press Enter to select
+Fill Text    ${dropdown_locator}    Volvo
 Keyboard Key    press    Enter
 ```
-NOTE: If value is 'label    Option Text', extract just 'Option Text' for Fill Text.
 
-**Example with element_type check:**
-*Input Step (custom dropdown):*
-`{"keyword": "Select Options By", "locator": "id=react-select-4-input", "element_type": "input", "value": "label    Volvo"}`
-*Output Code (Fill Text+Enter pattern because element_type is 'input', not 'select'):*
+**TYPE 3: Click-based Trigger (element_type='span', 'button', or 'div' without combobox role)**
+These require clicking the trigger first, then clicking the option text:
+```robot
+# Click the dropdown trigger to open options
+Click    ${dropdown_locator}
+Sleep    0.5s
+# Click the option by its visible text (PRESERVE IFRAME PREFIX if present!)
+Click    <iframe_prefix> >>> text=<option_text>
+```
+⚠️ **IMPORTANT**: If the dropdown locator contains `>>>` (iframe syntax), you MUST extract and use the same iframe prefix for the text click!
+- Pattern: `<iframe_prefix> >>> <element_selector>` → text click: `<iframe_prefix> >>> text=<value>`
+- Examples of iframe prefixes: `#iframeMain`, `#contentFrame`, `[name='main']`, `iframe >> nth=0`
+
+--- DECISION LOGIC ---
+When you see a dropdown-related step (Select Options By, dropdown, select):
+
+1. **IF element_type='select'** → Use Select Options By keyword
+   
+2. **IF element_type='input'** (usually role='combobox') → Use Fill Text + Enter
+   - Extract option text from value (e.g., 'label    Volvo' → 'Volvo')
+   
+3. **IF element_type='span', 'button', or 'div'** (without role='combobox') → Use Click + Click text
+   - First: Click the trigger to open the dropdown
+   - Then: Click the option text
+   - **CRITICAL IFRAME RULE**: If locator contains `>>>`, extract the prefix and use it:
+     - Locator: `#iframeMain >>> [role='button']` → prefix is `#iframeMain`
+     - Locator: `[name='content'] >>> .dropdown` → prefix is `[name='content']`
+     - Text click: `<prefix> >>> text=<value>`
+
+--- EXAMPLES ---
+
+*Example 1 - Native Select (element_type='select'):*
+Input: `{"locator": "id=country", "element_type": "select", "value": "label    USA"}`
+Output:
+```robot
+    Select Options By    id=country    label    USA
+```
+
+*Example 2 - Combobox Input (element_type='input'):*
+Input: `{"locator": "id=react-select-input", "element_type": "input", "value": "label    Volvo"}`
+Output:
 ```robot
     # Custom dropdown (element_type=input) - using Fill Text+Enter pattern
-    Fill Text    id=react-select-4-input    Volvo
+    Fill Text    id=react-select-input    Volvo
     Keyboard Key    press    Enter
 ```
 
-*Input Step (native select):*
-`{"keyword": "Select Options By", "locator": "id=country-select", "element_type": "select", "value": "label    USA"}`
-*Output Code (Select Options By because element_type is 'select'):*
+*Example 3 - Click-based Trigger with IFRAME (element_type='span'):*
+Input: `{"locator": "#iframeMain >>> [role='button']", "element_type": "span", "value": "ConfigAM"}`
+Output:
 ```robot
-    Select Options By    id=country-select    label    USA
+    # Custom dropdown (element_type=span) - using Click+Click text pattern
+    Click    ${dropdown_locator}
+    Sleep    0.5s
+    # Extract iframe prefix "#iframeMain" from locator and apply to text click
+    Click    #iframeMain >>> text=ConfigAM
 ```
+
+*Example 4 - Click-based Trigger with DIFFERENT IFRAME:*
+Input: `{"locator": "[name='content'] >>> .dropdown-trigger", "element_type": "button", "value": "Option2"}`
+Output:
+```robot
+    Click    ${dropdown_locator}
+    Sleep    0.5s
+    # Extract iframe prefix "[name='content']" from locator
+    Click    [name='content'] >>> text=Option2
+```
+
+*Example 5 - Click-based Trigger WITHOUT iframe:*
+Input: `{"locator": "[role='button']", "element_type": "span", "value": "Option1"}`
+Output:
+```robot
+    Click    ${dropdown_locator}
+    Sleep    0.5s
+    Click    text=Option1
+```
+
+**NOTE**: For 'label    X' values, extract just 'X' for Fill Text or Click text patterns.
 """
 
     CHECKBOX_RADIO_HANDLING = """
