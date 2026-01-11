@@ -352,7 +352,7 @@ Click    <iframe_prefix> >>> text=<option_text>
 
 ⚠️ **IMPORTANT**: If the dropdown locator contains `>>>` (frame entry syntax), you MUST extract and use the same iframe prefix for the text click!
 - Pattern: `<iframe_prefix> >>> <element_selector>` → text click: `<iframe_prefix> >>> text=<value>`
-- Valid iframe prefix examples: `#iframeMain`, `#contentFrame`, `[name='main']`, `iframe[id='content']`
+- Valid iframe prefix examples: `iframe[id="iframeMain"]`, `iframe[id="contentFrame"]`, `iframe[name="main"]`
 - **WRONG**: `iframe >> nth=0` (this uses `>>` which is selector chaining, NOT frame entry)
 
 --- DECISION LOGIC ---
@@ -367,8 +367,8 @@ When you see a dropdown-related step (Select Options By, dropdown, select):
    - First: Click the trigger to open the dropdown
    - Then: Click the option text
    - **CRITICAL IFRAME RULE**: If locator contains `>>>`, extract the prefix and use it:
-     - Locator: `#iframeMain >>> [role='button']` → prefix is `#iframeMain`
-     - Locator: `[name='content'] >>> .dropdown` → prefix is `[name='content']`
+     - Locator: `iframe[id="iframeMain"] >>> [role='button']` → prefix is `iframe[id="iframeMain"]`
+     - Locator: `iframe[name="content"] >>> .dropdown` → prefix is `iframe[name="content"]`
      - Text click: `<prefix> >>> text=<value>`
 
 --- EXAMPLES ---
@@ -390,20 +390,20 @@ Output:
 ```
 
 *Example 3 - Click-based Trigger with IFRAME (element_type='span'):*
-Input: `{"locator": "#iframeMain >>> [role='button']", "element_type": "span", "value": "ConfigAM"}`
+Input: `{"locator": "iframe[id=\"iframeMain\"] >>> [role='button']", "element_type": "span", "value": "ConfigAM"}`
 Output:
 ```robot
     # Custom dropdown (element_type=span) - Click trigger then option
-    Click    #iframeMain >>> [role='button']
-    Click    #iframeMain >>> text=ConfigAM
+    Click    iframe[id="iframeMain"] >>> [role='button']
+    Click    iframe[id="iframeMain"] >>> text=ConfigAM
 ```
 
 *Example 4 - Click-based Trigger with DIFFERENT IFRAME:*
-Input: `{"locator": "[name='content'] >>> .dropdown-trigger", "element_type": "button", "value": "Option2"}`
+Input: `{"locator": "iframe[name=\"content\"] >>> .dropdown-trigger", "element_type": "button", "value": "Option2"}`
 Output:
 ```robot
-    Click    [name='content'] >>> .dropdown-trigger
-    Click    [name='content'] >>> text=Option2
+    Click    iframe[name="content"] >>> .dropdown-trigger
+    Click    iframe[name="content"] >>> text=Option2
 ```
 
 *Example 5 - Click-based Trigger WITHOUT iframe:*
