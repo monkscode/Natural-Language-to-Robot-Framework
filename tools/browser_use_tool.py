@@ -356,7 +356,9 @@ class BatchBrowserUseTool(BaseTool):
                         'custom_actions_enabled': summary.get('custom_actions_enabled', False),
                         'custom_action_usage_count': 0,  # Will be calculated if needed
                         'session_id': results.get('session_id'),  # Browser session ID
-                        'timestamp': time.time()
+                        'timestamp': time.time(),
+                        # Per-element approach metrics for pattern analysis
+                        'element_approach_metrics': summary.get('element_approach_metrics', [])
                     }
                     
                     logger.info("📊 DEBUG: browser_metrics being saved:")
