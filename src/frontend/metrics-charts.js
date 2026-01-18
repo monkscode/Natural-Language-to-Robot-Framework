@@ -25,9 +25,9 @@ function initializeChartDropdowns() {
 // Process and store all chart data
 function processChartData(runs) {
     if (!runs || runs.length === 0) return null;
-    
+
     const sortedRuns = [...runs].reverse(); // Oldest first for time series
-    
+
     // Extract URL domains
     const getDomain = (url) => {
         try {
@@ -36,11 +36,11 @@ function processChartData(runs) {
             return 'unknown';
         }
     };
-    
+
     // Group by domain
     const domainStats = {};
     runs.forEach(r => {
-        const domain = getDomain(r.url ||'');
+        const domain = getDomain(r.url || '');
         if (!domainStats[domain]) {
             domainStats[domain] = { count: 0, totalCost: 0, totalTime: 0, successCount: 0 };
         }
@@ -49,7 +49,7 @@ function processChartData(runs) {
         domainStats[domain].totalTime += r.execution_time || 0;
         if (r.success_rate >= 1.0) domainStats[domain].successCount++;
     });
-    
+
     return {
         sortedRuns,
         labels: sortedRuns.map(r => formatDateForTooltip(r.timestamp)),
@@ -108,8 +108,8 @@ function getCommonOptions(title = '') {
             title: { display: !!title, text: title }
         },
         scales: {
-            y: { 
-                grid: { color: colors.gridColor, drawBorder: false }, 
+            y: {
+                grid: { color: colors.gridColor, drawBorder: false },
                 ticks: { color: '#888' }
             },
             x: { display: false }
@@ -120,18 +120,18 @@ function getCommonOptions(title = '') {
 // ============= CHART 1: Primary Metrics =============
 function renderChart1() {
     if (!currentChartData.labels) return;
-    
+
     const select = document.getElementById('chart1-select');
     const chartType = select.value;
     const canvas = document.getElementById('chart1');
     const ctx = canvas.getContext('2d');
     const colors = getThemeColors();
-    
+
     if (chart1) chart1.destroy();
-    
+
     const data = currentChartData;
-    
-    switch(chartType) {
+
+    switch (chartType) {
         case 'execution-llm':
             chart1 = new Chart(ctx, {
                 type: 'line',
@@ -183,7 +183,7 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         case 'cost-trend':
             chart1 = new Chart(ctx, {
                 type: 'line',
@@ -214,7 +214,7 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         case 'success-trend':
             chart1 = new Chart(ctx, {
                 type: 'line',
@@ -247,14 +247,14 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         case 'multi-metric': {
             // Normalize all metrics to 0-100 scale for comparison
             const normalize = (arr) => {
                 const max = Math.max(...arr);
                 return max > 0 ? arr.map(v => (v / max) * 100) : arr;
             };
-            
+
             chart1 = new Chart(ctx, {
                 type: 'line',
                 data: {
@@ -294,7 +294,7 @@ function renderChart1() {
             });
             break;
         }
-            
+
         case 'token-usage':
             chart1 = new Chart(ctx, {
                 type: 'bar',
@@ -327,7 +327,7 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         case 'cost-efficiency':
             chart1 = new Chart(ctx, {
                 type: 'bar',
@@ -356,7 +356,7 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         // ========= ELEMENT & PERFORMANCE OPTIONS (merged from chart3) =========
         case 'elements-bar':
             chart1 = new Chart(ctx, {
@@ -374,7 +374,7 @@ function renderChart1() {
                 options: getCommonOptions()
             });
             break;
-            
+
         case 'success-elements':
             chart1 = new Chart(ctx, {
                 type: 'bar',
@@ -405,7 +405,7 @@ function renderChart1() {
                 }
             });
             break;
-            
+
         case 'element-efficiency':
             chart1 = new Chart(ctx, {
                 type: 'line',
@@ -424,7 +424,7 @@ function renderChart1() {
                 options: getCommonOptions()
             });
             break;
-            
+
         case 'performance-scatter':
             chart1 = new Chart(ctx, {
                 type: 'scatter',
@@ -454,7 +454,7 @@ function renderChart1() {
                         y: {
                             title: { display: true, text: 'Cost (cents)' },
                             grid: { color: colors.gridColor },
-                            ticks: { 
+                            ticks: {
                                 color: '#888',
                                 callback: (value) => '¢' + value.toFixed(1)
                             }
@@ -463,24 +463,102 @@ function renderChart1() {
                 }
             });
             break;
+
+        // ========= LOCATOR STRATEGY DISTRIBUTION =========
+        case 'fallback-depth': {
+            // Count occurrences of each fallback depth (0-6)
+            const depthCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+
+            data.sortedRuns.forEach(workflow => {
+                const metrics = workflow.element_approach_metrics || [];
+                metrics.forEach(elem => {
+                    const depth = elem.fallback_depth;
+                    if (depth !== undefined && depth >= 0 && depth <= 6) {
+                        depthCounts[depth] = (depthCounts[depth] || 0) + 1;
+                    }
+                });
+            });
+
+            const depths = Object.keys(depthCounts).map(Number);
+            const depthCountsArray = depths.map(d => depthCounts[d]);
+
+            // Gradient from green (good) to red (bad)
+            const depthColors = [
+                colors.success,   // 0 - Best
+                colors.success,   // 1 - Excellent
+                colors.info,      // 2 - Good
+                colors.teal,      // 3 - OK
+                colors.warning,   // 4 - Fair
+                colors.warning,   // 5 - Poor
+                colors.danger     // 6 - Last resort
+            ];
+
+            const depthLabels = [
+                '0: LLM Candidate',
+                '1: Element Data',
+                '2: Candidate',
+                '3: Collection',
+                '4: Text First',
+                '5: Semantic',
+                '6: Coordinate'
+            ];
+
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: depthLabels,
+                    datasets: [{
+                        label: 'Elements',
+                        data: depthCountsArray,
+                        backgroundColor: depthColors,
+                        borderColor: depthColors.map(c => c),
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',  // Horizontal bar chart
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => {
+                                    const total = depthCountsArray.reduce((a, b) => a + b, 0);
+                                    const percent = total > 0 ? ((context.parsed.x / total) * 100).toFixed(1) : 0;
+                                    return `${context.parsed.x} elements (${percent}%)`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'Number of Elements' }
+                        }
+                    }
+                }
+            });
+            break;
+        }
     }
 }
 
 // ============= CHART 2: Cost Analysis =============
 function renderChart2() {
     if (!currentChartData.labels) return;
-    
+
     const select = document.getElementById('chart2-select');
     const chartType = select.value;
     const canvas = document.getElementById('chart2');
     const ctx = canvas.getContext('2d');
     const colors = getThemeColors();
-    
+
     if (chart2) chart2.destroy();
-    
+
     const data = currentChartData;
-    
-    switch(chartType) {
+
+    switch (chartType) {
         case 'cost-breakdown':
             chart2 = new Chart(ctx, {
                 type: 'doughnut',
@@ -507,7 +585,7 @@ function renderChart2() {
                 }
             });
             break;
-            
+
         case 'cost-stacked':
             chart2 = new Chart(ctx, {
                 type: 'bar',
@@ -533,8 +611,8 @@ function renderChart2() {
                     scales: {
                         ...getCommonOptions().scales,
                         x: { stacked: true, display: false },
-                        y: { 
-                            stacked: true, 
+                        y: {
+                            stacked: true,
                             ...getCommonOptions().scales.y,
                             ticks: {
                                 color: '#888',
@@ -545,7 +623,7 @@ function renderChart2() {
                 }
             });
             break;
-            
+
         case 'cost-comparison':
             chart2 = new Chart(ctx, {
                 type: 'line',
@@ -587,11 +665,11 @@ function renderChart2() {
                 }
             });
             break;
-            
+
         case 'domain-cost': {
             const domains = Object.keys(data.domainStats);
             const domainCosts = domains.map(d => data.domainStats[d].totalCost);
-            
+
             chart2 = new Chart(ctx, {
                 type: 'polarArea',
                 data: {
@@ -625,13 +703,13 @@ function renderChart2() {
             });
             break;
         }
-            
+
         // ========= ADVANCED ANALYSIS OPTIONS (merged from chart4) =========
         case 'llm-distribution': {
             // Create histogram bins
             const bins = [0, 10, 20, 30, 40, 50, 100];
             const binCounts = new Array(bins.length - 1).fill(0);
-            
+
             data.llmCalls.forEach(calls => {
                 for (let i = 0; i < bins.length - 1; i++) {
                     if (calls >= bins[i] && calls < bins[i + 1]) {
@@ -640,11 +718,11 @@ function renderChart2() {
                     }
                 }
             });
-            
+
             chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: bins.slice(0, -1).map((b, i) => `${b}-${bins[i+1]}`),
+                    labels: bins.slice(0, -1).map((b, i) => `${b}-${bins[i + 1]}`),
                     datasets: [{
                         label: 'Workflow Count',
                         data: binCounts,
@@ -656,12 +734,12 @@ function renderChart2() {
                 options: {
                     ...getCommonOptions(),
                     scales: {
-                        x: { 
+                        x: {
                             title: { display: true, text: 'LLM Call Range' },
                             grid: { color: colors.gridColor },
                             ticks: { color: '#888' }
                         },
-                        y: { 
+                        y: {
                             title: { display: true, text: 'Count' },
                             ...getCommonOptions().scales.y
                         }
@@ -670,7 +748,7 @@ function renderChart2() {
             });
             break;
         }
-            
+
         case 'workflow-radar': {
             // Take average of last 5 workflows
             const recent = data.sortedRuns.slice(-5);
@@ -681,7 +759,7 @@ function renderChart2() {
                 elements: recent.reduce((a, r) => a + (r.total_elements || 0), 0) / recent.length * 10,
                 success: recent.reduce((a, r) => a + (r.success_rate || 0), 0) / recent.length * 100
             };
-            
+
             chart2 = new Chart(ctx, {
                 type: 'radar',
                 data: {
@@ -719,14 +797,14 @@ function renderChart2() {
             });
             break;
         }
-            
+
         case 'domain-performance': {
             const domainList = Object.keys(data.domainStats);
             const domainSuccessRates = domainList.map(d => {
                 const stats = data.domainStats[d];
                 return (stats.successCount / stats.count) * 100;
             });
-            
+
             chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
@@ -734,7 +812,7 @@ function renderChart2() {
                     datasets: [{
                         label: 'Success Rate (%)',
                         data: domainSuccessRates,
-                        backgroundColor: domainSuccessRates.map(rate => 
+                        backgroundColor: domainSuccessRates.map(rate =>
                             rate >= 80 ? colors.success : rate >= 50 ? colors.warning : colors.danger
                         ),
                         borderColor: colors.borderWidth > 1 ? '#000' : 'transparent',
@@ -750,7 +828,7 @@ function renderChart2() {
                             max: 100,
                             title: { display: true, text: 'Success Rate (%)' },
                             grid: { color: colors.gridColor },
-                            ticks: { 
+                            ticks: {
                                 color: '#888',
                                 callback: (value) => value + '%'
                             }
@@ -764,13 +842,13 @@ function renderChart2() {
             });
             break;
         }
-            
+
         case 'time-distribution': {
             // Create time bins
             const maxTime = Math.max(...data.executionTimes);
             const timeBins = [0, 20, 40, 60, 80, 100, maxTime + 1];
             const timeBinCounts = new Array(timeBins.length - 1).fill(0);
-            
+
             data.executionTimes.forEach(time => {
                 for (let i = 0; i < timeBins.length - 1; i++) {
                     if (time >= timeBins[i] && time < timeBins[i + 1]) {
@@ -779,11 +857,11 @@ function renderChart2() {
                     }
                 }
             });
-            
+
             chart2 = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: timeBins.slice(0, -1).map((b, i) => `${b}-${timeBins[i+1]}s`),
+                    labels: timeBins.slice(0, -1).map((b, i) => `${b}-${timeBins[i + 1]}s`),
                     datasets: [{
                         label: 'Workflow Count',
                         data: timeBinCounts,
@@ -816,19 +894,19 @@ function renderChart2() {
 function renderAllCharts(runs) {
     const chart1Canvas = document.getElementById('chart1');
     const chart2Canvas = document.getElementById('chart2');
-    
+
     if (!runs || runs.length === 0) {
         showChartPlaceholder(chart1Canvas, 'Not enough data for chart');
         showChartPlaceholder(chart2Canvas, 'Not enough data for chart');
         return;
     }
-    
+
     clearChartPlaceholder(chart1Canvas);
     clearChartPlaceholder(chart2Canvas);
-    
+
     // Process all data
     currentChartData = processChartData(runs);
-    
+
     // Render all charts with current selections
     renderChart1();
     renderChart2();

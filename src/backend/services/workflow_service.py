@@ -351,6 +351,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
                     custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
                     session_id=browser_metrics.get('session_id'),
+                    
+                    # Per-element approach metrics for pattern analysis
+                    element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
                 )
                 
                 # 4. Record unified metrics
