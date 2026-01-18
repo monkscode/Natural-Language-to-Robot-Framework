@@ -1,0 +1,82 @@
+# FastAPI Application Dockerfile - Multi-Stage Build
+# Stage 1: Builder - Install dependencies with build tools
+# Stage 2: Runtime - Minimal runtime environment without build tools
+
+# ============================================================================
+# STAGE 1: Builder
+# ============================================================================
+FROM python:3.12-slim AS builder
+
+# Set working directory
+WORKDIR /build
+
+# Prevent Python from writing pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install UV package manager
+RUN pip install --no-cache-dir uv
+
+# Install build dependencies (gcc, g++ needed for compiling Python packages)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY src/backend/requirements.txt /build/requirements.txt
+
+# Install PyTorch CPU-only version first (to avoid downloading 2GB+ CUDA packages)
+# sentence-transformers depends on torch, so we install CPU version explicitly
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --prefix=/build/install --no-cache \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install all Python dependencies to /build/install
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --prefix=/build/install --no-cache -r /build/requirements.txt
+
+# ============================================================================
+# STAGE 2: Runtime
+# ============================================================================
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Prevent Python from writing pyc files and enable unbuffered output
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PATH="/opt/venv/bin:$PATH"
+
+# Install only runtime dependencies (curl for healthcheck, ca-certificates for HTTPS)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
+
+# Copy installed Python packages from builder stage
+COPY --from=builder /build/install /usr/local
+
+# Copy application source code
+COPY src/ /app/src/
+COPY tools/ /app/tools/
+
+# Create necessary directories for persistent data
+RUN mkdir -p /app/robot_tests /app/logs /app/chroma_db /app/data
+
+# Expose FastAPI port
+EXPOSE 5000
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Run FastAPI server with uvicorn
+CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "5000"]

@@ -1,3 +1,7 @@
+# ⚠️ ARCHIVED - This Dockerfile is for robot test runner image only
+# Migration Note: This has been replaced by Dockerfile.fastapi and Dockerfile.browser-service
+# for the main application. This file is kept for reference and building the test runner image.
+#
 # Optimized Dockerfile - 50% smaller size, 75-85% faster rebuilds
 # Python 3.12 + UV package manager + BuildKit caching
 FROM python:3.12-slim
