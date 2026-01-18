@@ -23,10 +23,12 @@ from src.backend.api.endpoints import router as api_router
 os.makedirs("logs", exist_ok=True)
 
 # Basic logging configuration
+# force=True: Ensures our format applies even if other modules configured logging first
 logging.basicConfig(
     level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s', 
-    encoding="utf-8"
+    format='%(asctime)s - %(levelname)-8s [%(name)s] %(message)s',
+    encoding="utf-8",
+    force=True
 )
 
 # --- FastAPI App ---

@@ -1,0 +1,8 @@
+{
+    "name": "Default",
+    "timing": {
+        "minimum_wait_page_load_time": 0.5,
+        "wait_for_network_idle_page_load_time": 1.0,
+        "wait_between_actions": 0.5
+    }
+}

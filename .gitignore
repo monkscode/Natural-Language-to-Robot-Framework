@@ -41,3 +41,5 @@ logs/temp_metrics
 
 # Ignore the local browser_service
 tools/browser_service/*
+node_modules/
+coverage/
