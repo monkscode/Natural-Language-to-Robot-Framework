@@ -461,22 +461,24 @@
             return runs.filter(run => new Date(run.timestamp) >= cutoff);
         }
 
+        // --- AGGREGATE CALCULATION HELPER ---
+        function calculateAggregates(runs) {
+            return {
+                total_workflows: runs.length,
+                avg_success_rate: runs.length > 0
+                    ? runs.reduce((acc, r) => acc + (r.success_rate || 0), 0) / runs.length * 100
+                    : 0,
+                total_cost: runs.reduce((acc, r) => acc + (r.total_cost || 0), 0),
+                avg_execution_time: runs.length > 0
+                    ? runs.reduce((acc, r) => acc + (r.execution_time || 0), 0) / runs.length
+                    : 0
+            };
+        }
+
         function applyFilter() {
             const filterValue = document.getElementById('time-filter').value;
             const filteredRuns = filterRunsByDays(allRuns, filterValue);
-
-            // Recalculate aggregate data for filtered runs
-            const agg = {
-                total_workflows: filteredRuns.length,
-                avg_success_rate: filteredRuns.length > 0
-                    ? filteredRuns.reduce((acc, r) => acc + (r.success_rate || 0), 0) / filteredRuns.length * 100
-                    : 0,
-                total_cost: filteredRuns.reduce((acc, r) => acc + (r.total_cost || 0), 0),
-                avg_execution_time: filteredRuns.length > 0
-                    ? filteredRuns.reduce((acc, r) => acc + (r.execution_time || 0), 0) / filteredRuns.length
-                    : 0
-            };
-
+            const agg = calculateAggregates(filteredRuns);
             renderDashboard(filteredRuns, agg);
         }
 
@@ -497,17 +499,8 @@
                 const filterValue = document.getElementById('time-filter').value;
                 const filteredRuns = filterRunsByDays(allRuns, filterValue);
 
-                // Recalculate aggregate for filtered data
-                const filteredAgg = filterValue === 'all' ? aggData : {
-                    total_workflows: filteredRuns.length,
-                    avg_success_rate: filteredRuns.length > 0
-                        ? filteredRuns.reduce((acc, r) => acc + (r.success_rate || 0), 0) / filteredRuns.length * 100
-                        : 0,
-                    total_cost: filteredRuns.reduce((acc, r) => acc + (r.total_cost || 0), 0),
-                    avg_execution_time: filteredRuns.length > 0
-                        ? filteredRuns.reduce((acc, r) => acc + (r.execution_time || 0), 0) / filteredRuns.length
-                        : 0
-                };
+                // Use API aggregate for 'all', otherwise calculate from filtered data
+                const filteredAgg = filterValue === 'all' ? aggData : calculateAggregates(filteredRuns);
 
                 renderDashboard(filteredRuns, filteredAgg);
             } catch (e) {

@@ -103,27 +103,26 @@ class CleanedLLMWrapper(LLM):
                 return super().call(messages, *args, **kwargs)
             except Exception as e:
                 if not DynamicRateLimitHandler.is_rate_limit_error(e):
-                    raise  # Re-raise non-rate-limit errors
+                    raise  # Re-raise non-rate-limit errors immediately
                 
-                if attempt >= max_retries:
-                    logger.error(f"❌ Rate limit: Max retries ({max_retries}) exceeded")
+                is_last_attempt = (attempt == max_retries)
+                
+                if is_last_attempt:
+                    logger.exception(f"❌ Rate limit: Max retries ({max_retries}) exceeded")
                     raise
                 
-                # Extract retry delay from error
+                # Extract retry delay from error response
                 error_str = str(e)
                 retry_delay = DynamicRateLimitHandler.extract_retry_delay(error_str)
                 
                 if retry_delay is None:
-                    # Default fallback if we can't parse the delay
                     retry_delay = 60.0
                     logger.warning(f"⚠️ Could not parse retryDelay, using default {retry_delay}s")
                 
                 logger.info(f"⏱️ Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
                            f"Waiting {retry_delay:.1f}s as specified by API...")
                 time.sleep(retry_delay)
-        
-        # Should not reach here, but just in case
-        return super().call(messages, *args, **kwargs)
+                # Loop continues to next attempt
     
     def _generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
         """

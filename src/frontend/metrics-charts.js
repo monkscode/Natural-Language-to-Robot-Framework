@@ -18,8 +18,8 @@ function formatDateForTooltip(dateStr) {
 
 // Initialize chart dropdowns
 function initializeChartDropdowns() {
-    document.getElementById('chart1-select').addEventListener('change', () => renderChart1());
-    document.getElementById('chart2-select').addEventListener('change', () => renderChart2());
+    document.getElementById('chart1-select')?.addEventListener('change', () => renderChart1());
+    document.getElementById('chart2-select')?.addEventListener('change', () => renderChart2());
 }
 
 // Process and store all chart data

@@ -104,7 +104,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info("✅ Extracted robot code from output.json_dict['code']")
         # Strategy 3: Try parsing raw output as JSON ({"code": "..."})
         else:
-            raw_output = task_output.raw
+            raw_output = getattr(task_output, "raw", "") or ""
+            # Guard: Normalize non-string raw outputs (e.g., dict/list) to JSON string
+            if not isinstance(raw_output, str):
+                raw_output = json.dumps(raw_output)
             try:
                 parsed_json = json.loads(raw_output)
                 if isinstance(parsed_json, dict) and 'code' in parsed_json:
@@ -114,7 +117,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     # Fallback: use raw output directly (legacy format)
                     robot_code = raw_output
                     logging.info("✅ Using raw output as robot code (legacy format)")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 # Raw output is not JSON, use as-is (legacy format)
                 robot_code = raw_output
                 logging.info("✅ Using raw output as robot code (not JSON)")

@@ -88,7 +88,7 @@ class FileBasedConfigProvider:
             
             return config
         except Exception as e:
-            logger.error(f"Failed to load {path}: {e}")
+            logger.exception(f"Failed to load {path}: {e}")
             return None
     
     def get_config(self, url: str) -> ClientConfig:
