@@ -136,34 +136,50 @@ Example usage:
     
     def _get_example(self, keyword_name: str, args: list) -> str:
         """
-        Generate usage example for keyword.
+        Generate usage example for keyword with clear argument structure.
         
         Args:
             keyword_name: Name of the keyword
             args: List of arguments
             
         Returns:
-            Example usage string
+            Example usage string with argument explanations
         """
-        # Format arguments
+        # Format arguments with explanations
         if args:
             # Handle both string and dict formats
-            arg_names = []
-            for arg in args:
+            arg_parts = []
+            arg_explanations = []
+            for i, arg in enumerate(args):
                 if isinstance(arg, dict):
                     arg_name = arg.get('name', '')
+                    # Check if 'default' key exists (not just if value is None)
+                    arg_required = 'default' not in arg
                 else:
-                    arg_name = str(arg).split('=')[0].split(':')[0].strip()
+                    arg_str_val = str(arg)
+                    arg_name = arg_str_val.split('=')[0].split(':')[0].strip()
+                    arg_required = '=' not in arg_str_val
                 
                 if arg_name and arg_name not in ['self', 'cls']:
-                    arg_names.append(f"<{arg_name}>")
+                    if arg_required:
+                        arg_parts.append(f"<{arg_name}>")
+                        arg_explanations.append(f"arg{i+1}: {arg_name} (required)")
+                    else:
+                        arg_parts.append(f"[{arg_name}]")
+                        arg_explanations.append(f"arg{i+1}: {arg_name} (optional)")
             
-            arg_str = '    '.join(arg_names) if arg_names else ""
+            arg_str = '    '.join(arg_parts) if arg_parts else ""
+            explanation_str = ", ".join(arg_explanations) if arg_explanations else ""
         else:
             arg_str = ""
+            explanation_str = ""
         
-        # Generate example based on keyword name
+        # Generate example with syntax note
         if arg_str:
-            return f"{keyword_name}    {arg_str}"
+            example = f"{keyword_name}    {arg_str}"
+            if explanation_str:
+                example += f"\n  # Syntax: {explanation_str}"
+                example += "\n  # Note: Each argument is SEPARATE (use 4 spaces between args)"
+            return example
         else:
             return f"{keyword_name}"

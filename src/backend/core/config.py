@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     APP_PORT: int = Field(default=5000, description="Port for FastAPI service")
     BROWSER_USE_SERVICE_URL: str = Field(default="http://localhost:4999", description="URL for BrowserUse service")
     
+    # Browser Configuration
+    BROWSER_HEADLESS: bool = Field(default=True, description="Run browser in headless mode (no UI) for BrowserUse service")
+    
     # Robot Framework Library Configuration
     ROBOT_LIBRARY: str = Field(default="selenium", description="Robot Framework library to use: 'selenium' or 'browser'")
     

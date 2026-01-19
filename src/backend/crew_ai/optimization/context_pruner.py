@@ -175,7 +175,7 @@ class ContextPruner:
             
             # Extract categories and convert distances to similarities
             similarities = {}
-            if results['ids'] and len(results['ids'][0]) > 0:
+            if results.get('ids') and results['ids'][0]:
                 for idx, category_id in enumerate(results['ids'][0]):
                     distance = results['distances'][0][idx]
                     # Convert cosine distance to similarity (0-1 range)
@@ -240,10 +240,10 @@ class ContextPruner:
             if kw.get("name") in relevant_names
         ]
         
-        logger.info(
-            f"Pruned {len(all_keywords)} keywords to {len(pruned)} "
-            f"({len(pruned)/len(all_keywords)*100:.1f}% retained)"
-        )
+        if all_keywords:
+            logger.info(f"Pruned {len(all_keywords)} keywords to {len(pruned)} ({len(pruned)/len(all_keywords)*100:.1f}% retained)")
+        else:
+            logger.info("No keywords to prune (empty input)")
         
         return pruned
     
@@ -260,15 +260,24 @@ class ContextPruner:
             pruned_count: Number of keywords after pruning
             
         Returns:
-            Dict with retention_rate and reduction_rate
+            Dict with original_count, pruned_count, retention_rate, reduction_rate, and reduction_percentage
         """
         if original_count == 0:
-            return {"retention_rate": 0.0, "reduction_rate": 0.0}
+            return {
+                "original_count": 0,
+                "pruned_count": 0,
+                "retention_rate": 0.0,
+                "reduction_rate": 0.0,
+                "reduction_percentage": 0.0
+            }
         
         retention = pruned_count / original_count
         reduction = 1.0 - retention
         
         return {
+            "original_count": original_count,
+            "pruned_count": pruned_count,
             "retention_rate": retention,
-            "reduction_rate": reduction
+            "reduction_rate": reduction,
+            "reduction_percentage": reduction * 100
         }

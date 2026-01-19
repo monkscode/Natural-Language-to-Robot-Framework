@@ -89,17 +89,43 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         yield {"status": "running", "message": f"{EMOJI['validate']} Validating code...", "progress": 85}
         yield {"status": "info", "message": "🔬 Validating syntax, structure, and best practices", "progress": 85}
 
-        # Extract robot code from task[2] (code_assembler - no more popup task)
-        robot_code = crew_with_results.tasks[2].output.raw
+        # Extract robot code from task[2] (code_assembler)
+        # With output_pydantic=AssemblyOutput, code is in output.pydantic.code
+        # Fall back to output.raw for backward compatibility
+        task_output = crew_with_results.tasks[2].output
+        
+        # Strategy 1: Try Pydantic output (new format with output_pydantic)
+        if hasattr(task_output, 'pydantic') and task_output.pydantic:
+            robot_code = task_output.pydantic.code
+            logging.info("✅ Extracted robot code from output.pydantic.code (AssemblyOutput)")
+        # Strategy 2: Try json_dict output
+        elif hasattr(task_output, 'json_dict') and task_output.json_dict and 'code' in task_output.json_dict:
+            robot_code = task_output.json_dict['code']
+            logging.info("✅ Extracted robot code from output.json_dict['code']")
+        # Strategy 3: Try parsing raw output as JSON ({"code": "..."})
+        else:
+            raw_output = getattr(task_output, "raw", "") or ""
+            # Guard: Normalize non-string raw outputs (e.g., dict/list) to JSON string
+            if not isinstance(raw_output, str):
+                raw_output = json.dumps(raw_output)
+            try:
+                parsed_json = json.loads(raw_output)
+                if isinstance(parsed_json, dict) and 'code' in parsed_json:
+                    robot_code = parsed_json['code']
+                    logging.info("✅ Extracted robot code from parsed JSON in raw output")
+                else:
+                    # Fallback: use raw output directly (legacy format)
+                    robot_code = raw_output
+                    logging.info("✅ Using raw output as robot code (legacy format)")
+            except (json.JSONDecodeError, TypeError):
+                # Raw output is not JSON, use as-is (legacy format)
+                robot_code = raw_output
+                logging.info("✅ Using raw output as robot code (not JSON)")
 
         # Simplified cleaning logic - prompt now handles most cases
         # Keep only essential defensive measures
         
-        # Step 1: Remove markdown code fences (defensive - LLMs sometimes add these)
-        robot_code = re.sub(r'^```[a-zA-Z]*\n', '', robot_code)
-        robot_code = re.sub(r'\n```$', '', robot_code)
-        
-        # Step 2: Handle multiple Settings blocks (LLM might output code multiple times)
+        # Step 1: Handle multiple Settings blocks (LLM might output code multiple times)
         # Find ALL occurrences of *** Settings ***
         settings_matches = list(re.finditer(
             r'\*\*\*\s+Settings\s+\*\*\*', robot_code, re.IGNORECASE))
@@ -133,7 +159,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             else:
                 logging.error("❌ No Robot Framework sections found in output!")
         
-        # Step 3: Final cleanup - remove any trailing non-Robot content
+        # Step 2: Final cleanup - remove any trailing non-Robot content
         # Split into lines and keep only content that's part of Robot Framework
         lines = robot_code.split('\n')
         cleaned_lines = []
@@ -280,15 +306,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 temp_storage = get_temp_metrics_storage()
                 browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
                 logging.info(f"📊 Browser-use metrics: {browser_metrics}")
+                logging.info(f"📊 DEBUG: browser_metrics tokens = {browser_metrics.get('tokens', 'NOT_FOUND')}")
+                logging.info(f"📊 DEBUG: browser_metrics input_tokens = {browser_metrics.get('input_tokens', 'NOT_FOUND')}")
+                logging.info(f"📊 DEBUG: browser_metrics output_tokens = {browser_metrics.get('output_tokens', 'NOT_FOUND')}")
                 
                 # 3. Create unified metrics
                 # Calculate averages
                 total_elements = browser_metrics.get('elements_processed', 0)
                 browser_llm_calls = browser_metrics.get('llm_calls', 0)
-                browser_cost = browser_metrics.get('cost', 0.0)
+                browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
                 
                 avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
-                avg_cost = browser_cost / total_elements if total_elements > 0 else 0
+                avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
                 
                 unified_metrics = WorkflowMetrics(
                     workflow_id=workflow_id,
@@ -297,7 +326,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     
                     # Totals
                     total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
-                    total_cost=crewai_metrics['cost'] + browser_cost,
+                    total_cost=crewai_metrics['cost'] + browser_actual_cost,
                     execution_time=browser_metrics.get('execution_time', 0),
                     
                     # CrewAI breakdown
@@ -307,10 +336,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
                     crewai_completion_tokens=crewai_metrics['completion_tokens'],
                     
-                    # Browser-use breakdown
+                    # Browser-use breakdown (with granular token tracking)
                     browser_use_llm_calls=browser_llm_calls,
-                    browser_use_cost=browser_cost,
+                    browser_use_cost=browser_actual_cost,
                     browser_use_tokens=browser_metrics.get('tokens', 0),
+                    browser_use_prompt_tokens=browser_metrics.get('input_tokens', 0),
+                    browser_use_completion_tokens=browser_metrics.get('output_tokens', 0),
+                    browser_use_cached_tokens=browser_metrics.get('cached_tokens', 0),
                     
                     # Browser-use specific
                     total_elements=total_elements,
@@ -322,6 +354,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
                     custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
                     session_id=browser_metrics.get('session_id'),
+                    
+                    # Per-element approach metrics for pattern analysis
+                    element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
                 )
                 
                 # 4. Record unified metrics
@@ -355,7 +390,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code.", "progress": 100}
             
             # Final completion message (without progress, as it's already at 100%)
-            yield {"status": "complete", "robot_code": robot_code, "message": f"{EMOJI['success']} Test generation complete."}
+            yield {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
         else:
             logging.error(
                 f"CrewAI workflow finished, but code validation failed. Reason: {validation_data.get('reason')}")
@@ -492,7 +527,7 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     logging.info("✅ Test generation complete. Ready for user review.")
 
 
-async def stream_execute_only(robot_code: str, user_query: str = None) -> Generator[str, None, None]:
+async def stream_execute_only(robot_code: str, user_query: str = None, workflow_id: str = None) -> Generator[str, None, None]:
     """
     Executes provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
@@ -500,12 +535,15 @@ async def stream_execute_only(robot_code: str, user_query: str = None) -> Genera
     Args:
         robot_code: Robot Framework test code to execute
         user_query: Optional original user query for pattern learning
+        workflow_id: Optional workflow ID from generation phase (for unified ID tracking)
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
         return
 
-    run_id = str(uuid.uuid4())
+    # Use provided workflow_id for unified tracking, or generate new one for standalone execution
+    run_id = workflow_id if workflow_id else str(uuid.uuid4())
+    logging.info(f"🆔 Execution ID (unified): {run_id}")
     robot_tests_dir = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
     run_dir = os.path.join(robot_tests_dir, run_id)
@@ -546,6 +584,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
     Kept for backward compatibility.
     """
     robot_code = None
+    workflow_id = None  # Capture workflow_id from generation for unified tracking
     q = Queue()
 
     workflow_thread = Thread(
@@ -562,6 +601,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
 
             if event.get("status") == "complete" and "robot_code" in event:
                 robot_code = event["robot_code"]
+                workflow_id = event.get("workflow_id")  # Capture for unified execution
                 workflow_thread.join()
                 break
             elif event.get("status") == "error":
@@ -578,6 +618,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             yield f"data: {json.dumps(event_data)}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
                 robot_code = event["robot_code"]
+                workflow_id = event.get("workflow_id")  # Capture for unified execution
             elif event.get("status") == "error":
                 return
         if not robot_code:
@@ -586,7 +627,9 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
             return
 
-    run_id = str(uuid.uuid4())
+    # Use workflow_id from generation for unified tracking (same ID for metrics and files)
+    run_id = workflow_id if workflow_id else str(uuid.uuid4())
+    logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
     robot_tests_dir = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
     run_dir = os.path.join(robot_tests_dir, run_id)

@@ -2,15 +2,15 @@
 function setTheme(themeName) {
     document.documentElement.setAttribute('data-theme', themeName);
     localStorage.setItem('theme', themeName);
-    
+
     // Update active state using data-theme attribute
     document.querySelectorAll('.theme-toggle-group .control-btn').forEach(btn => {
         btn.classList.remove('active');
-        if(btn.dataset.theme === themeName) {
+        if (btn.dataset.theme === themeName) {
             btn.classList.add('active');
         }
     });
-    
+
     // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
     window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: themeName } }));
 }
@@ -18,11 +18,11 @@ function setTheme(themeName) {
 function toggleDarkMode() {
     const currentMode = document.documentElement.getAttribute('data-mode');
     const newMode = currentMode === 'dark' ? 'light' : 'dark';
-    
+
     document.documentElement.setAttribute('data-mode', newMode);
     localStorage.setItem('mode', newMode);
     // Icon visibility is now controlled by CSS based on data-mode attribute
-    
+
     // Dispatch custom event for other pages to listen to (Comment #2 - decoupling)
     window.dispatchEvent(new CustomEvent('modechange', { detail: { mode: newMode } }));
 }
@@ -33,7 +33,7 @@ const savedMode = localStorage.getItem('mode') || 'light';
 
 // Set theme and mode attributes immediately (works before DOM ready)
 setTheme(savedTheme);
-if(savedMode === 'dark') {
+if (savedMode === 'dark') {
     document.documentElement.setAttribute('data-mode', 'dark');
 }
 
@@ -41,12 +41,12 @@ if(savedMode === 'dark') {
 document.addEventListener('DOMContentLoaded', () => {
     // Icon visibility is controlled by CSS based on data-mode attribute
     // No manual icon manipulation needed
-    
+
     // Event delegation for theme buttons (using specific selector to avoid matching <html> element)
     document.querySelectorAll('.theme-toggle-group [data-theme]').forEach(btn => {
         btn.addEventListener('click', () => setTheme(btn.dataset.theme));
     });
-    
+
     // Event delegation for dark mode toggle
     document.querySelectorAll('[data-action="toggle-dark-mode"]').forEach(btn => {
         btn.addEventListener('click', toggleDarkMode);
@@ -73,18 +73,21 @@ document.addEventListener('DOMContentLoaded', () => {
     let robotCodeContent = '';
     let executionStartTime = null;
     let currentState = 'idle'; // idle, ready_generate, ready_execute, generating, executing
-    
+
     // Track generation and execution history
     let hasGeneratedCode = false;
     let hasExecutedCode = false;
-    
+
     // Store the original user query for pattern learning
     let currentUserQuery = null;
-    
+
+    // Store workflow ID from generation for unified ID tracking
+    let currentWorkflowId = null;
+
     // Track manual collapse/expand state
     let generationLogsManualState = null; // null = auto, true = expanded, false = collapsed
     let executionLogsManualState = null; // null = auto, true = expanded, false = collapsed
-    
+
     // Get log section containers
     const generationLogsSection = document.getElementById('generation-logs-section');
     const executionLogsSection = document.getElementById('execution-logs-section');
@@ -134,17 +137,17 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateButtonState(state) {
         currentState = state;
         const config = buttonConfig[state];
-        
+
         actionBtnText.textContent = config.text;
         actionBtn.disabled = config.disabled;
-        
+
         if (config.icon) {
             actionBtnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${config.icon}"></path>`;
             actionBtnIcon.style.display = 'block';
         } else {
             actionBtnIcon.style.display = 'none';
         }
-        
+
         // Show/hide spinner
         const btnSpinner = actionBtn.querySelector('.btn-spinner');
         if (state === UIState.GENERATING || state === UIState.EXECUTING) {
@@ -159,11 +162,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function determineState() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (currentState === UIState.GENERATING || currentState === UIState.EXECUTING) {
             return currentState; // Don't change state during operations
         }
-        
+
         if (hasCode) {
             return UIState.READY_TO_EXECUTE;
         } else if (hasQuery) {
@@ -183,7 +186,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updatePlaceholder() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (!hasCode && codePlaceholder) {
             if (hasQuery) {
                 codePlaceholder.querySelector('p').textContent = "⚡ Click 'Generate Test' to create code from your query";
@@ -196,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateNewTestButton() {
         const hasQuery = queryInput.value.trim().length > 0;
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         // Show "New Test" button if there's any content
         if (hasQuery || hasCode) {
             newTestBtn.style.display = 'inline-flex';
@@ -205,35 +208,66 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function getCodeContent() {
+    // Get code content WITHOUT trimming - preserves trailing newlines/spaces
+    function getCodeContentRaw() {
         // Get text content, excluding the placeholder
+        // If placeholder is still in DOM (not focused yet), return empty
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
             return '';
         }
-        return robotCodeEl.textContent || '';
+
+        // Check if content is already highlighted (contains span elements from syntax highlighting)
+        const isHighlighted = robotCodeEl.querySelector('span[class^="rf-"]');
+
+        if (isHighlighted) {
+            // When highlighted, use innerText because it properly interprets <br> elements as newlines
+            // textContent ignores <br> elements which causes Enter key presses to be "lost"
+            return robotCodeEl.innerText || '';
+        }
+
+        // For unhighlighted content (raw paste with divs), use innerText but normalize newlines
+        // Browser's div-wrapping doubles newlines: each line becomes <div>line</div>
+        // and blank lines become <div><br></div> which innerText interprets as 2 newlines
+        let text = robotCodeEl.innerText || '';
+
+        // Normalize: Replace all sequences of 2+ newlines with just 2 (one blank line)
+        text = text.replace(/\n{2,}/g, '\n\n');
+
+        return text;
     }
 
+    // Get code content with trimming - for UI validation
+    function getCodeContent() {
+        return getCodeContentRaw().trim();
+    }
+
+    // SECURITY NOTE (CodeQL js/xss-through-dom):
+    // This function uses innerHTML for highlighted content, but it is SAFE because:
+    // 1. applySyntaxHighlighting() calls escapeHtml() on ALL user-derived content
+    // 2. escapeHtml() properly escapes: & < > " ' to prevent HTML injection
+    // 3. Only safe, predefined class names (rf-section, rf-keyword, etc.) are used
+    // The data flow from innerText -> innerHTML is sanitized through escapeHtml().
     function setCodeContent(code, highlighted = false) {
         robotCodeContent = code;
-        
+
         // Remove placeholder if exists
         if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
             robotCodeEl.removeChild(codePlaceholder);
         }
-        
+
         if (highlighted) {
             robotCodeEl.innerHTML = code;
         } else {
             robotCodeEl.textContent = code;
         }
-        
+
         if (code.trim()) {
             copyCodeBtn.style.display = 'flex';
             codeLanguageLabel.style.display = 'block';
             downloadBtn.style.display = 'inline-flex';
             editHint.style.display = 'block';
         }
-        
+
         updateUI();
     }
 
@@ -273,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function createLogEntry(logEvent, stage) {
         const logEntry = document.createElement('div');
         logEntry.className = 'log-entry';
-        
+
         // Determine log level styling based on message content or status
         let logLevel = 'info';
         if (logEvent.status === 'error' || logEvent.message.includes('⚠️') || logEvent.message.includes('ERROR')) {
@@ -288,30 +322,30 @@ document.addEventListener('DOMContentLoaded', () => {
             logLevel = 'insight';
         }
         logEntry.classList.add(`log-${logLevel}`);
-        
+
         // Build the log message HTML
         let html = `<div class="log-timestamp">[${new Date().toLocaleTimeString()}]</div>`;
         html += `<div class="log-message">${escapeHtml(logEvent.message)}`;
-        
+
         // Add step info if present (no individual progress bars)
         if (logEvent.step) {
             html += ` <span class="log-step-info">(Step ${logEvent.step})</span>`;
         }
-        
+
         html += `</div>`;
-        
+
         logEntry.innerHTML = html;
-        
+
         // Update global progress bar if progress is present
         if (logEvent.progress !== undefined) {
             updateGlobalProgress(stage, logEvent.progress);
         }
-        
+
         return logEntry;
     }
-    
+
     function updateGlobalProgress(stage, progress) {
-        const progressContainer = stage === 'generation' 
+        const progressContainer = stage === 'generation'
             ? document.getElementById('generation-progress-container')
             : document.getElementById('execution-progress-container');
         const progressFill = stage === 'generation'
@@ -320,14 +354,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const progressText = stage === 'generation'
             ? document.getElementById('generation-progress-text')
             : document.getElementById('execution-progress-text');
-        
+
         // Show progress container
         progressContainer.style.display = 'block';
-        
+
         // Update progress bar and text
         progressFill.style.width = `${progress}%`;
         progressText.textContent = `${progress}%`;
-        
+
         // Hide progress bar when complete (100%)
         if (progress >= 100) {
             setTimeout(() => {
@@ -339,19 +373,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function routeLogToContainer(logEntry, stage) {
         // Route log to the correct container based on stage
         const targetContainer = stage === 'generation' ? generationLogsEl : executionLogsEl;
-        const contentEl = stage === 'generation' 
+        const contentEl = stage === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
-        
+
         // Remove empty state if present
         const emptyState = targetContainer.querySelector('.empty-state');
         if (emptyState) {
             targetContainer.innerHTML = '';
         }
-        
+
         // Append log entry
         targetContainer.appendChild(logEntry);
-        
+
         // Only auto-scroll if section is expanded
         if (!contentEl.classList.contains('collapsed')) {
             targetContainer.scrollTop = targetContainer.scrollHeight;
@@ -366,54 +400,365 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     robotCodeEl.addEventListener('input', () => {
-        // When user types or edits, update UI state
-        // Remove placeholder if user starts typing
-        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-            const text = robotCodeEl.textContent.trim();
-            if (text && text !== codePlaceholder.textContent.trim()) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-        }
+        // When user types or edits, just update UI state
+        // Placeholder removal is handled by focus event
         updateUI();
+        // Schedule syntax highlighting after any input change
+        scheduleSyntaxHighlighting();
+        // Save history for Undo/Redo
+        scheduleHistorySave();
     });
 
+    // Handle paste events to normalize newlines before browser inserts content
     robotCodeEl.addEventListener('paste', (e) => {
-        // Handle paste to preserve user's formatting and apply syntax highlighting
         e.preventDefault();
-        const text = e.clipboardData.getData('text/plain');
-        
-        if (text.trim()) {
-            // Remove placeholder if present
-            if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
-                robotCodeEl.removeChild(codePlaceholder);
-            }
-            // Apply syntax highlighting to pasted code (preserves original formatting)
-            applySyntaxHighlighting(text);
-            // Update UI will be called by applySyntaxHighlighting -> setCodeContent -> updateUI
-            
-            // User pasted code directly - don't show generation logs
-            // Execution logs will show when user clicks execute
-        }
-    });
+        e.stopPropagation();
 
-    // Also listen for blur event to apply formatting when user finishes typing
-    robotCodeEl.addEventListener('blur', () => {
-        const code = getCodeContent().trim();
-        if (code && !robotCodeEl.querySelector('.rf-section')) {
-            // Code exists but no syntax highlighting - apply it
-            applySyntaxHighlighting(code);
-        }
-    });
+        // Get plain text from clipboard
+        const text = (e.clipboardData || window.clipboardData).getData('text/plain');
 
-    // Keyup event as backup for detecting content changes
-    robotCodeEl.addEventListener('keyup', () => {
+        // Normalize newlines - ensure consistent line endings
+        // Replace Windows-style \r\n with \n
+        let normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+        // Use standard DOM Range API instead of deprecated execCommand
+        const selection = window.getSelection();
+        if (selection.rangeCount) {
+            const range = selection.getRangeAt(0);
+            range.deleteContents();
+
+            const textNode = document.createTextNode(normalizedText);
+            range.insertNode(textNode);
+
+            // Move cursor to end of inserted text
+            range.setStartAfter(textNode);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+
+        // Trigger updates manually since programmatic changes don't fire input events
         updateUI();
+        scheduleSyntaxHighlighting();
+        commitState(); // Save immediately to ensure Paste is a distinct undo step
     });
+
+    // Remove placeholder on focus BEFORE typing starts - this prevents first character loss
+    robotCodeEl.addEventListener('focus', () => {
+        if (codePlaceholder && codePlaceholder.parentElement === robotCodeEl) {
+            robotCodeEl.removeChild(codePlaceholder);
+        }
+    });
+
+    // Debounced syntax highlighting - apply shortly after user stops typing
+    let syntaxHighlightTimer = null;
+    const SYNTAX_HIGHLIGHT_DELAY = 300; // 300ms for near-immediate formatting
+
+    // Track if Enter key was recently pressed (to adjust cursor position)
+    let enterKeyPressed = false;
+
+    // Track Enter key press to properly adjust cursor position after syntax highlighting
+    robotCodeEl.addEventListener('keydown', (e) => {
+        // Only set true for Enter, reset for any other key to prevent sticky behavior
+        enterKeyPressed = (e.key === 'Enter');
+
+        // Handle Undo/Redo (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
+        if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+            if (e.key.toLowerCase() === 'z') {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    redo();
+                } else {
+                    undo();
+                }
+            } else if (e.key.toLowerCase() === 'y') {
+                e.preventDefault();
+                redo();
+            }
+        }
+    });
+
+    /* --- UNDO/REDO HISTORY SYSTEM --- */
+    const undoStack = [];
+    const redoStack = [];
+    const HISTORY_LIMIT = 100;
+    let historyDebounceTimer = null;
+
+    // Initialize snapshot with current code content
+    let currentSnapshot = {
+        code: getCodeContentRaw(),
+        cursor: 0
+    };
+
+    function commitState() {
+        const newCode = getCodeContentRaw();
+        const newCursor = saveCursorPosition(robotCodeEl);
+
+        // Only save if code changed
+        if (newCode !== currentSnapshot.code) {
+            undoStack.push(currentSnapshot);
+            if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+
+            // Clear redo stack on new change
+            redoStack.length = 0;
+
+            // Update current snapshot
+            currentSnapshot = {
+                code: newCode,
+                cursor: newCursor
+            };
+        }
+    }
+
+    // Debounced save triggered by input
+    function scheduleHistorySave() {
+        if (historyDebounceTimer) clearTimeout(historyDebounceTimer);
+        historyDebounceTimer = setTimeout(commitState, 500); // 500ms debounce
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+
+        // Push current state to redo
+        const currentState = {
+            code: getCodeContentRaw(),
+            cursor: saveCursorPosition(robotCodeEl)
+        };
+        redoStack.push(currentState);
+
+        // Pop previous state
+        const prevState = undoStack.pop();
+        currentSnapshot = prevState;
+
+        // Restore
+        applyState(prevState);
+    }
+
+    function redo() {
+        if (redoStack.length === 0) return;
+
+        // Push current state to undo
+        const currentState = {
+            code: getCodeContentRaw(),
+            cursor: saveCursorPosition(robotCodeEl)
+        };
+        undoStack.push(currentState);
+
+        // Pop next state
+        const nextState = redoStack.pop();
+        currentSnapshot = nextState;
+
+        // Restore
+        applyState(nextState);
+    }
+
+    function applyState(state) {
+        // Apply code (triggers highlighting)
+        applySyntaxHighlighting(state.code);
+
+        // Restore cursor
+        if (state.cursor !== null) {
+            restoreCursorPosition(robotCodeEl, state.cursor);
+        }
+
+        updateUI();
+    }
+
+    function scheduleSyntaxHighlighting() {
+        // Clear any existing timer
+        if (syntaxHighlightTimer) {
+            clearTimeout(syntaxHighlightTimer);
+        }
+
+        // Schedule syntax highlighting after delay
+        syntaxHighlightTimer = setTimeout(() => {
+            // Use raw content to preserve trailing newlines/spaces
+            const codeRaw = getCodeContentRaw();
+            const code = codeRaw.trim();
+            if (code) {
+                // Save cursor position before highlighting
+                let cursorPos = saveCursorPosition(robotCodeEl);
+
+                // If Enter was pressed, the cursor should be on the new line
+                // The browser puts the cursor *before* the newline, we want it *after*
+                if (enterKeyPressed && cursorPos !== null) {
+                    cursorPos += 1;
+                    enterKeyPressed = false; // Reset flag after using it
+                }
+
+                // Always re-apply highlighting when content changes
+                // This ensures newly typed keywords get colored
+                // Pass raw code to preserve whitespace structure
+                applySyntaxHighlighting(codeRaw);
+
+                // Restore cursor position after highlighting (don't jump to end)
+                if (cursorPos !== null) {
+                    restoreCursorPosition(robotCodeEl, cursorPos);
+                }
+            }
+        }, SYNTAX_HIGHLIGHT_DELAY);
+    }
+
+    // Helper to calculate node length including implicit newlines
+    function getNodeLength(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.length;
+        } else if (node.nodeName === 'BR') {
+            return 1;
+        } else if (node.childNodes) {
+            let sum = 0;
+            for (const child of node.childNodes) {
+                sum += getNodeLength(child);
+            }
+            // If block element, count implicit newline
+            if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                sum += 1;
+            }
+            return sum;
+        }
+        return 0;
+    }
+
+    // Save cursor position as character offset
+    // Counts newlines for <br> and Block elements (DIV, P)
+    function saveCursorPosition(element) {
+        const selection = window.getSelection();
+        if (!selection.rangeCount) return null;
+
+        const range = selection.getRangeAt(0);
+        const targetNode = range.startContainer;
+        const targetOffset = range.startOffset;
+
+        let charCount = 0;
+        let found = false;
+
+        function traverse(node) {
+            if (found) return;
+
+            if (node === targetNode) {
+                // Check if this is an element node (cursor is between child nodes)
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    // targetOffset is the child index, count all children before it
+                    for (let i = 0; i < targetOffset && i < node.childNodes.length; i++) {
+                        charCount += getNodeLength(node.childNodes[i]);
+                    }
+                } else if (node.nodeType === Node.TEXT_NODE) {
+                    // For text nodes, add the offset within the node
+                    charCount += targetOffset;
+                }
+                found = true;
+                return;
+            }
+
+            if (node.nodeType === Node.TEXT_NODE) {
+                charCount += node.length;
+            } else if (node.nodeName === 'BR') {
+                // Count <br> as a newline character
+                charCount += 1;
+            } else if (node.childNodes) {
+                for (const child of node.childNodes) {
+                    traverse(child);
+                    if (found) return;
+                }
+                // When finishing a block element, add implicit newline
+                if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                    // Note: We don't check 'found' here because if found was true inside, 
+                    // we would have returned already.
+                    charCount += 1;
+                }
+            }
+        }
+
+        traverse(element);
+        return found ? charCount : null;
+    }
+
+    // Restore cursor position from character offset
+    // Counts newlines for <br> and Block elements (DIV, P)
+    function restoreCursorPosition(element, offset) {
+        let charCount = 0;
+        let found = false;
+        let lastNode = null;
+
+        function traverse(node) {
+            if (found) return;
+
+            if (node.nodeType === Node.TEXT_NODE) {
+                const nodeLength = node.length;
+                if (charCount + nodeLength >= offset) {
+                    // Found the target position
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    range.setStart(node, offset - charCount);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    found = true;
+                    return;
+                }
+                charCount += nodeLength;
+                lastNode = node;
+            } else if (node.nodeName === 'BR') {
+                // Count <br> as a newline character
+                charCount += 1;
+                lastNode = node;
+                // If we've now reached or passed the offset, position after the <br>
+                if (charCount >= offset) {
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    range.setStartAfter(node);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    found = true;
+                    return;
+                }
+            } else if (node.childNodes) {
+                for (const child of node.childNodes) {
+                    traverse(child);
+                    if (found) return;
+                }
+                // When finishing a block element, add implicit newline
+                if (node.nodeName === 'DIV' || node.nodeName === 'P') {
+                    charCount += 1; // Implicit newline
+                    if (charCount >= offset) {
+                        // Position after the block (which is effectively the start of the next line)
+                        const range = document.createRange();
+                        const selection = window.getSelection();
+                        range.setStartAfter(node);
+                        range.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        found = true;
+                        return;
+                    }
+                }
+            }
+        }
+
+        traverse(element);
+
+        // If offset is beyond content, move to end
+        if (!found) {
+            moveCursorToEnd(element);
+        }
+    }
+
+    function moveCursorToEnd(element) {
+        const range = document.createRange();
+        const selection = window.getSelection();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+
 
     // New Test Button Handler
     newTestBtn.addEventListener('click', () => {
         const hasCode = getCodeContent().trim().length > 0;
-        
+
         if (hasCode) {
             // Show confirmation dialog
             if (confirm('⚠️ This will clear your current test. Are you sure you want to start a new test?')) {
@@ -432,29 +777,30 @@ document.addEventListener('DOMContentLoaded', () => {
         executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><p>Test execution logs will appear here</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
-        
+
         // Reset tracking flags
         hasGeneratedCode = false;
         hasExecutedCode = false;
         generationLogsManualState = null;
         executionLogsManualState = null;
-        
-        // Clear stored user query
+
+        // Clear stored user query and workflow ID
         currentUserQuery = null;
-        
+        currentWorkflowId = null;  // Reset unified workflow ID
+
         // Hide both log sections
         generationLogsSection.style.display = 'none';
         executionLogsSection.style.display = 'none';
-        
+
         updateUI();
     }
-    
+
     // Manage log section visibility
     function updateLogSectionsVisibility() {
         // Generation logs visibility
         if (hasGeneratedCode) {
             generationLogsSection.style.display = 'block';
-            
+
             // Auto-collapse during execution unless manually overridden
             if (generationLogsManualState === null) {
                 if (currentState === UIState.EXECUTING || hasExecutedCode) {
@@ -473,11 +819,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             generationLogsSection.style.display = 'none';
         }
-        
+
         // Execution logs visibility
         if (hasExecutedCode || currentState === UIState.EXECUTING) {
             executionLogsSection.style.display = 'block';
-            
+
             // Auto-expand during execution unless manually overridden
             if (executionLogsManualState === null) {
                 expandSection('execution', false);
@@ -494,21 +840,22 @@ document.addEventListener('DOMContentLoaded', () => {
             executionLogsSection.style.display = 'none';
         }
     }
-    
+
     function collapseSection(section, isManual = true) {
-        const content = section === 'generation' 
+        const content = section === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
         const button = section === 'generation'
             ? document.getElementById('toggle-generation-logs')
             : document.getElementById('toggle-execution-logs');
         const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
-        
+
         content.classList.add('collapsed');
         sectionEl.classList.add('collapsed-section');
+        button.setAttribute('aria-expanded', 'false');
         button.querySelector('span').textContent = 'Expand';
         button.querySelector('svg path').setAttribute('d', 'M5 15l7-7 7 7');
-        
+
         if (isManual) {
             if (section === 'generation') {
                 generationLogsManualState = false;
@@ -517,9 +864,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
-    
+
     function expandSection(section, isManual = true) {
-        const content = section === 'generation' 
+        const content = section === 'generation'
             ? document.getElementById('generation-logs-content')
             : document.getElementById('execution-logs-content');
         const button = section === 'generation'
@@ -527,16 +874,17 @@ document.addEventListener('DOMContentLoaded', () => {
             : document.getElementById('toggle-execution-logs');
         const sectionEl = section === 'generation' ? generationLogsSection : executionLogsSection;
         const logsEl = section === 'generation' ? generationLogsEl : executionLogsEl;
-        
+
         content.classList.remove('collapsed');
         sectionEl.classList.remove('collapsed-section');
+        button.setAttribute('aria-expanded', 'true');
         button.querySelector('span').textContent = 'Collapse';
         button.querySelector('svg path').setAttribute('d', 'M19 9l-7 7-7-7');
-        
+
         // Auto-scroll to latest log when expanding
         if (isManual) {
             logsEl.scrollTop = logsEl.scrollHeight;
-            
+
             if (section === 'generation') {
                 generationLogsManualState = true;
             } else {
@@ -544,7 +892,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
-    
+
     // Toggle button handlers
     document.getElementById('toggle-generation-logs').addEventListener('click', () => {
         const content = document.getElementById('generation-logs-content');
@@ -554,7 +902,7 @@ document.addEventListener('DOMContentLoaded', () => {
             collapseSection('generation', true);
         }
     });
-    
+
     document.getElementById('toggle-execution-logs').addEventListener('click', () => {
         const content = document.getElementById('execution-logs-content');
         if (content.classList.contains('collapsed')) {
@@ -567,9 +915,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Main Action Button Handler
     actionBtn.addEventListener('click', async () => {
         const config = buttonConfig[currentState];
-        
+
         if (!config.action) return;
-        
+
         if (config.action === 'generate') {
             await handleGenerate();
         } else if (config.action === 'execute') {
@@ -580,24 +928,25 @@ document.addEventListener('DOMContentLoaded', () => {
     async function handleGenerate() {
         const query = queryInput.value.trim();
         const hasExistingCode = getCodeContent().trim().length > 0;
-        
+
         // Confirmation for regeneration
         if (hasExistingCode) {
             if (!confirm('⚠️ This will replace your current code. Continue?')) {
                 return;
             }
         }
-        
+
         // Store the user query for pattern learning when executing
         currentUserQuery = query;
-        
+
         updateButtonState(UIState.GENERATING);
         clearCode();
-        generationLogsEl.innerHTML = '';
+        // Show loading placeholder while generation is in progress
+        generationLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🧠</div><p>AI is generating your test code... Please wait.</p></div>';
         downloadBtn.style.display = 'none';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
-        
+
         // Reset progress bar
         const generationProgressContainer = document.getElementById('generation-progress-container');
         const generationProgressFill = document.getElementById('generation-progress-fill');
@@ -605,15 +954,20 @@ document.addEventListener('DOMContentLoaded', () => {
         generationProgressContainer.style.display = 'none';
         generationProgressFill.style.width = '0%';
         generationProgressText.textContent = '0%';
-        
+
         // Mark that generation has started
         hasGeneratedCode = true;
-        
+
         // Reset manual state for generation logs (allow auto-management)
         generationLogsManualState = null;
-        
+
         // Update log sections visibility
         updateLogSectionsVisibility();
+
+        // Auto-scroll to generation logs so user can see progress
+        setTimeout(() => {
+            generationLogsSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
 
         try {
             const requestPayload = {
@@ -669,18 +1023,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function handleExecute() {
         const code = getCodeContent().trim();
-        
+
         if (!code) {
             alert('No code to execute');
             return;
         }
-        
+
         updateButtonState(UIState.EXECUTING);
-        executionLogsEl.innerHTML = '';
+        // Show loading placeholder while execution is in progress
+        executionLogsEl.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⏳</div><p>Execution in progress... Please wait.</p></div>';
         statusBadge.classList.remove('status-persistent');
         statusBadge.style.display = 'none';
         executionStartTime = Date.now();
-        
+
         // Reset progress bar
         const executionProgressContainer = document.getElementById('execution-progress-container');
         const executionProgressFill = document.getElementById('execution-progress-fill');
@@ -688,20 +1043,26 @@ document.addEventListener('DOMContentLoaded', () => {
         executionProgressContainer.style.display = 'none';
         executionProgressFill.style.width = '0%';
         executionProgressText.textContent = '0%';
-        
+
         // Mark that execution has started
         hasExecutedCode = true;
-        
+
         // Reset manual state for execution logs (allow auto-management)
         executionLogsManualState = null;
-        
+
         // Update log sections visibility (will auto-collapse generation, show execution)
         updateLogSectionsVisibility();
+
+        // Auto-scroll to execution logs so user can see progress
+        setTimeout(() => {
+            executionLogsSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
 
         try {
             const requestPayload = {
                 robot_code: code,
-                user_query: currentUserQuery  // Pass the original query for pattern learning
+                user_query: currentUserQuery,  // Pass the original query for pattern learning
+                workflow_id: currentWorkflowId  // Pass unified workflow ID from generation
             };
 
             const response = await fetch('/execute-test', {
@@ -759,12 +1120,20 @@ document.addEventListener('DOMContentLoaded', () => {
             routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.robot_code) {
             applySyntaxHighlighting(data.robot_code);
+            // Capture workflow_id for unified ID tracking during execution
+            if (data.workflow_id) {
+                currentWorkflowId = data.workflow_id;
+            }
             updateStatus('success', 'Generation complete', false);
             hideStatus();
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();
             updateLogSectionsVisibility();
+            // Auto-scroll back to code area so user can see the generated code
+            setTimeout(() => {
+                document.querySelector('.section:has(#robot-code)')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 200);
         } else if (data.status === 'error') {
             updateStatus('error', 'Generation failed');
             const stage = data.stage || 'generation';
@@ -778,16 +1147,147 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Format execution logs into structured, readable HTML
+    function formatExecutionLog(rawLog) {
+        // Pattern: Robot Framework Test Execution (Exit Code: X)
+        // ==== Suite: Test Test: Generated Test - PASS Results: X passed, Y failed
+        // Detailed logs available in: <path>
+
+        const container = document.createElement('div');
+        container.className = 'execution-summary';
+
+        // Extract exit code
+        const exitCodeMatch = rawLog.match(/Robot Framework Test Execution \(Exit Code: (\d+)\)/i);
+        const exitCode = exitCodeMatch ? exitCodeMatch[1] : null;
+
+        // Extract suite name - using string methods to avoid ReDoS (SonarQube S5852)
+        let suiteName = 'Unknown';
+        const lowerLog = rawLog.toLowerCase();
+        const suiteIdx = lowerLog.indexOf('suite:');
+        if (suiteIdx !== -1) {
+            const afterSuite = suiteIdx + 6; // 'suite:'.length
+            const testIdx = lowerLog.indexOf('test:', afterSuite);
+            if (testIdx !== -1) {
+                suiteName = rawLog.slice(afterSuite, testIdx).trim();
+            }
+        }
+
+        // Extract test name and status - using string methods to avoid ReDoS (SonarQube S5852)
+        let testName = 'Unknown';
+        let testStatusFromMatch = 'UNKNOWN';
+        const testKeywordIdx = lowerLog.indexOf('test:', suiteIdx !== -1 ? suiteIdx + 6 : 0);
+        if (testKeywordIdx !== -1) {
+            const afterTest = testKeywordIdx + 5; // 'test:'.length
+            const restAfterTest = rawLog.slice(afterTest);
+            // Find ' - PASS' or ' - FAIL' pattern
+            const passIdx = restAfterTest.toUpperCase().indexOf(' - PASS');
+            const failIdx = restAfterTest.toUpperCase().indexOf(' - FAIL');
+            let statusIdx = -1;
+            if (passIdx !== -1 && (failIdx === -1 || passIdx < failIdx)) {
+                statusIdx = passIdx;
+                testStatusFromMatch = 'PASS';
+            } else if (failIdx !== -1) {
+                statusIdx = failIdx;
+                testStatusFromMatch = 'FAIL';
+            }
+            if (statusIdx !== -1) {
+                testName = restAfterTest.slice(0, statusIdx).trim();
+            }
+        }
+        // BUG FIX: Derive testStatus from failed count (below) instead of testStatusFromMatch
+        // because the Test line can incorrectly show PASS when results show failures
+
+        // Extract results - this regex is safe (no overlapping quantifiers)
+        const resultsMatch = rawLog.match(/Results?:\s*(\d+) passed, (\d+) failed/i);
+        const passed = resultsMatch ? resultsMatch[1] : '0';
+        const failed = resultsMatch ? resultsMatch[2] : '0';
+        const testStatus = parseInt(failed) > 0 ? 'FAIL' : testStatusFromMatch;
+
+        // Extract log path - using string methods to avoid ReDoS (SonarQube S5852)
+        let logPath = null;
+        const logPathKeyword = 'detailed logs available in:';
+        const logPathIdx = lowerLog.indexOf(logPathKeyword);
+        if (logPathIdx !== -1) {
+            const afterLogPath = logPathIdx + logPathKeyword.length;
+            // Extract to end of line or end of string
+            const newlineIdx = rawLog.indexOf('\n', afterLogPath);
+            if (newlineIdx !== -1) {
+                logPath = rawLog.slice(afterLogPath, newlineIdx).trim();
+            } else {
+                logPath = rawLog.slice(afterLogPath).trim();
+            }
+        }
+
+        // Build formatted HTML
+        let html = '';
+
+        // Header with exit code
+        html += '<div class="summary-header">';
+        html += `🤖 Robot Framework Test Execution`;
+        if (exitCode !== null) {
+            html += ` <span class="${exitCode === '0' ? 'summary-pass' : 'summary-fail'}">(Exit Code: ${exitCode})</span>`;
+        }
+        html += '</div>';
+
+        // Divider
+        html += '<div class="summary-divider">══════════════════════════════════════════════════</div>';
+
+        // Suite info
+        html += `<div class="summary-line"><span class="summary-label">Suite:</span> ${escapeHtml(suiteName)}</div>`;
+
+        // Test info
+        html += `<div class="summary-line"><span class="summary-label">Test:</span> ${escapeHtml(testName)} - `;
+        html += `<span class="${testStatus === 'PASS' ? 'summary-pass' : 'summary-fail'}">${testStatus}</span></div>`;
+
+        // Results
+        html += `<div class="summary-line"><span class="summary-label">Results:</span> `;
+        html += `<span class="summary-pass">${passed} passed</span>, `;
+        html += `<span class="${parseInt(failed) > 0 ? 'summary-fail' : ''}">${failed} failed</span></div>`;
+
+        // Log link
+        if (logPath) {
+            // Extract run_id from path (e.g., robot_tests/UUID/log.html)
+            const pathParts = logPath.replace(/\\/g, '/').split('/');
+            const robotTestsIndex = pathParts.findIndex(part => part === 'robot_tests');
+
+            let logUrl = logPath; // fallback to original path
+            if (robotTestsIndex !== -1 && pathParts.length > robotTestsIndex + 2) {
+                const runId = pathParts[robotTestsIndex + 1];
+                const fileName = pathParts[pathParts.length - 1];
+                // Create HTTP URL using the /reports endpoint
+                logUrl = `/reports/${runId}/${fileName}`;
+            }
+
+            // XSS Protection: Validate URL scheme to prevent javascript: injection
+            const isValidUrl = logUrl.startsWith('/') || logUrl.startsWith('http://') || logUrl.startsWith('https://');
+            if (!isValidUrl) {
+                logUrl = '#'; // Fallback to safe value
+            }
+
+            html += `<div class="summary-line" style="margin-top: 0.5rem;">`;
+            html += `<span class="summary-label">📄 Detailed logs:</span> `;
+            html += `<a href="${logUrl}" target="_blank" class="log-link" title="Open log file">View Log</a>`;
+            html += `</div>`;
+        }
+
+        container.innerHTML = html;
+        return container;
+    }
+
     function handleExecutionData(data) {
         updateStatus('processing', data.message);
-        
+
         if (data.status === 'running') {
             const stage = data.stage || 'execution';
             const logEntry = createLogEntry(data, stage);
             routeLogToContainer(logEntry, stage);
         } else if (data.status === 'complete' && data.result) {
             const logs = data.result.logs || 'No execution logs available';
-            executionLogsEl.textContent = logs;
+
+            // Format the execution logs into structured HTML
+            const formattedLog = formatExecutionLog(logs);
+            executionLogsEl.innerHTML = '';
+            executionLogsEl.appendChild(formattedLog);
 
             const executionTime = executionStartTime ? ((Date.now() - executionStartTime) / 1000).toFixed(1) : null;
             const timeText = executionTime ? ` (${executionTime}s)` : '';
@@ -820,6 +1320,10 @@ document.addEventListener('DOMContentLoaded', () => {
             currentState = UIState.IDLE;
             updateUI();
             updateLogSectionsVisibility();
+            // Auto-scroll to execution logs to show the results
+            setTimeout(() => {
+                executionLogsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 200);
         } else if (data.status === 'error') {
             updateStatus('error', 'Execution failed');
             const errorEntry = document.createElement('div');
@@ -841,15 +1345,19 @@ document.addEventListener('DOMContentLoaded', () => {
             await navigator.clipboard.writeText(code);
 
             const originalHTML = copyCodeBtn.innerHTML;
+            const originalAriaLabel = copyCodeBtn.getAttribute('aria-label');
+
             copyCodeBtn.classList.add('copied');
+            copyCodeBtn.setAttribute('aria-label', 'Copied successfully');
             copyCodeBtn.innerHTML = `
-                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
-                </svg>
-            `;
+               <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                   <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
+               </svg>
+           `;
 
             setTimeout(() => {
                 copyCodeBtn.classList.remove('copied');
+                copyCodeBtn.setAttribute('aria-label', originalAriaLabel);
                 copyCodeBtn.innerHTML = originalHTML;
             }, 2000);
         } catch (err) {
@@ -874,11 +1382,11 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadBtn.classList.add('download-success');
         const originalHTML = downloadBtn.innerHTML;
         downloadBtn.innerHTML = `
-            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-            </svg>
-            Downloaded
-        `;
+           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+           </svg>
+           Downloaded
+       `;
 
         setTimeout(() => {
             downloadBtn.classList.remove('download-success');
@@ -905,12 +1413,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Syntax highlighting function
+    // SECURITY NOTE (CodeQL js/xss-through-dom):
+    // This function builds HTML strings and passes to setCodeContent() which uses innerHTML.
+    // This is SAFE because escapeHtml() is called on ALL user-derived content before
+    // interpolation into HTML. The only unescaped values are predefined class names.
     function applySyntaxHighlighting(code) {
         const lines = code.split('\n');
-        let highlightedHTML = '';
 
-        lines.forEach((line, index) => {
+        const highlightedLines = lines.map(line => {
             let highlightedLine = '';
 
             if (line.trim().startsWith('***') && line.trim().endsWith('***')) {
@@ -923,7 +1433,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const keyword = match[1];
                     const rest = match[2];
                     const restHighlighted = escapeHtml(rest).replace(/(\$\{[^}]+\})/g, '<span class="rf-variable">$1</span>');
-                    highlightedLine = `<span class="rf-keyword">${keyword}</span>${restHighlighted}`;
+                    highlightedLine = `<span class="rf-keyword">${escapeHtml(keyword)}</span>${restHighlighted}`;
                 } else {
                     highlightedLine = escapeHtml(line);
                 }
@@ -933,7 +1443,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const varName = varMatch[1];
                     const separator = varMatch[2];
                     const varValue = varMatch[3];
-                    highlightedLine = `<span class="rf-variable">${escapeHtml(varName)}</span>${separator}${escapeHtml(varValue)}`;
+                    highlightedLine = `<span class="rf-variable">${escapeHtml(varName)}</span>${escapeHtml(separator)}${escapeHtml(varValue)}`;
                 } else {
                     highlightedLine = `<span class="rf-variable">${escapeHtml(line)}</span>`;
                 }
@@ -942,7 +1452,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (line.match(/^\s+\S/)) {
                 const leadingSpaces = line.match(/^(\s+)/)[1];
                 const trimmed = line.trimStart();
-                
+
                 const escapedLeadingSpaces = escapeHtml(leadingSpaces);
                 if (trimmed.startsWith('${')) {
                     const varMatch = trimmed.match(/^(\$\{[^}]+\})(\s+)(.+)$/);
@@ -956,7 +1466,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 } else {
                     const keywordMatch = trimmed.match(/^([^\s]+(?:\s+[^\s]+)*?)(\s{2,}|\t)/);
-                    
+
                     if (keywordMatch) {
                         const keyword = keywordMatch[1];
                         const separator = keywordMatch[2];
@@ -973,21 +1483,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 highlightedLine = escapeHtml(line);
             }
 
-            // Add newline only if not the last line
-            if (index < lines.length - 1) {
-                highlightedHTML += highlightedLine + '\n';
-            } else {
-                highlightedHTML += highlightedLine;
-            }
+            return highlightedLine;
         });
 
-        setCodeContent(highlightedHTML, true);
+        setCodeContent(highlightedLines.join('\n'), true);
     }
 
     function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        if (!text) return '';
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
     }
 
     // Initialize UI

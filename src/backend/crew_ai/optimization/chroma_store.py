@@ -46,9 +46,15 @@ class KeywordVectorStore:
             )
             
             # Initialize embedding function (sentence-transformers)
-            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2"
-            )
+            # ChromaDB 0.5.x changed the API - now uses default embedding function
+            try:
+                # Try ChromaDB 0.5.x API first (model_name parameter)
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2"
+                )
+            except TypeError:
+                # Fallback for ChromaDB 0.4.x API (no model_name parameter)
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction()
             
             logger.info(f"ChromaDB initialized at {persist_directory}")
             
@@ -179,9 +185,12 @@ class KeywordVectorStore:
             keywords = doc_data.get('keywords', [])
             
             # Filter out internal/deprecated keywords
+            # NOTE: Only filter if keyword ITSELF is deprecated (mentioned in first ~150 chars)
+            # Some keywords have deprecated PARAMETERS but are still valid (e.g., Click With Options)
             public_keywords = [
                 kw for kw in keywords 
-                if not kw['name'].startswith('_') and 'deprecated' not in kw.get('doc', '').lower()
+                if not kw['name'].startswith('_') and 
+                   'deprecated' not in kw.get('doc', '')[:150].lower()  # Only check first 150 chars
             ]
             
             logger.info(f"Found {len(public_keywords)} public keywords in {library_name}")

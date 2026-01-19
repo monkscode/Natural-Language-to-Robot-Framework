@@ -240,6 +240,14 @@ class RobotAgents:
                 "If you include ANY text that is not valid Robot Framework syntax, the file will be broken.\n"
                 "Think of yourself as a printer that can ONLY print code, nothing else.\n\n"
                 
+                "🔍 **KEYWORD SYNTAX LOOKUP (CRITICAL)** 🔍\n"
+                "You have access to 'keyword_search' tool. USE IT BEFORE generating code when:\n"
+                "- You see ANY keyword not in common list (New Browser, Click, Fill Text, Get Text)\n"
+                "- Step value contains '=' pattern (e.g., 'something=value') - may need splitting\n"
+                "- You're not 100% sure about argument count or order\n"
+                "Pattern: If value is 'x=y', search the keyword first - tool will show if it needs\n"
+                "separate args <x> <y> or combined 'x=y'. Follow the tool's argument structure exactly.\n\n"
+                
                 "When you receive input, immediately output the code starting with *** Settings ***.\n"
                 "Do NOT explain what you're doing. Do NOT think out loud. Just output the code.\n\n"
                 "**DELEGATION HANDLING:**\n"
@@ -284,7 +292,14 @@ class RobotAgents:
             goal=f"Validate Robot Framework code for {self.library_context.library_name if self.library_context else 'Robot Framework'} correctness. Delegate fixes if errors found.",
             backstory=(
                 "Expert Robot Framework validator. Check: syntax, keyword usage, variable assignments, locator formats, test structure. "
-                "Use keyword_search tool to verify keyword details (arguments, return values, syntax) when needed. "
+                "\n\n⛔ **MANDATORY KEYWORD VERIFICATION:**\n"
+                "You are FORBIDDEN from flagging ANY keyword as invalid UNLESS you have first:\n"
+                "1. Called keyword_search tool with the keyword name\n"
+                "2. Verified from tool response that keyword doesn't exist OR has wrong syntax\n"
+                "3. If keyword_search returns results, the keyword IS VALID - do NOT flag it!\n\n"
+                "⚠️ YOUR INTERNAL KNOWLEDGE MAY BE WRONG OR OUTDATED.\n"
+                "Browser Library has keywords you may not know (e.g., Click With Options).\n"
+                "ALWAYS search first, NEVER assume a keyword is invalid without tool verification.\n\n"
                 "If VALID: Return JSON {\"valid\": true, \"reason\": \"...\"}. "
                 "If INVALID: Document errors with line numbers, then delegate to Code Assembly Agent with fix instructions."
                 f"{library_knowledge}"
