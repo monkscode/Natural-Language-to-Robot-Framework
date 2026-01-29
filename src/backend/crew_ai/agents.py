@@ -1,44 +1,15 @@
-import os
-import sys
 import logging
 from crewai import Agent
-from crewai.llm import LLM
 from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
-from langchain_ollama import OllamaLLM
 
 # Import browser_use_tool from tools package
 # Note: Path setup is handled by tools/__init__.py automatically
 from tools.browser_use_tool import BatchBrowserUseTool
 
-# Import cleaned LLM wrapper for robust output parsing
-from .cleaned_llm_wrapper import get_cleaned_llm
+# Import LLM factory function
+from .cleaned_llm_wrapper import get_llm
 
 logger = logging.getLogger(__name__)
-
-# Initialize the LLMs
-
-
-def get_llm(model_provider, model_name):
-    """
-    Get LLM instance for the specified provider with automatic output cleaning.
-
-    This function now returns cleaned LLM wrappers that automatically fix
-    common formatting issues (like extra text on Action lines) before CrewAI
-    parses the output. This prevents workflow failures due to LLM formatting quirks.
-
-    The cleaning is transparent - the LLM behaves exactly the same but with
-    robust parsing that handles real-world LLM behavior.
-
-    Args:
-        model_provider: "local" for Ollama, "online" for Gemini
-        model_name: Model identifier (e.g., "llama3.1", "gemini-2.5-flash")
-
-    Returns:
-        Cleaned LLM wrapper instance that automatically fixes formatting issues
-    """
-    logger.info(
-        f"🧹 Initializing cleaned LLM wrapper for {model_provider}/{model_name}")
-    return get_cleaned_llm(model_provider, model_name)
 
 
 # Initialize the tools
@@ -51,8 +22,8 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None, 
-                 optimized_context=None, keyword_search_tool=None,
-                 planner_context=None, identifier_context=None,
+                 keyword_search_tool=None,
+                 planner_context=None,
                  assembler_context=None, validator_context=None):
         """
         Initialize Robot Framework agents.
@@ -61,10 +32,8 @@ class RobotAgents:
             model_provider: "local" or "online"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            optimized_context: DEPRECATED - Use assembler_context instead (kept for backward compatibility)
             keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
             planner_context: Optimized context for Test Automation Planner (optional)
-            identifier_context: Optimized context for Element Identifier (optional, currently unused)
             assembler_context: Optimized context for Code Assembler (optional)
             validator_context: Optimized context for Code Validator (optional)
         """
@@ -72,17 +41,8 @@ class RobotAgents:
         self.library_context = library_context
         self.keyword_search_tool = keyword_search_tool
         
-        # Handle backward compatibility for optimized_context (deprecated)
-        if optimized_context is not None and assembler_context is None:
-            logger.warning(
-                "⚠️ DEPRECATION WARNING: 'optimized_context' parameter is deprecated. "
-                "Use 'assembler_context' instead for clarity and consistency."
-            )
-            assembler_context = optimized_context
-        
         # Role-specific optimized contexts
         self.planner_context = planner_context
-        self.identifier_context = identifier_context  # Currently unused by element_identifier_agent
         self.assembler_context = assembler_context
         self.validator_context = validator_context
 
