@@ -101,6 +101,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     baseline_context_tokens = 0
     optimized_context_tokens = 0
     
+    # Build properly prefixed model name for LiteLLM token counting
+    # Online models already have prefix (e.g., "gemini/gemini-2.5-flash")
+    # Local models need prefix added (e.g., "llama3" -> "ollama/llama3")
+    token_model = model_name if model_provider != "local" else f"ollama/{model_name}"
+    
     if settings.OPTIMIZATION_ENABLED:
         try:
             logger.info("🚀 Optimization system enabled - initializing components")
@@ -151,7 +156,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             
             # Calculate baseline context size (full context)
             baseline_context = library_context.code_assembly_context
-            baseline_context_tokens = count_tokens(baseline_context, model_name)
+            baseline_context_tokens = count_tokens(baseline_context, token_model)
             
             # Get optimized contexts for ALL agents
             logger.info("🎯 Generating optimized contexts for all agents...")
@@ -160,9 +165,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             validator_context = smart_provider.get_agent_context(query, "validator")
             
             # Calculate total optimized tokens
-            planner_tokens = count_tokens(planner_context, model_name)
-            assembler_tokens = count_tokens(assembler_context, model_name)
-            validator_tokens = count_tokens(validator_context, model_name)
+            planner_tokens = count_tokens(planner_context, token_model)
+            assembler_tokens = count_tokens(assembler_context, token_model)
+            validator_tokens = count_tokens(validator_context, token_model)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
             
             logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}, Validator={validator_tokens}")
