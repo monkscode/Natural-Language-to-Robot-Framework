@@ -96,7 +96,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         )
     
     # Initialize optimization system if enabled
-    optimized_context = None
     keyword_search_tool = None
     smart_provider = None
     baseline_context_tokens = 0
@@ -152,25 +151,21 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             
             # Calculate baseline context size (full context)
             baseline_context = library_context.code_assembly_context
-            baseline_context_tokens = count_tokens(baseline_context)
+            baseline_context_tokens = count_tokens(baseline_context, model_name)
             
             # Get optimized contexts for ALL agents
             logger.info("🎯 Generating optimized contexts for all agents...")
             planner_context = smart_provider.get_agent_context(query, "planner")
-            # Identifier context skipped - element_identifier_agent doesn't use context
-            # It only needs batch_browser_automation tool, no keyword knowledge required
-            identifier_context = None
             assembler_context = smart_provider.get_agent_context(query, "assembler")
             validator_context = smart_provider.get_agent_context(query, "validator")
             
-            # Calculate total optimized tokens (skip None values)
-            planner_tokens = count_tokens(planner_context)
-            identifier_tokens = 0  # Not generated, saves ~50-100ms per workflow
-            assembler_tokens = count_tokens(assembler_context)
-            validator_tokens = count_tokens(validator_context)
+            # Calculate total optimized tokens
+            planner_tokens = count_tokens(planner_context, model_name)
+            assembler_tokens = count_tokens(assembler_context, model_name)
+            validator_tokens = count_tokens(validator_context, model_name)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
             
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Identifier=N/A (skipped), Assembler={assembler_tokens}, Validator={validator_tokens}")
+            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}, Validator={validator_tokens}")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -192,7 +187,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             logger.error(f"❌ Failed to initialize optimization system: {e}")
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
             planner_context = None
-            identifier_context = None
             assembler_context = None
             validator_context = None
             keyword_search_tool = None
@@ -201,7 +195,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
         planner_context = None
-        identifier_context = None
         assembler_context = None
         validator_context = None
 
@@ -210,10 +203,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         model_provider, 
         model_name, 
         library_context,
-        assembler_context=assembler_context,  # Use consistent naming with other contexts
+        assembler_context=assembler_context,
         keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
-        identifier_context=identifier_context,
         validator_context=validator_context
     )
     tasks = RobotTasks(library_context, workflow_id=workflow_id)

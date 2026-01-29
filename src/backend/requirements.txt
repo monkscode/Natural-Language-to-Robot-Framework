@@ -22,12 +22,13 @@ flask
 langchain-ollama
 browser_use==0.11.2
 robotframework-browser[bb]
+litellm
 playwright
 browser-service>=1.0.0
 
 # ChromaDB Performance Optimization Dependencies (Requirement 7.1)
 # chromadb: Vector database for semantic keyword search and pattern learning storage
-chromadb~=0.5.0
+chromadb
 # sentence-transformers: Generate embeddings for semantic similarity search
 # Note: Using 3.0+ for compatibility with latest huggingface_hub
 sentence-transformers~=3.0.0
