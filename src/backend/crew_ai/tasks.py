@@ -74,7 +74,11 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
     Implements 3 strategies to extract valid JSON containing a specific key:
     1. Direct JSON parse
     2. Find key pattern and raw_decode  
-    3. Iterate through all '{' positions
+    3. Iterate through all '{' positions - returns LAST valid JSON (LLMs self-correct)
+    
+    CRITICAL: For 'code' key, we prefer the LAST valid JSON because LLMs often:
+    - First explain the format: {"code": "..."}  (placeholder)
+    - Then output the actual: {"code": "*** Settings ***..."}  (real code)
     
     Args:
         raw: Raw LLM output string
@@ -93,21 +97,11 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
     except json.JSONDecodeError:
         pass
     
-    # Strategy 2: Extract JSON using raw_decode (handles trailing text)
-    json_match = re.search(rf'\{{\s*"{required_key}"\s*:', raw)
-    if json_match:
-        start = json_match.start()
-        try:
-            decoder = json.JSONDecoder()
-            data, _ = decoder.raw_decode(raw[start:])
-            if isinstance(data, dict) and required_key in data:
-                fixed = json.dumps(data)
-                logger.info(f"✅ Guardrail: Extracted {log_prefix} JSON (stripped trailing chars)")
-                return fixed
-        except json.JSONDecodeError as e:
-            logger.debug(f"raw_decode failed: {e}")
+    # Strategy 2 & 3: Find ALL valid JSON objects with the required key, then pick the best one
+    # For 'code' key: prefer the one with actual content (not "..." placeholder)
+    # For other keys: prefer the last one (LLMs self-correct)
+    candidates = []
     
-    # Strategy 3: Iterate through all '{' positions to find valid JSON
     search_start = 0
     while True:
         brace_start = raw.find('{', search_start)
@@ -117,14 +111,41 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
             decoder = json.JSONDecoder()
             data, _ = decoder.raw_decode(raw[brace_start:])
             if isinstance(data, dict) and required_key in data:
-                fixed = json.dumps(data)
-                logger.info(f"✅ Guardrail: Found {log_prefix} at position {brace_start}")
-                return fixed
+                candidates.append({
+                    'data': data,
+                    'position': brace_start,
+                    'value': data.get(required_key, '')
+                })
+                logger.debug(f"Found candidate {log_prefix} at position {brace_start}")
         except json.JSONDecodeError:
             pass
         search_start = brace_start + 1
     
-    return None
+    if not candidates:
+        return None
+    
+    # For 'code' key: filter out placeholders like "..." and prefer substantive content
+    if required_key == 'code':
+        # Filter candidates: remove placeholders (empty, "...", very short values)
+        substantive = [
+            c for c in candidates 
+            if isinstance(c['value'], str) and len(c['value']) > 20 and c['value'].strip() != '...'
+        ]
+        if substantive:
+            # Return the LAST substantive one (LLMs often self-correct)
+            best = substantive[-1]
+            logger.info(f"✅ Guardrail: Selected {log_prefix} with substantive code (position {best['position']}, {len(best['value'])} chars)")
+            return json.dumps(best['data'])
+        else:
+            # No substantive candidates, fall back to last one
+            best = candidates[-1]
+            logger.warning(f"⚠️ Guardrail: No substantive {log_prefix} found, using last candidate")
+            return json.dumps(best['data'])
+    else:
+        # For other keys: return the last valid JSON (LLMs self-correct)
+        best = candidates[-1]
+        logger.info(f"✅ Guardrail: Selected last {log_prefix} at position {best['position']}")
+        return json.dumps(best['data'])
 
 
 def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
