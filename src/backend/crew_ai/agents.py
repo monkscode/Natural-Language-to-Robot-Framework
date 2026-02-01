@@ -9,7 +9,7 @@ from langchain_ollama import OllamaLLM
 from tools.browser_use_tool import BatchBrowserUseTool
 
 # Import LLM factory function
-from .cleaned_llm_wrapper import get_llm
+from .cleaned_llm_wrapper import get_llm as get_cleaned_llm
 
 logger = logging.getLogger(__name__)
 
