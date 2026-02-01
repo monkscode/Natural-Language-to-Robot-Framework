@@ -153,8 +153,8 @@ Example usage:
             for i, arg in enumerate(args):
                 if isinstance(arg, dict):
                     arg_name = arg.get('name', '')
-                    arg_default = arg.get('default', None)
-                    arg_required = arg_default is None
+                    # Check if 'default' key exists (not just if value is None)
+                    arg_required = 'default' not in arg
                 else:
                     arg_str_val = str(arg)
                     arg_name = arg_str_val.split('=')[0].split(':')[0].strip()
@@ -179,7 +179,7 @@ Example usage:
             example = f"{keyword_name}    {arg_str}"
             if explanation_str:
                 example += f"\n  # Syntax: {explanation_str}"
-                example += f"\n  # Note: Each argument is SEPARATE (use 4 spaces between args)"
+                example += "\n  # Note: Each argument is SEPARATE (use 4 spaces between args)"
             return example
         else:
             return f"{keyword_name}"

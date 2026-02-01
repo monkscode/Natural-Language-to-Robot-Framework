@@ -318,45 +318,103 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 """
 
     DROPDOWN_HANDLING = """
---- HANDLING CUSTOM DROPDOWNS (React-Select, Material-UI, etc.) ---
-⚠️ **CRITICAL**: Check the 'element_type' field for dropdown-related keywords!
+--- HANDLING DROPDOWNS BASED ON element_type ---
+⚠️ **CRITICAL**: Check the 'element_type' and 'role' fields to choose the correct interaction pattern!
 
-If keyword is 'Select Options By' (or similar) but element_type is NOT 'select':
-- The element is a CUSTOM dropdown (e.g., React-Select, Material-UI)
-- 'Select Options By' ONLY works with native <select> elements
-- For custom dropdowns, use FILL TEXT + ENTER pattern (simplest and most reliable)
+Dropdowns come in 3 types, each requiring different Robot Framework keywords:
 
-**When element_type IS 'select' (native dropdown):**
+**TYPE 1: Native HTML Select (element_type='select')**
+Use standard Select Options By keyword:
 ```robot
 Select Options By    ${dropdown_locator}    label    Option Text
 ```
 
-**When element_type is 'input', 'div', or anything other than 'select' (custom dropdown):**
-Use FILL TEXT + ENTER pattern (2 steps):
+**TYPE 2: Combobox Input (element_type='input', typically role='combobox')**
+These are searchable/filterable dropdowns. Use Fill Text + Enter pattern:
 ```robot
-# Fill Text clears and types the option to filter the dropdown
-Fill Text    ${dropdown_locator}    Option Text
-# Press Enter to select the filtered/highlighted option
+# Type the option text to filter, then press Enter to select
+Fill Text    ${dropdown_locator}    Volvo
 Keyboard Key    press    Enter
 ```
-NOTE: If value is 'label    Option Text', extract just 'Option Text' for Fill Text.
 
-**Example with element_type check:**
-*Input Step (custom dropdown):*
-`{"keyword": "Select Options By", "locator": "id=react-select-4-input", "element_type": "input", "value": "label    Volvo"}`
-*Output Code (Fill Text+Enter pattern because element_type is 'input', not 'select'):*
+**TYPE 3: Click-based Trigger (element_type='span', 'button', or 'div' without combobox role)**
+These require clicking the trigger first, then clicking the option text:
+```robot
+# Click the dropdown trigger to open options
+Click    ${dropdown_locator}
+# Click the option - Browser Library auto-waits for visibility
+Click    <iframe_prefix> >>> text=<option_text>
+```
+
+⚠️ **CRITICAL: `>>` vs `>>>` Syntax**
+- `>>>` = **Frame entry** (enters an iframe context) - USE THIS for iframe prefixes
+- `>>` = **Selector chaining** (combines selectors, stays in same context) - NOT for iframe entry!
+
+⚠️ **IMPORTANT**: If the dropdown locator contains `>>>` (frame entry syntax), you MUST extract and use the same iframe prefix for the text click!
+- Pattern: `<iframe_prefix> >>> <element_selector>` → text click: `<iframe_prefix> >>> text=<value>`
+- Valid iframe prefix examples: `iframe[id="iframeMain"]`, `iframe[id="contentFrame"]`, `iframe[name="main"]`
+- **WRONG**: `iframe >> nth=0` (this uses `>>` which is selector chaining, NOT frame entry)
+
+--- DECISION LOGIC ---
+When you see a dropdown-related step (Select Options By, dropdown, select):
+
+1. **IF element_type='select'** → Use Select Options By keyword
+   
+2. **IF element_type='input'** (usually role='combobox') → Use Fill Text + Enter
+   - Extract option text from value (e.g., 'label    Volvo' → 'Volvo')
+   
+3. **IF element_type='span', 'button', or 'div'** (without role='combobox') → Use Click + Click text
+   - First: Click the trigger to open the dropdown
+   - Then: Click the option text
+   - **CRITICAL IFRAME RULE**: If locator contains `>>>`, extract the prefix and use it:
+     - Locator: `iframe[id="iframeMain"] >>> [role='button']` → prefix is `iframe[id="iframeMain"]`
+     - Locator: `iframe[name="content"] >>> .dropdown` → prefix is `iframe[name="content"]`
+     - Text click: `<prefix> >>> text=<value>`
+
+--- EXAMPLES ---
+
+*Example 1 - Native Select (element_type='select'):*
+Input: `{"locator": "id=country", "element_type": "select", "value": "label    USA"}`
+Output:
+```robot
+    Select Options By    id=country    label    USA
+```
+
+*Example 2 - Combobox Input (element_type='input'):*
+Input: `{"locator": "id=react-select-input", "element_type": "input", "value": "label    Volvo"}`
+Output:
 ```robot
     # Custom dropdown (element_type=input) - using Fill Text+Enter pattern
-    Fill Text    id=react-select-4-input    Volvo
+    Fill Text    id=react-select-input    Volvo
     Keyboard Key    press    Enter
 ```
 
-*Input Step (native select):*
-`{"keyword": "Select Options By", "locator": "id=country-select", "element_type": "select", "value": "label    USA"}`
-*Output Code (Select Options By because element_type is 'select'):*
+*Example 3 - Click-based Trigger with IFRAME (element_type='span'):*
+Input: `{"locator": "iframe[id=\"iframeMain\"] >>> [role='button']", "element_type": "span", "value": "ConfigAM"}`
+Output:
 ```robot
-    Select Options By    id=country-select    label    USA
+    # Custom dropdown (element_type=span) - Click trigger then option
+    Click    iframe[id="iframeMain"] >>> [role='button']
+    Click    iframe[id="iframeMain"] >>> text=ConfigAM
 ```
+
+*Example 4 - Click-based Trigger with DIFFERENT IFRAME:*
+Input: `{"locator": "iframe[name=\"content\"] >>> .dropdown-trigger", "element_type": "button", "value": "Option2"}`
+Output:
+```robot
+    Click    iframe[name="content"] >>> .dropdown-trigger
+    Click    iframe[name="content"] >>> text=Option2
+```
+
+*Example 5 - Click-based Trigger WITHOUT iframe:*
+Input: `{"locator": "[role='button']", "element_type": "span", "value": "Option1"}`
+Output:
+```robot
+    Click    [role='button']
+    Click    text=Option1
+```
+
+**NOTE**: For 'label    X' values, extract just 'X' for Fill Text or Click text patterns.
 """
 
     CHECKBOX_RADIO_HANDLING = """
@@ -527,54 +585,48 @@ Structure of Action Input:
     # ═══════════════════════════════════════════════════════════════════════════
 
     ASSEMBLY_OUTPUT_RULES = """
-🚨 **YOU ARE A CODE GENERATOR - OUTPUT STRUCTURED JSON** 🚨
+🚨 **CODE GENERATOR - OUTPUT JSON FORMAT** 🚨
 
-Your ONLY task: Generate Robot Framework code from the provided steps and return it in JSON format.
+Your task: Generate Robot Framework code and return as JSON.
+
+**OUTPUT FORMAT:**
+{"code": "*** Settings ***\\nLibrary    Browser\\n..."}
+
+**RULES:**
+1. Final Answer must be a JSON object with "code" key
+2. "code" value: Complete Robot Framework code with \\n for newlines
+3. No markdown, no explanatory text - just the JSON
 
 --- KEYWORD SYNTAX LOOKUP (CRITICAL) ---
-⚠️ You have access to 'keyword_search' tool. USE IT when:
-- You encounter ANY keyword you're not 100% certain about
-- The step value contains '=' pattern (e.g., 'attr=value') - may need splitting
-- You need to verify argument count, order, or syntax
-- The keyword is NOT in the common list (New Browser, Click, Fill Text, Get Text)
+⚠️ Use 'keyword_search' tool for unfamiliar keywords.
 
 **BEFORE generating code for unfamiliar keywords:**
-1. Call keyword_search with the EXACT keyword name from the step
-2. Review the returned syntax: check argument count and whether they're separate
-3. If tool shows args like <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
-4. If step value has 'x=y' format, check if tool expects 2 args: <x> and <y> separately
+1. Call keyword_search with the EXACT keyword name
+2. Check returned syntax: argument count and order
+3. If tool shows <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
+4. If step value has 'x=y' format, check if tool expects 2 separate args
 
 **Pattern Recognition:**
-- Step value 'attr=value' → likely needs: Keyword    ${loc}    attr    value (3 args)
-- Step value 'just_text' → likely needs: Keyword    ${loc}    just_text (2 args)
-- When unsure → ALWAYS search first, then follow the tool's argument structure
+- 'attr=value' → likely: Keyword    ${loc}    attr    value (3 args)
+- 'just_text' → likely: Keyword    ${loc}    just_text (2 args)
+- When unsure → ALWAYS search first
 
-⛔ **ABSOLUTELY FORBIDDEN** ⛔
-DO NOT include in the code value:
-- Thinking process ('Thought:', 'I will', 'Let me', 'First', 'Now', 'I need')
-- Explanations ('From the first step:', 'Also add', 'Variables:', 'Test Case Steps:')
-- Markdown ('**Variables:**', '```robot', '```', '**Test Cases:**')
+**FORBIDDEN in Final Answer:**
+- Markdown code blocks (```json, ```)
+- Thinking text ('Thought:', 'I will', etc.)
+- Text before/after the JSON
 
-✅ **YOUR OUTPUT MUST BE** ✅
-A JSON object with 'code' key containing Robot Framework code:
-{"code": "*** Settings ***\nLibrary    Browser\n..."}
-
-The code value must:
-1. Start with *** Settings ***
-2. Contain ONLY valid Robot Framework syntax
-3. Use \n for newlines within the string
+**CORRECT Example:**
+{"code": "*** Settings ***\\nLibrary    Browser\\n\\n*** Variables ***\\n${browser}    chromium\\n\\n*** Test Cases ***\\nGenerated Test\\n    New Browser    ${browser}    headless=True\\n    Close Browser"}
 """
 
     ASSEMBLY_FORMAT_RULES = """
---- CRITICAL OUTPUT FORMAT RULES ---
-1. ⚠️ Output a JSON object: {"code": "<robot_code_here>"}
-2. The 'code' value must start with *** Settings ***
-3. Use \n for newlines: "*** Settings ***\nLibrary    Browser\n..."
-4. End code with the last test keyword (e.g., Close Browser)
-5. No explanatory text in the code value
-6. For price or numeric validations, use Evaluate to convert strings to numbers
-7. Optionally include 'warnings' array: {"code": "...", "warnings": ["..."]}
+--- OUTPUT FORMAT ---
+Final Answer must be: {"code": "<robot_code>"}
 
-Example of correct output:
-{"code": "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${browser}    chromium\n\n*** Test Cases ***\nGenerated Test\n    New Browser    ${browser}\n    Close Browser"}
+1. Code must start with *** Settings ***
+2. Use \\n for newlines
+3. End with last test keyword (e.g., Close Browser)
+4. No explanatory text in code value
+5. For price/numeric validations: use Evaluate to convert strings to numbers
 """

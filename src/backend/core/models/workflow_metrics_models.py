@@ -120,6 +120,9 @@ class WorkflowMetricsBase(
     
     # Optional session tracking
     session_id: Optional[str] = None
+    
+    # Per-element approach metrics for pattern analysis
+    element_approach_metrics: Optional[List[Dict[str, Any]]] = None
 
 
 class WorkflowMetrics(WorkflowMetricsBase):
@@ -312,6 +315,7 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             custom_actions_enabled=m.custom_actions_enabled,
             custom_action_usage_count=m.custom_action_usage_count,
             session_id=m.session_id,
+            element_approach_metrics=m.element_approach_metrics,
         )
 
 

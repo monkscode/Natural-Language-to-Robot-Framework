@@ -104,7 +104,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info("✅ Extracted robot code from output.json_dict['code']")
         # Strategy 3: Try parsing raw output as JSON ({"code": "..."})
         else:
-            raw_output = task_output.raw
+            raw_output = getattr(task_output, "raw", "") or ""
+            # Guard: Normalize non-string raw outputs (e.g., dict/list) to JSON string
+            if not isinstance(raw_output, str):
+                raw_output = json.dumps(raw_output)
             try:
                 parsed_json = json.loads(raw_output)
                 if isinstance(parsed_json, dict) and 'code' in parsed_json:
@@ -114,10 +117,19 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     # Fallback: use raw output directly (legacy format)
                     robot_code = raw_output
                     logging.info("✅ Using raw output as robot code (legacy format)")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 # Raw output is not JSON, use as-is (legacy format)
                 robot_code = raw_output
                 logging.info("✅ Using raw output as robot code (not JSON)")
+
+        # CRITICAL: Normalize escaped newlines/tabs to actual characters
+        # LLM often outputs literal \n instead of actual newlines in JSON
+        if '\\n' in robot_code or '\\t' in robot_code or '\\r' in robot_code:
+            robot_code = robot_code.replace('\\r\\n', '\n')  # Windows line endings
+            robot_code = robot_code.replace('\\n', '\n')
+            robot_code = robot_code.replace('\\t', '\t')
+            robot_code = robot_code.replace('\\r', '\r')
+            logging.info("✅ Normalized escaped newlines/tabs to actual characters")
 
         # Simplified cleaning logic - prompt now handles most cases
         # Keep only essential defensive measures
@@ -171,6 +183,16 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             cleaned_lines.pop()
         
         robot_code = '\n'.join(cleaned_lines).strip()
+        
+        # Step 3: Strip trailing JSON artifacts that may leak from LLM output
+        # LLM sometimes outputs {"code": "...robot code..."} and the closing "} leaks through
+        json_trailing_patterns = [
+            '"}',  # JSON closing brace with quote
+        ]
+        for pattern in json_trailing_patterns:
+            if robot_code.endswith(pattern):
+                robot_code = robot_code[:-len(pattern)].strip()
+                logging.info(f"✅ Stripped trailing JSON artifact: {pattern}")
 
         # Extract validation output from task[3] (code_validator)
         raw_validation_output = crew_with_results.tasks[3].output.raw
@@ -323,18 +345,6 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
                 avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
                 
-                # Prepare token_usage dict from per_agent_metrics
-                token_usage = {
-                    "step_planner": per_agent_metrics.get("step_planner", {}).get("total_tokens", 0),
-                    "element_identifier": per_agent_metrics.get("element_identifier", {}).get("total_tokens", 0),
-                    "code_assembler": per_agent_metrics.get("code_assembler", {}).get("total_tokens", 0),
-                    "code_validator": per_agent_metrics.get("code_validator", {}).get("total_tokens", 0),
-                    "total": sum(
-                        per_agent_metrics.get(agent, {}).get("total_tokens", 0)
-                        for agent in ["step_planner", "element_identifier", "code_assembler", "code_validator"]
-                    )
-                }
-                
                 unified_metrics = WorkflowMetrics(
                     workflow_id=workflow_id,
                     timestamp=datetime.now(),
@@ -371,8 +381,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
                     session_id=browser_metrics.get('session_id'),
                     
-                    # Per-agent token tracking
-                    token_usage=token_usage,
+                    # Per-element approach metrics for pattern analysis
+                    element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
                 )
                 
                 # 4. Record unified metrics

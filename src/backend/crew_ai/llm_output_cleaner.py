@@ -1,29 +1,18 @@
 """
-LLM Output Cleaner - Robust parsing for malformed agent responses.
+LLM Output Cleaner - Utility functions for LLM output formatting.
 
-This module provides a wrapper around LLM instances that cleans malformed
-output before CrewAI parses it. This handles the common issue where LLMs
-(especially Gemini) add extra text to Action lines, breaking CrewAI's parser.
+This module provides:
+1. Action/Action Input line cleaning (LLMs add extra text to tool calls)
+2. Formatting error detection (for error handling)
+3. Response monitoring (for debugging)
 
-Root Cause:
------------
-LLMs naturally want to explain their actions, leading to output like:
-    "Action: batch_browser_automation` call with the collected elements..."
-    
-Instead of the required format:
-    "Action: batch_browser_automation"
-    "Action Input: {...}"
-
-Solution:
----------
-We intercept LLM responses and clean them using regex patterns before
-CrewAI's parser sees them. This is similar to how we handled duplicate
-entries - we create robust parsing that handles real-world LLM behavior.
+NOTE: JSON extraction and Robot Framework code wrapping are now handled by 
+guardrails in tasks.py, which is a more robust solution.
 """
 
 import re
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,45 +57,23 @@ class LLMOutputCleaner:
         Examples:
             Input:  "Action: batch_browser_automation` call with the elements..."
             Output: "Action: batch_browser_automation"
-
-            Input:  "Action: vision_browser_automation` and Action Input using..."
-            Output: "Action: vision_browser_automation"
         """
-        if not isinstance(text, str):
+        if not text:
             return text
 
-        original_text = text
         lines = text.split('\n')
         cleaned_lines = []
-        changes_made = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
+            # Only process lines that look like Action or Using Tool lines
             stripped = line.strip()
-
-            # Check if this line starts with "Action:" or "Using Tool:"
-            if stripped.startswith('Action:') or stripped.startswith('Using Tool:'):
-                # Try to extract clean action name
+            if stripped.startswith(('Action:', 'Using Tool:')):
                 cleaned_line = LLMOutputCleaner._clean_single_action_line(line)
-
-                if cleaned_line != line:
-                    changes_made = True
-                    logger.debug(f"🧹 Cleaned Action/Tool line {i+1}:")
-                    logger.debug(f"   Before: {line[:100]}...")
-                    logger.debug(f"   After:  {cleaned_line}")
-
                 cleaned_lines.append(cleaned_line)
             else:
                 cleaned_lines.append(line)
 
-        cleaned_text = '\n'.join(cleaned_lines)
-
-        if changes_made:
-            logger.info(
-                f"✅ Cleaned LLM output: removed extra text from Action lines")
-            logger.debug(f"   Original length: {len(original_text)} chars")
-            logger.debug(f"   Cleaned length:  {len(cleaned_text)} chars")
-
-        return cleaned_text
+        return '\n'.join(cleaned_lines)
 
     @staticmethod
     def _clean_single_action_line(line: str) -> str:
@@ -121,28 +88,15 @@ class LLMOutputCleaner:
         """
         # Try each pattern
         for pattern in LLMOutputCleaner.ACTION_PATTERNS:
-            match = re.match(pattern, line.strip())
+            match = re.match(pattern, line.strip(), re.IGNORECASE)
             if match:
-                # Extract the clean "Action: <name>" or "Using Tool: <name>" part
-                clean_action = match.group(1)
-                # Remove any trailing backticks or quotes
-                clean_action = re.sub(r'[`\'"]$', '', clean_action)
-                return clean_action
+                # Return just the captured group (proper Action format)
+                cleaned = match.group(1)
+                if cleaned != line.strip():
+                    logger.debug(f"🧹 Cleaned action line: '{line.strip()[:50]}...' → '{cleaned}'")
+                return cleaned
 
-        # If no pattern matched, try simple extractions
-        # Match "Action: <word>" and stop at first non-word character
-        simple_match = re.match(
-            r'(Action:\s*[a-zA-Z_][a-zA-Z0-9_]*)', line.strip())
-        if simple_match:
-            return simple_match.group(1)
-
-        # Match "Using Tool: <word>" and stop at first non-word character
-        tool_match = re.match(
-            r'(Using Tool:\s*[a-zA-Z_][a-zA-Z0-9_]*)', line.strip())
-        if tool_match:
-            return tool_match.group(1)
-
-        # If all else fails, return original line
+        # No pattern matched, return original
         return line
 
     @staticmethod
@@ -156,184 +110,47 @@ class LLMOutputCleaner:
         Returns:
             Cleaned text with proper Action Input formatting
         """
-        if not isinstance(text, str):
+        if not text:
             return text
 
-        lines = text.split('\n')
-        cleaned_lines = []
-
-        for line in lines:
-            stripped = line.strip()
-
-            # Check if this line starts with "Action Input:"
-            if stripped.startswith('Action Input:'):
-                # Ensure proper JSON formatting
-                if '{' in line:
-                    # Extract JSON part (everything from first { onwards)
-                    json_start = line.find('{')
-                    # Find the end of JSON (last } on this line or next lines)
-                    json_part = line[json_start:]
-                    cleaned_line = f'Action Input: {json_part}'
-                    cleaned_lines.append(cleaned_line)
-                else:
-                    # No JSON found, keep as-is
-                    cleaned_lines.append(line)
-            else:
-                cleaned_lines.append(line)
-
-        return '\n'.join(cleaned_lines)
-
-    @staticmethod
-    def clean_robot_code_prefix(text: str) -> str:
-        """
-        Remove explanatory text that appears before Robot Framework code.
-
-        LLMs often add thinking text like "Let's assemble the code." right before
-        the actual Robot Framework code, which should start with *** Settings ***
-        or *** Test Cases ***.
-
-        Args:
-            text: Raw LLM output that may contain explanatory text before code
-
-        Returns:
-            Cleaned text with explanatory prefix removed
-
-        Examples:
-            Input:  "Let's assemble the code.*** Settings ***\nLibrary..."
-            Output: "*** Settings ***\nLibrary..."
-
-            Input:  "Here's the code:\n\n*** Settings ***\nLibrary..."
-            Output: "*** Settings ***\nLibrary..."
-        """
-        if not isinstance(text, str):
-            return text
-
-        # Pattern to match Robot Framework section headers
-        rf_section_pattern = r'\*\*\*\s+(Settings|Variables|Test Cases|Keywords|Tasks)\s+\*\*\*'
-
-        # Find the first occurrence of a Robot Framework section
-        match = re.search(rf_section_pattern, text, re.IGNORECASE)
-
-        if match:
-            # Check if there's text before the section header
-            prefix_text = text[:match.start()].strip()
-
-            if prefix_text:
-                # There's explanatory text before the code
-                # Check if it's just thinking/explanation (not part of the code)
-                # Common patterns: "Let's", "Here's", "Now", "Okay", etc.
-                thinking_patterns = [
-                    r'let\'?s\s+',
-                    r'here\'?s\s+',
-                    r'now\s+',
-                    r'okay\s*,?\s*',
-                    r'alright\s*,?\s*',
-                    r'i\s+will\s+',
-                    r'i\'ll\s+',
-                    r'assembling\s+',
-                    r'generating\s+',
-                ]
-
-                prefix_lower = prefix_text.lower()
-                is_thinking = any(re.search(pattern, prefix_lower)
-                                  for pattern in thinking_patterns)
-
-                if is_thinking:
-                    # Remove the prefix and return code starting from the section header
-                    cleaned_text = text[match.start():]
-                    logger.info(
-                        f"🧹 Removed explanatory prefix before Robot Framework code")
-                    logger.debug(f"   Removed: {prefix_text[:100]}...")
-                    return cleaned_text
-
-        return text
-
-    @staticmethod
-    def clean_robot_code_duplicates(text: str) -> str:
-        """
-        Remove duplicate Robot Framework code and embedded thinking text.
-
-        LLMs sometimes output the code, then add thinking text, then output
-        the code again. This removes duplicates and keeps only the last complete version.
-
-        Args:
-            text: Raw LLM output that may contain duplicate code sections
-
-        Returns:
-            Cleaned text with only the last complete code section
-
-        Examples:
-            Input:  "*** Settings ***\n...\nClose Browser\nLet me review...\n*** Settings ***\n..."
-            Output: "*** Settings ***\n..." (last occurrence)
-        """
-        if not isinstance(text, str):
-            return text
-
-        # Pattern to match Robot Framework section headers
-        rf_section_pattern = r'\*\*\*\s+(Settings|Variables|Test Cases|Keywords|Tasks)\s+\*\*\*'
-
-        # Find all occurrences of Robot Framework sections
-        matches = list(re.finditer(rf_section_pattern, text, re.IGNORECASE))
-
-        if len(matches) > 1:
-            # Multiple sections found - likely duplicate code
-            # Find the last occurrence of *** Settings *** or *** Test Cases ***
-            last_settings_match = None
-            last_test_cases_match = None
-
-            for match in matches:
-                section_name = match.group(1).lower()
-                if section_name == 'settings':
-                    last_settings_match = match
-                elif section_name == 'test cases':
-                    last_test_cases_match = match
-
-            # Determine which section to use as the start of clean code
-            if last_settings_match:
-                # Use the last *** Settings *** as the start
-                start_pos = last_settings_match.start()
-            elif last_test_cases_match:
-                # No Settings found, use last *** Test Cases ***
-                start_pos = last_test_cases_match.start()
-            else:
-                # No Settings or Test Cases, return as-is
-                return text
-
-            # Extract code from the last section onwards
-            cleaned_text = text[start_pos:]
-
-            # Check if we actually removed something
-            if start_pos > 0:
-                removed_text = text[:start_pos]
-                logger.info(f"🧹 Removed duplicate/embedded code sections")
-                logger.debug(
-                    f"   Removed {len(removed_text)} chars before final code")
-                return cleaned_text
-
-        return text
+        # Pattern: "Action Input:" followed by extra text before the JSON
+        # e.g., "Action Input: Here's the input: {...}"
+        pattern = r'(Action Input:\s*)(?:Here\'?s?[^{]*|The input[^{]*|I\'ll use[^{]*)(\{)'
+        
+        def replacer(match):
+            return match.group(1) + match.group(2)
+        
+        cleaned = re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+        
+        if cleaned != text:
+            logger.debug("🧹 Cleaned Action Input line (removed prefix before JSON)")
+        
+        return cleaned
 
     @staticmethod
     def clean_output(text: str) -> str:
         """
-        Apply all cleaning operations to LLM output.
-
-        This is the main entry point for cleaning LLM responses.
-
+        Apply all Action/ActionInput cleaning operations to LLM output.
+        
+        This is the main entry point for cleaning LLM responses in wrappers.
+        Fixes formatting issues that would break CrewAI's parser.
+        
+        Note: Robot Framework code cleaning is handled by guardrails in tasks.py,
+        not here. This method focuses only on Action/ActionInput formatting.
+        
         Args:
             text: Raw LLM output
-
+            
         Returns:
-            Fully cleaned output ready for CrewAI parsing
+            Cleaned output ready for CrewAI parsing
         """
         if not isinstance(text, str):
             return text
-
-        # Apply all cleaning operations in sequence
+        
+        # Apply Action/ActionInput cleaning
         text = LLMOutputCleaner.clean_action_lines(text)
         text = LLMOutputCleaner.clean_action_input_lines(text)
-        text = LLMOutputCleaner.clean_robot_code_duplicates(text)
-        text = LLMOutputCleaner.clean_robot_code_prefix(text)
-
+        
         return text
 
     @staticmethod
@@ -347,20 +164,22 @@ class LLMOutputCleaner:
         Returns:
             True if this looks like a formatting error
         """
-        error_lower = error_msg.lower()
-
         formatting_indicators = [
-            "Action" in error_msg and "don't exist" in error_msg,
-            "batch_browser_automation" in error_msg and "call with" in error_msg,
-            "vision_browser_automation" in error_msg and "using" in error_msg,
-            "Action Input" in error_msg and "using" in error_msg,
-            "partial sentence" in error_lower,
-            "extra text" in error_lower,
-            "not properly formatted" in error_lower,
-            "backtick" in error_lower,
+            'invalid format',
+            'expected string or bytes-like object',
+            'could not parse',
+            'json',
+            'parsing',
+            'malformed',
+            'unexpected',
+            'invalid action',
+            'action input',
+            'actionparsingerror',
+            'no completion choices',
         ]
-
-        return any(formatting_indicators)
+        
+        error_lower = error_msg.lower()
+        return any(indicator in error_lower for indicator in formatting_indicators)
 
 
 class LLMFormattingMonitor:

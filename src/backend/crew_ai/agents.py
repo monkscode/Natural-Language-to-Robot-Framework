@@ -1,5 +1,3 @@
-import os
-import sys
 import logging
 from crewai import Agent
 from crewai.llm import LLM
@@ -10,8 +8,8 @@ from langchain_ollama import OllamaLLM
 # Note: Path setup is handled by tools/__init__.py automatically
 from tools.browser_use_tool import BatchBrowserUseTool
 
-# Import cleaned LLM wrapper for robust output parsing
-from .cleaned_llm_wrapper import get_cleaned_llm
+# Import LLM factory function
+from .cleaned_llm_wrapper import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +46,8 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None, 
-                 optimized_context=None, keyword_search_tool=None,
-                 planner_context=None, identifier_context=None,
+                 keyword_search_tool=None,
+                 planner_context=None,
                  assembler_context=None, validator_context=None):
         """
         Initialize Robot Framework agents.
@@ -58,10 +56,8 @@ class RobotAgents:
             model_provider: "local" or "online"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            optimized_context: DEPRECATED - Use assembler_context instead (kept for backward compatibility)
             keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
             planner_context: Optimized context for Test Automation Planner (optional)
-            identifier_context: Optimized context for Element Identifier (optional, currently unused)
             assembler_context: Optimized context for Code Assembler (optional)
             validator_context: Optimized context for Code Validator (optional)
         """
@@ -69,17 +65,8 @@ class RobotAgents:
         self.library_context = library_context
         self.keyword_search_tool = keyword_search_tool
         
-        # Handle backward compatibility for optimized_context (deprecated)
-        if optimized_context is not None and assembler_context is None:
-            logger.warning(
-                "⚠️ DEPRECATION WARNING: 'optimized_context' parameter is deprecated. "
-                "Use 'assembler_context' instead for clarity and consistency."
-            )
-            assembler_context = optimized_context
-        
         # Role-specific optimized contexts
         self.planner_context = planner_context
-        self.identifier_context = identifier_context  # Currently unused by element_identifier_agent
         self.assembler_context = assembler_context
         self.validator_context = validator_context
 

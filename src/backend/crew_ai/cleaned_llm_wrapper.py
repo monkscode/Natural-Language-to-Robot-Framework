@@ -1,9 +1,9 @@
 """
-Cleaned LLM Wrapper - Intercepts and cleans LLM responses before CrewAI parsing.
+LLM Wrapper - LLM instantiation with output cleaning for CrewAI agents.
 
-This module provides wrapper classes that intercept LLM responses and clean
-them before CrewAI's parser sees them. This prevents formatting errors from
-breaking the workflow.
+This module provides:
+1. CleanedLLMWrapper - For online models (Gemini) with Action/ActionInput cleaning
+2. CleanedOllamaLLMWrapper - For local models (Ollama) with Action/ActionInput cleaning
 
 The wrapper is transparent - it behaves exactly like the original LLM but
 with automatic output cleaning.
@@ -71,19 +71,23 @@ class DynamicRateLimitHandler:
 
 class CleanedLLMWrapper(LLM):
     """
-    Wrapper around CrewAI's LLM that cleans output before returning.
+    Wrapper around CrewAI's LLM that cleans Action/ActionInput lines.
     
-    This wrapper:
-    1. Intercepts LLM responses and applies cleaning logic for formatting issues
-    2. Handles rate limit errors dynamically based on API-provided retryDelay
+    This wrapper intercepts LLM responses and applies cleaning to fix formatting
+    issues that would break CrewAI's parser. Specifically:
+    - Fixes 'Action: tool_name` extra text' → 'Action: tool_name'
+    - Fixes 'Action Input: prefix {...}' → 'Action Input: {...}'
     
-    No hardcoded rate limits - delays are extracted from actual API responses.
+    This prevents parsing failures and saves retry costs.
+    
+    Rate limiting is NOT handled here - LiteLLM handles it internally with num_retries.
+    RF code cleaning is NOT handled here - guardrails handle it in tasks.py.
     """
     
     def __init__(self, *args, **kwargs):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
-        logger.info("🧹 Initialized CleanedLLMWrapper - will clean all LLM responses")
+        logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
     
     def call(self, messages, *args, **kwargs):
         """
@@ -127,10 +131,7 @@ class CleanedLLMWrapper(LLM):
     
     def _generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
         """
-        Generate response and clean it before returning.
-        
-        This method intercepts the LLM's response and applies cleaning logic.
-        Note: Rate limiting is handled in call() method.
+        Generate response and clean Action/ActionInput lines before returning.
         """
         # Call the original _generate method
         result = super()._generate(messages, **kwargs)
@@ -143,12 +144,6 @@ class CleanedLLMWrapper(LLM):
     def _clean_chat_result(self, result: ChatResult) -> ChatResult:
         """
         Clean a ChatResult by applying output cleaning to all generations.
-        
-        Args:
-            result: Original ChatResult from LLM
-            
-        Returns:
-            Cleaned ChatResult with fixed formatting
         """
         if not result or not result.generations:
             return result
@@ -158,34 +153,28 @@ class CleanedLLMWrapper(LLM):
         
         for generation in result.generations:
             if isinstance(generation, ChatGeneration) and generation.message:
-                # Extract the text content
                 original_text = generation.message.content
                 
-                # Clean it
+                # Clean Action/ActionInput formatting issues
                 cleaned_text = LLMOutputCleaner.clean_output(original_text)
                 
-                # Check if cleaning was needed
                 if cleaned_text != original_text:
                     was_cleaned = True
                     logger.debug(f"🧹 Cleaned LLM response (length: {len(original_text)} → {len(cleaned_text)})")
                 
                 # Create new message with cleaned content
                 cleaned_message = AIMessage(content=cleaned_text)
-                
-                # Create new generation with cleaned message
                 cleaned_generation = ChatGeneration(
                     message=cleaned_message,
                     generation_info=generation.generation_info
                 )
                 cleaned_generations.append(cleaned_generation)
             else:
-                # Keep non-chat generations as-is
                 cleaned_generations.append(generation)
         
-        # Log to monitor
+        # Log to monitor for debugging
         formatting_monitor.log_response(was_cleaned=was_cleaned)
         
-        # Create new result with cleaned generations
         return ChatResult(
             generations=cleaned_generations,
             llm_output=result.llm_output
@@ -194,39 +183,27 @@ class CleanedLLMWrapper(LLM):
 
 class CleanedOllamaLLMWrapper(OllamaLLM):
     """
-    Wrapper around OllamaLLM that cleans output before returning.
+    Wrapper around OllamaLLM that cleans Action/ActionInput lines.
     
-    This wrapper provides the same cleaning functionality for local Ollama models.
+    Provides the same cleaning functionality for local Ollama models.
     """
     
     def __init__(self, *args, **kwargs):
         """Initialize the wrapper with the same arguments as OllamaLLM."""
         super().__init__(*args, **kwargs)
-        logger.info("🧹 Initialized CleanedOllamaLLMWrapper - will clean all LLM responses")
+        logger.info("🧹 Initialized CleanedOllamaLLMWrapper - will clean Action/ActionInput lines")
     
     def _generate(self, prompts: List[str], **kwargs) -> LLMResult:
         """
-        Generate response and clean it before returning.
-        
-        This method intercepts the LLM's response and applies cleaning logic.
+        Generate response and clean Action/ActionInput lines before returning.
         """
-        # Call the original _generate method
         result = super()._generate(prompts, **kwargs)
-        
-        # Clean the response
         cleaned_result = self._clean_llm_result(result)
-        
         return cleaned_result
     
     def _clean_llm_result(self, result: LLMResult) -> LLMResult:
         """
         Clean an LLMResult by applying output cleaning to all generations.
-        
-        Args:
-            result: Original LLMResult from LLM
-            
-        Returns:
-            Cleaned LLMResult with fixed formatting
         """
         if not result or not result.generations:
             return result
@@ -239,45 +216,45 @@ class CleanedOllamaLLMWrapper(OllamaLLM):
             
             for generation in generation_list:
                 if isinstance(generation, Generation):
-                    # Extract the text content
                     original_text = generation.text
                     
-                    # Clean it
+                    # Clean Action/ActionInput formatting issues
                     cleaned_text = LLMOutputCleaner.clean_output(original_text)
                     
-                    # Check if cleaning was needed
                     if cleaned_text != original_text:
                         was_cleaned = True
                         logger.debug(f"🧹 Cleaned Ollama response (length: {len(original_text)} → {len(cleaned_text)})")
                     
-                    # Create new generation with cleaned text
                     cleaned_generation = Generation(
                         text=cleaned_text,
                         generation_info=generation.generation_info
                     )
                     cleaned_generation_list.append(cleaned_generation)
                 else:
-                    # Keep other types as-is
                     cleaned_generation_list.append(generation)
             
             cleaned_generations_list.append(cleaned_generation_list)
         
-        # Log to monitor
+        # Log to monitor for debugging
         formatting_monitor.log_response(was_cleaned=was_cleaned)
         
-        # Create new result with cleaned generations
         return LLMResult(
             generations=cleaned_generations_list,
             llm_output=result.llm_output
         )
 
 
-def get_cleaned_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
+def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
     """
-    Get a cleaned LLM instance that automatically fixes formatting issues.
+    Get a cleaned LLM instance that automatically fixes Action/ActionInput formatting.
     
-    This is a drop-in replacement for the original get_llm function,
-    but returns wrapped instances that clean their output.
+    The returned wrapper:
+    - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'  
+    - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
+    - Prevents parser failures that would cause costly retries
+    
+    Rate limiting is handled automatically by LiteLLM (CrewAI's internal LLM layer).
+    Robot Framework code cleaning is handled by guardrails in tasks.py.
     
     Args:
         model_provider: "local" for Ollama, "online" for Gemini
@@ -285,15 +262,16 @@ def get_cleaned_llm(model_provider: str, model_name: str, api_key: Optional[str]
         api_key: API key for online models (optional, can use env var)
         
     Returns:
-        Cleaned LLM wrapper instance
+        Cleaned LLM wrapper instance ready for use with CrewAI
     """
     if model_provider == "local":
         logger.info(f"🧹 Creating CleanedOllamaLLMWrapper for model: {model_name}")
         return CleanedOllamaLLMWrapper(model=model_name)
-    else:
-        logger.info(f"🧹 Creating CleanedLLMWrapper for model: {model_name}")
-        return CleanedLLMWrapper(
-            api_key=api_key or os.getenv("GEMINI_API_KEY"),
-            model=f"{model_name}",
-            num_retries=3
-        )
+    
+    # Create cleaned wrapper for online provider
+    logger.info(f"🧹 Creating CleanedLLMWrapper for model: {model_name}")
+    return CleanedLLMWrapper(
+        api_key=api_key or os.getenv("GEMINI_API_KEY"),
+        model=model_name,
+        num_retries=3  # LiteLLM internal retry for transient API errors (429, 503, etc.)
+    )
