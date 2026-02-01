@@ -466,14 +466,14 @@ function renderChart1() {
 
         // ========= LOCATOR STRATEGY DISTRIBUTION =========
         case 'fallback-depth': {
-            // Count occurrences of each fallback depth (0-6)
-            const depthCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+            // Count occurrences of each fallback depth (0-7)
+            const depthCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 };
 
             data.sortedRuns.forEach(workflow => {
                 const metrics = workflow.element_approach_metrics || [];
                 metrics.forEach(elem => {
                     const depth = elem.fallback_depth;
-                    if (depth !== undefined && depth >= 0 && depth <= 6) {
+                    if (depth !== undefined && depth >= 0 && depth <= 7) {
                         depthCounts[depth] = (depthCounts[depth] || 0) + 1;
                     }
                 });
@@ -490,7 +490,8 @@ function renderChart1() {
                 colors.teal,      // 3 - OK
                 colors.warning,   // 4 - Fair
                 colors.warning,   // 5 - Poor
-                colors.danger     // 6 - Last resort
+                colors.info,      // 6 - Accessibility fallback
+                colors.danger     // 7 - Last resort (coordinate)
             ];
 
             const depthLabels = [
@@ -500,7 +501,8 @@ function renderChart1() {
                 '3: Collection',
                 '4: Text First',
                 '5: Semantic',
-                '6: Coordinate'
+                '6: Accessibility',
+                '7: Coordinate'
             ];
 
             chart1 = new Chart(ctx, {
