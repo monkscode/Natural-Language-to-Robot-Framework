@@ -3,7 +3,7 @@ import sys
 import logging
 from crewai import Agent
 from crewai.llm import LLM
-from crewai_tools import ScrapeElementFromWebsiteTool
+# from crewai_tools import ScrapeElementFromWebsiteTool  # DEPRECATED - use batch tool instead
 from langchain_ollama import OllamaLLM
 
 # Import browser_use_tool from tools package
@@ -41,7 +41,7 @@ def get_llm(model_provider, model_name):
 
 # Initialize the tools
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
-scrape_tool = ScrapeElementFromWebsiteTool()
+# scrape_tool = ScrapeElementFromWebsiteTool()  # DEPRECATED - use batch tool instead 
 # Primary tool: Batch processing for multiple elements with full context
 batch_browser_use_tool = BatchBrowserUseTool()
 

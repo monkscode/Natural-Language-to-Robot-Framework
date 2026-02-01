@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     OPTIMIZATION_ENABLED: bool = Field(default=False, description="Enable/disable optimization system (pattern learning, ChromaDB)")
     OPTIMIZATION_CHROMA_DB_PATH: str = Field(default="./chroma_db", description="Path to ChromaDB storage directory")
     OPTIMIZATION_PATTERN_DB_PATH: str = Field(default="./data/pattern_learning.db", description="Path to pattern learning SQLite database")
-    OPTIMIZATION_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="Sentence transformer model for embeddings (used by ChromaDB)")
+    # Note: ChromaDB uses its default ONNX-based embedding function (no sentence-transformers/pytorch needed)
     OPTIMIZATION_KEYWORD_SEARCH_TOP_K: int = Field(default=3, description="Number of keywords to return from search")
     OPTIMIZATION_PATTERN_CONFIDENCE_THRESHOLD: float = Field(default=0.7, description="Minimum confidence for pattern prediction (0.0-1.0)")
     OPTIMIZATION_CONTEXT_PRUNING_ENABLED: bool = Field(default=True, description="Enable smart context pruning")

@@ -4,13 +4,14 @@ Context Pruner for Smart Keyword Filtering
 This module classifies user queries into action categories and prunes
 keyword context to include only relevant keywords, reducing token usage
 while maintaining code generation accuracy.
+
+Uses ChromaDB's default ONNX-based embedding function for lightweight operation.
 """
 
 import logging
 from typing import List, Dict
 import chromadb
 from chromadb.config import Settings
-from chromadb.utils import embedding_functions
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,9 @@ class ContextPruner:
     Uses ChromaDB for semantic similarity to classify queries into action 
     categories (navigation, input, interaction, extraction, assertion, wait) 
     and filters keywords to only those in relevant categories.
+    
+    Uses ChromaDB's default embedding function (ONNX-based) which is
+    lightweight and doesn't require PyTorch or sentence-transformers.
     """
     
     # Keyword category mappings
@@ -54,14 +58,12 @@ class ContextPruner:
     
     def __init__(
         self, 
-        model_name: str = "all-MiniLM-L6-v2",
         persist_directory: str = "./chroma_db"
     ):
         """
         Initialize with ChromaDB for semantic classification.
         
         Args:
-            model_name: Name of sentence-transformers model to use
             persist_directory: Path to ChromaDB storage directory
         """
         logger.info(f"Initializing ContextPruner with ChromaDB at {persist_directory}")
@@ -76,22 +78,19 @@ class ContextPruner:
                 )
             )
             
-            # Initialize embedding function
-            self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=model_name
-            )
+            # Use ChromaDB's default embedding function (ONNX-based)
+            # This is lightweight and doesn't require PyTorch
             
-            # Create or get category collection
+            # Create or get category collection (ChromaDB will use default embedding)
             self.collection = self.client.get_or_create_collection(
                 name="category_descriptions",
-                embedding_function=self.embedding_function,
                 metadata={"type": "query_categories"}
             )
             
             # Initialize category descriptions in ChromaDB
             self._init_category_collection()
             
-            logger.info("ContextPruner initialized successfully with ChromaDB")
+            logger.info("ContextPruner initialized successfully with ChromaDB (using default ONNX embedding)")
             
         except Exception as e:
             logger.error(f"Failed to initialize ContextPruner: {e}")

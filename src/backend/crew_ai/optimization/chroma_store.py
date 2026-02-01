@@ -2,7 +2,7 @@
 ChromaDB vector store for keyword embeddings and semantic search.
 
 This module provides persistent storage and semantic search for Robot Framework
-keywords using ChromaDB with sentence-transformers embeddings.
+keywords using ChromaDB with its default ONNX-based embedding function.
 """
 
 import json
@@ -10,7 +10,6 @@ import logging
 from typing import List, Dict, Optional
 import chromadb
 from chromadb.config import Settings
-from chromadb.utils import embedding_functions
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +23,9 @@ class KeywordVectorStore:
     - Semantic search over keywords
     - Library-specific collections
     - Version tracking and auto-rebuild
+    
+    Uses ChromaDB's default embedding function (ONNX-based) which is
+    lightweight and doesn't require PyTorch or sentence-transformers.
     """
     
     def __init__(self, persist_directory: str = "./chroma_db"):
@@ -45,18 +47,11 @@ class KeywordVectorStore:
                 )
             )
             
-            # Initialize embedding function (sentence-transformers)
-            # ChromaDB 0.5.x changed the API - now uses default embedding function
-            try:
-                # Try ChromaDB 0.5.x API first (model_name parameter)
-                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name="all-MiniLM-L6-v2"
-                )
-            except TypeError:
-                # Fallback for ChromaDB 0.4.x API (no model_name parameter)
-                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction()
+            # Use ChromaDB's default embedding function (ONNX-based)
+            # This is lightweight and doesn't require PyTorch
+            self.embedding_function = None  # ChromaDB will use default
             
-            logger.info(f"ChromaDB initialized at {persist_directory}")
+            logger.info(f"ChromaDB initialized at {persist_directory} (using default ONNX embedding)")
             
         except Exception as e:
             logger.error(f"Failed to initialize ChromaDB: {e}")
@@ -75,9 +70,9 @@ class KeywordVectorStore:
         collection_name = f"keywords_{library_name.lower()}"
         
         try:
+            # Don't pass embedding_function - let ChromaDB use its default
             collection = self.client.get_or_create_collection(
                 name=collection_name,
-                embedding_function=self.embedding_function,
                 metadata={"library": library_name}
             )
             logger.debug(f"Collection '{collection_name}' ready")
@@ -97,9 +92,9 @@ class KeywordVectorStore:
         collection_name = "query_patterns"
         
         try:
+            # Don't pass embedding_function - let ChromaDB use its default
             collection = self.client.get_or_create_collection(
                 name=collection_name,
-                embedding_function=self.embedding_function,
                 metadata={"type": "query_patterns"}
             )
             logger.debug(f"Collection '{collection_name}' ready")
