@@ -68,8 +68,7 @@ jobs:
           tags: |
             type=ref,event=branch,prefix=base-browser-
             type=sha,prefix=base-browser-,format=short
-            type=raw,value=base-browser-latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=base-browser-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=raw,value=base-browser-latest
 
       - name: Build and push Base Browser image
         uses: docker/build-push-action@v5
