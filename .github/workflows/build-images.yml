@@ -67,8 +67,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch,prefix=base-browser-
+            type=ref,event=pr,prefix=base-browser-pr-
             type=sha,prefix=base-browser-,format=short
-            type=raw,value=base-browser-latest
+            type=raw,value=base-browser-latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push Base Browser image
         uses: docker/build-push-action@v5
@@ -110,6 +111,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch,prefix=fastapi-
+            type=ref,event=pr,prefix=fastapi-pr-
             type=sha,prefix=fastapi-,format=short
             type=raw,value=fastapi-latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=fastapi-develop,enable=${{ github.ref == 'refs/heads/develop' }}
@@ -155,6 +157,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch,prefix=browser-service-
+            type=ref,event=pr,prefix=browser-service-pr-
             type=sha,prefix=browser-service-,format=short
             type=raw,value=browser-service-latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=browser-service-develop,enable=${{ github.ref == 'refs/heads/develop' }}
@@ -200,6 +203,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch,prefix=test-runner-
+            type=ref,event=pr,prefix=test-runner-pr-
             type=sha,prefix=test-runner-,format=short
             type=raw,value=test-runner-latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=test-runner-develop,enable=${{ github.ref == 'refs/heads/develop' }}
