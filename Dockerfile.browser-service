@@ -18,6 +18,7 @@ RUN playwright install chromium
 # Copy application source code
 COPY src/ /app/src/
 COPY tools/ /app/tools/
+COPY clients/ /app/clients/
 
 # Expose browser service port
 EXPOSE 4999
