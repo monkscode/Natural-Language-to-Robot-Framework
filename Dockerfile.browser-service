@@ -4,15 +4,12 @@ FROM devasy23/nlrf:base-browser-latest
 
 WORKDIR /app
 
-# Copy browser-service source code for installation
-COPY browser-service/ /app/browser-service/
-
-# Install browser-service from source and its dependencies using UV
+# Install browser-service and its dependencies using UV
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     flask \
     playwright \
-    /app/browser-service
+    browser-service
 
 # Install Playwright Chromium (required by browser-use library)
 # browser-use needs Playwright's browser, can't use system Chrome
