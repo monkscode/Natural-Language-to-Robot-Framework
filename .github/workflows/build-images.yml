@@ -9,6 +9,8 @@ on:
       - 'browser-service/**'
       - 'Dockerfile.fastapi'
       - 'Dockerfile.browser-service'
+      - 'Dockerfile.base-browser'
+      - 'Dockerfile.test-runner'
       - '.github/workflows/build-images.yml'
   push:
     branches:
@@ -21,6 +23,8 @@ on:
       - 'browser-service/**'
       - 'Dockerfile.fastapi'
       - 'Dockerfile.browser-service'
+      - 'Dockerfile.base-browser'
+      - 'Dockerfile.test-runner'
       - '.github/workflows/build-images.yml'
 
   workflow_dispatch:
@@ -35,6 +39,50 @@ env:
   IMAGE_NAME: devasy23/nlrf
 
 jobs:
+  build-base-browser:
+    name: Build Base Browser Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=base-browser-
+            type=sha,prefix=base-browser-,format=short
+            type=raw,value=base-browser-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=base-browser-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push Base Browser image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.base-browser
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache,mode=max
+          platforms: linux/amd64
+
   build-fastapi:
     name: Build FastAPI Image
     runs-on: ubuntu-latest
@@ -82,6 +130,7 @@ jobs:
   build-browser-service:
     name: Build Browser Service Image
     runs-on: ubuntu-latest
+    needs: [build-base-browser]
     permissions:
       contents: read
       packages: write
@@ -123,10 +172,55 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache,mode=max
           platforms: linux/amd64
 
+  build-test-runner:
+    name: Build Test Runner Image
+    runs-on: ubuntu-latest
+    needs: [build-base-browser]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=test-runner-
+            type=sha,prefix=test-runner-,format=short
+            type=raw,value=test-runner-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test-runner-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push Test Runner image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.test-runner
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache,mode=max
+          platforms: linux/amd64
+
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [build-fastapi, build-browser-service]
+    needs: [build-base-browser, build-fastapi, build-browser-service, build-test-runner]
     if: always()
 
     steps:
@@ -135,17 +229,21 @@ jobs:
           echo "## 🐳 Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images Built:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Base Browser**: \`${{ env.IMAGE_NAME }}:base-browser-*\` (1.05GB)" >> $GITHUB_STEP_SUMMARY
           echo "- **FastAPI**: \`${{ env.IMAGE_NAME }}:fastapi-*\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Browser Service**: \`${{ env.IMAGE_NAME }}:browser-service-*\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Browser Service**: \`${{ env.IMAGE_NAME }}:browser-service-*\` (2.49GB)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test Runner**: \`${{ env.IMAGE_NAME }}:test-runner-*\` (1.21GB)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "### Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ needs.build-fastapi.result }}" == "success" ] && [ "${{ needs.build-browser-service.result }}" == "success" ]; then
+          if [ "${{ needs.build-base-browser.result }}" == "success" ] && [ "${{ needs.build-fastapi.result }}" == "success" ] && [ "${{ needs.build-browser-service.result }}" == "success" ] && [ "${{ needs.build-test-runner.result }}" == "success" ]; then
             echo "✅ **Status**: All images built successfully" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Status**: Some builds failed" >> $GITHUB_STEP_SUMMARY
+            echo "- Base Browser: ${{ needs.build-base-browser.result }}" >> $GITHUB_STEP_SUMMARY
             echo "- FastAPI: ${{ needs.build-fastapi.result }}" >> $GITHUB_STEP_SUMMARY
             echo "- Browser Service: ${{ needs.build-browser-service.result }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Test Runner: ${{ needs.build-test-runner.result }}" >> $GITHUB_STEP_SUMMARY
           fi
