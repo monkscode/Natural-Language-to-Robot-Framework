@@ -12,7 +12,7 @@ services:
       - ./robot_tests:/app/robot_tests
       - ./logs:/app/logs
       - ./chroma_db:/app/chroma_db
-      - ./data:/app/data
+      - ./data/pattern_learning.db:/app/data/pattern_learning.db
       # Docker socket for robot test execution (Docker-in-Docker)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
