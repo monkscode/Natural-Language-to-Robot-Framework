@@ -5,9 +5,10 @@ import traceback
 import xml.etree.ElementTree as ET
 from typing import Generator, Dict, Any
 
-IMAGE_TAG = "robot-test-runner:latest"
-# Default remote image - can be overridden by REMOTE_DOCKER_IMAGE env var
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:latest')
+# Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
+IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
+# Default remote image - fallback if local image not found
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'devasy23/nlrf:test-runner-pr-3')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'true').lower() == 'true'
 

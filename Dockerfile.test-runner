@@ -16,13 +16,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN rfbrowser init --skip-browsers
 
 # Create optimized virtual display script using sh (smaller than bash)
-RUN printf '#!/bin/sh\n\
-if [ "$HEALING_SESSION" = "true" ]; then\n\
-  export DISPLAY=:99\n\
-  Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &\n\
-  sleep 1\n\
-fi\n\
-exec "$@"\n' > /usr/local/bin/start-with-display.sh && \
+# Use printf to ensure Unix line endings
+RUN printf '#!/bin/sh\nif [ "$HEALING_SESSION" = "true" ]; then\n  export DISPLAY=:99\n  Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &\n  sleep 1\nfi\nexec "$@"\n' > /usr/local/bin/start-with-display.sh && \
     chmod +x /usr/local/bin/start-with-display.sh
 
 # Set Chrome options for healing sessions
@@ -30,3 +25,6 @@ ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disabl
 
 # Use the display script as entrypoint
 ENTRYPOINT ["/usr/local/bin/start-with-display.sh"]
+
+# Default command (can be overridden)
+CMD ["robot", "--version"]
