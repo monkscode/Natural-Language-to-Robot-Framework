@@ -20,11 +20,12 @@ aiohttp
 requests
 flask
 langchain-ollama
-browser_use==0.11.2
+browser_use==0.12.0
 robotframework-browser[bb]
 litellm
 playwright
 browser-service>=1.0.0
+pytest
 
 # ChromaDB Performance Optimization Dependencies (Requirement 7.1)
 # chromadb: Vector database for semantic keyword search and pattern learning storage
@@ -32,5 +33,8 @@ chromadb
 # sentence-transformers: Generate embeddings for semantic similarity search
 # Note: Using 3.0+ for compatibility with latest huggingface_hub
 sentence-transformers~=3.0.0
+# tokenizers: Required by transformers, chromadb, crewai, litellm
+# Pinned to match transformers 4.x requirement (>=0.22.0,<=0.23.0)
+tokenizers>=0.22.0,<=0.23.0
 # numpy: Required by sentence-transformers for vector operations and similarity calculations
 numpy~=1.26.0

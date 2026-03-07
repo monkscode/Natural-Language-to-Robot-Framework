@@ -42,13 +42,15 @@ class Settings(BaseSettings):
     # Optimization Configuration
     OPTIMIZATION_ENABLED: bool = Field(default=False, description="Enable/disable optimization system (pattern learning, ChromaDB)")
     OPTIMIZATION_CHROMA_DB_PATH: str = Field(default="./chroma_db", description="Path to ChromaDB storage directory")
-    OPTIMIZATION_PATTERN_DB_PATH: str = Field(default="./data/pattern_learning.db", description="Path to pattern learning SQLite database")
     OPTIMIZATION_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2", description="Sentence transformer model for embeddings (used by ChromaDB)")
     OPTIMIZATION_KEYWORD_SEARCH_TOP_K: int = Field(default=3, description="Number of keywords to return from search")
     OPTIMIZATION_PATTERN_CONFIDENCE_THRESHOLD: float = Field(default=0.7, description="Minimum confidence for pattern prediction (0.0-1.0)")
     OPTIMIZATION_CONTEXT_PRUNING_ENABLED: bool = Field(default=True, description="Enable smart context pruning")
     OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD: float = Field(default=0.6, description="Minimum confidence for category classification (0.0-1.0)")
     
+    # Learning System Configuration (Adaptive Learning — Phase 1+)
+    EXECUTION_MEMORY_DB: str = Field(default="./data/execution_memory.db", description="Path to execution memory SQLite database for the learning system")
+
     @validator('ROBOT_LIBRARY')
     def validate_robot_library(cls, v):
         """Validate that ROBOT_LIBRARY is either 'selenium' or 'browser'."""

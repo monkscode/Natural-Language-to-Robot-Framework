@@ -278,7 +278,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 if tests_passed:
                     message = "Test execution finished: All tests passed."
                     logging.info(f"🎉 DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "test_status": "passed", "result": {
+                    return {"status": "complete", "message": message, "test_status": "passed",
+                            "output_xml_path": output_xml_path,
+                            "exit_code": exit_code,
+                            "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -286,7 +289,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 else:
                     message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                     logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "test_status": "failed", "result": {
+                    return {"status": "complete", "message": message, "test_status": "failed",
+                            "output_xml_path": output_xml_path,
+                            "exit_code": exit_code,
+                            "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -307,7 +313,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         if exit_code == 0:
             message = "Test execution finished: All tests passed."
             logging.info(f"✅ DOCKER SERVICE: {message}")
-            return {"status": "complete", "message": message, "test_status": "passed", "result": {
+            return {"status": "complete", "message": message, "test_status": "passed",
+                    "output_xml_path": output_xml_path if os.path.exists(output_xml_path) else None,
+                    "exit_code": exit_code,
+                    "result": {
                 'logs': robot_logs,
                 'log_html': f"/reports/{run_id}/log.html",
                 'report_html': f"/reports/{run_id}/report.html"
@@ -316,7 +325,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             if os.path.exists(log_html_path):
                 message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                 logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                return {"status": "complete", "message": message, "test_status": "failed", "result": {
+                return {"status": "complete", "message": message, "test_status": "failed",
+                        "output_xml_path": output_xml_path if os.path.exists(output_xml_path) else None,
+                        "exit_code": exit_code,
+                        "result": {
                     'logs': robot_logs,
                     'log_html': f"/reports/{run_id}/log.html",
                     'report_html': f"/reports/{run_id}/report.html"

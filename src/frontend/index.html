@@ -222,6 +222,68 @@
                 </div>
             </div>
         </div>
+
+        <!-- Feedback Panel — context-adaptive, shown after test execution (DAY_08) -->
+        <div id="feedback-panel" class="feedback-panel" style="display: none;">
+            <!-- Pass state: celebration + optional feedback link -->
+            <div id="feedback-pass" class="feedback-pass" style="display: none;">
+                <span class="feedback-pass-text">🎉 All tests passed successfully!</span>
+                <a id="feedback-pass-link" class="feedback-link" href="javascript:void(0)">
+                    Something not right? Let us know →
+                </a>
+            </div>
+
+            <!-- Inline textarea for pass edge case (expanded from link) -->
+            <div id="feedback-pass-detail" class="feedback-pass-detail" style="display: none;">
+                <textarea id="feedback-pass-text" class="feedback-textarea"
+                          placeholder="What could be improved?"
+                          rows="2" maxlength="500"></textarea>
+                <div class="feedback-actions">
+                    <button id="btn-submit-pass-feedback" class="feedback-submit-btn small">
+                        Submit
+                    </button>
+                    <button id="btn-cancel-pass-feedback" class="feedback-skip-btn small">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+
+            <!-- Fail state: empathetic card + textarea -->
+            <div id="feedback-fail" class="feedback-fail" style="display: none;">
+                <div class="feedback-card">
+                    <div class="feedback-card-header">
+                        <span class="feedback-icon">💡</span>
+                        <span class="feedback-title">Help us get it right next time</span>
+                    </div>
+                    <p class="feedback-subtitle">
+                        We learn from every failure to make our test generation smarter over time.
+                    </p>
+                    <textarea id="feedback-text" class="feedback-textarea"
+                              placeholder="What should have happened? e.g., &quot;It should have checked all rows&quot; or &quot;Used the wrong button&quot;"
+                              rows="3" maxlength="500"></textarea>
+                    <div class="feedback-char-count">
+                        <span id="feedback-char-count">0</span>/500
+                    </div>
+                    <div class="feedback-actions">
+                        <button id="btn-submit-feedback" class="feedback-submit-btn">
+                            🚀 Submit Feedback
+                        </button>
+                        <button id="btn-skip-feedback" class="feedback-skip-btn">
+                            Skip →
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Success confirmation -->
+            <div id="feedback-thanks" class="feedback-thanks" style="display: none;">
+                <div class="feedback-thanks-content">
+                    <span class="feedback-thanks-icon">✅</span>
+                    <span class="feedback-thanks-text">Thanks for your feedback! It helps us improve.</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Navigation Tabs - Removed healing tabs as healing orchestrator has been removed -->
         <!-- The system now validates locators during generation using browser-use -->
     </main>

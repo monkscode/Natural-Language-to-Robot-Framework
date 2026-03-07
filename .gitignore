@@ -30,6 +30,7 @@ test.py
 .vscode
 .codex
 .github/copilot-instructions.md
+tmpclaude-*
 
 # Ignore the jsonl files
 *.jsonl
@@ -43,3 +44,7 @@ logs/temp_metrics
 tools/browser_service/*
 node_modules/
 coverage/
+
+docs/tasks/
+.agents/workflows/development-workflow.md
+tasks/lessons.md
