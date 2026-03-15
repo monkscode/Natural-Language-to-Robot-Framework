@@ -10,7 +10,7 @@ IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 # Default remote image - fallback if local image not found
 REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'devasy23/nlrf:test-runner-pr-3')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
-PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'true').lower() == 'true'
+PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
 
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
@@ -20,6 +20,33 @@ ROBOT_TESTS_DIR = os.path.join(DOCKERFILE_PATH, 'robot_tests')
 # the host's absolute path for volume mounts, not the container's internal path.
 # This env var should be set in docker-compose.yml to the host's robot_tests path.
 HOST_ROBOT_TESTS_DIR = os.getenv('HOST_ROBOT_TESTS_DIR', os.path.abspath(ROBOT_TESTS_DIR))
+
+
+def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
+    """
+    Resolve the host path mounted to /app/robot_tests for this FastAPI container.
+
+    This avoids brittle ${PWD} behavior on Windows/Compose by querying Docker
+    for the current container mount source and falling back to env/config only
+    when lookup is unavailable.
+    """
+    container_id = os.getenv('HOSTNAME', '').strip()
+    if container_id:
+        try:
+            current_container = client.containers.get(container_id)
+            for mount in current_container.attrs.get('Mounts', []):
+                if mount.get('Destination') == '/app/robot_tests' and mount.get('Source'):
+                    source = mount['Source']
+                    logging.info(
+                        f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect: {source}")
+                    return source
+        except Exception as e:
+            logging.warning(
+                f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect: {e}")
+
+    logging.info(
+        f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")
+    return HOST_ROBOT_TESTS_DIR
 
 
 def log_docker_operation(operation: str, details: str = "", level: str = "info"):
@@ -167,19 +194,28 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         logging.info(
             f"🤖 DOCKER SERVICE: Robot command: {' '.join(robot_command)}")
 
+        host_robot_tests_dir = resolve_host_robot_tests_dir(client)
+        host_test_file = os.path.join(host_robot_tests_dir, run_id, test_filename)
+        if not os.path.exists(host_test_file):
+            raise RuntimeError(
+                "Test file not found in host-mounted robot_tests directory. "
+                f"Expected: {host_test_file}. "
+                "This usually means HOST_ROBOT_TESTS_DIR points to a different folder than /app/robot_tests in FastAPI."
+            )
+
         # Container configuration
-        # Docker-in-Docker: Use HOST_ROBOT_TESTS_DIR for volume mount to reference host path
+        # Docker-in-Docker: Use resolved host path for volume mount
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
-            "volumes": {HOST_ROBOT_TESTS_DIR: {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            "volumes": {host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
             "name": f"robot-test-{run_id}"  # Give container a unique name
         }
         logging.info(
-            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {HOST_ROBOT_TESTS_DIR}:/app/robot_tests")
+            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {host_robot_tests_dir}:/app/robot_tests")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"
@@ -220,6 +256,18 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         exit_code = result['StatusCode']
         logging.info(
             f"🏁 DOCKER SERVICE: Container {container_name} finished with exit code: {exit_code}")
+
+        container_startup_logs = ""
+        try:
+            # Capture container stdout/stderr before cleanup for system-error diagnosis.
+            raw_logs = client.api.logs(container.id, stdout=True, stderr=True, tail=400)
+            if isinstance(raw_logs, (bytes, bytearray)):
+                container_startup_logs = raw_logs.decode('utf-8', errors='replace').strip()
+            else:
+                container_startup_logs = str(raw_logs).strip()
+        except Exception as e:
+            logging.warning(
+                f"⚠️  DOCKER SERVICE: Could not capture container startup logs: {e}")
 
         # Clean up container immediately after execution to prevent conflicts
         logging.info(
@@ -331,6 +379,9 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             else:
                 error_logs = f"Docker container exited with a system error (exit code {exit_code}).\n"
                 error_logs += "Robot Framework reports were not generated, indicating a problem with the test runner itself.\n\n"
+                if container_startup_logs:
+                    error_logs += "Container stdout/stderr (tail):\n"
+                    error_logs += f"{container_startup_logs}\n\n"
                 error_logs += f"Available Logs:\n{robot_logs}"
                 logging.error(f"❌ DOCKER SERVICE: System error - {error_logs}")
                 raise RuntimeError(error_logs)

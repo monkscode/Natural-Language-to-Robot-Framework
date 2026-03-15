@@ -9,11 +9,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     robotframework \
     robotframework-seleniumlibrary \
-    robotframework-browser
+    robotframework-browser \
+    playwright
 
-# Initialize rfbrowser node dependencies but SKIP browser binary download
-# We use the system-installed google-chrome-stable instead
-RUN rfbrowser init --skip-browsers
+# Initialize rfbrowser node dependencies and install Playwright Chromium.
+# This is required for Browser library tests that use: New Browser    chromium
+RUN rfbrowser init --skip-browsers && python -m playwright install chromium
 
 # Create optimized virtual display script using sh (smaller than bash)
 # Use printf to ensure Unix line endings
