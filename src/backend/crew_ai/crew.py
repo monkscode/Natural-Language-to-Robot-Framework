@@ -294,37 +294,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         logger.info(f"🏁 Crew execution finished - delegation cycle complete")
         logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
         
-        # Capture per-agent token metrics for cost attribution
-        logger.info("📊 Capturing per-agent token metrics...")
-        per_agent_metrics = {}
-        agents_list = [
-            ("step_planner", step_planner_agent),
-            ("element_identifier", element_identifier_agent),
-            ("code_assembler", code_assembler_agent),
-            ("code_validator", code_validator_agent),
-        ]
-        
-        for agent_name, agent in agents_list:
-            try:
-                # Get cumulative token usage from the agent's LLM
-                usage = agent.llm.get_token_usage_summary()
-                per_agent_metrics[agent_name] = {
-                    'total_tokens': usage.total_tokens,
-                    'prompt_tokens': usage.prompt_tokens,
-                    'completion_tokens': usage.completion_tokens,
-                    'successful_requests': usage.successful_requests,
-                }
-                logger.info(f"   • {agent_name}: {usage.total_tokens} tokens "
-                           f"(prompt: {usage.prompt_tokens}, completion: {usage.completion_tokens})")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get token usage for {agent_name}: {e}")
-                per_agent_metrics[agent_name] = {
-                    'total_tokens': 0,
-                    'prompt_tokens': 0,
-                    'completion_tokens': 0,
-                    'successful_requests': 0,
-                }
-        
         # NOTE: Pattern learning is NOT done here!
         # Learning should only happen AFTER test execution succeeds (test_status == "passed")
         # This ensures we only learn from validated, working code.
@@ -334,7 +303,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         if optimization_metrics:
             logger.info("📊 Optimization metrics collected")
         
-        return result, crew, optimization_metrics, per_agent_metrics
+        return result, crew, optimization_metrics
 
     except Exception as e:
         error_msg = str(e)

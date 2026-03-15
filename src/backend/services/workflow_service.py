@@ -128,7 +128,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results, optimization_metrics, per_agent_metrics = run_crew(
+        validation_output, crew_with_results, optimization_metrics = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
         
         # Stage 3: Generating (50-75%)
@@ -354,13 +354,6 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     }
                     
                     logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                    
-                    # Log per-agent token breakdown
-                    if per_agent_metrics:
-                        logging.info(f"📊 Per-agent token breakdown:")
-                        for agent_name, metrics in per_agent_metrics.items():
-                            logging.info(f"   • {agent_name}: {metrics['total_tokens']} tokens "
-                                       f"(prompt: {metrics['prompt_tokens']}, completion: {metrics['completion_tokens']})")
                     
                 except Exception as e:
                     logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
