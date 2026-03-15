@@ -237,10 +237,16 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
 
         host_test_file = os.path.join(normalized_host_robot_tests_dir, run_id, test_filename)
         if not os.path.exists(host_test_file):
-            logging.warning(
-                f"⚠️  DOCKER SERVICE: Host path pre-check could not verify file existence: {host_test_file}. "
-                "Continuing anyway because Docker daemon may still resolve this mount source."
-            )
+            if normalized_host_robot_tests_dir.startswith('/run/desktop/mnt/host/'):
+                logging.info(
+                    f"ℹ️  DOCKER SERVICE: Skipping strict host file pre-check for Docker Desktop mount path: {host_test_file}. "
+                    "Container-local check already passed."
+                )
+            else:
+                logging.warning(
+                    f"⚠️  DOCKER SERVICE: Host path pre-check could not verify file existence: {host_test_file}. "
+                    "Continuing anyway because Docker daemon may still resolve this mount source."
+                )
 
         # Container configuration
         # Docker-in-Docker: Use resolved host path for volume mount

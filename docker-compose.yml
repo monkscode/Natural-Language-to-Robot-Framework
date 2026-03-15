@@ -26,7 +26,7 @@ services:
       - ./src/backend/.env
     depends_on:
       browser-service:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -65,11 +65,11 @@ services:
         max-file: "3"
         labels: "service=browser-service"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4999/health"]
-      interval: 30s
+      test: ["CMD", "curl", "-f", "http://localhost:4999/probe"]
+      interval: 15s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 10
+      start_period: 120s
     networks:
       - nlrf-network
 
