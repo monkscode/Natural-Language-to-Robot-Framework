@@ -48,10 +48,11 @@ console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(formatter)
 
 # Configure root logger
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-root_logger.addHandler(file_handler)
-root_logger.addHandler(console_handler)
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler],
+    force=True,
+)
 
 # Disable crewai tracing prompts to prevent log spam
 os.environ['CREWAI_TRACING_ENABLED'] = 'false'

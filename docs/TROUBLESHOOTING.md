@@ -252,6 +252,29 @@ Logs are in the `logs/` directory:
 - `logs/langchain.log` - LLM interactions
 - `logs/litellm.log` - Model provider
 
+### Logs appear twice
+
+**Symptoms:**
+- Each line is printed twice with two different formats
+- Example: one line includes `root - INFO - ...`, another includes `[root] ...`
+
+**Cause:**
+- Multiple handlers are attached to the root logger
+- This usually happens when an imported module calls `logging.basicConfig(...)` before app startup, and startup then adds handlers again
+
+**Immediate fix:**
+- Ensure root logging is configured once in `src/backend/main.py` with `force=True`
+
+**Long-term prevention:**
+1. Configure root logging only in application entrypoints (`src/backend/main.py`)
+2. In library/tool modules, never call `logging.basicConfig(...)`
+3. In modules, always use `logger = logging.getLogger(__name__)` and emit logs through that logger
+4. If duplicate logs reappear, inspect root handlers at runtime:
+   ```python
+   import logging
+   print(logging.getLogger().handlers)
+   ```
+
 ### View test execution logs
 
 Every test creates detailed logs:
