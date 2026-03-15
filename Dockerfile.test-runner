@@ -2,7 +2,7 @@
 # Base: nlrf-base-browser (Chrome + Playwright + UV + Xvfb + system deps)
 # Size: ~900MB (vs 2.7GB unoptimized) - 67% reduction
 
-FROM devasy23/nlrf:base-browser-latest
+FROM monkscode/nlrf:base-browser-latest
 
 # Install Robot Framework packages using UV with cache
 RUN --mount=type=cache,target=/root/.cache/uv \

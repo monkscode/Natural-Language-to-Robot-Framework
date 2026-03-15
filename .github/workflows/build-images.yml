@@ -36,7 +36,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: devasy23/nlrf
+  IMAGE_NAME: monkscode/nlrf
 
 jobs:
   build-base-browser:

@@ -1,6 +1,6 @@
 services:
   fastapi:
-    image: ${FASTAPI_IMAGE_TAG:-devasy23/nlrf:fastapi-latest}
+    image: ${FASTAPI_IMAGE_TAG:-monkscode/nlrf:fastapi-latest}
     container_name: nlrf-fastapi
     ports:
       - "5000:5000"
@@ -20,7 +20,7 @@ services:
       - HOST_ROBOT_TESTS_DIR=${PWD}/robot_tests
       - HOST_WORKSPACE_DIR=${PWD}
       # Test runner image tag for spawned containers
-      - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-devasy23/nlrf:test-runner-pr-3}
+      - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-pr-3}
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env
@@ -44,7 +44,7 @@ services:
       - nlrf-network
 
   browser-service:
-    image: ${BROWSER_SERVICE_IMAGE_TAG:-devasy23/nlrf:browser-service-latest}
+    image: ${BROWSER_SERVICE_IMAGE_TAG:-monkscode/nlrf:browser-service-latest}
     container_name: nlrf-browser-service
     ports:
       - "4999:4999"

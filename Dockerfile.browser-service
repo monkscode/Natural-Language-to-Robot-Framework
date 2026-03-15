@@ -1,6 +1,6 @@
 # Browser Service Dockerfile - Optimized with shared base (PR #20 style)
 # Single-stage build with system Chrome only
-FROM devasy23/nlrf:base-browser-latest
+FROM monkscode/nlrf:base-browser-latest
 
 WORKDIR /app
 
