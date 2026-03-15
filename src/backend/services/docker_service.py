@@ -1,4 +1,5 @@
 import os
+import re
 import docker
 import logging
 import traceback
@@ -30,23 +31,51 @@ def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
     for the current container mount source and falling back to env/config only
     when lookup is unavailable.
     """
-    container_id = os.getenv('HOSTNAME', '').strip()
-    if container_id:
+    candidate_container_refs = [
+        os.getenv('HOSTNAME', '').strip(),
+        os.getenv('CONTAINER_NAME', '').strip(),
+        'nlrf-fastapi'
+    ]
+
+    for container_ref in candidate_container_refs:
+        if not container_ref:
+            continue
         try:
-            current_container = client.containers.get(container_id)
+            current_container = client.containers.get(container_ref)
             for mount in current_container.attrs.get('Mounts', []):
                 if mount.get('Destination') == '/app/robot_tests' and mount.get('Source'):
                     source = mount['Source']
                     logging.info(
-                        f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect: {source}")
+                        f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect ({container_ref}): {source}")
                     return source
         except Exception as e:
             logging.warning(
-                f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect: {e}")
+                f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {e}")
 
     logging.info(
         f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")
     return HOST_ROBOT_TESTS_DIR
+
+
+def normalize_docker_mount_source(path: str) -> str:
+    """
+    Normalize host path for Docker bind mount source.
+
+    On Docker Desktop (Linux engine), Windows paths like C:\\... need to be
+    converted to /run/desktop/mnt/host/c/... when passed from a Linux container.
+    """
+    if not path:
+        return path
+
+    if os.name != 'nt' and re.match(r'^[A-Za-z]:[\\/]', path):
+        drive = path[0].lower()
+        remainder = path[2:].replace('\\', '/').lstrip('/')
+        normalized = f"/run/desktop/mnt/host/{drive}/{remainder}"
+        logging.info(
+            f"🐳 DOCKER SERVICE: Normalized Windows mount path '{path}' -> '{normalized}'")
+        return normalized
+
+    return path
 
 
 def log_docker_operation(operation: str, details: str = "", level: str = "info"):
@@ -195,12 +224,22 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             f"🤖 DOCKER SERVICE: Robot command: {' '.join(robot_command)}")
 
         host_robot_tests_dir = resolve_host_robot_tests_dir(client)
-        host_test_file = os.path.join(host_robot_tests_dir, run_id, test_filename)
-        if not os.path.exists(host_test_file):
+        normalized_host_robot_tests_dir = normalize_docker_mount_source(host_robot_tests_dir)
+
+        # Always validate file presence using the FastAPI container-visible path.
+        container_test_file = os.path.join(ROBOT_TESTS_DIR, run_id, test_filename)
+        if not os.path.exists(container_test_file):
             raise RuntimeError(
-                "Test file not found in host-mounted robot_tests directory. "
-                f"Expected: {host_test_file}. "
-                "This usually means HOST_ROBOT_TESTS_DIR points to a different folder than /app/robot_tests in FastAPI."
+                "Test file not found in FastAPI container robot_tests directory. "
+                f"Expected: {container_test_file}. "
+                "This usually means the test file was not written correctly before Docker execution."
+            )
+
+        host_test_file = os.path.join(normalized_host_robot_tests_dir, run_id, test_filename)
+        if not os.path.exists(host_test_file):
+            logging.warning(
+                f"⚠️  DOCKER SERVICE: Host path pre-check could not verify file existence: {host_test_file}. "
+                "Continuing anyway because Docker daemon may still resolve this mount source."
             )
 
         # Container configuration
@@ -208,14 +247,14 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
-            "volumes": {host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            "volumes": {normalized_host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
             "name": f"robot-test-{run_id}"  # Give container a unique name
         }
         logging.info(
-            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {host_robot_tests_dir}:/app/robot_tests")
+            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {normalized_host_robot_tests_dir}:/app/robot_tests")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"

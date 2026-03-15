@@ -1,9 +1,6 @@
 services:
   fastapi:
     image: ${FASTAPI_IMAGE_TAG:-devasy23/nlrf:fastapi-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile.fastapi
     container_name: nlrf-fastapi
     ports:
       - "5000:5000"
@@ -48,9 +45,6 @@ services:
 
   browser-service:
     image: ${BROWSER_SERVICE_IMAGE_TAG:-devasy23/nlrf:browser-service-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile.browser-service
     container_name: nlrf-browser-service
     ports:
       - "4999:4999"
