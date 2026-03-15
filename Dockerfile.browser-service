@@ -25,7 +25,7 @@ EXPOSE 4999
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:4999/health || exit 1
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4999/health', timeout=5).getcode()==200 else 1)"
 
 # Run browser service
 CMD ["python", "tools/browser_use_service.py"]

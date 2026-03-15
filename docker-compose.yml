@@ -65,7 +65,13 @@ services:
         max-file: "3"
         labels: "service=browser-service"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4999/probe"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4999/probe', timeout=5).getcode()==200 else 1)",
+        ]
       interval: 15s
       timeout: 10s
       retries: 10
