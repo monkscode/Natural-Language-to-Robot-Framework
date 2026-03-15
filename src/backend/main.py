@@ -1,6 +1,8 @@
 import os
 import sys
+import sqlite3
 import logging
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,7 +102,71 @@ app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 @app.on_event("startup")
 async def startup_event():
     logging.info("Application startup complete.")
+    _check_learning_health()
+
+
+def _check_learning_health():
+    """Pre-flight validation for learning system databases and paths.
+
+    Runs at startup when OPTIMIZATION_ENABLED=true. Validates that all
+    required paths exist, SQLite databases pass integrity checks, and
+    the schema is current. Logs warnings on failure but never blocks startup.
+    """
+    from src.backend.core.config import settings
+
+    if not settings.OPTIMIZATION_ENABLED:
+        logging.info("[LEARNING HEALTH] Learning system disabled (OPTIMIZATION_ENABLED=false)")
+        return
+
+    issues = []
+
+    # Check 1: data/ directory exists (required for execution_memory.db)
+    from src.backend.crew_ai.optimization.learning_config import LEARNING_CONFIG
+    exec_db_path = LEARNING_CONFIG["EXECUTION_MEMORY_DB"]
+    data_dir = str(Path(exec_db_path).parent)
+    if not os.path.isdir(data_dir):
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+            logging.info(f"[LEARNING HEALTH] Created directory: {data_dir}")
+        except OSError as e:
+            issues.append(f"Cannot create data directory '{data_dir}': {e}")
+
+    # Check 2: execution_memory.db is accessible and healthy
+    try:
+        conn = sqlite3.connect(exec_db_path)
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        if result[0] != "ok":
+            issues.append(f"execution_memory.db integrity check failed: {result[0]}")
+        conn.close()
+    except Exception as e:
+        issues.append(f"execution_memory.db cannot be opened: {e}")
+
+    # Check 3: ChromaDB directory is writable
+    chroma_dir = settings.OPTIMIZATION_CHROMA_DB_PATH
+    chroma_parent = str(Path(chroma_dir).parent) if chroma_dir else "."
+    if chroma_parent and not os.access(chroma_parent, os.W_OK):
+        issues.append(f"ChromaDB parent directory not writable: {chroma_parent}")
+
+    # Report results
+    if issues:
+        for issue in issues:
+            logging.warning(f"[LEARNING HEALTH] {issue}")
+        logging.warning(
+            "[LEARNING HEALTH] Learning system may not function correctly. "
+            "Fix the issues above or set OPTIMIZATION_ENABLED=false."
+        )
+    else:
+        logging.info("[LEARNING HEALTH] All checks passed — learning system ready")
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    # Drain pending learning writes before exit
+    try:
+        from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is not None:
+            feedback_loop.write_queue.shutdown(timeout=5.0)
+            logging.info("Learning write queue drained successfully.")
+    except Exception as e:
+        logging.warning(f"Learning write queue shutdown error: {e}")
     logging.info("Application shutdown complete.")

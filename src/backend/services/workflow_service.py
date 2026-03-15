@@ -18,6 +18,7 @@ from src.backend.core.workflow_metrics import (
     WorkflowMetrics,
     calculate_crewai_cost
 )
+from src.backend.core.config import settings
 
 
 logging.basicConfig(
@@ -25,6 +26,55 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     encoding="utf-8"
 )
+
+
+# ---------------------------------------------------------------------------
+# Learning System — import singleton from registry
+# ---------------------------------------------------------------------------
+
+from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+
+
+def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
+    """Feed execution results into the adaptive learning system.
+
+    Non-blocking: failures are logged and swallowed so the main
+    pipeline is never affected.
+
+    Guard: skips learning when user_query is empty (paste-and-execute).
+    Empty queries pollute ChromaDB embeddings and break SQLite
+    deduplication — garbage in, garbage out.
+    """
+    try:
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is None:
+            return
+
+        # Guard: skip learning when no user query (paste-and-execute)
+        if not user_query or not user_query.strip():
+            logging.info(
+                "⏭️ Skipping learning for %s — no user query "
+                "(paste-and-execute mode)", run_id,
+            )
+            return
+
+        test_status = result.get('test_status', 'unknown')
+        output_xml_path = result.get('output_xml_path')
+        exit_code = result.get('exit_code')
+        url = extract_url_from_query(user_query) if user_query else None
+
+        feedback_loop.process_execution(
+            workflow_id=run_id,
+            user_query=user_query or "",
+            url=url or "",
+            robot_code=robot_code,
+            test_status=test_status,
+            output_xml_path=output_xml_path,
+            metrics=None,  # execution-only mode — no LLM metrics
+        )
+        logging.info(f"✅ Learning system processed execution {run_id}")
+    except Exception as e:
+        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
@@ -457,50 +507,6 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
 
 
-def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str) -> None:
-    """
-    Learn from a successful test execution for pattern optimization.
-    
-    Args:
-        user_query: Original user query (None if not provided)
-        robot_code: Generated robot code
-        test_status: Test execution status
-    """
-    if test_status != 'passed':
-        logging.info(f"⏭️  Skipping pattern learning - test status: {test_status}")
-        return
-    
-    if not user_query:
-        logging.info("⏭️  Test PASSED but skipping pattern learning - no user query provided")
-        return
-    
-    try:
-        from src.backend.core.config import settings
-        if not settings.OPTIMIZATION_ENABLED:
-            return
-            
-        from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
-        from src.backend.crew_ai.library_context import get_library_context
-        
-        logging.info("📚 Test PASSED - Learning from successful execution...")
-        
-        # Initialize components
-        library_context = get_library_context(settings.ROBOT_LIBRARY)
-        chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
-        smart_provider = SmartKeywordProvider(
-            library_context=library_context,
-            pattern_matcher=pattern_matcher,
-            vector_store=chroma_store
-        )
-        
-        # Learn from the successful execution
-        smart_provider.learn_from_execution(user_query, robot_code)
-        logging.info("✅ Pattern learning completed - learned from PASSED test")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to learn from execution: {e}")
-
-
 async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
     """
     Generates Robot Framework test code without executing it.
@@ -595,9 +601,9 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-        
-        # Pattern learning: ONLY learn from PASSED tests
-        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
+
+        # Unified learning: pattern learning (passed only) + adaptive learning (all)
+        _process_learning(run_id, user_query, robot_code, result)
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")
@@ -674,9 +680,9 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-        
-        # Pattern learning: ONLY learn from PASSED tests
-        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
+
+        # Unified learning: pattern learning (passed only) + adaptive learning (all)
+        _process_learning(run_id, user_query, robot_code, result)
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")

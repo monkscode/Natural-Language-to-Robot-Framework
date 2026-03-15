@@ -263,17 +263,19 @@ def validation_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
 
 
 class RobotTasks:
-    def __init__(self, library_context=None, workflow_id: str = ""):
+    def __init__(self, library_context=None, workflow_id: str = "", hint_context: dict = None):
         """
         Initialize Robot Framework tasks.
 
         Args:
             library_context: LibraryContext instance (optional, for dynamic library knowledge)
             workflow_id: Unique workflow identifier for metrics tracking
+            hint_context: Dict mapping agent role -> hint text for task-level injection
         """
         self.library_context = library_context
         self.workflow_id = workflow_id
-        
+        self._hint_context = hint_context or {}
+
         # Cache static context - computed once on initialization
         # These values depend on library_context which is set at init time
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
@@ -389,9 +391,29 @@ Generated Test
             """
         return ""
 
+    def _get_task_hints(self, role: str) -> str:
+        """Get mandatory hint block for a task description, or empty string.
+
+        Mirrors the proven viewport instruction pattern: MANDATORY + CRITICAL framing
+        with specific, actionable directives. Hints are injected into task descriptions
+        (high salience) rather than agent backstories (low salience).
+        """
+        hint_text = self._hint_context.get(role, "")
+        if not hint_text:
+            return ""
+        logger.info(f"[LEARNING] Injecting hints into {role} task description")
+        return (
+            "--- MANDATORY USER CORRECTIONS (CRITICAL — FROM PAST FAILURES) ---\n\n"
+            "The following corrections are based on real execution failures. "
+            "You MUST apply ALL of them to your output.\n\n"
+            f"{hint_text}\n\n"
+            "**CRITICAL**: Ignoring these corrections will cause the test to FAIL again.\n"
+            "Apply every correction listed above.\n\n"
+        )
+
     def plan_steps_task(self, agent, query) -> Task:
         # Build prompt using PromptComponents for maintainability
-        description = f"""
+        description = f"""{self._get_task_hints("planner")}
             Your mission is to act as an expert Test Automation Planner. You must analyze a user's natural language query and decompose it into a comprehensive, step-by-step test plan that a junior test engineer could follow.
 
             The user query is: "{query}"
@@ -665,6 +687,7 @@ Generated Test
         )
         
         description = (
+            f"{self._get_task_hints('assembler')}"
             f"{PromptComponents.ASSEMBLY_OUTPUT_RULES}\n\n"
             
             "The context will be a JSON object from 'identify_elements_task' with: {\"steps\": [array of steps with locators]}.\n"
@@ -735,6 +758,8 @@ Generated Test
                 "⚠️ **PRIMARY TASK: VALIDATE THE ROBOT FRAMEWORK CODE** ⚠️\n"
                 "Your MAIN responsibility is to validate Robot Framework code for correctness.\n"
                 "Delegation is ONLY for invalid code - DO NOT delegate if code is valid!\n\n"
+
+                f"{self._get_task_hints('validator')}"
 
                 f"{validation_rules}"
 

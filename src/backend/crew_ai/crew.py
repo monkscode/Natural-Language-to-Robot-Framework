@@ -113,9 +113,26 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 KeywordVectorStore,
                 QueryPatternMatcher,
                 SmartKeywordProvider,
-                ContextPruner
+                ContextPruner,
             )
-            
+
+            # Get learning db_conn from FeedbackLoop singleton (shared connection)
+            # Must be initialized BEFORE QueryPatternMatcher and SmartKeywordProvider
+            learning_db_conn = None
+            try:
+                from src.backend.crew_ai.optimization.learning_registry import (
+                    get_feedback_loop,
+                )
+                feedback_loop = get_feedback_loop()
+                if feedback_loop is not None:
+                    learning_db_conn = feedback_loop.execution_memory.conn
+                    logger.info("✅ Learning DB connection obtained from FeedbackLoop singleton")
+                else:
+                    logger.warning("⚠️ FeedbackLoop unavailable — learning hints will be disabled")
+            except Exception as e:
+                logger.warning(f"⚠️ Learning DB init failed: {e}")
+                logger.warning("   Learning hints will be disabled")
+
             # Initialize ChromaDB vector store
             vector_store = KeywordVectorStore(
                 persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
@@ -126,7 +143,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             
             # Initialize pattern matcher (with ChromaDB for query embeddings)
             pattern_matcher = QueryPatternMatcher(
-                db_path=settings.OPTIMIZATION_PATTERN_DB_PATH,
+                db_conn=learning_db_conn,
                 chroma_store=vector_store  # Pass ChromaDB store for query embeddings
             )
             
@@ -142,8 +159,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to initialize context pruner: {e}")
                     logger.warning("   Context pruning will be disabled")
-            
-            # Initialize smart keyword provider with metrics
+
+            # Initialize smart keyword provider with metrics + learning DB
             smart_provider = SmartKeywordProvider(
                 library_context=library_context,
                 pattern_matcher=pattern_matcher,
@@ -151,7 +168,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 context_pruner=context_pruner,
                 pruning_enabled=settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED,
                 pruning_threshold=settings.OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD,
-                metrics=optimization_metrics
+                metrics=optimization_metrics,
+                db_conn=learning_db_conn,
             )
             
             # Calculate baseline context size (full context)
@@ -159,10 +177,35 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             baseline_context_tokens = count_tokens(baseline_context, token_model)
             
             # Get optimized contexts for ALL agents
+            # URL extracted once, passed to all agents for domain-scoped hints
+            url = extract_url_from_query(query)
             logger.info("🎯 Generating optimized contexts for all agents...")
-            planner_context = smart_provider.get_agent_context(query, "planner")
-            assembler_context = smart_provider.get_agent_context(query, "assembler")
-            validator_context = smart_provider.get_agent_context(query, "validator")
+            planner_result = smart_provider.get_agent_context(query, "planner", url=url)
+            assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
+            validator_result = smart_provider.get_agent_context(query, "validator", url=url)
+
+            planner_context = planner_result.context
+            assembler_context = assembler_result.context
+            validator_context = validator_result.context
+
+            # Capture hint metadata for future FeedbackLoop integration
+            hint_metadata = {
+                "planner": {"count": planner_result.hints_count, "sources": planner_result.hint_sources},
+                "assembler": {"count": assembler_result.hints_count, "sources": assembler_result.hint_sources},
+                "validator": {"count": validator_result.hints_count, "sources": validator_result.hint_sources},
+            }
+            total_hints = sum(r["count"] for r in hint_metadata.values())
+            if total_hints > 0:
+                logger.info(f"📚 Learning hints injected: {hint_metadata}")
+
+            # Build hint_context for task-level injection
+            hint_context = {}
+            if planner_result.hint_text:
+                hint_context["planner"] = planner_result.hint_text
+            if assembler_result.hint_text:
+                hint_context["assembler"] = assembler_result.hint_text
+            if validator_result.hint_text:
+                hint_context["validator"] = validator_result.hint_text
             
             # Calculate total optimized tokens
             planner_tokens = count_tokens(planner_context, token_model)
@@ -197,11 +240,13 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             keyword_search_tool = None
             smart_provider = None
             optimization_metrics = None
+            hint_context = {}
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
         planner_context = None
         assembler_context = None
         validator_context = None
+        hint_context = {}
 
     # Initialize agents and tasks with library context and workflow_id
     agents = RobotAgents(
@@ -213,7 +258,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         planner_context=planner_context,
         validator_context=validator_context
     )
-    tasks = RobotTasks(library_context, workflow_id=workflow_id)
+    tasks = RobotTasks(library_context, workflow_id=workflow_id, hint_context=hint_context)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
     step_planner_agent = agents.step_planner_agent()

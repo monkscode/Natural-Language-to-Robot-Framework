@@ -57,7 +57,7 @@
         /* Dashboard Grid */
         .dashboard-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 1.5rem;
             margin-bottom: 2rem;
         }
@@ -335,6 +335,13 @@
                     <span>Per Workflow</span>
                 </div>
             </div>
+            <div class="metric-card" id="learning-health-card">
+                <div class="metric-label">Learning Health</div>
+                <div class="metric-value" id="learning-status">-</div>
+                <div class="metric-trend" id="learning-trend">
+                    <span>Loading...</span>
+                </div>
+            </div>
         </div>
 
         <!-- MERGED CHARTS -->
@@ -538,6 +545,9 @@
             document.getElementById('total-cost').textContent = '$' + agg.total_cost.toFixed(2);
             document.getElementById('avg-time').textContent = agg.avg_execution_time.toFixed(1) + 's';
 
+            // Fetch learning health (non-blocking)
+            fetchLearningHealth();
+
             // 2. Render Table
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '';
@@ -620,6 +630,34 @@
 
         // Time filter change handler
         document.getElementById('time-filter').addEventListener('change', applyFilter);
+
+        async function fetchLearningHealth() {
+            const statusEl = document.getElementById('learning-status');
+            const trendEl = document.getElementById('learning-trend');
+            try {
+                const resp = await fetch('/api/workflow-metrics/learning-health');
+                const data = await resp.json();
+
+                if (data.status === 'disabled') {
+                    statusEl.textContent = 'Off';
+                    trendEl.innerHTML = '<span>Disabled</span>';
+                } else if (data.status === 'unavailable') {
+                    statusEl.textContent = '--';
+                    trendEl.innerHTML = '<span class="trend-down">Unavailable</span>';
+                } else if (data.status === 'error') {
+                    statusEl.textContent = 'ERR';
+                    trendEl.innerHTML = '<span class="trend-down">Circuit Open</span>';
+                } else {
+                    statusEl.textContent = data.total_rules;
+                    trendEl.innerHTML =
+                        '<span class="trend-up">Active</span> ' +
+                        data.total_executions + ' runs';
+                }
+            } catch (e) {
+                statusEl.textContent = '--';
+                trendEl.innerHTML = '<span>N/A</span>';
+            }
+        }
 
         // Initialize chart dropdowns
         window.metricsCharts.initialize();
