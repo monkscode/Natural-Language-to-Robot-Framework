@@ -64,7 +64,10 @@ class DynamicLibraryDocumentation:
                 logger.info(f"Loaded pre-generated documentation for {self.library_name} from {libdoc_file}")
                 return doc_data
             except Exception as e:
-                logger.warning(f"Failed to load pre-generated libdoc from {libdoc_file}: {e}")
+                raise RuntimeError(
+                    f"Failed to read/parse pre-generated libdoc for {self.library_name} at "
+                    f"{libdoc_file}: {e}"
+                ) from e
         
         return None
     
@@ -127,7 +130,7 @@ class DynamicLibraryDocumentation:
             raise ImportError(
                 f"Library {self.library_name} not found. Either install it or provide "
                 f"pre-generated libdoc at {LIBDOCS_DIR / f'{self.library_name.lower()}.json'}"
-            )
+            ) from e
         
         except Exception as e:
             logger.error(f"Failed to extract documentation for {self.library_name}: {e}")

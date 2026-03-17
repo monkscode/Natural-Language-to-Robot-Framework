@@ -47,10 +47,6 @@ class KeywordVectorStore:
                 )
             )
             
-            # Use ChromaDB's default embedding function (ONNX-based)
-            # This is lightweight and doesn't require PyTorch
-            self.embedding_function = None  # ChromaDB will use default
-            
             logger.info(f"ChromaDB initialized at {persist_directory} (using default ONNX embedding)")
             
         except Exception as e:

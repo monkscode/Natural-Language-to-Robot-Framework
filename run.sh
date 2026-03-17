@@ -55,5 +55,20 @@ fi
 # Run the application
 echo "Starting the application..."
 echo "You can access it at http://localhost:${APP_PORT}"
-python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}"
-python tools/browser_use_service.py > bus.log 2>&1
+python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
+UVICORN_PID=$!
+
+python tools/browser_use_service.py > bus.log 2>&1 &
+BROWSER_SERVICE_PID=$!
+
+cleanup() {
+    kill "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+wait -n "$UVICORN_PID" "$BROWSER_SERVICE_PID"
+EXIT_CODE=$?
+cleanup
+wait "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+exit "$EXIT_CODE"

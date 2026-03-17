@@ -8,9 +8,6 @@ from typing import List, Optional, Tuple, Any
 # Import reusable prompt components
 from .prompts import PromptComponents
 
-# Import reusable prompt components
-from .prompts import PromptComponents
-
 logger = logging.getLogger(__name__)
 
 

@@ -65,8 +65,27 @@ class DynamicRateLimitHandler:
     @staticmethod
     def is_rate_limit_error(exception) -> bool:
         """Check if exception is a rate limit (429) error."""
+        status_candidates = [
+            getattr(exception, 'status_code', None),
+            getattr(exception, 'status', None),
+            getattr(exception, 'http_status', None),
+            getattr(exception, 'code', None),
+        ]
+        for status in status_candidates:
+            try:
+                if status is not None and int(status) == 429:
+                    return True
+            except (TypeError, ValueError):
+                continue
+
         error_str = str(exception).lower()
-        return '429' in error_str or 'rate' in error_str or 'quota' in error_str
+        patterns = [
+            r'\b429\b',
+            r'\brate[- ]limit(?:ed|ing)?\b',
+            r'\bquota exceeded\b',
+            r'\btoo many requests\b',
+        ]
+        return any(re.search(pattern, error_str) for pattern in patterns)
 
 
 class CleanedLLMWrapper(LLM):
@@ -100,7 +119,17 @@ class CleanedLLMWrapper(LLM):
         if os.getenv("DISABLE_RATE_LIMIT", "").lower() == "true":
             return super().call(messages, *args, **kwargs)
         
-        max_retries = int(os.getenv("LLM_MAX_RETRIES", "3"))
+        max_retries_raw = os.getenv("LLM_MAX_RETRIES", "3")
+        try:
+            max_retries = int(max_retries_raw)
+            if max_retries < 0:
+                raise ValueError("negative retry value")
+            max_retries = min(max_retries, 10)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid LLM_MAX_RETRIES='{max_retries_raw}', using default 3"
+            )
+            max_retries = 3
         
         for attempt in range(max_retries + 1):
             try:

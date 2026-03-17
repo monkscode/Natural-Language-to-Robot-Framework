@@ -4,12 +4,13 @@ import docker
 import logging
 import traceback
 import xml.etree.ElementTree as ET
-from typing import Generator, Dict, Any
+from collections.abc import Generator
+from typing import Any
 
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
 IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 # Default remote image - fallback if local image not found
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'devasy23/nlrf:test-runner-pr-3')
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-pr-3')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
 
@@ -48,9 +49,9 @@ def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
                     logging.info(
                         f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect ({container_ref}): {source}")
                     return source
-        except Exception as e:
+        except docker.errors.DockerException as e:
             logging.warning(
-                f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {e}")
+            f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {type(e).__name__}: {e}")
 
     logging.info(
         f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")
@@ -137,7 +138,7 @@ def get_docker_client():
             f"Docker is not available. Please ensure Docker Desktop is installed and running. Details: {e}")
 
 
-def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, None]:
+def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, None]:
     """
     Ensure the Docker image is available for test execution.
     Tries to pull from Docker Hub first, falls back to local build if needed.
@@ -212,7 +213,7 @@ def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, 
             raise
 
 
-def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> Dict[str, Any]:
+def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> dict[str, Any]:
     container = None
     logging.info(
         f"🚀 DOCKER SERVICE: Starting test execution for run_id={run_id}, test_filename={test_filename}")
@@ -596,7 +597,7 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
     return final_logs
 
 
-def cleanup_test_containers(client: docker.DockerClient) -> Dict[str, Any]:
+def cleanup_test_containers(client: docker.DockerClient) -> dict[str, Any]:
     """Clean up any orphaned test containers."""
     try:
         # Find all containers with robot-test prefix
@@ -628,7 +629,7 @@ def cleanup_test_containers(client: docker.DockerClient) -> Dict[str, Any]:
         }
 
 
-def rebuild_image(client: docker.DockerClient) -> Dict[str, str]:
+def rebuild_image(client: docker.DockerClient) -> dict[str, str]:
     try:
         try:
             client.images.remove(image=IMAGE_TAG, force=True)
@@ -644,7 +645,7 @@ def rebuild_image(client: docker.DockerClient) -> Dict[str, str]:
         raise ConnectionError(f"Docker error: {e}")
 
 
-def get_docker_status(client: docker.DockerClient) -> Dict[str, Any]:
+def get_docker_status(client: docker.DockerClient) -> dict[str, Any]:
     try:
         image = client.images.get(IMAGE_TAG)
         image_info = {

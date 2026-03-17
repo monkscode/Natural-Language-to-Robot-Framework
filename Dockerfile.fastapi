@@ -14,8 +14,11 @@ WORKDIR /build
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
-    ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    ca-certificates \
+    bash && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh && \
+    bash /tmp/nodesource_setup.sh && \
+    rm -f /tmp/nodesource_setup.sh && \
     apt-get install -y nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -39,7 +42,8 @@ COPY tools/generate_libdocs.py /build/generate_libdocs.py
 
 # Generate library documentation as JSON (SeleniumLibrary, BuiltIn, and Browser)
 RUN mkdir -p /build/libdocs && \
-    python /build/generate_libdocs.py /build/libdocs || true
+    python /build/generate_libdocs.py /build/libdocs && \
+    test -n "$(ls -1 /build/libdocs/*.json 2>/dev/null)"
 
 # ============================================================================
 # STAGE 2: Builder - Install runtime dependencies
@@ -80,7 +84,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/usr/local/bin:$PATH"
 
 # Install only runtime dependencies (curl for healthcheck, ca-certificates for HTTPS)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -102,7 +106,12 @@ COPY src/ /app/src/
 COPY tools/ /app/tools/
 
 # Create necessary directories for persistent data
-RUN mkdir -p /app/robot_tests /app/logs /app/chroma_db /app/data
+RUN mkdir -p /app/robot_tests /app/logs /app/chroma_db /app/data && \
+    groupadd -g 1000 appuser && \
+    useradd -m -u 1000 -g 1000 appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 # Expose FastAPI port
 EXPOSE 5000

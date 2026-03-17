@@ -41,15 +41,16 @@ def generate_libdoc(library_name: str, output_dir: Path) -> bool:
         # Generate libdoc JSON
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
             temp_path = temp_file.name
-        
-        libdoc(library_name, temp_path, format='JSON')
-        
-        # Read and rewrite to output directory
-        with open(temp_path, 'r', encoding='utf-8') as f:
-            doc_data = json.load(f)
-        
-        # Clean up temp file
-        os.unlink(temp_path)
+
+        try:
+            libdoc(library_name, temp_path, format='JSON')
+
+            # Read and rewrite to output directory
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                doc_data = json.load(f)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
         
         # Write to output directory
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -87,15 +88,21 @@ def main():
     ]
     
     success_count = 0
+    failed_libraries = []
     for library in libraries:
         if generate_libdoc(library, output_dir):
             success_count += 1
+        else:
+            failed_libraries.append(library)
     
     print("-" * 50)
     print(f"Generated {success_count}/{len(libraries)} library documentation files")
-    
-    # Return success if at least one library was generated
-    return 0 if success_count > 0 else 1
+
+    if failed_libraries:
+        print(f"Missing required libdocs: {', '.join(failed_libraries)}")
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":

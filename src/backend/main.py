@@ -33,14 +33,21 @@ formatter = logging.Formatter(log_format, datefmt=date_format)
 
 # File handler - rotates logs to prevent huge files
 from logging.handlers import RotatingFileHandler
-file_handler = RotatingFileHandler(
-    'logs/application.log',
-    maxBytes=10*1024*1024,  # 10MB per file
-    backupCount=5,           # Keep 5 backup files
-    encoding='utf-8'
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
+try:
+    file_handler = RotatingFileHandler(
+        'logs/application.log',
+        maxBytes=10*1024*1024,  # 10MB per file
+        backupCount=5,           # Keep 5 backup files
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+except (OSError, IOError, Exception) as e:
+    fallback_handler = logging.StreamHandler()
+    fallback_handler.setLevel(logging.INFO)
+    fallback_handler.setFormatter(formatter)
+    file_handler = fallback_handler
+    logging.warning(f"Failed to initialize file logging, using stream fallback: {type(e).__name__}: {e}")
 
 # Console handler
 console_handler = logging.StreamHandler()

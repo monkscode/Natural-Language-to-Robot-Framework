@@ -1,6 +1,7 @@
 # Browser Service Dockerfile - Optimized with shared base (PR #20 style)
 # Single-stage build with system Chrome only
-FROM monkscode/nlrf:base-browser-latest
+ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
@@ -20,12 +21,20 @@ COPY src/ /app/src/
 COPY tools/ /app/tools/
 COPY clients/ /app/clients/
 
+# Create unprivileged runtime user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
+# Browser use service URL for app + healthcheck target derivation
+ENV BROWSER_USE_SERVICE_URL=http://localhost:4999
+
+USER appuser
+
 # Expose browser service port
 EXPOSE 4999
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4999/health', timeout=5).getcode()==200 else 1)"
+    CMD python -c "import os,sys,urllib.parse,urllib.request; u=urllib.parse.urlparse(os.getenv('BROWSER_USE_SERVICE_URL','http://localhost:4999')); p=u.port or 4999; url=f'http://localhost:{p}/health'; sys.exit(0 if urllib.request.urlopen(url, timeout=5).getcode()==200 else 1)"
 
 # Run browser service
 CMD ["python", "tools/browser_use_service.py"]

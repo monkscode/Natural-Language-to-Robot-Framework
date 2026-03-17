@@ -2,7 +2,8 @@
 # Base: nlrf-base-browser (Chrome + Playwright + UV + Xvfb + system deps)
 # Size: ~900MB (vs 2.7GB unoptimized) - 67% reduction
 
-FROM monkscode/nlrf:base-browser-latest
+ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
+FROM ${BASE_IMAGE}
 
 # Install Robot Framework packages using UV with cache
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -10,16 +11,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     robotframework \
     robotframework-seleniumlibrary \
     robotframework-browser \
-    playwright
+    playwright && \
+    rfbrowser init --skip-browsers && \
+    python -m playwright install chromium
 
-# Initialize rfbrowser node dependencies and install Playwright Chromium.
-# This is required for Browser library tests that use: New Browser    chromium
-RUN rfbrowser init --skip-browsers && python -m playwright install chromium
-
-# Create optimized virtual display script using sh (smaller than bash)
-# Use printf to ensure Unix line endings
-RUN printf '#!/bin/sh\nif [ "$HEALING_SESSION" = "true" ]; then\n  export DISPLAY=:99\n  Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &\n  sleep 1\nfi\nexec "$@"\n' > /usr/local/bin/start-with-display.sh && \
-    chmod +x /usr/local/bin/start-with-display.sh
+# Copy virtual display helper script
+COPY scripts/start-with-display.sh /usr/local/bin/start-with-display.sh
+RUN chmod +x /usr/local/bin/start-with-display.sh
 
 # Set Chrome options for healing sessions
 ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
