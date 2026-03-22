@@ -10,7 +10,7 @@ from typing import Any
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
 IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 # Default remote image - fallback if local image not found
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-pr-3')
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-latest')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
 
@@ -196,7 +196,7 @@ def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, 
             logging.info("🐳 DOCKER_DEBUG: Ensuring DOCKER_BUILDKIT=1 for the build process")
 
             build_logs = client.api.build(
-                path=DOCKERFILE_PATH, tag=IMAGE_TAG, rm=True, decode=True)
+                path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True, decode=True)
             for log in build_logs:
                 if 'stream' in log:
                     log_message = log['stream'].strip()
@@ -637,7 +637,7 @@ def rebuild_image(client: docker.DockerClient) -> dict[str, str]:
         except docker.errors.ImageNotFound:
             logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
 
-        client.images.build(path=DOCKERFILE_PATH, tag=IMAGE_TAG, rm=True)
+        client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
         logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
         return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
     except docker.errors.DockerException as e:

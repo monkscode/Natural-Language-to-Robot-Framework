@@ -20,7 +20,7 @@ services:
       - HOST_ROBOT_TESTS_DIR=${PWD}/robot_tests
       - HOST_WORKSPACE_DIR=${PWD}
       # Test runner image tag for spawned containers
-      - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-pr-3}
+      - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-latest}
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env

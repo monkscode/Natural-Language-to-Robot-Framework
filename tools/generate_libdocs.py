@@ -83,23 +83,32 @@ def main():
     # Libraries to generate docs for
     libraries = [
         "SeleniumLibrary",
-        "Browser",  # May fail if not installed - that's OK
+        "Browser",
         "BuiltIn"
     ]
-    
+
+    # Browser is optional - it may not be installed in all environments
+    optional_libs = {"Browser"}
+
     success_count = 0
-    failed_libraries = []
+    failed_required = []
+    failed_optional = []
     for library in libraries:
         if generate_libdoc(library, output_dir):
             success_count += 1
+        elif library in optional_libs:
+            failed_optional.append(library)
         else:
-            failed_libraries.append(library)
+            failed_required.append(library)
     
     print("-" * 50)
     print(f"Generated {success_count}/{len(libraries)} library documentation files")
 
-    if failed_libraries:
-        print(f"Missing required libdocs: {', '.join(failed_libraries)}")
+    if failed_optional:
+        print(f"Optional libraries skipped (non-fatal): {', '.join(failed_optional)}")
+
+    if failed_required:
+        print(f"Missing required libdocs: {', '.join(failed_required)}")
         return 1
 
     return 0

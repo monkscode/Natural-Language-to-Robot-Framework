@@ -338,9 +338,10 @@ class KeywordVectorStore:
             current_version = self.get_library_version(library_name)
             
             # Create new collection with version metadata
+            # Don't pass embedding_function - let ChromaDB use its default ONNX embedding
+            # (consistent with create_or_get_collection and other methods)
             collection = self.client.create_collection(
                 name=collection_name,
-                embedding_function=self.embedding_function,
                 metadata={
                     "library": library_name,
                     "version": current_version or "unknown"

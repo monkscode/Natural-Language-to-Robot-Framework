@@ -302,5 +302,5 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     return CleanedLLMWrapper(
         api_key=api_key or os.getenv("GEMINI_API_KEY"),
         model=model_name,
-        num_retries=3  # LiteLLM internal retry for transient API errors (429, 503, etc.)
+        num_retries=0  # Disable LiteLLM's internal retry — the wrapper's call() loop handles 429s with API-provided delays
     )
