@@ -1,0 +1,33 @@
+# Base Browser Image - Optimized foundation for browser automation
+FROM python:3.12-slim
+
+LABEL maintainer="Natural-Language-to-Robot-Framework"
+LABEL description="Optimized base image with Chrome, Playwright, UV package manager"
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+
+RUN pip install --no-cache-dir uv
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget gnupg ca-certificates curl \
+    xvfb dbus-x11 \
+    fonts-liberation \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+    libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 \
+    libnspr4 libnss3 libwayland-client0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \
+    xdg-utils nodejs npm && \
+    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends google-chrome-stable && \
+    apt-get purge -y --auto-remove wget gnupg curl && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*

@@ -1,21 +1,45 @@
 import logging
 from crewai import Agent
-from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
+from crewai.llm import LLM
+# from crewai_tools import ScrapeElementFromWebsiteTool  # DEPRECATED - use batch tool instead
+from langchain_ollama import OllamaLLM
 
 # Import browser_use_tool from tools package
 # Note: Path setup is handled by tools/__init__.py automatically
 from tools.browser_use_tool import BatchBrowserUseTool
 
 # Import LLM factory function
-from .cleaned_llm_wrapper import get_llm
+from .cleaned_llm_wrapper import get_llm as get_cleaned_llm
 
 logger = logging.getLogger(__name__)
 
 
+def get_llm(model_provider, model_name):
+    """
+    Get LLM instance for the specified provider with automatic output cleaning.
+
+    This function now returns cleaned LLM wrappers that automatically fix
+    common formatting issues (like extra text on Action lines) before CrewAI
+    parses the output. This prevents workflow failures due to LLM formatting quirks.
+
+    The cleaning is transparent - the LLM behaves exactly the same but with
+    robust parsing that handles real-world LLM behavior.
+
+    Args:
+        model_provider: "local" for Ollama, "online" for Gemini
+        model_name: Model identifier (e.g., "llama3.1", "gemini-2.5-flash")
+
+    Returns:
+        Cleaned LLM wrapper instance that automatically fixes formatting issues
+    """
+    logger.info(
+        f"🧹 Initializing cleaned LLM wrapper for {model_provider}/{model_name}")
+    return get_cleaned_llm(model_provider, model_name)
+
+
 # Initialize the tools
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
-selenium_tool = SeleniumScrapingTool()
-scrape_tool = ScrapeElementFromWebsiteTool()
+# scrape_tool = ScrapeElementFromWebsiteTool()  # DEPRECATED - use batch tool instead 
 # Primary tool: Batch processing for multiple elements with full context
 batch_browser_use_tool = BatchBrowserUseTool()
 

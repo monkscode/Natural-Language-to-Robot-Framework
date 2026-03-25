@@ -5,16 +5,18 @@ This module provides:
 1. CleanedLLMWrapper - For online models (Gemini) with Action/ActionInput cleaning
 2. CleanedOllamaLLMWrapper - For local models (Ollama) with Action/ActionInput cleaning
 
-The wrappers intercept LLM responses and clean them before CrewAI's parser sees them.
-This prevents Action/ActionInput parsing errors that would cause retries.
+The wrapper is transparent - it behaves exactly like the original LLM but
+with automatic output cleaning.
 
-Rate limiting is handled automatically by LiteLLM (used internally by CrewAI).
-Robot Framework code cleaning is handled by guardrails in tasks.py, not here.
+RATE LIMITING: Includes a global rate limiter for Gemini Free Tier (5 RPM).
 """
 
 import logging
+import time
 import os
-from typing import Any, List, Optional
+import re
+from threading import Lock
+from typing import Any, Dict, List, Optional
 from crewai.llm import LLM
 from langchain_ollama import OllamaLLM
 from langchain_core.messages import BaseMessage, AIMessage
@@ -23,6 +25,67 @@ from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult, Genera
 from .llm_output_cleaner import LLMOutputCleaner, formatting_monitor
 
 logger = logging.getLogger(__name__)
+
+
+class DynamicRateLimitHandler:
+    """
+    Dynamic rate limit handler that respects API-provided retry delays.
+    
+    Instead of using hardcoded intervals, this handler:
+    1. Attempts the API call
+    2. If 429 error occurs, extracts retryDelay from the error response
+    3. Waits the specified time and retries
+    
+    Configuration via environment variables:
+    - DISABLE_RATE_LIMIT: Set to "true" to disable retry handling entirely
+    - LLM_MAX_RETRIES: Maximum retry attempts (default: 3)
+    """
+    
+    @staticmethod
+    def extract_retry_delay(error_message: str) -> Optional[float]:
+        """
+        Extract retryDelay from API error message.
+        
+        Looks for patterns like:
+        - "retryDelay": "50s"
+        - "Please retry in 42.284326757s"
+        """
+        # Pattern 1: "retryDelay": "50s"
+        match = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)\s*s?"', error_message)
+        if match:
+            return float(match.group(1))
+        
+        # Pattern 2: Please retry in Xs
+        match = re.search(r'retry in (\d+(?:\.\d+)?)\s*s', error_message, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+        
+        return None
+    
+    @staticmethod
+    def is_rate_limit_error(exception) -> bool:
+        """Check if exception is a rate limit (429) error."""
+        status_candidates = [
+            getattr(exception, 'status_code', None),
+            getattr(exception, 'status', None),
+            getattr(exception, 'http_status', None),
+            getattr(exception, 'code', None),
+        ]
+        for status in status_candidates:
+            try:
+                if status is not None and int(status) == 429:
+                    return True
+            except (TypeError, ValueError):
+                continue
+
+        error_str = str(exception).lower()
+        patterns = [
+            r'\b429\b',
+            r'\brate[- ]limit(?:ed|ing)?\b',
+            r'\bquota exceeded\b',
+            r'\btoo many requests\b',
+        ]
+        return any(re.search(pattern, error_str) for pattern in patterns)
 
 
 class CleanedLLMWrapper(LLM):
@@ -44,6 +107,56 @@ class CleanedLLMWrapper(LLM):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
+    
+    def call(self, messages, *args, **kwargs):
+        """
+        Override call() to handle rate limit errors with dynamic retry.
+        
+        CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
+        We intercept at call() level to catch and handle 429 errors.
+        """
+        # Check if rate limit handling is disabled
+        if os.getenv("DISABLE_RATE_LIMIT", "").lower() == "true":
+            return super().call(messages, *args, **kwargs)
+        
+        max_retries_raw = os.getenv("LLM_MAX_RETRIES", "3")
+        try:
+            max_retries = int(max_retries_raw)
+            if max_retries < 0:
+                raise ValueError("negative retry value")
+            max_retries = min(max_retries, 10)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid LLM_MAX_RETRIES='{max_retries_raw}', using default 3"
+            )
+            max_retries = 3
+        
+        for attempt in range(max_retries + 1):
+            try:
+                return super().call(messages, *args, **kwargs)
+            except Exception as e:
+                if not DynamicRateLimitHandler.is_rate_limit_error(e):
+                    raise  # Re-raise non-rate-limit errors
+                
+                if attempt >= max_retries:
+                    logger.error(f"❌ Rate limit: Max retries ({max_retries}) exceeded")
+                    raise
+                
+                # Extract retry delay from error
+                error_str = str(e)
+                retry_delay = DynamicRateLimitHandler.extract_retry_delay(error_str)
+                
+                if retry_delay is None:
+                    # Default fallback if we can't parse the delay
+                    retry_delay = 60.0
+                    logger.warning(f"⚠️ Could not parse retryDelay, using default {retry_delay}s")
+                
+                logger.info(f"⏱️ Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
+                           f"Waiting {retry_delay:.1f}s as specified by API...")
+                time.sleep(retry_delay)
+        
+        # Should not reach here, but just in case
+        return super().call(messages, *args, **kwargs)
     
     def _generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
         """
@@ -189,5 +302,5 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     return CleanedLLMWrapper(
         api_key=api_key or os.getenv("GEMINI_API_KEY"),
         model=model_name,
-        num_retries=3  # LiteLLM internal retry for transient API errors (429, 503, etc.)
+        num_retries=0  # Disable LiteLLM's internal retry — the wrapper's call() loop handles 429s with API-provided delays
     )
