@@ -16,7 +16,6 @@ docker
 
 # CrewAI (without tools - we don't use crewai_tools)
 crewai==1.8.1
-mcp>=1.23.0
 litellm
 
 # LLM Providers
