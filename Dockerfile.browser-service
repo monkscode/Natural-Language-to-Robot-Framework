@@ -1,7 +1,12 @@
 # Browser Service Dockerfile - Optimized with shared base (PR #20 style)
 # Single-stage build with system Chrome only
+
+# ARG before FROM has global scope for the FROM instruction only
 ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
 FROM ${BASE_IMAGE}
+
+# Re-declare ARG after FROM to make it available in this build stage
+ARG BASE_IMAGE
 
 WORKDIR /app
 
