@@ -2,21 +2,17 @@
 # Base: nlrf-base-browser (Chrome + Playwright + UV + Xvfb + system deps)
 # Size: ~900MB (vs 2.7GB unoptimized) - 67% reduction
 
-# ARG before FROM has global scope for the FROM instruction only
 ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
 FROM ${BASE_IMAGE}
-
-# Re-declare ARG after FROM to make it available in this build stage
-ARG BASE_IMAGE
 
 # Install Robot Framework packages using UV with cache
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     robotframework \
     robotframework-seleniumlibrary \
-    robotframework-browser[bb] \
-    playwright && \
+    "robotframework-browser[bb]" && \
     rfbrowser install chromium && \
+    test -d /opt/playwright-browsers && \
     chmod -R 755 /opt/playwright-browsers
 
 # Copy virtual display helper script
