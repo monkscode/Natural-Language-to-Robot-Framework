@@ -21,18 +21,15 @@ from src.backend.core.workflow_metrics import (
 from src.backend.core.config import settings
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    encoding="utf-8"
-)
-
-
 # ---------------------------------------------------------------------------
 # Learning System — import singleton from registry
 # ---------------------------------------------------------------------------
 
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+
+# Hint metadata cache — bridges generation phase (crew.py) and execution phase
+# (_process_learning). Keyed by workflow_id, consumed via .pop() in _process_learning().
+_hint_metadata_cache: Dict[str, dict] = {}
 
 
 def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
@@ -63,6 +60,13 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         exit_code = result.get('exit_code')
         url = extract_url_from_query(user_query) if user_query else None
 
+        # Retrieve and consume hint metadata stored during generation phase
+        hint_meta = _hint_metadata_cache.pop(run_id, {})
+        total_hints = sum(d.get("count", 0) for d in hint_meta.values())
+        all_sources = []
+        for d in hint_meta.values():
+            all_sources.extend(d.get("sources", []))
+
         feedback_loop.process_execution(
             workflow_id=run_id,
             user_query=user_query or "",
@@ -71,6 +75,9 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
             test_status=test_status,
             output_xml_path=output_xml_path,
             metrics=None,  # execution-only mode — no LLM metrics
+            hints_available=total_hints,
+            hints_injected=total_hints,
+            hint_sources=all_sources,
         )
         logging.info(f"✅ Learning system processed execution {run_id}")
     except Exception as e:
@@ -128,8 +135,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results, optimization_metrics = run_crew(
+        validation_output, crew_with_results, optimization_metrics, hint_metadata = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
+
+        # Store hint metadata for the execution phase to consume
+        if hint_metadata:
+            _hint_metadata_cache[workflow_id] = hint_metadata
         
         # Stage 3: Generating (50-75%)
         yield {"status": "running", "message": f"{EMOJI['code']} Generating test code...", "progress": 60}

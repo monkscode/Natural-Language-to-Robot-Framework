@@ -10,10 +10,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     robotframework \
     robotframework-seleniumlibrary \
-    robotframework-browser \
+    robotframework-browser[bb] \
     playwright && \
-    rfbrowser init --skip-browsers && \
-    python -m playwright install chromium
+    rfbrowser install chromium && \
+    chmod -R 755 /opt/playwright-browsers
 
 # Copy virtual display helper script
 COPY scripts/start-with-display.sh /usr/local/bin/start-with-display.sh

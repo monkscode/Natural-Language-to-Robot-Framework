@@ -751,6 +751,58 @@ class TestLRUCache:
 
 
 # ===================================================================
+# Category 6b: KeywordSearchTool Schema Validation (Issue #3 fix)
+# ===================================================================
+#
+# Before the fix, CrewAI's auto-schema builder used only __annotations__
+# from _run(), ignoring Python default values. Pydantic then treated
+# `top_k: int` as required, causing 4+ wasted LLM retry calls per workflow.
+# These tests pin the correct schema behaviour so a regression is caught.
+
+class TestKeywordSearchToolSchema:
+
+    def _schema(self):
+        from src.backend.crew_ai.optimization.keyword_search_tool import KeywordSearchToolSchema
+        return KeywordSearchToolSchema
+
+    def test_top_k_optional_when_omitted(self):
+        """Omitting top_k must not raise — this was the exact failing call."""
+        instance = self._schema()(query="click a button")
+        assert instance.top_k == 3
+
+    def test_top_k_default_is_3(self):
+        """Default value must be 3, matching the _run signature."""
+        assert self._schema().model_fields["top_k"].default == 3
+
+    def test_explicit_top_k_accepted(self):
+        """An explicit top_k value must override the default."""
+        instance = self._schema()(query="find element", top_k=10)
+        assert instance.top_k == 10
+
+    def test_query_is_required(self):
+        """query must remain required — omitting it must raise ValidationError."""
+        with pytest.raises(Exception):
+            self._schema()(top_k=5)
+
+    def test_tool_uses_explicit_schema(self):
+        """Tool.args_schema must be KeywordSearchToolSchema, not the auto-generated placeholder."""
+        from unittest.mock import MagicMock
+        from src.backend.crew_ai.optimization.keyword_search_tool import (
+            KeywordSearchTool,
+            KeywordSearchToolSchema,
+        )
+        tool = KeywordSearchTool(library_name="Browser", vector_store=MagicMock())
+        assert tool.args_schema is KeywordSearchToolSchema
+
+    def test_field_descriptions_populated(self):
+        """Both fields must have non-None descriptions visible to the LLM."""
+        fields = self._schema().model_fields
+        assert fields["query"].description is not None
+        assert fields["top_k"].description is not None
+        assert "default" in fields["top_k"].description.lower()
+
+
+# ===================================================================
 # Category 7: Thread-Safe Circuit Breaker Tests
 # ===================================================================
 

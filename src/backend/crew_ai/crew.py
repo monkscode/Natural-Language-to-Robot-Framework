@@ -106,6 +106,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     # Local models need prefix added (e.g., "llama3" -> "ollama/llama3")
     token_model = model_name if model_provider != "local" else f"ollama/{model_name}"
     
+    hint_metadata = {}
+
     if settings.OPTIMIZATION_ENABLED:
         try:
             logger.info("🚀 Optimization system enabled - initializing components")
@@ -303,7 +305,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         if optimization_metrics:
             logger.info("📊 Optimization metrics collected")
         
-        return result, crew, optimization_metrics
+        return result, crew, optimization_metrics, hint_metadata
 
     except Exception as e:
         error_msg = str(e)

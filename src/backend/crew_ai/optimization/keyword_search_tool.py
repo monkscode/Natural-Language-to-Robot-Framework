@@ -9,11 +9,17 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Type
+from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 from .chroma_store import KeywordVectorStore
 
 logger = logging.getLogger(__name__)
+
+
+class KeywordSearchToolSchema(BaseModel):
+    query: str = Field(..., description="Keyword name or action description to search for")
+    top_k: int = Field(default=3, description="Number of results to return (default: 3)")
 
 
 class KeywordSearchTool(BaseTool):
@@ -37,7 +43,9 @@ Example usage:
 - To find input keywords: "type text into field"
 - To find wait keywords: "wait for element to be visible"
 """
-    
+
+    args_schema: Type[BaseModel] = KeywordSearchToolSchema
+
     # Use Pydantic's PrivateAttr for internal state
     _library_name: str
     _vector_store: KeywordVectorStore

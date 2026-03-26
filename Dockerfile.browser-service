@@ -10,11 +10,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     flask \
     playwright \
-    browser-service
-
-# Install Playwright Chromium (required by browser-use library)
-# browser-use needs Playwright's browser, can't use system Chrome
-RUN playwright install chromium
+    browser-service && \
+    playwright install chromium && \
+    chmod -R 755 /opt/playwright-browsers
 
 # Copy application source code
 COPY src/ /app/src/

@@ -7,9 +7,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Docker
-.dockerignore
-
 # Logs
 *.log
 logs/audit

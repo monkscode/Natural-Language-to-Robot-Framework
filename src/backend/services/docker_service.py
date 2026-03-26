@@ -3,6 +3,7 @@ import re
 import docker
 import logging
 import traceback
+import requests as _requests
 import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from typing import Any
@@ -13,6 +14,8 @@ IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-latest')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
+# Maximum seconds to wait for a test container to finish (default: 30 minutes)
+TEST_EXECUTION_TIMEOUT = int(os.getenv('TEST_EXECUTION_TIMEOUT', '1800'))
 
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
@@ -298,10 +301,23 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         # Wait for container to finish
         logging.info(
             f"⏳ DOCKER SERVICE: Waiting for container {container_name} to finish execution")
-        result = container.wait()
-        exit_code = result['StatusCode']
-        logging.info(
-            f"🏁 DOCKER SERVICE: Container {container_name} finished with exit code: {exit_code}")
+        try:
+            result = container.wait(timeout=TEST_EXECUTION_TIMEOUT)
+            exit_code = result['StatusCode']
+            logging.info(
+                f"🏁 DOCKER SERVICE: Container {container_name} finished with exit code: {exit_code}")
+        except _requests.exceptions.ReadTimeout:
+            logging.error(
+                f"❌ DOCKER SERVICE: Container {container_name} timed out after {TEST_EXECUTION_TIMEOUT}s. Killing it.")
+            try:
+                container._container.stop(timeout=10)
+                container._container.remove(force=True)
+            except Exception as cleanup_err:
+                logging.warning(f"Cleanup after timeout failed: {cleanup_err}")
+            raise RuntimeError(
+                f"Test execution timed out after {TEST_EXECUTION_TIMEOUT // 60} minutes. "
+                "The test may have an infinite loop or unresponsive browser. Container has been stopped."
+            )
 
         container_startup_logs = ""
         try:
