@@ -22,17 +22,27 @@ class TestGetLlm:
             MockCleanedLLMWrapper.assert_called_once_with(
                 api_key="test-key",
                 model="gemini-2.5-flash",
-                num_retries=3
+                num_retries=3,
+                is_litellm=True
             )
 
-    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedOllamaLLMWrapper")
-    def test_local_returns_ollama_wrapper(self, MockCleanedOllamaLLMWrapper):
-        """Local provider creates CleanedOllamaLLMWrapper."""
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_local_returns_ollama_wrapper(self, MockCleanedLLMWrapper):
+        """Local provider creates CleanedLLMWrapper with ollama/ prefix and default base URL."""
+        import os
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
 
-        llm = get_llm(model_provider="local", model_name="llama3")
-        assert llm == MockCleanedOllamaLLMWrapper.return_value
-        MockCleanedOllamaLLMWrapper.assert_called_once_with(model="llama3")
+        # Remove OLLAMA_API_BASE so the default "http://localhost:11434" is used
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop("OLLAMA_API_BASE", None)
+            llm = get_llm(model_provider="local", model_name="llama3")
+            assert llm == MockCleanedLLMWrapper.return_value
+            MockCleanedLLMWrapper.assert_called_once_with(
+                model="ollama/llama3",
+                base_url="http://localhost:11434",
+                is_litellm=True,
+                num_retries=3,
+            )
 
     @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
     def test_uses_env_api_key(self, MockCleanedLLMWrapper):
@@ -45,5 +55,6 @@ class TestGetLlm:
             MockCleanedLLMWrapper.assert_called_once_with(
                 api_key="env-key-123",
                 model="gemini-2.5-flash",
-                num_retries=3
+                num_retries=3,
+                is_litellm=True
             )
