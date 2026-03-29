@@ -225,7 +225,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
       provider factory entirely — no provider SDK needs to be installed)
     - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'
     - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
-    - Retries on rate-limit errors (online models) using API-provided retryDelay
+    - Retries on transient API errors via LiteLLM (num_retries=3)
     - Tracks all responses via formatting_monitor
 
     Args:
@@ -256,8 +256,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             base_url=ollama_base_url,
             is_litellm=True,  # No routing effect — __new__ override bypasses LLM.__new__
                               # entirely. Kept for documentation clarity only.
-            num_retries=0,    # CleanedLLMWrapper.call() manages retries; Ollama has
-                              # no rate limits so the handler stays dormant.
+            num_retries=3,    # LiteLLM internal retry for transient API errors.
         )
 
     # Online provider (Gemini and future API-based models).
@@ -267,7 +266,6 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     return CleanedLLMWrapper(
         api_key=api_key or os.getenv("GEMINI_API_KEY"),
         model=model_name,
-        num_retries=0,    # Disable LiteLLM's internal retry — CleanedLLMWrapper.call()
-                          # handles 429s using the API-provided retryDelay value.
+        num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
         is_litellm=True,
     )
