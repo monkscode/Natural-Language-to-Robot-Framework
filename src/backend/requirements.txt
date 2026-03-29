@@ -6,7 +6,6 @@ pydantic-settings
 sse-starlette
 aiohttp
 requests
-pytest
 # Configuration
 python-dotenv
 PyYAML
