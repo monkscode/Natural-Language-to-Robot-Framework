@@ -30,82 +30,17 @@ NOTE ON DOUBLE BaseLLM.__init__:
     Do not remove the __new__ call to "fix" this.
 
 RATE LIMITING:
-    Dynamic retry using API-provided retryDelay values (Gemini Free Tier).
-    Ollama has no rate limits; the retry handler is harmlessly dormant for
-    local models.
+    Handled automatically by LiteLLM (used internally by CrewAI).
 """
 
 import logging
-import time
 import os
-import re
 from typing import Optional
 from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
 
 from .llm_output_cleaner import LLMOutputCleaner, formatting_monitor
 
 logger = logging.getLogger(__name__)
-
-
-class DynamicRateLimitHandler:
-    """
-    Dynamic rate limit handler that respects API-provided retry delays.
-
-    Instead of using hardcoded intervals, this handler:
-    1. Attempts the API call
-    2. If 429 error occurs, extracts retryDelay from the error response
-    3. Waits the specified time and retries
-
-    Configuration via environment variables:
-    - DISABLE_RATE_LIMIT: Set to "true" to disable retry handling entirely
-    - LLM_MAX_RETRIES: Maximum retry attempts (default: 3)
-    """
-
-    @staticmethod
-    def extract_retry_delay(error_message: str) -> Optional[float]:
-        """
-        Extract retryDelay from API error message.
-
-        Looks for patterns like:
-        - "retryDelay": "50s"
-        - "Please retry in 42.284326757s"
-        """
-        # Pattern 1: "retryDelay": "50s"
-        match = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)\s*s?"', error_message)
-        if match:
-            return float(match.group(1))
-
-        # Pattern 2: Please retry in Xs
-        match = re.search(r'retry in (\d+(?:\.\d+)?)\s*s', error_message, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
-
-        return None
-
-    @staticmethod
-    def is_rate_limit_error(exception) -> bool:
-        """Check if exception is a rate limit (429) error."""
-        status_candidates = [
-            getattr(exception, 'status_code', None),
-            getattr(exception, 'status', None),
-            getattr(exception, 'http_status', None),
-            getattr(exception, 'code', None),
-        ]
-        for status in status_candidates:
-            try:
-                if status is not None and int(status) == 429:
-                    return True
-            except (TypeError, ValueError):
-                continue
-
-        error_str = str(exception).lower()
-        patterns = [
-            r'\b429\b',
-            r'\brate[- ]limit(?:ed|ing)?\b',
-            r'\bquota exceeded\b',
-            r'\btoo many requests\b',
-        ]
-        return any(re.search(pattern, error_str) for pattern in patterns)
 
 
 class CleanedLLMWrapper(LLM):
@@ -131,7 +66,7 @@ class CleanedLLMWrapper(LLM):
     - 'Action: tool_name` extra text' → 'Action: tool_name'
     - 'Action Input: prefix {...}' → 'Action Input: {...}'
 
-    Rate limiting is handled here (not by LiteLLM) using API-provided delays.
+    Rate limiting is handled automatically by LiteLLM (used internally by CrewAI).
     """
 
     def __new__(cls, model: str, **kwargs):
@@ -256,60 +191,13 @@ class CleanedLLMWrapper(LLM):
         )
         return result
 
-    def call(self, messages, *args, **kwargs):
+    def call(self, messages, *args, **kwargs) -> str:
         """
-        Override call() for rate limit retry AND output cleaning.
+        Override call() for output cleaning.
 
         CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
         _generate() is a LangChain concept and is never called by CrewAI, so all
         cleaning must happen here.
-        """
-        # Check if rate limit handling is disabled
-        if os.getenv("DISABLE_RATE_LIMIT", "").lower() == "true":
-            return self._call_and_clean(messages, *args, **kwargs)
-
-        max_retries_raw = os.getenv("LLM_MAX_RETRIES", "3")
-        try:
-            max_retries = int(max_retries_raw)
-            if max_retries < 0:
-                raise ValueError("negative retry value")
-            max_retries = min(max_retries, 10)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"Invalid LLM_MAX_RETRIES='{max_retries_raw}', using default 3"
-            )
-            max_retries = 3
-
-        for attempt in range(max_retries + 1):
-            try:
-                return self._call_and_clean(messages, *args, **kwargs)
-            except Exception as e:
-                if not DynamicRateLimitHandler.is_rate_limit_error(e):
-                    raise  # Re-raise non-rate-limit errors
-
-                if attempt >= max_retries:
-                    logger.error(f"❌ Rate limit: Max retries ({max_retries}) exceeded")
-                    raise
-
-                # Extract retry delay from error
-                error_str = str(e)
-                retry_delay = DynamicRateLimitHandler.extract_retry_delay(error_str)
-
-                if retry_delay is None:
-                    # Default fallback if we can't parse the delay
-                    retry_delay = 60.0
-                    logger.warning(f"⚠️ Could not parse retryDelay, using default {retry_delay}s")
-
-                logger.info(f"⏱️ Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
-                           f"Waiting {retry_delay:.1f}s as specified by API...")
-                time.sleep(retry_delay)
-
-    def _call_and_clean(self, messages, *args, **kwargs) -> str:
-        """
-        Call the parent LLM and apply Action/ActionInput cleaning to the string result.
-
-        Separated from call() so that all return paths — including the
-        DISABLE_RATE_LIMIT early exit — go through the same cleaning logic.
         """
         result = super().call(messages, *args, **kwargs)
         if not isinstance(result, str):
