@@ -15,6 +15,26 @@ import pytest
 from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 
 
+@pytest.fixture(scope="session", autouse=True)
+def enable_optimization_for_tests():
+    """Force OPTIMIZATION_ENABLED=True for the entire optimization test suite.
+
+    In CI (GitHub Actions) no .env file is present, so OPTIMIZATION_ENABLED
+    defaults to False.  Every optimization test expects the learning system to
+    be active, so we patch the live settings object here instead of requiring
+    each test to patch it individually.
+
+    Scope is 'session' so the patch is applied once and remains for all tests
+    in this package.  The original value is restored when the session ends.
+    """
+    from src.backend.core.config import settings
+
+    original = settings.OPTIMIZATION_ENABLED
+    settings.OPTIMIZATION_ENABLED = True
+    yield
+    settings.OPTIMIZATION_ENABLED = original
+
+
 @pytest.fixture
 def in_memory_db():
     """Create a fresh in-memory SQLite database with schema applied.
