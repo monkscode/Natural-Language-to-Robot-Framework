@@ -227,7 +227,11 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
 
         try:
             import chromadb
-            self._chroma_client = chromadb.PersistentClient(path=self._chroma_dir)
+            from chromadb.config import Settings as ChromaSettings
+            self._chroma_client = chromadb.PersistentClient(
+                path=self._chroma_dir,
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
             self._execution_collection = self._chroma_client.get_or_create_collection(
                 name="execution_embeddings",
                 metadata={"hnsw:space": "cosine"},

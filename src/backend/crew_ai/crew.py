@@ -2,12 +2,58 @@ from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
 from src.backend.crew_ai.tasks import RobotTasks
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from datetime import datetime
+import os
 import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+# CrewAI log file path and rotation settings
+CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
+CREWAI_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB per file
+CREWAI_LOG_BACKUP_COUNT = 9              # 9 backups = 450MB max
+
+
+def _rotate_crewai_log():
+    """Rotate crewai.log.txt if it exceeds the size limit.
+
+    CrewAI's output_log_file appends .txt to any path not ending in .json or .txt,
+    so "logs/crewai.log" becomes "logs/crewai.log.txt". CREWAI_LOG_FILE reflects
+    the actual filename CrewAI creates. We handle rotation manually before each
+    crew.kickoff() call since CrewAI's FileHandler has no rotation support.
+
+    Rotation scheme: crewai.log.txt -> crewai.log.txt.1 -> ... -> crewai.log.txt.9
+    """
+    if not os.path.exists(CREWAI_LOG_FILE):
+        return
+
+    file_size = os.path.getsize(CREWAI_LOG_FILE)
+    if file_size < CREWAI_LOG_MAX_BYTES:
+        return
+
+    logger.info(
+        f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
+        f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
+    )
+
+    # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
+    for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
+        src = f"{CREWAI_LOG_FILE}.{i}"
+        dst = f"{CREWAI_LOG_FILE}.{i + 1}"
+        if os.path.exists(src):
+            if os.path.exists(dst):
+                os.remove(dst)
+            os.rename(src, dst)
+
+    # Current log -> .1
+    backup_path = f"{CREWAI_LOG_FILE}.1"
+    if os.path.exists(backup_path):
+        os.remove(backup_path)
+    os.rename(CREWAI_LOG_FILE, backup_path)
+    logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
 
 
 def extract_url_from_query(query: str) -> str:
@@ -62,8 +108,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         workflow_id: Unique workflow identifier for metrics tracking
 
     Architecture Note:
-    - Rate limiting was removed during Phase 2 of codebase cleanup. Direct LLM calls
-      are now used without wrappers as Google Gemini API has sufficient rate limits.
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
     - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
     - Optimization system (pattern learning, ChromaDB) can be enabled via OPTIMIZATION_ENABLED config.
@@ -121,6 +165,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             # Get learning db_conn from FeedbackLoop singleton (shared connection)
             # Must be initialized BEFORE QueryPatternMatcher and SmartKeywordProvider
             learning_db_conn = None
+            feedback_loop = None
             try:
                 from src.backend.crew_ai.optimization.learning_registry import (
                     get_feedback_loop,
@@ -135,28 +180,47 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 logger.warning(f"⚠️ Learning DB init failed: {e}")
                 logger.warning("   Learning hints will be disabled")
 
-            # Initialize ChromaDB vector store
-            vector_store = KeywordVectorStore(
-                persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+            # Initialize ChromaDB vector store and pattern matcher.
+            # FeedbackLoop.__init__() already created its own KeywordVectorStore
+            # and QueryPatternMatcher internally (feedback_loop.py lines 555-574).
+            # Reuse those instances when available to avoid opening a second
+            # PersistentClient on ./chroma_db, which loads the ONNX embedding
+            # model a second time and risks SQLite write-lock contention.
+            _fl_pattern_learner = (
+                getattr(feedback_loop, "pattern_learner", None)
+                if feedback_loop is not None else None
             )
-            
-            # Ensure collection is ready (auto-rebuild if version mismatch)
+            _fl_chroma_store = (
+                getattr(_fl_pattern_learner, "chroma_store", None)
+                if _fl_pattern_learner is not None else None
+            )
+
+            if _fl_chroma_store is not None:
+                vector_store = _fl_chroma_store
+                pattern_matcher = _fl_pattern_learner
+                logger.info(
+                    "✅ Reusing FeedbackLoop's ChromaDB client and pattern matcher "
+                    "(avoids double ONNX model load)"
+                )
+            else:
+                vector_store = KeywordVectorStore(
+                    persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+                )
+                pattern_matcher = QueryPatternMatcher(
+                    chroma_store=vector_store
+                )
+
+            # Ensure keyword collection is ready (auto-rebuild if version mismatch).
+            # Called regardless of whether we reused FeedbackLoop's store — the
+            # FeedbackLoop never calls ensure_collection_ready itself.
             vector_store.ensure_collection_ready(library_context.library_name)
-            
-            # Initialize pattern matcher (with ChromaDB for query embeddings)
-            pattern_matcher = QueryPatternMatcher(
-                db_conn=learning_db_conn,
-                chroma_store=vector_store  # Pass ChromaDB store for query embeddings
-            )
             
             # Initialize context pruner if enabled
             context_pruner = None
             if settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED:
                 try:
                     logger.info("🔍 Initializing context pruner...")
-                    context_pruner = ContextPruner(
-                        persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
-                    )
+                    context_pruner = ContextPruner()
                     logger.info("✅ Context pruner initialized")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to initialize context pruner: {e}")
@@ -223,9 +287,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                     baseline=baseline_context_tokens,
                     optimized=optimized_context_tokens
                 )
+                pct = optimization_metrics.context_reduction['reduction_percentage']
+                direction = "reduction" if pct >= 0 else "increase"
                 logger.info(
-                    f"📊 Context reduction (assembler): {baseline_context_tokens} -> {optimized_context_tokens} tokens "
-                    f"({optimization_metrics.context_reduction['reduction_percentage']:.1f}% reduction)"
+                    f"📊 Context change (assembler): {baseline_context_tokens} -> {optimized_context_tokens} tokens "
+                    f"({abs(pct):.1f}% {direction})"
                 )
             
             # Get keyword search tool
@@ -274,6 +340,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     assemble_code = tasks.assemble_code_task(code_assembler_agent)
     validate_code = tasks.validate_code_task(code_validator_agent, code_assembler_agent)
 
+    # Rotate crewai.log if it exceeds size limit (before creating the Crew)
+    _rotate_crewai_log()
+
+    step_callback, task_callback = get_crew_callbacks()
+
     # Create and run the crew
     crew = Crew(
         agents=[step_planner_agent, element_identifier_agent,
@@ -281,6 +352,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         tasks=[plan_steps, identify_elements, assemble_code, validate_code],
         process=Process.sequential,
         verbose=True,
+        output_log_file=CREWAI_LOG_FILE,
+        step_callback=step_callback,
+        task_callback=task_callback,
         embedder=None,  # Disable automatic knowledge/embedding system
     )
 
@@ -294,6 +368,10 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         result = crew.kickoff()
         logger.info("✅ CrewAI workflow completed successfully")
         logger.info(f"🏁 Crew execution finished - delegation cycle complete")
+        # formatting_monitor is the authoritative call count: incremented once per
+        # CleanedLLMWrapper.call() invocation. Compare against "Raw CrewAI usage metrics"
+        # in workflow_service.py — that figure is N_agents × real_calls due to CrewAI
+        # summing the shared LLM instance once per agent in calculate_usage_metrics().
         logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
         
         # NOTE: Pattern learning is NOT done here!

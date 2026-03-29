@@ -11,9 +11,8 @@ Steps:
 3. Verify data integrity (tables, indexes, WAL mode)
 4. Report status
 
-Note: As of schema v4, keyword_stats (previously in separate pattern_learning.db)
-is consolidated into execution_memory.db. QueryPatternMatcher now uses a shared
-db_conn instead of its own database file.
+Note: QueryPatternMatcher uses ChromaDB (query_patterns collection) for pattern storage.
+execution_memory.db holds all other learning tables via SchemaManager.
 """
 
 import sqlite3
@@ -77,12 +76,11 @@ def verify_integrity() -> bool:
     if not ok:
         all_passed = False
 
-    # Check 3: Expected tables (all 10 tables from schema v1-v4)
+    # Check 3: Expected tables
     expected_tables = {
         "execution_records", "intent_patterns", "structural_rules",
         "keyword_corrections", "anti_patterns", "learning_stats",
         "schema_version", "nl_feedback_corrections", "learning_metrics",
-        "keyword_stats",
     }
     tables = set(SchemaManager.get_table_names(conn))
     missing = expected_tables - tables

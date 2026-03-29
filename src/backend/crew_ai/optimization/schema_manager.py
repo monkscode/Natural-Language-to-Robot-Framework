@@ -232,18 +232,6 @@ SCHEMA_MIGRATIONS = {
             "ON structural_rules(score DESC, evidence_count DESC)",
         ],
     },
-    4: {
-        "description": "Consolidate keyword_stats from pattern_learning.db",
-        "sql": [
-            """
-            CREATE TABLE IF NOT EXISTS keyword_stats (
-                keyword_name TEXT PRIMARY KEY,
-                usage_count INTEGER DEFAULT 1,
-                last_used TEXT NOT NULL
-            )
-            """,
-        ],
-    },
     5: {
         # Remediation: learning_metrics was added to v1's SQL list after v1
         # had already been applied to existing databases.  SchemaManager

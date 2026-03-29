@@ -368,11 +368,16 @@ Use this tool whenever you need to find the right keyword for an action.
 
         if self.pruning_enabled and user_query:
             try:
-                # Classify query into categories
-                relevant_categories = self.context_pruner.classify_query(
-                    user_query,
-                    confidence_threshold=self.pruning_threshold
-                )
+                # Derive relevant categories directly from predicted keywords via
+                # reverse-lookup against KEYWORD_CATEGORIES. The predicted keywords
+                # ARE the result of pattern learning, so their own categories are
+                # the correct ones to use for pruning.
+                relevant_categories = [
+                    cat for cat, cat_kws in self.context_pruner.KEYWORD_CATEGORIES.items()
+                    if any(kw in predicted_keywords for kw in cat_kws)
+                ]
+                if not relevant_categories:
+                    relevant_categories = list(self.context_pruner.KEYWORD_CATEGORIES.keys())
 
                 # Create keyword dicts for pruning
                 keyword_dicts = [{'name': kw} for kw in keywords_to_fetch]
@@ -506,7 +511,6 @@ Use keyword_search tool if you need additional keywords.
                     self.metrics.track_pattern_learning(
                         predicted=True,
                         keyword_count=len(predicted_keywords),
-                        accuracy=0.0  # Accuracy will be calculated after execution
                     )
 
                 try:
@@ -521,7 +525,6 @@ Use keyword_search tool if you need additional keywords.
                     self.metrics.track_pattern_learning(
                         predicted=False,
                         keyword_count=0,
-                        accuracy=0.0
                     )
         except Exception as e:
             logger.warning(f"Pattern learning failed: {e}, falling back to zero-context")
@@ -531,7 +534,6 @@ Use keyword_search tool if you need additional keywords.
                 self.metrics.track_pattern_learning(
                     predicted=False,
                     keyword_count=0,
-                    accuracy=0.0
                 )
 
         # Tier 2 Fallback: Zero-context + tool instructions
@@ -594,16 +596,3 @@ Use keyword_search tool if you need additional keywords.
             metrics=self.metrics
         )
 
-    def learn_from_execution(self, user_query: str, generated_code: str):
-        """
-        Learn from successful execution.
-
-        Args:
-            user_query: Original user query
-            generated_code: Successfully generated Robot Framework code
-        """
-        try:
-            self.pattern_matcher.learn_from_execution(user_query, generated_code)
-            logger.info(f"Learned pattern from query: {user_query[:50]}...")
-        except Exception as e:
-            logger.error(f"Failed to learn from execution: {e}")

@@ -2,7 +2,6 @@ import logging
 from crewai import Agent
 from crewai.llm import LLM
 # from crewai_tools import ScrapeElementFromWebsiteTool  # DEPRECATED - use batch tool instead
-from langchain_ollama import OllamaLLM
 
 # Import browser_use_tool from tools package
 # Note: Path setup is handled by tools/__init__.py automatically

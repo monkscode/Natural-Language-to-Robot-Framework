@@ -365,7 +365,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     }
                     
                     logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                    
+                    # NOTE: successful_requests above is inflated — CrewAI's
+                    # calculate_usage_metrics() adds the shared LLM's _token_usage once per
+                    # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
+                    # which reads formatting_monitor — incremented exactly once per
+                    # CleanedLLMWrapper.call() invocation.
+
                 except Exception as e:
                     logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
                     # Fallback to empty metrics
@@ -439,11 +444,22 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
                 )
                 
-                # 4. Record unified metrics
+                # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
+                # search stats, pattern predictions) — these are tracked inside crew.py
+                # but stored in a separate object that was previously dropped here.
+                if optimization_metrics is not None:
+                    if optimization_metrics.context_reduction:
+                        unified_metrics.context_reduction = optimization_metrics.context_reduction
+                    if optimization_metrics.keyword_search_stats:
+                        unified_metrics.keyword_search_stats = optimization_metrics.keyword_search_stats
+                    if optimization_metrics.pattern_learning_stats:
+                        unified_metrics.pattern_learning_stats = optimization_metrics.pattern_learning_stats
+
+                # 5. Record unified metrics
                 collector = get_workflow_metrics_collector()
                 collector.record_workflow(unified_metrics)
                 
-                # 5. Cleanup temp file
+                # 6. Cleanup temp file
                 temp_storage.delete_temp_file(workflow_id)
                 
                 logging.info(f"✅ Unified metrics recorded successfully")

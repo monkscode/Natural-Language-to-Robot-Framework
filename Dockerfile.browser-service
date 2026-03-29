@@ -10,6 +10,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     flask \
+    gunicorn \
     playwright \
     browser-service && \
     playwright install chromium && \
@@ -35,5 +36,16 @@ EXPOSE 4999
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import os,sys,urllib.parse,urllib.request; u=urllib.parse.urlparse(os.getenv('BROWSER_USE_SERVICE_URL','http://localhost:4999')); p=u.port or 4999; url=f'http://localhost:{p}/health'; sys.exit(0 if urllib.request.urlopen(url, timeout=5).getcode()==200 else 1)"
 
-# Run browser service
-CMD ["python", "tools/browser_use_service.py"]
+# Run browser service with Gunicorn (production WSGI server)
+# --workers 1: single worker — browser sessions use shared TaskProcessor state
+# --threads 4: handle health checks + active task + polling concurrently
+# --timeout 300: allow 5-minute browser automation tasks without timing out
+# --graceful-timeout 30: drain in-flight requests on SIGTERM before shutdown
+CMD ["gunicorn", \
+     "--bind", "0.0.0.0:4999", \
+     "--workers", "1", \
+     "--threads", "4", \
+     "--timeout", "300", \
+     "--graceful-timeout", "30", \
+     "--log-level", "info", \
+     "tools.browser_use_service:app"]

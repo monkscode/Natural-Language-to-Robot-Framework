@@ -100,7 +100,6 @@ class KeywordVectorStore:
             logger.error(f"Failed to create/get collection '{collection_name}': {e}")
             raise
 
-    
     def add_keywords(self, library_name: str, keywords: List[Dict]) -> None:
         """
         Add keywords to ChromaDB collection.

@@ -48,7 +48,6 @@ class TestSchemaManager:
             "execution_records", "intent_patterns", "structural_rules",
             "keyword_corrections", "anti_patterns", "learning_stats",
             "schema_version", "nl_feedback_corrections", "learning_metrics",
-            "keyword_stats",
         }
         tables = set(SchemaManager.get_table_names(in_memory_db))
         assert expected_tables == tables, (

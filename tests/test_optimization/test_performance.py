@@ -623,65 +623,6 @@ def test_concurrent_engine_learns(tmp_db_path):
     assert count == 15, f"Expected 15 records from 5 concurrent users, got {count}"
 
 
-@pytest.mark.performance
-def test_concurrent_keyword_stats_writes(tmp_db_path):
-    """5 threads writing to keyword_stats concurrently — UPSERT handles conflicts.
-
-    Tests the consolidated keyword_stats table under concurrent access,
-    ensuring ON CONFLICT DO UPDATE works correctly without deadlocks.
-    """
-    conn = sqlite3.connect(tmp_db_path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    SchemaManager.ensure_current(conn)
-    conn.close()
-
-    errors = []
-
-    def writer(thread_id):
-        try:
-            tc = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            tc.execute("PRAGMA journal_mode=WAL")
-            tc.execute("PRAGMA busy_timeout=5000")
-
-            keywords = ["Click Element", "Get Text", "Input Text",
-                         f"Custom Keyword {thread_id}"]
-            ts = datetime.now().isoformat()
-
-            for kw in keywords:
-                tc.execute("""
-                    INSERT INTO keyword_stats (keyword_name, usage_count, last_used)
-                    VALUES (?, 1, ?)
-                    ON CONFLICT(keyword_name) DO UPDATE SET
-                        usage_count = usage_count + 1,
-                        last_used = ?
-                """, (kw, ts, ts))
-                tc.commit()
-
-            tc.close()
-        except Exception as e:
-            errors.append(f"Thread {thread_id}: {e}")
-
-    threads = [threading.Thread(target=writer, args=(t,)) for t in range(5)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
-
-    assert len(errors) == 0, f"Concurrent keyword_stats errors: {errors}"
-
-    # Verify shared keywords were correctly aggregated
-    verify_conn = sqlite3.connect(tmp_db_path)
-    row = verify_conn.execute(
-        "SELECT usage_count FROM keyword_stats WHERE keyword_name = 'Click Element'"
-    ).fetchone()
-    verify_conn.close()
-
-    assert row is not None, "Click Element should be in keyword_stats"
-    assert row[0] == 5, (
-        f"Expected usage_count=5 for 'Click Element' (5 threads), got {row[0]}"
-    )
-
 
 # ===================================================================
 # Category 6: LRU Cache Tests (KeywordSearchTool)

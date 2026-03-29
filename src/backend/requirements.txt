@@ -16,13 +16,16 @@ docker
 
 # CrewAI (without tools - we don't use crewai_tools)
 crewai==1.8.1
-litellm
+# crewai==1.8.1 targets litellm~=1.74.9 (its own litellm extra) and requires
+# openai~=1.83.0. litellm>=1.81.x bumped openai to 2.x, making it incompatible.
+# 1.74.15.post2 is the latest 1.74.x patch: openai>=1.68.2 (no conflict),
+# cold_storage_handler not yet present (apscheduler error cannot occur).
+litellm==1.74.15.post2
 
 # LLM Providers
-langchain-google-genai
-langchain_community
-langchain-ollama
-ollama
 
 # ChromaDB for semantic keyword search (uses default ONNX embedding - no pytorch needed)
 chromadb
+# Pin PostHog to version compatible with ChromaDB 1.1.1 (requires posthog>=2.4.0,<6.0.0)
+# PostHog 7.x breaks chromadb's telemetry capture() call signature
+posthog>=2.4.0,<6.0.0

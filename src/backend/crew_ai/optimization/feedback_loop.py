@@ -552,7 +552,7 @@ class FeedbackLoop:
             )
             self.anti_pattern_engine = AntiPatternEngine(db_conn)
 
-        # Pattern learner — keyword-to-query association (ChromaDB + shared SQLite)
+        # Pattern learner — keyword-to-query association (ChromaDB only)
         if pattern_learner is not None:
             self.pattern_learner = pattern_learner
         else:
@@ -565,7 +565,6 @@ class FeedbackLoop:
                     persist_directory=app_settings.OPTIMIZATION_CHROMA_DB_PATH,
                 )
                 self.pattern_learner = QueryPatternMatcher(
-                    db_conn=db_conn,
                     chroma_store=chroma_store,
                 )
             except Exception as e:

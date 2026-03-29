@@ -5,8 +5,8 @@ This module implements a pattern learning system that learns which keywords
 are commonly used for specific query types and predicts relevant keywords
 for new queries based on similarity to past queries.
 
-Uses ChromaDB for semantic similarity search (efficient) and SQLite for usage statistics.
-The keyword_stats table lives in the shared execution_memory.db (managed by SchemaManager).
+Uses ChromaDB for semantic similarity search — stores (user_query → keywords) patterns
+from every successful execution and queries them at generation time.
 """
 
 import re
@@ -14,27 +14,26 @@ import json
 import uuid
 import logging
 from datetime import datetime
-from typing import List, Dict
+from typing import List
 
 logger = logging.getLogger(__name__)
 
 
 class QueryPatternMatcher:
     """
-    Learn and predict keyword usage patterns using ChromaDB for embeddings and SQLite for statistics.
-    Uses ChromaDB for semantic similarity search (efficient) and shared db_conn for usage tracking.
+    Learn and predict keyword usage patterns using ChromaDB for semantic similarity.
+
+    Stores (user_query → keywords) patterns from successful executions and
+    queries them at generation time to predict relevant keywords for new queries.
     """
 
-    def __init__(self, db_conn=None, chroma_store=None):
+    def __init__(self, chroma_store=None):
         """
-        Initialize with shared SQLite connection and ChromaDB store.
+        Initialize with ChromaDB store for query pattern embeddings.
 
         Args:
-            db_conn: sqlite3.Connection (shared from ExecutionMemory).
-                     The keyword_stats table is managed by SchemaManager v4.
             chroma_store: KeywordVectorStore instance (for query embeddings)
         """
-        self.db_conn = db_conn
         self.chroma_store = chroma_store
 
         # Get or create ChromaDB collection for query patterns
@@ -44,7 +43,7 @@ class QueryPatternMatcher:
             logger.warning("No ChromaDB store provided, pattern learning will be limited")
             self.pattern_collection = None
 
-        logger.info("QueryPatternMatcher initialized (shared db_conn)")
+        logger.info("QueryPatternMatcher initialized")
 
     def _extract_keywords_from_code(self, code: str) -> List[str]:
         """
@@ -115,47 +114,33 @@ class QueryPatternMatcher:
 
     def learn_from_execution(self, user_query: str, generated_code: str):
         """
-        Extract keywords from generated code and store pattern in ChromaDB + SQLite.
+        Extract keywords from generated code and store pattern in ChromaDB.
 
         Args:
             user_query: Original user query
-            generated_code: Successfully generated Robot Framework code
+            generated_code: Successfully generated Robot Framework code (passed tests only)
         """
         try:
-            # Extract keywords used in code
             used_keywords = self._extract_keywords_from_code(generated_code)
 
             if not used_keywords:
                 logger.warning("No keywords extracted from code, skipping pattern learning")
                 return
 
-            timestamp = datetime.now().isoformat()
-
-            # Store pattern in ChromaDB (for semantic search)
             if self.pattern_collection:
                 pattern_id = f"pattern_{uuid.uuid4().hex}"
-                self.pattern_collection.add(
-                    documents=[user_query],
-                    ids=[pattern_id],
-                    metadatas=[{
-                        "keywords": json.dumps(used_keywords),
-                        "timestamp": timestamp
-                    }]
-                )
-                logger.debug(f"Stored pattern in ChromaDB: {pattern_id}")
-
-            # Update keyword statistics in shared SQLite connection
-            if self.db_conn is not None:
-                for keyword in used_keywords:
-                    self.db_conn.execute("""
-                        INSERT INTO keyword_stats (keyword_name, usage_count, last_used)
-                        VALUES (?, 1, ?)
-                        ON CONFLICT(keyword_name) DO UPDATE SET
-                            usage_count = usage_count + 1,
-                            last_used = ?
-                    """, (keyword, timestamp, timestamp))
-
-                self.db_conn.commit()
+                try:
+                    self.pattern_collection.add(
+                        documents=[user_query],
+                        ids=[pattern_id],
+                        metadatas=[{
+                            "keywords": json.dumps(used_keywords),
+                            "timestamp": datetime.now().isoformat()
+                        }]
+                    )
+                    logger.debug(f"Stored pattern in ChromaDB: {pattern_id}")
+                except Exception as chroma_e:
+                    logger.warning(f"Failed to store pattern in ChromaDB: {chroma_e}")
 
             logger.info(f"Learned pattern: query='{user_query[:50]}...', keywords={used_keywords}")
 
@@ -178,15 +163,18 @@ class QueryPatternMatcher:
                 logger.debug("No ChromaDB pattern collection available")
                 return []
 
-            # Search for similar patterns in ChromaDB
+            # Guard: ChromaDB raises if n_results > collection size
+            count = self.pattern_collection.count()
+            if count == 0:
+                logger.debug("No patterns in ChromaDB yet")
+                return []
+
             results = self.pattern_collection.query(
                 query_texts=[user_query],
-                n_results=5  # Get top 5 similar patterns
+                n_results=min(5, count)
             )
 
-            # Check if we have results
             if not results['ids'][0]:
-                logger.debug("No patterns in ChromaDB yet")
                 return []
 
             # Check confidence (ChromaDB returns distances, lower is better)
@@ -225,51 +213,3 @@ class QueryPatternMatcher:
             return []
 
 
-    def get_keyword_stats(self) -> Dict[str, Dict]:
-        """
-        Get statistics about keyword usage.
-
-        Returns:
-            Dictionary mapping keyword names to usage statistics
-        """
-        try:
-            if self.db_conn is None:
-                return {}
-
-            rows = self.db_conn.execute("""
-                SELECT keyword_name, usage_count, last_used
-                FROM keyword_stats
-                ORDER BY usage_count DESC
-            """).fetchall()
-
-            stats = {}
-            for row in rows:
-                stats[row[0]] = {
-                    "usage_count": row[1],
-                    "last_used": row[2],
-                }
-
-            return stats
-
-        except Exception as e:
-            logger.error(f"Failed to get keyword stats: {e}", exc_info=True)
-            return {}
-
-    def get_pattern_count(self) -> int:
-        """
-        Get the number of patterns stored in ChromaDB.
-
-        Returns:
-            Number of patterns
-        """
-        try:
-            if not self.pattern_collection:
-                return 0
-
-            # Get count from ChromaDB collection
-            count = self.pattern_collection.count()
-            return count
-
-        except Exception as e:
-            logger.error(f"Failed to get pattern count: {e}", exc_info=True)
-            return 0
