@@ -637,7 +637,8 @@ class FeedbackLoop:
             attempt_number: Which attempt number this is (1-based).
             hint_tokens: Total tokens used by injected hints.
         """
-        if not self.circuit_breaker.is_enabled():
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED or not self.circuit_breaker.is_enabled():
             return
 
         try:

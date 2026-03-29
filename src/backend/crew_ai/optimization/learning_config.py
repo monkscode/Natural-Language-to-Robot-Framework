@@ -19,7 +19,6 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict
-from src.backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +131,11 @@ class LearningCircuitBreaker:
                  If it succeeds → CLOSED (counters reset).
                  If it fails → OPEN (timer restarts).
 
-    Also checks OPTIMIZATION_ENABLED master switch from config.py.
+    Does NOT check OPTIMIZATION_ENABLED master switch directly (handled at call site).
 
     Usage in every engine:
-        if not circuit_breaker.is_enabled():
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED or not circuit_breaker.is_enabled():
             return  # Skip learning, pipeline continues normally
     """
 
@@ -165,15 +165,11 @@ class LearningCircuitBreaker:
         """Check if learning system is enabled.
 
         Returns False if:
-        - Master switch (OPTIMIZATION_ENABLED) is off
         - Circuit breaker is OPEN and recovery timeout hasn't elapsed
         Returns True if:
         - Circuit breaker is CLOSED
         - Circuit breaker is HALF_OPEN (allows one probe request)
         """
-        if not settings.OPTIMIZATION_ENABLED:
-            return False
-
         with self._lock:
             if self._state == self.CLOSED:
                 # Check if we should trip open
@@ -267,7 +263,7 @@ class LearningCircuitBreaker:
             total = self._total_calls
             errors = self._error_count
             state = self._state
-        is_open = not settings.OPTIMIZATION_ENABLED or state != self.CLOSED
+        is_open = state != self.CLOSED
         return {
             "total_calls": total,
             "error_count": errors,
