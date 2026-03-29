@@ -1,0 +1,133 @@
+# FastAPI Application Dockerfile - Multi-Stage Build
+# Stage 1: Libdoc Builder - Generate Robot Framework library documentation
+# Stage 2: Builder - Install runtime dependencies
+# Stage 3: Runtime - Minimal runtime environment
+
+# ============================================================================
+# STAGE 1: Libdoc Builder - Generate library documentation
+# ============================================================================
+FROM python:3.12-slim AS libdoc-builder
+
+WORKDIR /build
+
+# Install Node.js 20.x for Browser library initialization
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    bash && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh && \
+    bash /tmp/nodesource_setup.sh && \
+    rm -f /tmp/nodesource_setup.sh && \
+    apt-get install -y nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install minimal build dependencies for robotframework
+RUN pip install --no-cache-dir uv
+
+# Install Robot Framework libraries (needed for libdoc generation)
+# These will NOT be in the final image - we only extract the JSON docs
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-cache \
+    robotframework \
+    robotframework-seleniumlibrary \
+    robotframework-browser
+
+# Initialize Browser library (requires Node.js)
+RUN rfbrowser init --skip-browsers
+
+# Copy libdoc generation script
+COPY tools/generate_libdocs.py /build/generate_libdocs.py
+
+# Generate library documentation as JSON (SeleniumLibrary, BuiltIn, and Browser)
+RUN mkdir -p /build/libdocs && \
+    python /build/generate_libdocs.py /build/libdocs && \
+    test -n "$(ls -1 /build/libdocs/*.json 2>/dev/null)"
+
+# ============================================================================
+# STAGE 2: Builder - Install runtime dependencies
+# ============================================================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install UV package manager
+RUN pip install --no-cache-dir uv
+
+# Install build dependencies (gcc, g++ needed for compiling Python packages)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY src/backend/requirements.txt /build/requirements.txt
+
+# Install all Python dependencies to /build/install
+# ChromaDB will use its default ONNX-based embedding function (no pytorch needed)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --prefix=/build/install --no-cache -r /build/requirements.txt
+
+# ============================================================================
+# STAGE 3: Runtime
+# ============================================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PATH="/usr/local/bin:$PATH"
+
+# Install runtime dependencies:
+#   curl            — healthcheck
+#   ca-certificates — HTTPS
+#   gosu            — privilege de-escalation in entrypoint (same pattern as official postgres/redis images)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    gosu && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
+
+# Copy installed Python packages from builder stage
+COPY --from=builder /build/install /usr/local
+
+# Copy pre-generated library documentation from libdoc-builder stage
+COPY --from=libdoc-builder /build/libdocs /app/libdocs
+
+# Copy application source code
+COPY src/ /app/src/
+COPY tools/ /app/tools/
+
+# Create necessary directories and non-root user
+RUN mkdir -p /app/robot_tests /app/logs /app/chroma_db /app/data && \
+    groupadd -g 1000 appuser && \
+    useradd -m -u 1000 -g 1000 appuser && \
+    chown -R appuser:appuser /app
+
+# Copy entrypoint script (handles Docker socket permissions at runtime,
+# then drops to appuser via gosu — works on Linux, macOS, and Windows)
+COPY scripts/fastapi-entrypoint.sh /usr/local/bin/fastapi-entrypoint.sh
+RUN chmod +x /usr/local/bin/fastapi-entrypoint.sh
+
+# Expose FastAPI port
+EXPOSE 5000
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Entrypoint runs as root briefly to fix Docker socket permissions,
+# then drops to appuser before executing the CMD
+ENTRYPOINT ["fastapi-entrypoint.sh"]
+CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "5000"]

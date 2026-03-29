@@ -1,0 +1,102 @@
+"""
+Unit tests for WorkflowMetricsModels — Pydantic models for metrics.
+"""
+
+import pytest
+from datetime import datetime
+
+
+class TestWorkflowMetricsModel:
+    """Tests for the WorkflowMetrics Pydantic model."""
+
+    def _get_model(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        return WorkflowMetrics
+
+    def _get_valid_data(self):
+        return {
+            "workflow_id": "wf-001",
+            "url": "https://example.com",
+            "total_llm_calls": 0,
+            "total_cost": 0.0,
+            "execution_time": 1.5,
+            "timestamp": datetime.now()
+        }
+
+    def test_construction_with_required_fields(self):
+        """Model constructs with required fields."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        m = Model(**data)
+        assert m.workflow_id == "wf-001"
+
+    def test_default_dicts_are_independent(self):
+        """Default mutable fields (dicts) are independent across instances."""
+        Model = self._get_model()
+        m1 = Model(**self._get_valid_data())
+        m2 = Model(**self._get_valid_data())
+        # Mutating one shouldn't affect the other
+        if hasattr(m1, 'token_usage'):
+            assert m1.token_usage is not m2.token_usage
+
+    def test_to_dict(self):
+        """to_dict returns serializable dictionary."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-to-dict"
+        m = Model(**data)
+        d = m.to_dict()
+        assert isinstance(d, dict)
+        assert d["workflow_id"] == "wf-to-dict"
+
+    def test_from_dict(self):
+        """from_dict reconstructs model from dictionary."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-from-dict"
+        data["total_input_tokens"] = 500  # Obsolete field to be ignored
+        # Convert datetime to string for from_dict as it would come from JSON
+        data["timestamp"] = data["timestamp"].isoformat()
+        
+        m = Model.from_dict(data)
+        assert m.workflow_id == "wf-from-dict"
+
+    def test_timestamp_string_accepted(self):
+        """Timestamp as ISO string is accepted."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-ts"
+        data["timestamp"] = "2026-03-12T10:00:00"
+        m = Model(**data)
+        assert m.timestamp is not None
+
+    def test_timestamp_datetime_accepted(self):
+        """Timestamp as datetime object is accepted."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-dt"
+        m = Model(**data)
+        assert m.timestamp is not None
+
+    def test_track_token_usage(self):
+        """track_token_usage updates running totals."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-tokens"
+        m = Model(**data)
+        if hasattr(m, 'track_token_usage'):
+            m.track_token_usage(agent_name="step_planner", token_count=100)
+            assert m.token_usage["step_planner"] >= 100
+            assert m.token_usage["total"] >= 100
+
+    def test_response_conversion(self):
+        """Model can be converted for API response."""
+        Model = self._get_model()
+        data = self._get_valid_data()
+        data["workflow_id"] = "wf-resp"
+        m = Model(**data)
+        d = m.to_dict()
+        # Should be JSON-serializable
+        import json
+        json_str = json.dumps(d, default=str)
+        assert "wf-resp" in json_str

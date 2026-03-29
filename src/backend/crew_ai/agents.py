@@ -1,6 +1,6 @@
 import logging
 from crewai import Agent
-from crewai_tools import SeleniumScrapingTool, ScrapeElementFromWebsiteTool
+# from crewai_tools import ScrapeElementFromWebsiteTool  # DEPRECATED - use batch tool instead
 
 # Import browser_use_tool from tools package
 # Note: Path setup is handled by tools/__init__.py automatically
@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize the tools
 # Note: These are tool instances, not classes. CrewAI requires instantiated tools.
-selenium_tool = SeleniumScrapingTool()
-scrape_tool = ScrapeElementFromWebsiteTool()
+# scrape_tool = ScrapeElementFromWebsiteTool()  # DEPRECATED - use batch tool instead 
 # Primary tool: Batch processing for multiple elements with full context
 batch_browser_use_tool = BatchBrowserUseTool()
 

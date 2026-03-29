@@ -792,6 +792,9 @@ document.addEventListener('DOMContentLoaded', () => {
         generationLogsSection.style.display = 'none';
         executionLogsSection.style.display = 'none';
 
+        // Reset feedback panel
+        hideFeedbackPanel();
+
         updateUI();
     }
 
@@ -1320,6 +1323,9 @@ document.addEventListener('DOMContentLoaded', () => {
             currentState = UIState.IDLE;
             updateUI();
             updateLogSectionsVisibility();
+            // Show feedback panel (only when user query exists)
+            const testPassed = statusBadge.textContent.toLowerCase().includes('passed');
+            showFeedbackPanel(testPassed ? 'passed' : 'failed');
             // Auto-scroll to execution logs to show the results
             setTimeout(() => {
                 executionLogsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1338,7 +1344,173 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Copy code button handler
+    // -----------------------------------------------------------------
+    // Feedback Panel Logic (DAY_08)
+    // -----------------------------------------------------------------
+
+    const feedbackPanel = document.getElementById('feedback-panel');
+    const feedbackPass = document.getElementById('feedback-pass');
+    const feedbackPassLink = document.getElementById('feedback-pass-link');
+    const feedbackPassDetail = document.getElementById('feedback-pass-detail');
+    const feedbackPassText = document.getElementById('feedback-pass-text');
+    const feedbackFail = document.getElementById('feedback-fail');
+    const feedbackTextArea = document.getElementById('feedback-text');
+    const feedbackCharCount = document.getElementById('feedback-char-count');
+    const feedbackThanks = document.getElementById('feedback-thanks');
+    const btnSubmitFeedback = document.getElementById('btn-submit-feedback');
+    const btnSkipFeedback = document.getElementById('btn-skip-feedback');
+    const btnSubmitPassFeedback = document.getElementById('btn-submit-pass-feedback');
+    const btnCancelPassFeedback = document.getElementById('btn-cancel-pass-feedback');
+
+    /**
+     * Show the feedback panel after test execution.
+     * Context-adaptive: pass → subtle link, fail → prominent card.
+     * Guard: only shown when currentUserQuery exists (no paste-and-execute).
+     */
+    function showFeedbackPanel(testStatus) {
+        if (!currentUserQuery || !currentUserQuery.trim()) {
+            return; // No feedback for paste-and-execute
+        }
+        if (!feedbackPanel) return;
+
+        hideFeedbackPanel();
+        feedbackPanel.style.display = 'block';
+
+        if (testStatus === 'passed') {
+            feedbackPass.style.display = 'flex';
+        } else {
+            feedbackFail.style.display = 'block';
+        }
+    }
+
+    /**
+     * Hide and reset all feedback panel states.
+     */
+    function hideFeedbackPanel() {
+        if (!feedbackPanel) return;
+        feedbackPanel.style.display = 'none';
+        if (feedbackPass) feedbackPass.style.display = 'none';
+        if (feedbackPassDetail) feedbackPassDetail.style.display = 'none';
+        if (feedbackFail) feedbackFail.style.display = 'none';
+        if (feedbackThanks) feedbackThanks.style.display = 'none';
+        // Reset textarea
+        if (feedbackTextArea) feedbackTextArea.value = '';
+        if (feedbackPassText) feedbackPassText.value = '';
+        if (feedbackCharCount) feedbackCharCount.textContent = '0';
+        // Reset buttons
+        if (btnSubmitFeedback) {
+            btnSubmitFeedback.disabled = false;
+            btnSubmitFeedback.classList.remove('success');
+            btnSubmitFeedback.textContent = '🚀 Submit Feedback';
+        }
+        if (btnSubmitPassFeedback) {
+            btnSubmitPassFeedback.disabled = false;
+            btnSubmitPassFeedback.classList.remove('success');
+            btnSubmitPassFeedback.textContent = 'Submit';
+        }
+    }
+
+    /**
+     * Submit feedback to the backend API.
+     */
+    async function submitFeedback(feedbackType, feedbackText, submitBtn) {
+        const wfId = currentWorkflowId || 'unknown';
+
+        // Disable button and show loading
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submitting...';
+        }
+
+        try {
+            const response = await fetch('/api/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    workflow_id: wfId,
+                    feedback_text: feedbackText,
+                    feedback_type: feedbackType,
+                }),
+            });
+
+            const result = await response.json();
+            console.log('[Feedback] Response:', result);
+
+            // Show success state
+            if (submitBtn) {
+                submitBtn.classList.add('success');
+                submitBtn.textContent = '✅ Sent!';
+            }
+
+            // Transition to thanks after short delay
+            setTimeout(() => {
+                if (feedbackPass) feedbackPass.style.display = 'none';
+                if (feedbackPassDetail) feedbackPassDetail.style.display = 'none';
+                if (feedbackFail) feedbackFail.style.display = 'none';
+                if (feedbackThanks) feedbackThanks.style.display = 'block';
+            }, 600);
+
+        } catch (err) {
+            console.error('[Feedback] Error:', err);
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '❌ Retry';
+            }
+        }
+    }
+
+    // --- Feedback event listeners ---
+
+    // Fail state: Submit feedback
+    if (btnSubmitFeedback) {
+        btnSubmitFeedback.addEventListener('click', () => {
+            const text = feedbackTextArea ? feedbackTextArea.value.trim() : '';
+            submitFeedback('completely_wrong', text, btnSubmitFeedback);
+        });
+    }
+
+    // Fail state: Skip feedback
+    if (btnSkipFeedback) {
+        btnSkipFeedback.addEventListener('click', () => {
+            // Auto-record as completely_wrong with no text
+            submitFeedback('completely_wrong', '', null);
+            if (feedbackFail) feedbackFail.style.display = 'none';
+            if (feedbackThanks) feedbackThanks.style.display = 'block';
+        });
+    }
+
+    // Pass state: "Something not right?" link
+    if (feedbackPassLink) {
+        feedbackPassLink.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (feedbackPassDetail) feedbackPassDetail.style.display = 'block';
+        });
+    }
+
+    // Pass detail: Submit feedback
+    if (btnSubmitPassFeedback) {
+        btnSubmitPassFeedback.addEventListener('click', () => {
+            const text = feedbackPassText ? feedbackPassText.value.trim() : '';
+            submitFeedback('close_enough', text, btnSubmitPassFeedback);
+        });
+    }
+
+    // Pass detail: Cancel
+    if (btnCancelPassFeedback) {
+        btnCancelPassFeedback.addEventListener('click', () => {
+            if (feedbackPassDetail) feedbackPassDetail.style.display = 'none';
+        });
+    }
+
+    // Character counter for feedback textarea
+    if (feedbackTextArea) {
+        feedbackTextArea.addEventListener('input', () => {
+            if (feedbackCharCount) {
+                feedbackCharCount.textContent = feedbackTextArea.value.length;
+            }
+        });
+    }
+
     copyCodeBtn.addEventListener('click', async () => {
         const code = getCodeContent();
         try {

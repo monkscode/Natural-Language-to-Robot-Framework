@@ -8,11 +8,18 @@ to find relevant keywords on-demand without having all keywords in context.
 import json
 import logging
 import time
-from typing import Optional
+from collections import OrderedDict
+from typing import Optional, Type
+from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 from .chroma_store import KeywordVectorStore
 
 logger = logging.getLogger(__name__)
+
+
+class KeywordSearchToolSchema(BaseModel):
+    query: str = Field(..., description="Keyword name or action description to search for")
+    top_k: int = Field(default=3, description="Number of results to return (default: 3)")
 
 
 class KeywordSearchTool(BaseTool):
@@ -36,11 +43,13 @@ Example usage:
 - To find input keywords: "type text into field"
 - To find wait keywords: "wait for element to be visible"
 """
-    
+
+    args_schema: Type[BaseModel] = KeywordSearchToolSchema
+
     # Use Pydantic's PrivateAttr for internal state
     _library_name: str
     _vector_store: KeywordVectorStore
-    _cache: dict
+    _cache: OrderedDict
     _metrics: Optional[object]
     
     def __init__(self, library_name: str, vector_store: KeywordVectorStore, metrics: Optional[object] = None):
@@ -55,7 +64,7 @@ Example usage:
         super().__init__()
         object.__setattr__(self, '_library_name', library_name)
         object.__setattr__(self, '_vector_store', vector_store)
-        object.__setattr__(self, '_cache', {})
+        object.__setattr__(self, '_cache', OrderedDict())
         object.__setattr__(self, '_metrics', metrics)
     
     def _run(self, query: str, top_k: int = 3) -> str:
@@ -75,6 +84,7 @@ Example usage:
         # Check cache
         cache_key = f"{query}:{top_k}"
         if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)
             logger.debug(f"Cache hit for query: {query}")
             return self._cache[cache_key]
         
@@ -114,8 +124,8 @@ Example usage:
             
             # Cache result (limit cache size to 100 entries)
             if len(self._cache) >= 100:
-                # Remove oldest entry (simple FIFO)
-                self._cache.pop(next(iter(self._cache)))
+                # Evict least-recently-used entry
+                self._cache.popitem(last=False)
             self._cache[cache_key] = result_json
             
             # Track metrics if available

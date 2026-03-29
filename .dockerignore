@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+.cursor/
+.claude/
+.kiro/
+.codex/
+.agents/
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+logs/
+bus.log
+run.log
+cleanup_worker.log
+run_all_working.log
+browser_use_service_all_working.log
+
+# Runtime data (generated at runtime, not needed for build)
+chroma_db/
+data/
+robot_tests/
+
+# Node
+node_modules/
+coverage/
+
+# Docker
+docker-compose.yml
+.env*
+!src/backend/.env.example
+
+# Docs (not needed in image)
+docs/
+tasks/
+tests/
+pytest.ini
+*.md
+!README.md
+
+# Misc
+.github/

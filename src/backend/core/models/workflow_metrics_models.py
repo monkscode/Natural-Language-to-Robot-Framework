@@ -52,29 +52,18 @@ class BrowserUseElementMetrics(BaseModel):
 # Optimization Metrics Models
 # ============================================================================
 
-class TokenUsageStats(BaseModel):
-    """Per-agent token usage tracking."""
-    step_planner: int = 0
-    element_identifier: int = 0
-    code_assembler: int = 0
-    code_validator: int = 0
-    total: int = 0
-
-
 class KeywordSearchStats(BaseModel):
     """Keyword search performance metrics."""
     calls: int = 0
     total_latency_ms: float = 0.0
     avg_latency_ms: float = 0.0
     returned_keywords: List[str] = Field(default_factory=list)
-    accuracy: float = 0.0
 
 
 class PatternLearningStats(BaseModel):
     """Pattern learning metrics."""
     prediction_used: bool = False
     predicted_keywords_count: int = 0
-    prediction_accuracy: float = 0.0
 
 
 class ContextReductionStats(BaseModel):
@@ -86,7 +75,6 @@ class ContextReductionStats(BaseModel):
 
 class OptimizationMetrics(BaseModel):
     """Combined optimization metrics."""
-    token_usage: Optional[TokenUsageStats] = None
     keyword_search: Optional[KeywordSearchStats] = None
     pattern_learning: Optional[PatternLearningStats] = None
     context_reduction: Optional[ContextReductionStats] = None
@@ -141,7 +129,6 @@ class WorkflowMetrics(WorkflowMetricsBase):
     timestamp: datetime
     
     # Optimization metrics
-    token_usage: Optional[Dict[str, int]] = None
     keyword_search_stats: Optional[Dict[str, Any]] = None
     pattern_learning_stats: Optional[Dict[str, Any]] = None
     context_reduction: Optional[Dict[str, Any]] = None
@@ -156,29 +143,18 @@ class WorkflowMetrics(WorkflowMetricsBase):
     
     def model_post_init(self, __context):
         """Initialize default values for optimization metrics."""
-        if self.token_usage is None:
-            self.token_usage = {
-                "step_planner": 0,
-                "element_identifier": 0,
-                "code_assembler": 0,
-                "code_validator": 0,
-                "total": 0
-            }
-        
         if self.keyword_search_stats is None:
             self.keyword_search_stats = {
                 "calls": 0,
                 "total_latency_ms": 0.0,
                 "avg_latency_ms": 0.0,
                 "returned_keywords": [],
-                "accuracy": 0.0
             }
         
         if self.pattern_learning_stats is None:
             self.pattern_learning_stats = {
                 "prediction_used": False,
                 "predicted_keywords_count": 0,
-                "prediction_accuracy": 0.0
             }
         
         if self.context_reduction is None:
@@ -195,7 +171,6 @@ class WorkflowMetrics(WorkflowMetricsBase):
         
         # Add optimization metrics section for storage format
         data['optimization'] = {
-            'token_usage': self.token_usage,
             'keyword_search': self.keyword_search_stats,
             'pattern_learning': self.pattern_learning_stats,
             'context_reduction': self.context_reduction
@@ -238,7 +213,6 @@ class WorkflowMetrics(WorkflowMetricsBase):
         # Handle optimization metrics from storage format
         if 'optimization' in data:
             opt = data.pop('optimization')
-            data.setdefault('token_usage', opt.get('token_usage'))
             data.setdefault('keyword_search_stats', opt.get('keyword_search'))
             data.setdefault('pattern_learning_stats', opt.get('pattern_learning'))
             data.setdefault('context_reduction', opt.get('context_reduction'))
@@ -246,12 +220,6 @@ class WorkflowMetrics(WorkflowMetricsBase):
         return cls.model_validate(data)
     
     # Tracking methods
-    def track_token_usage(self, agent_name: str, token_count: int) -> None:
-        """Track token usage per agent."""
-        if agent_name in self.token_usage:
-            self.token_usage[agent_name] += token_count
-            self.token_usage["total"] += token_count
-    
     def track_keyword_search(self, latency_ms: float, returned_keywords: List[str]) -> None:
         """Track keyword search performance."""
         self.keyword_search_stats["calls"] += 1
@@ -262,11 +230,10 @@ class WorkflowMetrics(WorkflowMetricsBase):
         )
         self.keyword_search_stats["returned_keywords"].extend(returned_keywords)
     
-    def track_pattern_learning(self, predicted: bool, keyword_count: int, accuracy: float = 0.0) -> None:
+    def track_pattern_learning(self, predicted: bool, keyword_count: int) -> None:
         """Track pattern learning usage."""
         self.pattern_learning_stats["prediction_used"] = predicted
         self.pattern_learning_stats["predicted_keywords_count"] = keyword_count
-        self.pattern_learning_stats["prediction_accuracy"] = accuracy
     
     def track_context_reduction(self, baseline: int, optimized: int) -> None:
         """Track context reduction metrics."""
@@ -352,7 +319,6 @@ __all__ = [
     'WorkflowMetricsBase',
     
     # Optimization metrics
-    'TokenUsageStats',
     'KeywordSearchStats',
     'PatternLearningStats',
     'ContextReductionStats',

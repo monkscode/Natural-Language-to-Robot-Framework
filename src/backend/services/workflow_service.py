@@ -18,13 +18,70 @@ from src.backend.core.workflow_metrics import (
     WorkflowMetrics,
     calculate_crewai_cost
 )
+from src.backend.core.config import settings
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    encoding="utf-8"
-)
+# ---------------------------------------------------------------------------
+# Learning System — import singleton from registry
+# ---------------------------------------------------------------------------
+
+from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+
+# Hint metadata cache — bridges generation phase (crew.py) and execution phase
+# (_process_learning). Keyed by workflow_id, consumed via .pop() in _process_learning().
+_hint_metadata_cache: Dict[str, dict] = {}
+
+
+def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
+    """Feed execution results into the adaptive learning system.
+
+    Non-blocking: failures are logged and swallowed so the main
+    pipeline is never affected.
+
+    Guard: skips learning when user_query is empty (paste-and-execute).
+    Empty queries pollute ChromaDB embeddings and break SQLite
+    deduplication — garbage in, garbage out.
+    """
+    try:
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is None:
+            return
+
+        # Guard: skip learning when no user query (paste-and-execute)
+        if not user_query or not user_query.strip():
+            logging.info(
+                "⏭️ Skipping learning for %s — no user query "
+                "(paste-and-execute mode)", run_id,
+            )
+            return
+
+        test_status = result.get('test_status', 'unknown')
+        output_xml_path = result.get('output_xml_path')
+        exit_code = result.get('exit_code')
+        url = extract_url_from_query(user_query) if user_query else None
+
+        # Retrieve and consume hint metadata stored during generation phase
+        hint_meta = _hint_metadata_cache.pop(run_id, {})
+        total_hints = sum(d.get("count", 0) for d in hint_meta.values())
+        all_sources = []
+        for d in hint_meta.values():
+            all_sources.extend(d.get("sources", []))
+
+        feedback_loop.process_execution(
+            workflow_id=run_id,
+            user_query=user_query or "",
+            url=url or "",
+            robot_code=robot_code,
+            test_status=test_status,
+            output_xml_path=output_xml_path,
+            metrics=None,  # execution-only mode — no LLM metrics
+            hints_available=total_hints,
+            hints_injected=total_hints,
+            hint_sources=all_sources,
+        )
+        logging.info(f"✅ Learning system processed execution {run_id}")
+    except Exception as e:
+        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
@@ -78,8 +135,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         
         # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
         # User sees progress messages above while this runs
-        validation_output, crew_with_results, optimization_metrics = run_crew(
+        validation_output, crew_with_results, optimization_metrics, hint_metadata = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
+
+        # Store hint metadata for the execution phase to consume
+        if hint_metadata:
+            _hint_metadata_cache[workflow_id] = hint_metadata
         
         # Stage 3: Generating (50-75%)
         yield {"status": "running", "message": f"{EMOJI['code']} Generating test code...", "progress": 60}
@@ -304,7 +365,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     }
                     
                     logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                    
+                    # NOTE: successful_requests above is inflated — CrewAI's
+                    # calculate_usage_metrics() adds the shared LLM's _token_usage once per
+                    # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
+                    # which reads formatting_monitor — incremented exactly once per
+                    # CleanedLLMWrapper.call() invocation.
+
                 except Exception as e:
                     logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
                     # Fallback to empty metrics
@@ -378,11 +444,22 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
                 )
                 
-                # 4. Record unified metrics
+                # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
+                # search stats, pattern predictions) — these are tracked inside crew.py
+                # but stored in a separate object that was previously dropped here.
+                if optimization_metrics is not None:
+                    if optimization_metrics.context_reduction:
+                        unified_metrics.context_reduction = optimization_metrics.context_reduction
+                    if optimization_metrics.keyword_search_stats:
+                        unified_metrics.keyword_search_stats = optimization_metrics.keyword_search_stats
+                    if optimization_metrics.pattern_learning_stats:
+                        unified_metrics.pattern_learning_stats = optimization_metrics.pattern_learning_stats
+
+                # 5. Record unified metrics
                 collector = get_workflow_metrics_collector()
                 collector.record_workflow(unified_metrics)
                 
-                # 5. Cleanup temp file
+                # 6. Cleanup temp file
                 temp_storage.delete_temp_file(workflow_id)
                 
                 logging.info(f"✅ Unified metrics recorded successfully")
@@ -448,50 +525,6 @@ def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, m
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
         queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
-
-
-def _learn_from_successful_test(user_query: str, robot_code: str, test_status: str) -> None:
-    """
-    Learn from a successful test execution for pattern optimization.
-    
-    Args:
-        user_query: Original user query (None if not provided)
-        robot_code: Generated robot code
-        test_status: Test execution status
-    """
-    if test_status != 'passed':
-        logging.info(f"⏭️  Skipping pattern learning - test status: {test_status}")
-        return
-    
-    if not user_query:
-        logging.info("⏭️  Test PASSED but skipping pattern learning - no user query provided")
-        return
-    
-    try:
-        from src.backend.core.config import settings
-        if not settings.OPTIMIZATION_ENABLED:
-            return
-            
-        from src.backend.crew_ai.optimization import SmartKeywordProvider, QueryPatternMatcher, KeywordVectorStore
-        from src.backend.crew_ai.library_context import get_library_context
-        
-        logging.info("📚 Test PASSED - Learning from successful execution...")
-        
-        # Initialize components
-        library_context = get_library_context(settings.ROBOT_LIBRARY)
-        chroma_store = KeywordVectorStore(persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH)
-        pattern_matcher = QueryPatternMatcher(db_path=settings.OPTIMIZATION_PATTERN_DB_PATH, chroma_store=chroma_store)
-        smart_provider = SmartKeywordProvider(
-            library_context=library_context,
-            pattern_matcher=pattern_matcher,
-            vector_store=chroma_store
-        )
-        
-        # Learn from the successful execution
-        smart_provider.learn_from_execution(user_query, robot_code)
-        logging.info("✅ Pattern learning completed - learned from PASSED test")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to learn from execution: {e}")
 
 
 async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
@@ -588,9 +621,9 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-        
-        # Pattern learning: ONLY learn from PASSED tests
-        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
+
+        # Unified learning: pattern learning (passed only) + adaptive learning (all)
+        _process_learning(run_id, user_query, robot_code, result)
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")
@@ -667,9 +700,9 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         logging.info(f"🚀 Executing test: {test_filename}")
         result = run_test_in_container(client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-        
-        # Pattern learning: ONLY learn from PASSED tests
-        _learn_from_successful_test(user_query, robot_code, result.get('test_status', 'unknown'))
+
+        # Unified learning: pattern learning (passed only) + adaptive learning (all)
+        _process_learning(run_id, user_query, robot_code, result)
 
     except (ConnectionError, RuntimeError, Exception) as e:
         logging.error(f"An error occurred during Docker execution: {e}")

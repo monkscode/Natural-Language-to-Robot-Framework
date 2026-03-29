@@ -1,19 +1,85 @@
 import os
+import re
 import docker
 import logging
 import traceback
+import requests as _requests
 import xml.etree.ElementTree as ET
-from typing import Generator, Dict, Any
+from collections.abc import Generator
+from typing import Any
 
-IMAGE_TAG = "robot-test-runner:latest"
-# Default remote image - can be overridden by REMOTE_DOCKER_IMAGE env var
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:latest')
+# Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
+IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
+# Default remote image - fallback if local image not found
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-latest')
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
-PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'true').lower() == 'true'
+PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
+# Maximum seconds to wait for a test container to finish (default: 30 minutes)
+TEST_EXECUTION_TIMEOUT = int(os.getenv('TEST_EXECUTION_TIMEOUT', '1800'))
 
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
 ROBOT_TESTS_DIR = os.path.join(DOCKERFILE_PATH, 'robot_tests')
+
+# Docker-in-Docker Support: When running inside a Docker container, we need to use
+# the host's absolute path for volume mounts, not the container's internal path.
+# This env var should be set in docker-compose.yml to the host's robot_tests path.
+HOST_ROBOT_TESTS_DIR = os.getenv('HOST_ROBOT_TESTS_DIR', os.path.abspath(ROBOT_TESTS_DIR))
+
+
+def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
+    """
+    Resolve the host path mounted to /app/robot_tests for this FastAPI container.
+
+    This avoids brittle ${PWD} behavior on Windows/Compose by querying Docker
+    for the current container mount source and falling back to env/config only
+    when lookup is unavailable.
+    """
+    candidate_container_refs = [
+        os.getenv('HOSTNAME', '').strip(),
+        os.getenv('CONTAINER_NAME', '').strip(),
+        'nlrf-fastapi'
+    ]
+
+    for container_ref in candidate_container_refs:
+        if not container_ref:
+            continue
+        try:
+            current_container = client.containers.get(container_ref)
+            for mount in current_container.attrs.get('Mounts', []):
+                if mount.get('Destination') == '/app/robot_tests' and mount.get('Source'):
+                    source = mount['Source']
+                    logging.info(
+                        f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect ({container_ref}): {source}")
+                    return source
+        except docker.errors.DockerException as e:
+            logging.warning(
+            f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {type(e).__name__}: {e}")
+
+    logging.info(
+        f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")
+    return HOST_ROBOT_TESTS_DIR
+
+
+def normalize_docker_mount_source(path: str) -> str:
+    """
+    Normalize host path for Docker bind mount source.
+
+    On Docker Desktop (Linux engine), Windows paths like C:\\... need to be
+    converted to /run/desktop/mnt/host/c/... when passed from a Linux container.
+    """
+    if not path:
+        return path
+
+    if os.name != 'nt' and re.match(r'^[A-Za-z]:[\\/]', path):
+        drive = path[0].lower()
+        remainder = path[2:].replace('\\', '/').lstrip('/')
+        normalized = f"/run/desktop/mnt/host/{drive}/{remainder}"
+        logging.info(
+            f"🐳 DOCKER SERVICE: Normalized Windows mount path '{path}' -> '{normalized}'")
+        return normalized
+
+    return path
 
 
 def log_docker_operation(operation: str, details: str = "", level: str = "info"):
@@ -75,7 +141,7 @@ def get_docker_client():
             f"Docker is not available. Please ensure Docker Desktop is installed and running. Details: {e}")
 
 
-def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, None]:
+def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, None]:
     """
     Ensure the Docker image is available for test execution.
     Tries to pull from Docker Hub first, falls back to local build if needed.
@@ -133,7 +199,7 @@ def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, 
             logging.info("🐳 DOCKER_DEBUG: Ensuring DOCKER_BUILDKIT=1 for the build process")
 
             build_logs = client.api.build(
-                path=DOCKERFILE_PATH, tag=IMAGE_TAG, rm=True, decode=True)
+                path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True, decode=True)
             for log in build_logs:
                 if 'stream' in log:
                     log_message = log['stream'].strip()
@@ -150,7 +216,7 @@ def build_image(client: docker.DockerClient) -> Generator[Dict[str, Any], None, 
             raise
 
 
-def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> Dict[str, Any]:
+def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> dict[str, Any]:
     container = None
     logging.info(
         f"🚀 DOCKER SERVICE: Starting test execution for run_id={run_id}, test_filename={test_filename}")
@@ -161,18 +227,44 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         logging.info(
             f"🤖 DOCKER SERVICE: Robot command: {' '.join(robot_command)}")
 
+        host_robot_tests_dir = resolve_host_robot_tests_dir(client)
+        normalized_host_robot_tests_dir = normalize_docker_mount_source(host_robot_tests_dir)
+
+        # Always validate file presence using the FastAPI container-visible path.
+        container_test_file = os.path.join(ROBOT_TESTS_DIR, run_id, test_filename)
+        if not os.path.exists(container_test_file):
+            raise RuntimeError(
+                "Test file not found in FastAPI container robot_tests directory. "
+                f"Expected: {container_test_file}. "
+                "This usually means the test file was not written correctly before Docker execution."
+            )
+
+        host_test_file = os.path.join(normalized_host_robot_tests_dir, run_id, test_filename)
+        if not os.path.exists(host_test_file):
+            if normalized_host_robot_tests_dir.startswith('/run/desktop/mnt/host/'):
+                logging.info(
+                    f"ℹ️  DOCKER SERVICE: Skipping strict host file pre-check for Docker Desktop mount path: {host_test_file}. "
+                    "Container-local check already passed."
+                )
+            else:
+                logging.warning(
+                    f"⚠️  DOCKER SERVICE: Host path pre-check could not verify file existence: {host_test_file}. "
+                    "Continuing anyway because Docker daemon may still resolve this mount source."
+                )
+
         # Container configuration
+        # Docker-in-Docker: Use resolved host path for volume mount
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
-            "volumes": {os.path.abspath(ROBOT_TESTS_DIR): {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            "volumes": {normalized_host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
             "name": f"robot-test-{run_id}"  # Give container a unique name
         }
         logging.info(
-            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id}")
+            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {normalized_host_robot_tests_dir}:/app/robot_tests")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"
@@ -209,10 +301,35 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         # Wait for container to finish
         logging.info(
             f"⏳ DOCKER SERVICE: Waiting for container {container_name} to finish execution")
-        result = container.wait()
-        exit_code = result['StatusCode']
-        logging.info(
-            f"🏁 DOCKER SERVICE: Container {container_name} finished with exit code: {exit_code}")
+        try:
+            result = container.wait(timeout=TEST_EXECUTION_TIMEOUT)
+            exit_code = result['StatusCode']
+            logging.info(
+                f"🏁 DOCKER SERVICE: Container {container_name} finished with exit code: {exit_code}")
+        except _requests.exceptions.ReadTimeout:
+            logging.error(
+                f"❌ DOCKER SERVICE: Container {container_name} timed out after {TEST_EXECUTION_TIMEOUT}s. Killing it.")
+            try:
+                container._container.stop(timeout=10)
+                container._container.remove(force=True)
+            except Exception as cleanup_err:
+                logging.warning(f"Cleanup after timeout failed: {cleanup_err}")
+            raise RuntimeError(
+                f"Test execution timed out after {TEST_EXECUTION_TIMEOUT // 60} minutes. "
+                "The test may have an infinite loop or unresponsive browser. Container has been stopped."
+            )
+
+        container_startup_logs = ""
+        try:
+            # Capture container stdout/stderr before cleanup for system-error diagnosis.
+            raw_logs = client.api.logs(container.id, stdout=True, stderr=True, tail=400)
+            if isinstance(raw_logs, (bytes, bytearray)):
+                container_startup_logs = raw_logs.decode('utf-8', errors='replace').strip()
+            else:
+                container_startup_logs = str(raw_logs).strip()
+        except Exception as e:
+            logging.warning(
+                f"⚠️  DOCKER SERVICE: Could not capture container startup logs: {e}")
 
         # Clean up container immediately after execution to prevent conflicts
         logging.info(
@@ -278,7 +395,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 if tests_passed:
                     message = "Test execution finished: All tests passed."
                     logging.info(f"🎉 DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "test_status": "passed", "result": {
+                    return {"status": "complete", "message": message, "test_status": "passed",
+                            "output_xml_path": output_xml_path,
+                            "exit_code": exit_code,
+                            "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -286,7 +406,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 else:
                     message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                     logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                    return {"status": "complete", "message": message, "test_status": "failed", "result": {
+                    return {"status": "complete", "message": message, "test_status": "failed",
+                            "output_xml_path": output_xml_path,
+                            "exit_code": exit_code,
+                            "result": {
                         'logs': robot_logs,
                         'log_html': f"/reports/{run_id}/log.html",
                         'report_html': f"/reports/{run_id}/report.html"
@@ -307,7 +430,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         if exit_code == 0:
             message = "Test execution finished: All tests passed."
             logging.info(f"✅ DOCKER SERVICE: {message}")
-            return {"status": "complete", "message": message, "test_status": "passed", "result": {
+            return {"status": "complete", "message": message, "test_status": "passed",
+                    "output_xml_path": output_xml_path if os.path.exists(output_xml_path) else None,
+                    "exit_code": exit_code,
+                    "result": {
                 'logs': robot_logs,
                 'log_html': f"/reports/{run_id}/log.html",
                 'report_html': f"/reports/{run_id}/report.html"
@@ -316,7 +442,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             if os.path.exists(log_html_path):
                 message = f"Test execution finished: Some tests failed (exit code {exit_code})."
                 logging.info(f"⚠️  DOCKER SERVICE: {message}")
-                return {"status": "complete", "message": message, "test_status": "failed", "result": {
+                return {"status": "complete", "message": message, "test_status": "failed",
+                        "output_xml_path": output_xml_path if os.path.exists(output_xml_path) else None,
+                        "exit_code": exit_code,
+                        "result": {
                     'logs': robot_logs,
                     'log_html': f"/reports/{run_id}/log.html",
                     'report_html': f"/reports/{run_id}/report.html"
@@ -324,6 +453,9 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             else:
                 error_logs = f"Docker container exited with a system error (exit code {exit_code}).\n"
                 error_logs += "Robot Framework reports were not generated, indicating a problem with the test runner itself.\n\n"
+                if container_startup_logs:
+                    error_logs += "Container stdout/stderr (tail):\n"
+                    error_logs += f"{container_startup_logs}\n\n"
                 error_logs += f"Available Logs:\n{robot_logs}"
                 logging.error(f"❌ DOCKER SERVICE: System error - {error_logs}")
                 raise RuntimeError(error_logs)
@@ -481,7 +613,7 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
     return final_logs
 
 
-def cleanup_test_containers(client: docker.DockerClient) -> Dict[str, Any]:
+def cleanup_test_containers(client: docker.DockerClient) -> dict[str, Any]:
     """Clean up any orphaned test containers."""
     try:
         # Find all containers with robot-test prefix
@@ -513,7 +645,7 @@ def cleanup_test_containers(client: docker.DockerClient) -> Dict[str, Any]:
         }
 
 
-def rebuild_image(client: docker.DockerClient) -> Dict[str, str]:
+def rebuild_image(client: docker.DockerClient) -> dict[str, str]:
     try:
         try:
             client.images.remove(image=IMAGE_TAG, force=True)
@@ -521,7 +653,7 @@ def rebuild_image(client: docker.DockerClient) -> Dict[str, str]:
         except docker.errors.ImageNotFound:
             logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
 
-        client.images.build(path=DOCKERFILE_PATH, tag=IMAGE_TAG, rm=True)
+        client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
         logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
         return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
     except docker.errors.DockerException as e:
@@ -529,7 +661,7 @@ def rebuild_image(client: docker.DockerClient) -> Dict[str, str]:
         raise ConnectionError(f"Docker error: {e}")
 
 
-def get_docker_status(client: docker.DockerClient) -> Dict[str, Any]:
+def get_docker_status(client: docker.DockerClient) -> dict[str, Any]:
     try:
         image = client.images.get(IMAGE_TAG)
         image_info = {

@@ -8,7 +8,6 @@ from .workflow_metrics_models import (
     WorkflowMetricsBase,
     
     # Optimization metrics
-    TokenUsageStats,
     KeywordSearchStats,
     PatternLearningStats,
     ContextReductionStats,
@@ -29,7 +28,6 @@ __all__ = [
     'WorkflowMetricsBase',
     
     # Optimization metrics
-    'TokenUsageStats',
     'KeywordSearchStats',
     'PatternLearningStats',
     'ContextReductionStats',

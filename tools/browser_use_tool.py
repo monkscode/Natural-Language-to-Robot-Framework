@@ -300,6 +300,10 @@ class BatchBrowserUseTool(BaseTool):
         logger.info(f"Polling for batch task {task_id} results...")
         start_time = time.time()
         last_status = None
+        # Local counter for transient network errors (connection refused during cleanup).
+        # Isolated per _run() call — zero shared state, multi-user safe.
+        network_error_retries = 0
+        MAX_NETWORK_RETRIES = 3  # waits: 2s + 4s + 8s = 14s max overhead
 
         while time.time() - start_time < timeout:
             status_response = api_client.query_task_status(task_id)
@@ -423,6 +427,31 @@ class BatchBrowserUseTool(BaseTool):
 
             elif current_status == "error":
                 error_message = status_response.get("message", "Unknown error")
+
+                # Distinguish transient network errors (service crashed/restarting during
+                # browser cleanup) from real task failures.
+                # WinError 10061 = connection refused — the browser_use_service process died
+                # briefly during Chrome kill (proc.kill()) in the finally block.
+                # Fix 1 (workflow.py) stores results before cleanup, so the service recovers
+                # quickly. Retry here to tolerate that brief window.
+                is_network_error = (
+                    "Network error" in error_message
+                    or "connection" in error_message.lower()
+                    or "10061" in error_message
+                    or "refused" in error_message.lower()
+                )
+                if is_network_error and network_error_retries < MAX_NETWORK_RETRIES:
+                    network_error_retries += 1
+                    wait_secs = 2 ** network_error_retries  # 2s, 4s, 8s
+                    logger.warning(
+                        f"⚠️ Transient network error polling task {task_id} "
+                        f"(retry {network_error_retries}/{MAX_NETWORK_RETRIES}, "
+                        f"waiting {wait_secs}s): {error_message}"
+                    )
+                    time.sleep(wait_secs)
+                    continue  # retry the poll
+
+                # Real task failure OR network retries exhausted
                 logger.error(f"Batch task failed: {error_message}")
 
                 # Try to return partial results if available
