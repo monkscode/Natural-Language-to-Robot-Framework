@@ -384,8 +384,8 @@ class TestProcessLearningWiring:
 
 class TestKillSwitch:
 
-    def test_circuit_breaker_disabled(self):
-        """LearningCircuitBreaker.is_enabled() returns False when OPTIMIZATION_ENABLED=False."""
+    def test_circuit_breaker_ignores_feature_flag(self):
+        """LearningCircuitBreaker.is_enabled() only reflects its error state, ignoring OPTIMIZATION_ENABLED."""
         from src.backend.crew_ai.optimization.learning_config import LearningCircuitBreaker
         from src.backend.core.config import settings
 
@@ -393,20 +393,9 @@ class TestKillSwitch:
         original = settings.OPTIMIZATION_ENABLED
         try:
             settings.OPTIMIZATION_ENABLED = False
-            assert cb.is_enabled() is False, "Should be disabled"
-        finally:
-            settings.OPTIMIZATION_ENABLED = original
-
-    def test_circuit_breaker_enabled(self):
-        """LearningCircuitBreaker.is_enabled() returns True when OPTIMIZATION_ENABLED=True."""
-        from src.backend.crew_ai.optimization.learning_config import LearningCircuitBreaker
-        from src.backend.core.config import settings
-
-        cb = LearningCircuitBreaker()
-        original = settings.OPTIMIZATION_ENABLED
-        try:
+            assert cb.is_enabled() is True, "Breaker state is decoupled from feature flag"
             settings.OPTIMIZATION_ENABLED = True
-            assert cb.is_enabled() is True, "Should be enabled"
+            assert cb.is_enabled() is True, "Breaker state remains enabled when valid"
         finally:
             settings.OPTIMIZATION_ENABLED = original
 
