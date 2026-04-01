@@ -1,298 +1,271 @@
 """
-Cleaned LLM Wrapper - Intercepts and cleans LLM responses before CrewAI parsing.
+LLM Wrapper - LLM instantiation with output cleaning for CrewAI agents.
 
-This module provides wrapper classes that intercept LLM responses and clean
-them before CrewAI's parser sees them. This prevents formatting errors from
-breaking the workflow.
+This module provides a single CleanedLLMWrapper that works for all providers:
+- Online models (Gemini): model="gemini/gemini-2.5-flash"
+- Local  models (Ollama): model="ollama/<model_name>"
 
-The wrapper is transparent - it behaves exactly like the original LLM but
-with automatic output cleaning.
+The wrapper intercepts every LLM call via call() to apply Action/ActionInput
+cleaning and rate-limit retry logic, then delegates to LiteLLM for the actual
+API call.
 
-RATE LIMITING: Includes a global rate limiter for Gemini Free Tier (5 RPM).
+WHY CleanedLLMWrapper OVERRIDES __new__:
+    LLM.__new__ is a factory method that, for known providers (gemini, openai,
+    anthropic, azure, bedrock), unconditionally calls _get_native_provider()
+    BEFORE checking is_litellm. _get_native_provider() does a live import of
+    the provider SDK (e.g. google-genai for Gemini). If the SDK is not
+    installed, this raises ImportError immediately — is_litellm is never
+    checked. By overriding __new__ in CleanedLLMWrapper, LLM.__new__ is never
+    called at all: we create the instance via object.__new__ and initialize via
+    BaseLLM.__init__ directly, identical to LLM.__new__'s own LiteLLM fallback
+    path (llm.py lines 404-406). No provider SDK is imported; LiteLLM handles
+    all API communication.
+
+NOTE ON DOUBLE BaseLLM.__init__:
+    BaseLLM.__init__ is called twice per instantiation — once explicitly in
+    __new__ and once via the normal __init__ chain. This is NOT a bug: it
+    exactly mirrors how plain LLM() behaves on its own LiteLLM fallback path.
+    Verified empirically (both LLM() and CleanedLLMWrapper() produce 2 calls).
+    Both calls are idempotent — they set the same fields to the same values.
+    Do not remove the __new__ call to "fix" this.
+
+RATE LIMITING:
+    Handled automatically by LiteLLM (used internally by CrewAI).
 """
 
 import logging
-import time
 import os
-import re
-from threading import Lock
-from typing import Any, Dict, List, Optional
-from crewai.llm import LLM
-from langchain_ollama import OllamaLLM
-from langchain_core.messages import BaseMessage, AIMessage
-from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult, Generation
+from typing import Optional
+from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
 
 from .llm_output_cleaner import LLMOutputCleaner, formatting_monitor
 
 logger = logging.getLogger(__name__)
 
 
-class DynamicRateLimitHandler:
-    """
-    Dynamic rate limit handler that respects API-provided retry delays.
-    
-    Instead of using hardcoded intervals, this handler:
-    1. Attempts the API call
-    2. If 429 error occurs, extracts retryDelay from the error response
-    3. Waits the specified time and retries
-    
-    Configuration via environment variables:
-    - DISABLE_RATE_LIMIT: Set to "true" to disable retry handling entirely
-    - LLM_MAX_RETRIES: Maximum retry attempts (default: 3)
-    """
-    
-    @staticmethod
-    def extract_retry_delay(error_message: str) -> Optional[float]:
-        """
-        Extract retryDelay from API error message.
-        
-        Looks for patterns like:
-        - "retryDelay": "50s"
-        - "Please retry in 42.284326757s"
-        """
-        # Pattern 1: "retryDelay": "50s"
-        match = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)\s*s?"', error_message)
-        if match:
-            return float(match.group(1))
-        
-        # Pattern 2: Please retry in Xs
-        match = re.search(r'retry in (\d+(?:\.\d+)?)\s*s', error_message, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
-        
-        return None
-    
-    @staticmethod
-    def is_rate_limit_error(exception) -> bool:
-        """Check if exception is a rate limit (429) error."""
-        error_str = str(exception).lower()
-        return '429' in error_str or 'rate' in error_str or 'quota' in error_str
-
-
 class CleanedLLMWrapper(LLM):
     """
-    Wrapper around CrewAI's LLM that cleans output before returning.
-    
-    This wrapper:
-    1. Intercepts LLM responses and applies cleaning logic for formatting issues
-    2. Handles rate limit errors dynamically based on API-provided retryDelay
-    
-    No hardcoded rate limits - delays are extracted from actual API responses.
+    Wrapper around CrewAI's LLM that cleans Action/ActionInput lines.
+
+    Uses LiteLLM as the sole transport layer for ALL providers (Gemini, Ollama,
+    OpenAI, Anthropic, etc.). This gives provider independence: switching models
+    requires only an env var change, and no provider-specific SDK is imported
+    into this codebase.
+
+    WHY __new__ IS OVERRIDDEN:
+        LLM.__new__ is a factory method that, for known providers (gemini, openai,
+        anthropic, etc.), attempts to import their native SDK class BEFORE checking
+        is_litellm. For example, for "gemini/..." models it always runs:
+            from crewai.llms.providers.gemini.completion import GeminiCompletion
+        This import raises ImportError if crewai[google-genai] is not installed,
+        crashing before is_litellm is ever checked. Our __new__ override bypasses
+        this entirely — _get_native_provider is never called — so no provider SDK
+        needs to be installed. LiteLLM handles all API communication.
+
+    Specifically fixes:
+    - 'Action: tool_name` extra text' → 'Action: tool_name'
+    - 'Action Input: prefix {...}' → 'Action Input: {...}'
+
+    Rate limiting is handled automatically by LiteLLM (used internally by CrewAI).
     """
-    
+
+    def __new__(cls, model: str, **kwargs):
+        """Bypass LLM.__new__ factory to always use the LiteLLM path.
+
+        Replicates the LiteLLM fallback path from LLM.__new__ directly, without
+        calling _get_native_provider. This prevents any native provider SDK import
+        from being attempted regardless of which model/provider is configured.
+
+        Any is_litellm kwarg from the caller is discarded — we always force True.
+        """
+        kwargs.pop("is_litellm", None)  # caller's value is irrelevant; we always force True
+        instance = object.__new__(cls)
+        # This replicates LLM.__new__'s LiteLLM fallback path exactly (llm.py line 404-406):
+        #   instance = object.__new__(cls)
+        #   super(LLM, instance).__init__(...)   ← BaseLLM.__init__ call #1
+        #   instance.is_litellm = True
+        # BaseLLM.__init__ is then called a second time when Python's normal instantiation
+        # runs CleanedLLMWrapper.__init__ → LLM.__init__ → BaseLLM.__init__ (call #2).
+        # This double-call is intentional and matches CrewAI's own LLM behaviour —
+        # plain LLM() also triggers BaseLLM.__init__ twice via the same mechanism.
+        # Verified empirically: both LLM() and CleanedLLMWrapper() produce exactly 2 calls.
+        # DO NOT remove this call to "fix" the double-init — doing so would make our wrapper
+        # diverge from CrewAI's own instantiation pattern.
+        super(LLM, instance).__init__(model=model, is_litellm=True, **kwargs)
+        instance.is_litellm = True
+        return instance
+
     def __init__(self, *args, **kwargs):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
-        logger.info("🧹 Initialized CleanedLLMWrapper - will clean all LLM responses")
-    
-    def call(self, messages, *args, **kwargs):
+        logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
+
+    def get_context_window_size(self) -> int:
+        """Return the context window size for the configured model.
+
+        LLM.get_context_window_size() matches self.model against keys in
+        LLM_CONTEXT_WINDOW_SIZES using startswith, but our model string is
+        'provider/model' (e.g. 'gemini/gemini-2.5-flash'). The provider prefix
+        causes all startswith checks to fail, returning the tiny 6963-token
+        default. This override fixes that by querying authoritative sources:
+
+        1. LiteLLM's local model database  — covers all cloud providers
+        2. Ollama's REST API               — covers local models not in LiteLLM DB
+        3. CrewAI's built-in lookup        — last resort fallback
         """
-        Override call() to handle rate limit errors with dynamic retry.
-        
-        CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
-        We intercept at call() level to catch and handle 429 errors.
-        """
-        # Check if rate limit handling is disabled
-        if os.getenv("DISABLE_RATE_LIMIT", "").lower() == "true":
-            return super().call(messages, *args, **kwargs)
-        
-        max_retries = int(os.getenv("LLM_MAX_RETRIES", "3"))
-        
-        for attempt in range(max_retries + 1):
-            try:
-                return super().call(messages, *args, **kwargs)
-            except Exception as e:
-                if not DynamicRateLimitHandler.is_rate_limit_error(e):
-                    raise  # Re-raise non-rate-limit errors immediately
-                
-                is_last_attempt = (attempt == max_retries)
-                
-                if is_last_attempt:
-                    logger.exception(f"❌ Rate limit: Max retries ({max_retries}) exceeded")
-                    raise
-                
-                # Extract retry delay from error response
-                error_str = str(e)
-                retry_delay = DynamicRateLimitHandler.extract_retry_delay(error_str)
-                
-                if retry_delay is None:
-                    retry_delay = 60.0
-                    logger.warning(f"⚠️ Could not parse retryDelay, using default {retry_delay}s")
-                
-                logger.info(f"⏱️ Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
-                           f"Waiting {retry_delay:.1f}s as specified by API...")
-                time.sleep(retry_delay)
-                # Loop continues to next attempt
-    
-    def _generate(self, messages: List[BaseMessage], **kwargs) -> ChatResult:
-        """
-        Generate response and clean it before returning.
-        
-        This method intercepts the LLM's response and applies cleaning logic.
-        Note: Rate limiting is handled in call() method.
-        """
-        # Call the original _generate method
-        result = super()._generate(messages, **kwargs)
-        
-        # Clean the response
-        cleaned_result = self._clean_chat_result(result)
-        
-        return cleaned_result
-    
-    def _clean_chat_result(self, result: ChatResult) -> ChatResult:
-        """
-        Clean a ChatResult by applying output cleaning to all generations.
-        
-        Args:
-            result: Original ChatResult from LLM
-            
-        Returns:
-            Cleaned ChatResult with fixed formatting
-        """
-        if not result or not result.generations:
-            return result
-        
-        cleaned_generations = []
-        was_cleaned = False
-        
-        for generation in result.generations:
-            if isinstance(generation, ChatGeneration) and generation.message:
-                # Extract the text content
-                original_text = generation.message.content
-                
-                # Clean it
-                cleaned_text = LLMOutputCleaner.clean_output(original_text)
-                
-                # Check if cleaning was needed
-                if cleaned_text != original_text:
-                    was_cleaned = True
-                    logger.debug(f"🧹 Cleaned LLM response (length: {len(original_text)} → {len(cleaned_text)})")
-                
-                # Create new message with cleaned content
-                cleaned_message = AIMessage(content=cleaned_text)
-                
-                # Create new generation with cleaned message
-                cleaned_generation = ChatGeneration(
-                    message=cleaned_message,
-                    generation_info=generation.generation_info
+        if self.context_window_size != 0:
+            return self.context_window_size
+
+        # Step 1: LiteLLM's local model database (no API call — ships with litellm)
+        # Note: only use max_input_tokens (context window), NOT max_tokens (output limit)
+        try:
+            import litellm
+            info = litellm.get_model_info(self.model)
+            max_input_tokens = info.get("max_input_tokens")
+            if max_input_tokens:
+                self.context_window_size = int(max_input_tokens * CONTEXT_WINDOW_USAGE_RATIO)
+                logger.debug(
+                    f"🪟 Context window for '{self.model}': "
+                    f"{self.context_window_size} tokens (source: LiteLLM DB)"
                 )
-                cleaned_generations.append(cleaned_generation)
-            else:
-                # Keep non-chat generations as-is
-                cleaned_generations.append(generation)
-        
-        # Log to monitor
-        formatting_monitor.log_response(was_cleaned=was_cleaned)
-        
-        # Create new result with cleaned generations
-        return ChatResult(
-            generations=cleaned_generations,
-            llm_output=result.llm_output
-        )
+                return self.context_window_size
+        except Exception as e:
+            logger.debug(
+                f"LiteLLM DB has no entry for '{self.model}' "
+                f"(type={type(e).__name__}, detail={e}) — trying Ollama API next"
+            )
 
-
-class CleanedOllamaLLMWrapper(OllamaLLM):
-    """
-    Wrapper around OllamaLLM that cleans output before returning.
-    
-    This wrapper provides the same cleaning functionality for local Ollama models.
-    """
-    
-    def __init__(self, *args, **kwargs):
-        """Initialize the wrapper with the same arguments as OllamaLLM."""
-        super().__init__(*args, **kwargs)
-        logger.info("🧹 Initialized CleanedOllamaLLMWrapper - will clean all LLM responses")
-    
-    def _generate(self, prompts: List[str], **kwargs) -> LLMResult:
-        """
-        Generate response and clean it before returning.
-        
-        This method intercepts the LLM's response and applies cleaning logic.
-        """
-        # Call the original _generate method
-        result = super()._generate(prompts, **kwargs)
-        
-        # Clean the response
-        cleaned_result = self._clean_llm_result(result)
-        
-        return cleaned_result
-    
-    def _clean_llm_result(self, result: LLMResult) -> LLMResult:
-        """
-        Clean an LLMResult by applying output cleaning to all generations.
-        
-        Args:
-            result: Original LLMResult from LLM
-            
-        Returns:
-            Cleaned LLMResult with fixed formatting
-        """
-        if not result or not result.generations:
-            return result
-        
-        cleaned_generations_list = []
-        was_cleaned = False
-        
-        for generation_list in result.generations:
-            cleaned_generation_list = []
-            
-            for generation in generation_list:
-                if isinstance(generation, Generation):
-                    # Extract the text content
-                    original_text = generation.text
-                    
-                    # Clean it
-                    cleaned_text = LLMOutputCleaner.clean_output(original_text)
-                    
-                    # Check if cleaning was needed
-                    if cleaned_text != original_text:
-                        was_cleaned = True
-                        logger.debug(f"🧹 Cleaned Ollama response (length: {len(original_text)} → {len(cleaned_text)})")
-                    
-                    # Create new generation with cleaned text
-                    cleaned_generation = Generation(
-                        text=cleaned_text,
-                        generation_info=generation.generation_info
+        # Step 2: Ollama API — local models are not in LiteLLM's central database
+        if self.model.startswith("ollama/"):
+            try:
+                import requests
+                model_name = self.model.split("/", 1)[1]
+                # rstrip to handle trailing slash in OLLAMA_API_BASE (e.g. "http://host/")
+                base_url = (self.base_url or "http://localhost:11434").rstrip("/")
+                response = requests.post(
+                    f"{base_url}/api/show",
+                    json={"model": model_name},
+                    timeout=5,
+                )
+                if response.status_code == 200:
+                    model_info = response.json().get("model_info", {})
+                    # Keys follow the pattern "{architecture}.context_length"
+                    # e.g. "llama.context_length", "qwen2.context_length"
+                    ctx_length = next(
+                        (v for k, v in model_info.items()
+                         if k.endswith(".context_length")),
+                        None,
                     )
-                    cleaned_generation_list.append(cleaned_generation)
+                    if ctx_length:
+                        self.context_window_size = int(
+                            ctx_length * CONTEXT_WINDOW_USAGE_RATIO
+                        )
+                        logger.debug(
+                            f"🪟 Context window for '{self.model}': "
+                            f"{self.context_window_size} tokens (source: Ollama API)"
+                        )
+                        return self.context_window_size
+                    else:
+                        logger.warning(
+                            f"⚠️ Ollama /api/show returned no context_length key "
+                            f"for '{model_name}' — falling back to CrewAI defaults"
+                        )
                 else:
-                    # Keep other types as-is
-                    cleaned_generation_list.append(generation)
-            
-            cleaned_generations_list.append(cleaned_generation_list)
-        
-        # Log to monitor
-        formatting_monitor.log_response(was_cleaned=was_cleaned)
-        
-        # Create new result with cleaned generations
-        return LLMResult(
-            generations=cleaned_generations_list,
-            llm_output=result.llm_output
+                    logger.warning(
+                        f"⚠️ Ollama /api/show returned HTTP {response.status_code} "
+                        f"for '{model_name}' — falling back to CrewAI defaults"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Failed to query Ollama API for context window of "
+                    f"'{self.model}' (type={type(e).__name__}, detail={e}) "
+                    f"— falling back to CrewAI defaults"
+                )
+
+        # Step 3: CrewAI's built-in lookup (last resort — likely returns tiny default)
+        result = super().get_context_window_size()
+        logger.warning(
+            f"⚠️ Context window for '{self.model}' not resolved from LiteLLM DB "
+            f"or Ollama API — using CrewAI fallback: {result} tokens. "
+            f"Context summarization may be suboptimal."
         )
+        return result
+
+    def call(self, messages, *args, **kwargs) -> str:
+        """
+        Override call() for output cleaning.
+
+        CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
+        _generate() is a LangChain concept and is never called by CrewAI, so all
+        cleaning must happen here.
+        """
+        result = super().call(messages, *args, **kwargs)
+        if not isinstance(result, str):
+            formatting_monitor.log_response(was_cleaned=False)
+            return result
+
+        cleaned = LLMOutputCleaner.clean_output(result)
+        was_cleaned = cleaned != result
+        if was_cleaned:
+            logger.debug(f"🧹 Cleaned LLM response (length: {len(result)} → {len(cleaned)})")
+        formatting_monitor.log_response(was_cleaned=was_cleaned)
+        return cleaned
 
 
-def get_cleaned_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
+def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
     """
-    Get a cleaned LLM instance that automatically fixes formatting issues.
-    
-    This is a drop-in replacement for the original get_llm function,
-    but returns wrapped instances that clean their output.
-    
+    Get a CleanedLLMWrapper instance for the given provider and model.
+
+    Works for all LiteLLM-supported providers via a single wrapper class:
+    - Online (Gemini):  model_provider="online", model_name="gemini/gemini-2.5-flash"
+    - Local  (Ollama):  model_provider="local",  model_name="qwen2.5-coder:14b"
+
+    The returned instance:
+    - Calls LiteLLM under the hood (__new__ override bypasses CrewAI's native
+      provider factory entirely — no provider SDK needs to be installed)
+    - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'
+    - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
+    - Retries on transient API errors via LiteLLM (num_retries=3)
+    - Tracks all responses via formatting_monitor
+
     Args:
-        model_provider: "local" for Ollama, "online" for Gemini
-        model_name: Model identifier (e.g., "llama3.1", "gemini-2.5-flash")
-        api_key: API key for online models (optional, can use env var)
-        
+        model_provider: "local" for Ollama, "online" for Gemini/other API models
+        model_name: Model identifier.
+                    Online: include provider prefix (e.g. "gemini/gemini-2.5-flash")
+                    Local:  bare model name (e.g. "qwen2.5-coder:14b") — "ollama/"
+                            is prepended here so callers stay provider-agnostic.
+        api_key: API key for online models (optional, falls back to GEMINI_API_KEY
+                 env var). Not used for local Ollama models.
+
     Returns:
-        Cleaned LLM wrapper instance
+        CleanedLLMWrapper instance ready for use with CrewAI agents
     """
     if model_provider == "local":
-        logger.info(f"🧹 Creating CleanedOllamaLLMWrapper for model: {model_name}")
-        return CleanedOllamaLLMWrapper(model=model_name)
-    else:
-        logger.info(f"🧹 Creating CleanedLLMWrapper for model: {model_name}")
-        return CleanedLLMWrapper(
-            api_key=api_key or os.getenv("GEMINI_API_KEY"),
-            model=f"{model_name}",
-            num_retries=3
+        # LiteLLM routes "ollama/<model>" to the Ollama HTTP API.
+        # OLLAMA_API_BASE env var controls the server URL:
+        #   Local dev (no Docker): http://localhost:11434  (default)
+        #   Docker Desktop Mac/Win: http://host.docker.internal:11434
+        #   Docker on Linux:        http://172.17.0.1:11434
+        ollama_base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        logger.info(
+            f"🧹 Creating CleanedLLMWrapper for local model: ollama/{model_name} "
+            f"at {ollama_base_url}"
         )
+        return CleanedLLMWrapper(
+            model=f"ollama/{model_name}",
+            base_url=ollama_base_url,
+            is_litellm=True,  # No routing effect — __new__ override bypasses LLM.__new__
+                              # entirely. Kept for documentation clarity only.
+            num_retries=3,    # LiteLLM internal retry for transient API errors.
+        )
+
+    # Online provider (Gemini and future API-based models).
+    # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
+    # LLM.__new__ entirely. Kept for documentation clarity only.
+    logger.info(f"🧹 Creating CleanedLLMWrapper for model: {model_name}")
+    return CleanedLLMWrapper(
+        api_key=api_key or os.getenv("GEMINI_API_KEY"),
+        model=model_name,
+        num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
+        is_litellm=True,
+    )

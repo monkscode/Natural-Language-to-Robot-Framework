@@ -1,0 +1,323 @@
+name: Build and Push Docker Images
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'browser_service/**'
+      - 'browser-service/**'
+      - 'Dockerfile.fastapi'
+      - 'Dockerfile.browser-service'
+      - 'Dockerfile.base-browser'
+      - 'Dockerfile.test-runner'
+      - '.github/workflows/build-images.yml'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'src/**'
+      - 'tools/**'
+      - 'browser_service/**'
+      - 'browser-service/**'
+      - 'Dockerfile.fastapi'
+      - 'Dockerfile.browser-service'
+      - 'Dockerfile.base-browser'
+      - 'Dockerfile.test-runner'
+      - '.github/workflows/build-images.yml'
+
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild all images'
+        required: false
+        default: 'false'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: monkscode/nlrf
+
+jobs:
+  build-base-browser:
+    name: Build Base Browser Image
+    runs-on: ubuntu-latest
+    outputs:
+      base_image_tag: ${{ steps.base_tag.outputs.base_image_tag }}
+      image_size: ${{ steps.image_size.outputs.image_size }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=base-browser-
+            type=ref,event=pr,prefix=base-browser-pr-
+            type=sha,prefix=base-browser-,format=short
+            type=raw,value=base-browser-latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Base Browser image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.base-browser
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache,mode=max
+          platforms: linux/amd64
+
+      - name: Select base image tag output
+        id: base_tag
+        run: |
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+          if [ -z "$first_tag" ]; then
+            echo "No base-browser tag produced by metadata-action" >&2
+            exit 1
+          fi
+          echo "base_image_tag=$first_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Get image size
+        id: image_size
+        run: |
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+          SIZE_BYTES=$(docker manifest inspect "$first_tag" -v 2>/dev/null | jq '[.[] | .OCIManifest // .SchemaV2Manifest | .layers[]?.size // 0] | add // 0' 2>/dev/null || echo 0)
+          if [ "$SIZE_BYTES" -gt 0 ] 2>/dev/null; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "image_size=${SIZE_GB}GB" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_size=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-fastapi:
+    name: Build FastAPI Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_size: ${{ steps.image_size.outputs.image_size }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=fastapi-
+            type=ref,event=pr,prefix=fastapi-pr-
+            type=sha,prefix=fastapi-,format=short
+            type=raw,value=fastapi-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=fastapi-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push FastAPI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.fastapi
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache,mode=max
+          platforms: linux/amd64
+
+      - name: Get image size
+        id: image_size
+        run: |
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+          SIZE_BYTES=$(docker manifest inspect "$first_tag" -v 2>/dev/null | jq '[.[] | .OCIManifest // .SchemaV2Manifest | .layers[]?.size // 0] | add // 0' 2>/dev/null || echo 0)
+          if [ "$SIZE_BYTES" -gt 0 ] 2>/dev/null; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "image_size=${SIZE_GB}GB" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_size=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-browser-service:
+    name: Build Browser Service Image
+    runs-on: ubuntu-latest
+    needs: [build-base-browser]
+    outputs:
+      image_size: ${{ steps.image_size.outputs.image_size }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=browser-service-
+            type=ref,event=pr,prefix=browser-service-pr-
+            type=sha,prefix=browser-service-,format=short
+            type=raw,value=browser-service-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=browser-service-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push Browser Service image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.browser-service
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache,mode=max
+          platforms: linux/amd64
+
+      - name: Get image size
+        id: image_size
+        run: |
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+          SIZE_BYTES=$(docker manifest inspect "$first_tag" -v 2>/dev/null | jq '[.[] | .OCIManifest // .SchemaV2Manifest | .layers[]?.size // 0] | add // 0' 2>/dev/null || echo 0)
+          if [ "$SIZE_BYTES" -gt 0 ] 2>/dev/null; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "image_size=${SIZE_GB}GB" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_size=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-test-runner:
+    name: Build Test Runner Image
+    runs-on: ubuntu-latest
+    needs: [build-base-browser]
+    outputs:
+      image_size: ${{ steps.image_size.outputs.image_size }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,prefix=test-runner-
+            type=ref,event=pr,prefix=test-runner-pr-
+            type=sha,prefix=test-runner-,format=short
+            type=raw,value=test-runner-latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test-runner-develop,enable=${{ github.ref == 'refs/heads/develop' }}
+
+      - name: Build and push Test Runner image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.test-runner
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache,mode=max
+          platforms: linux/amd64
+
+      - name: Get image size
+        id: image_size
+        run: |
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+          SIZE_BYTES=$(docker manifest inspect "$first_tag" -v 2>/dev/null | jq '[.[] | .OCIManifest // .SchemaV2Manifest | .layers[]?.size // 0] | add // 0' 2>/dev/null || echo 0)
+          if [ "$SIZE_BYTES" -gt 0 ] 2>/dev/null; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "image_size=${SIZE_GB}GB" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_size=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-base-browser, build-fastapi, build-browser-service, build-test-runner]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🐳 Docker Image Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Images Built:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Base Browser**: \`${{ env.IMAGE_NAME }}:base-browser-*\` (${{ needs.build-base-browser.outputs.image_size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **FastAPI**: \`${{ env.IMAGE_NAME }}:fastapi-*\` (${{ needs.build-fastapi.outputs.image_size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Browser Service**: \`${{ env.IMAGE_NAME }}:browser-service-*\` (${{ needs.build-browser-service.outputs.image_size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Test Runner**: \`${{ env.IMAGE_NAME }}:test-runner-*\` (${{ needs.build-test-runner.outputs.image_size }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Branch: \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          
+          if [ "${{ needs.build-base-browser.result }}" = "success" ] && [ "${{ needs.build-fastapi.result }}" = "success" ] && [ "${{ needs.build-browser-service.result }}" = "success" ] && [ "${{ needs.build-test-runner.result }}" = "success" ]; then
+            echo "✅ **Status**: All images built successfully" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ **Status**: Some builds failed" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Base Browser: ${{ needs.build-base-browser.result }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- FastAPI: ${{ needs.build-fastapi.result }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Browser Service: ${{ needs.build-browser-service.result }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Test Runner: ${{ needs.build-test-runner.result }}" >> "$GITHUB_STEP_SUMMARY"
+          fi

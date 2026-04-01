@@ -183,7 +183,7 @@ async def get_metrics_health():
     try:
         collector = get_workflow_metrics_collector()
         recent_metrics = collector.get_all_metrics(limit=10)
-        
+
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
@@ -191,6 +191,64 @@ async def get_metrics_health():
             "recent_workflows_count": len(recent_metrics),
             "last_recorded": recent_metrics[0].timestamp.isoformat() if recent_metrics else None
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get metrics health: {str(e)}")
+
+
+@router.get("/learning-health")
+async def get_learning_health():
+    """
+    Get learning system health and effectiveness metrics.
+
+    Returns status, total rules learned, hint injection rate, and
+    natural comparison lift (Cat B pass rate - Cat A pass rate).
+    """
+    try:
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED:
+            return {
+                "status": "disabled",
+                "reason": "OPTIMIZATION_ENABLED=false",
+                "total_rules": 0,
+                "total_executions": 0,
+                "effectiveness": None,
+                "circuit_breaker": None,
+            }
+
+        from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is None:
+            return {
+                "status": "unavailable",
+                "reason": "Learning system failed to initialize",
+                "total_rules": 0,
+                "total_executions": 0,
+                "effectiveness": None,
+                "circuit_breaker": None,
+            }
+
+        stats = feedback_loop.get_learning_stats()
+        cb = stats.get("circuit_breaker", {})
+
+        structural_count = stats.get("structural_rules", {}).get("total_rules", 0)
+        anti_pattern_count = stats.get("anti_patterns", {}).get("total_anti_patterns", 0)
+        keyword_count = stats.get("keyword_corrections", {}).get("total_corrections", 0)
+
+        return {
+            "status": "active" if not cb.get("is_open", False) else "error",
+            "total_rules": structural_count + anti_pattern_count + keyword_count,
+            "total_executions": stats.get("total_records", 0),
+            "effectiveness": stats.get("learning_effectiveness", {}),
+            "circuit_breaker": cb,
+            "structural_rules": structural_count,
+            "anti_patterns": anti_pattern_count,
+            "keyword_corrections": keyword_count,
+            "contradictions": stats.get("contradictions", {}).get("total_flagged", 0),
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get learning health: {str(e)}"
+        )

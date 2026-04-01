@@ -6,10 +6,14 @@ Robot Framework libraries, ensuring the context is always up-to-date
 with the installed library version.
 
 Uses in-memory caching to avoid repeated libdoc calls during server runtime.
+
+In Docker environments, pre-generated JSON files from the build stage are used,
+eliminating the need for the actual libraries to be installed at runtime.
 """
 
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Dict, Optional
@@ -19,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Global cache for library documentation (persists during server runtime)
 _LIBRARY_DOC_CACHE: Dict[str, Dict] = {}
 
+# Default path for pre-generated libdocs (from Docker build stage)
+LIBDOCS_DIR = Path(os.environ.get("LIBDOCS_DIR", "./data/libdocs"))
+
 
 class DynamicLibraryDocumentation:
     """
@@ -26,6 +33,9 @@ class DynamicLibraryDocumentation:
     
     This ensures that the AI agents always have access to the latest
     keywords and documentation from the installed library version.
+    
+    In Docker environments, pre-generated JSON files are loaded from
+    LIBDOCS_DIR, eliminating the need for the actual RF libraries at runtime.
     """
     
     def __init__(self, library_name: str):
@@ -38,16 +48,44 @@ class DynamicLibraryDocumentation:
         """
         self.library_name = library_name
     
+    def _load_from_pregenerated(self) -> Optional[Dict]:
+        """
+        Try to load documentation from pre-generated JSON file.
+        
+        Returns:
+            Dictionary containing library metadata and keywords, or None if not found
+        """
+        libdoc_file = LIBDOCS_DIR / f"{self.library_name.lower()}.json"
+        
+        if libdoc_file.exists():
+            try:
+                with open(libdoc_file, 'r', encoding='utf-8') as f:
+                    doc_data = json.load(f)
+                logger.info(f"Loaded pre-generated documentation for {self.library_name} from {libdoc_file}")
+                return doc_data
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to read/parse pre-generated libdoc for {self.library_name} at "
+                    f"{libdoc_file}: {e}"
+                ) from e
+        
+        return None
+    
     def get_library_documentation(self) -> Dict:
         """
-        Extract library documentation using Robot Framework's libdoc.
-        Uses global cache to avoid repeated extraction during server runtime.
+        Get library documentation, preferring pre-generated files over live extraction.
+        Uses global cache to avoid repeated loading during server runtime.
+        
+        Priority:
+        1. Global cache (fastest)
+        2. Pre-generated JSON files (for Docker environments without RF libraries)
+        3. Live libdoc extraction (for development environments with libraries installed)
         
         Returns:
             Dictionary containing library metadata and keywords
             
         Raises:
-            ImportError: If library is not installed
+            ImportError: If library is not installed and no pre-generated file exists
             Exception: If libdoc extraction fails
         """
         # Check global cache first
@@ -55,6 +93,13 @@ class DynamicLibraryDocumentation:
             logger.debug(f"Using cached documentation for {self.library_name}")
             return _LIBRARY_DOC_CACHE[self.library_name]
         
+        # Try to load from pre-generated files first (Docker environment)
+        doc_data = self._load_from_pregenerated()
+        if doc_data:
+            _LIBRARY_DOC_CACHE[self.library_name] = doc_data
+            return doc_data
+        
+        # Fall back to live libdoc extraction (development environment)
         try:
             from robot.libdoc import libdoc
             
@@ -81,8 +126,11 @@ class DynamicLibraryDocumentation:
             return doc_data
             
         except ImportError as e:
-            logger.error(f"Library {self.library_name} is not installed: {e}")
-            raise ImportError(f"Library {self.library_name} not found. Please install it first.")
+            logger.error(f"Library {self.library_name} is not installed and no pre-generated libdoc found: {e}")
+            raise ImportError(
+                f"Library {self.library_name} not found. Either install it or provide "
+                f"pre-generated libdoc at {LIBDOCS_DIR / f'{self.library_name.lower()}.json'}"
+            ) from e
         
         except Exception as e:
             logger.error(f"Failed to extract documentation for {self.library_name}: {e}")

@@ -2,12 +2,58 @@ from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
 from src.backend.crew_ai.tasks import RobotTasks
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from datetime import datetime
+import os
 import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+# CrewAI log file path and rotation settings
+CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
+CREWAI_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB per file
+CREWAI_LOG_BACKUP_COUNT = 9              # 9 backups = 450MB max
+
+
+def _rotate_crewai_log():
+    """Rotate crewai.log.txt if it exceeds the size limit.
+
+    CrewAI's output_log_file appends .txt to any path not ending in .json or .txt,
+    so "logs/crewai.log" becomes "logs/crewai.log.txt". CREWAI_LOG_FILE reflects
+    the actual filename CrewAI creates. We handle rotation manually before each
+    crew.kickoff() call since CrewAI's FileHandler has no rotation support.
+
+    Rotation scheme: crewai.log.txt -> crewai.log.txt.1 -> ... -> crewai.log.txt.9
+    """
+    if not os.path.exists(CREWAI_LOG_FILE):
+        return
+
+    file_size = os.path.getsize(CREWAI_LOG_FILE)
+    if file_size < CREWAI_LOG_MAX_BYTES:
+        return
+
+    logger.info(
+        f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
+        f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
+    )
+
+    # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
+    for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
+        src = f"{CREWAI_LOG_FILE}.{i}"
+        dst = f"{CREWAI_LOG_FILE}.{i + 1}"
+        if os.path.exists(src):
+            if os.path.exists(dst):
+                os.remove(dst)
+            os.rename(src, dst)
+
+    # Current log -> .1
+    backup_path = f"{CREWAI_LOG_FILE}.1"
+    if os.path.exists(backup_path):
+        os.remove(backup_path)
+    os.rename(CREWAI_LOG_FILE, backup_path)
+    logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
 
 
 def extract_url_from_query(query: str) -> str:
@@ -62,8 +108,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         workflow_id: Unique workflow identifier for metrics tracking
 
     Architecture Note:
-    - Rate limiting was removed during Phase 2 of codebase cleanup. Direct LLM calls
-      are now used without wrappers as Google Gemini API has sufficient rate limits.
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
     - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
     - Optimization system (pattern learning, ChromaDB) can be enabled via OPTIMIZATION_ENABLED config.
@@ -96,12 +140,18 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         )
     
     # Initialize optimization system if enabled
-    optimized_context = None
     keyword_search_tool = None
     smart_provider = None
     baseline_context_tokens = 0
     optimized_context_tokens = 0
     
+    # Build properly prefixed model name for LiteLLM token counting
+    # Online models already have prefix (e.g., "gemini/gemini-2.5-flash")
+    # Local models need prefix added (e.g., "llama3" -> "ollama/llama3")
+    token_model = model_name if model_provider != "local" else f"ollama/{model_name}"
+    
+    hint_metadata = {}
+
     if settings.OPTIMIZATION_ENABLED:
         try:
             logger.info("🚀 Optimization system enabled - initializing components")
@@ -109,37 +159,74 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 KeywordVectorStore,
                 QueryPatternMatcher,
                 SmartKeywordProvider,
-                ContextPruner
+                ContextPruner,
             )
-            
-            # Initialize ChromaDB vector store
-            vector_store = KeywordVectorStore(
-                persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+
+            # Get learning db_conn from FeedbackLoop singleton (shared connection)
+            # Must be initialized BEFORE QueryPatternMatcher and SmartKeywordProvider
+            learning_db_conn = None
+            feedback_loop = None
+            try:
+                from src.backend.crew_ai.optimization.learning_registry import (
+                    get_feedback_loop,
+                )
+                feedback_loop = get_feedback_loop()
+                if feedback_loop is not None:
+                    learning_db_conn = feedback_loop.execution_memory.conn
+                    logger.info("✅ Learning DB connection obtained from FeedbackLoop singleton")
+                else:
+                    logger.warning("⚠️ FeedbackLoop unavailable — learning hints will be disabled")
+            except Exception as e:
+                logger.warning(f"⚠️ Learning DB init failed: {e}")
+                logger.warning("   Learning hints will be disabled")
+
+            # Initialize ChromaDB vector store and pattern matcher.
+            # FeedbackLoop.__init__() already created its own KeywordVectorStore
+            # and QueryPatternMatcher internally (feedback_loop.py lines 555-574).
+            # Reuse those instances when available to avoid opening a second
+            # PersistentClient on ./chroma_db, which loads the ONNX embedding
+            # model a second time and risks SQLite write-lock contention.
+            _fl_pattern_learner = (
+                getattr(feedback_loop, "pattern_learner", None)
+                if feedback_loop is not None else None
             )
-            
-            # Ensure collection is ready (auto-rebuild if version mismatch)
+            _fl_chroma_store = (
+                getattr(_fl_pattern_learner, "chroma_store", None)
+                if _fl_pattern_learner is not None else None
+            )
+
+            if _fl_chroma_store is not None:
+                vector_store = _fl_chroma_store
+                pattern_matcher = _fl_pattern_learner
+                logger.info(
+                    "✅ Reusing FeedbackLoop's ChromaDB client and pattern matcher "
+                    "(avoids double ONNX model load)"
+                )
+            else:
+                vector_store = KeywordVectorStore(
+                    persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
+                )
+                pattern_matcher = QueryPatternMatcher(
+                    chroma_store=vector_store
+                )
+
+            # Ensure keyword collection is ready (auto-rebuild if version mismatch).
+            # Called regardless of whether we reused FeedbackLoop's store — the
+            # FeedbackLoop never calls ensure_collection_ready itself.
             vector_store.ensure_collection_ready(library_context.library_name)
-            
-            # Initialize pattern matcher (with ChromaDB for query embeddings)
-            pattern_matcher = QueryPatternMatcher(
-                db_path=settings.OPTIMIZATION_PATTERN_DB_PATH,
-                chroma_store=vector_store  # Pass ChromaDB store for query embeddings
-            )
             
             # Initialize context pruner if enabled
             context_pruner = None
             if settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED:
                 try:
                     logger.info("🔍 Initializing context pruner...")
-                    context_pruner = ContextPruner(
-                        persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
-                    )
+                    context_pruner = ContextPruner()
                     logger.info("✅ Context pruner initialized")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to initialize context pruner: {e}")
                     logger.warning("   Context pruning will be disabled")
-            
-            # Initialize smart keyword provider with metrics
+
+            # Initialize smart keyword provider with metrics + learning DB
             smart_provider = SmartKeywordProvider(
                 library_context=library_context,
                 pattern_matcher=pattern_matcher,
@@ -147,30 +234,52 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 context_pruner=context_pruner,
                 pruning_enabled=settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED,
                 pruning_threshold=settings.OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD,
-                metrics=optimization_metrics
+                metrics=optimization_metrics,
+                db_conn=learning_db_conn,
             )
             
             # Calculate baseline context size (full context)
             baseline_context = library_context.code_assembly_context
-            baseline_context_tokens = count_tokens(baseline_context)
+            baseline_context_tokens = count_tokens(baseline_context, token_model)
             
             # Get optimized contexts for ALL agents
+            # URL extracted once, passed to all agents for domain-scoped hints
+            url = extract_url_from_query(query)
             logger.info("🎯 Generating optimized contexts for all agents...")
-            planner_context = smart_provider.get_agent_context(query, "planner")
-            # Identifier context skipped - element_identifier_agent doesn't use context
-            # It only needs batch_browser_automation tool, no keyword knowledge required
-            identifier_context = None
-            assembler_context = smart_provider.get_agent_context(query, "assembler")
-            validator_context = smart_provider.get_agent_context(query, "validator")
+            planner_result = smart_provider.get_agent_context(query, "planner", url=url)
+            assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
+            validator_result = smart_provider.get_agent_context(query, "validator", url=url)
+
+            planner_context = planner_result.context
+            assembler_context = assembler_result.context
+            validator_context = validator_result.context
+
+            # Capture hint metadata for future FeedbackLoop integration
+            hint_metadata = {
+                "planner": {"count": planner_result.hints_count, "sources": planner_result.hint_sources},
+                "assembler": {"count": assembler_result.hints_count, "sources": assembler_result.hint_sources},
+                "validator": {"count": validator_result.hints_count, "sources": validator_result.hint_sources},
+            }
+            total_hints = sum(r["count"] for r in hint_metadata.values())
+            if total_hints > 0:
+                logger.info(f"📚 Learning hints injected: {hint_metadata}")
+
+            # Build hint_context for task-level injection
+            hint_context = {}
+            if planner_result.hint_text:
+                hint_context["planner"] = planner_result.hint_text
+            if assembler_result.hint_text:
+                hint_context["assembler"] = assembler_result.hint_text
+            if validator_result.hint_text:
+                hint_context["validator"] = validator_result.hint_text
             
-            # Calculate total optimized tokens (skip None values)
-            planner_tokens = count_tokens(planner_context)
-            identifier_tokens = 0  # Not generated, saves ~50-100ms per workflow
-            assembler_tokens = count_tokens(assembler_context)
-            validator_tokens = count_tokens(validator_context)
+            # Calculate total optimized tokens
+            planner_tokens = count_tokens(planner_context, token_model)
+            assembler_tokens = count_tokens(assembler_context, token_model)
+            validator_tokens = count_tokens(validator_context, token_model)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
             
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Identifier=N/A (skipped), Assembler={assembler_tokens}, Validator={validator_tokens}")
+            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}, Validator={validator_tokens}")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -178,9 +287,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                     baseline=baseline_context_tokens,
                     optimized=optimized_context_tokens
                 )
+                pct = optimization_metrics.context_reduction['reduction_percentage']
+                direction = "reduction" if pct >= 0 else "increase"
                 logger.info(
-                    f"📊 Context reduction (assembler): {baseline_context_tokens} -> {optimized_context_tokens} tokens "
-                    f"({optimization_metrics.context_reduction['reduction_percentage']:.1f}% reduction)"
+                    f"📊 Context change (assembler): {baseline_context_tokens} -> {optimized_context_tokens} tokens "
+                    f"({abs(pct):.1f}% {direction})"
                 )
             
             # Get keyword search tool
@@ -192,31 +303,30 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             logger.error(f"❌ Failed to initialize optimization system: {e}")
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
             planner_context = None
-            identifier_context = None
             assembler_context = None
             validator_context = None
             keyword_search_tool = None
             smart_provider = None
             optimization_metrics = None
+            hint_context = {}
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
         planner_context = None
-        identifier_context = None
         assembler_context = None
         validator_context = None
+        hint_context = {}
 
     # Initialize agents and tasks with library context and workflow_id
     agents = RobotAgents(
         model_provider, 
         model_name, 
         library_context,
-        assembler_context=assembler_context,  # Use consistent naming with other contexts
+        assembler_context=assembler_context,
         keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
-        identifier_context=identifier_context,
         validator_context=validator_context
     )
-    tasks = RobotTasks(library_context, workflow_id=workflow_id)
+    tasks = RobotTasks(library_context, workflow_id=workflow_id, hint_context=hint_context)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
     step_planner_agent = agents.step_planner_agent()
@@ -230,6 +340,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     assemble_code = tasks.assemble_code_task(code_assembler_agent)
     validate_code = tasks.validate_code_task(code_validator_agent, code_assembler_agent)
 
+    # Rotate crewai.log if it exceeds size limit (before creating the Crew)
+    _rotate_crewai_log()
+
+    step_callback, task_callback = get_crew_callbacks()
+
     # Create and run the crew
     crew = Crew(
         agents=[step_planner_agent, element_identifier_agent,
@@ -237,6 +352,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         tasks=[plan_steps, identify_elements, assemble_code, validate_code],
         process=Process.sequential,
         verbose=True,
+        output_log_file=CREWAI_LOG_FILE,
+        step_callback=step_callback,
+        task_callback=task_callback,
         embedder=None,  # Disable automatic knowledge/embedding system
     )
 
@@ -250,6 +368,10 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         result = crew.kickoff()
         logger.info("✅ CrewAI workflow completed successfully")
         logger.info(f"🏁 Crew execution finished - delegation cycle complete")
+        # formatting_monitor is the authoritative call count: incremented once per
+        # CleanedLLMWrapper.call() invocation. Compare against "Raw CrewAI usage metrics"
+        # in workflow_service.py — that figure is N_agents × real_calls due to CrewAI
+        # summing the shared LLM instance once per agent in calculate_usage_metrics().
         logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
         
         # NOTE: Pattern learning is NOT done here!
@@ -261,7 +383,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         if optimization_metrics:
             logger.info("📊 Optimization metrics collected")
         
-        return result, crew, optimization_metrics
+        return result, crew, optimization_metrics, hint_metadata
 
     except Exception as e:
         error_msg = str(e)

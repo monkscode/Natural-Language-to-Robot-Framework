@@ -1,35 +1,30 @@
+# FastAPI Core
 fastapi
 uvicorn
-python-dotenv
-robotframework
-robotframework-seleniumlibrary
-docker
 pydantic
 pydantic-settings
-PyYAML
-ollama
-crewai
-crewai[tools]
-langchain-google-genai
-langchain_community
-beautifulsoup4
-selenium
-webdriver-manager
 sse-starlette
 aiohttp
 requests
-flask
-langchain-ollama
-browser_use==0.11.2
-robotframework-browser[bb]
-playwright
-browser-service>=1.0.0
+# Configuration
+python-dotenv
+PyYAML
 
-# ChromaDB Performance Optimization Dependencies (Requirement 7.1)
-# chromadb: Vector database for semantic keyword search and pattern learning storage
-chromadb~=0.5.0
-# sentence-transformers: Generate embeddings for semantic similarity search
-# Note: Using 3.0+ for compatibility with latest huggingface_hub
-sentence-transformers~=3.0.0
-# numpy: Required by sentence-transformers for vector operations and similarity calculations
-numpy~=1.26.0
+# Docker SDK (for robot test execution)
+docker
+
+# CrewAI (without tools - we don't use crewai_tools)
+crewai==1.8.1
+# crewai==1.8.1 targets litellm~=1.74.9 (its own litellm extra) and requires
+# openai~=1.83.0. litellm>=1.81.x bumped openai to 2.x, making it incompatible.
+# 1.74.15.post2 is the latest 1.74.x patch: openai>=1.68.2 (no conflict),
+# cold_storage_handler not yet present (apscheduler error cannot occur).
+litellm==1.74.15.post2
+
+# LLM Providers
+
+# ChromaDB for semantic keyword search (uses default ONNX embedding - no pytorch needed)
+chromadb
+# Pin PostHog to version compatible with ChromaDB 1.1.1 (requires posthog>=2.4.0,<6.0.0)
+# PostHog 7.x breaks chromadb's telemetry capture() call signature
+posthog>=2.4.0,<6.0.0

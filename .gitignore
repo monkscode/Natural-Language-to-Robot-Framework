@@ -7,9 +7,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Docker
-.dockerignore
-
 # Logs
 *.log
 logs/audit
@@ -30,6 +27,7 @@ test.py
 .vscode
 .codex
 .github/copilot-instructions.md
+tmpclaude-*
 
 # Ignore the jsonl files
 *.jsonl
@@ -43,3 +41,8 @@ logs/temp_metrics
 tools/browser_service/*
 node_modules/
 coverage/
+
+docs/tasks/
+.agents/workflows/development-workflow.md
+tasks/lessons.md
+logs/crewai.log.txt

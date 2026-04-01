@@ -1,7 +1,9 @@
-from crewai import Task
+from crewai import Task, TaskOutput
 import logging
+import json
+import re
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Tuple, Any
 
 # Import reusable prompt components
 from .prompts import PromptComponents
@@ -16,8 +18,8 @@ logger = logging.getLogger(__name__)
 class PlannedStep(BaseModel):
     """Schema for a single planned test step from plan_steps_task."""
     step_description: str = Field(description="Human-readable description of the step")
-    element_description: str = Field(description="Description of the element to interact with")
-    value: str = Field(description="Value to use in the action (URL, text, key, etc.)")
+    element_description: Optional[str] = Field(default=None, description="Description of the element to interact with")
+    value: Optional[str] = Field(default=None, description="Value to use in the action (URL, text, key, etc.)")
     keyword: str = Field(description="Robot Framework keyword to use")
     # Optional fields for conditional logic and loops
     condition_type: Optional[str] = Field(default=None, description="IF for conditional steps")
@@ -39,7 +41,7 @@ class IdentifiedElement(PlannedStep):
     """
     # Locator information from browser automation (new fields only)
     locator: Optional[str] = Field(default=None, description="Best locator for the element")
-    found: bool = Field(default=False, description="Whether locator was found")
+    found: Optional[bool] = Field(default=False, description="Whether locator was found")
     element_type: Optional[str] = Field(default=None, description="Element type (input, select, etc.)")
 
 
@@ -59,23 +61,218 @@ class ValidationOutput(BaseModel):
 class AssemblyOutput(BaseModel):
     """Pydantic model for assemble_code_task output - Robot Framework code."""
     code: str = Field(description="Complete Robot Framework code ready to save as .robot file")
-    # Future extensibility fields (optional)
-    warnings: Optional[List[str]] = Field(
-        default=None, description="Any warnings generated during code assembly")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GUARDRAIL FUNCTIONS FOR OUTPUT FORMAT FIXING
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Optional[str]:
+    """
+    Common JSON extraction logic for guardrails.
+    
+    Implements 3 strategies to extract valid JSON containing a specific key:
+    1. Direct JSON parse
+    2. Find key pattern and raw_decode  
+    3. Iterate through all '{' positions - returns LAST valid JSON (LLMs self-correct)
+    
+    CRITICAL: For 'code' key, we prefer the LAST valid JSON because LLMs often:
+    - First explain the format: {"code": "..."}  (placeholder)
+    - Then output the actual: {"code": "*** Settings ***..."}  (real code)
+    
+    Args:
+        raw: Raw LLM output string
+        required_key: The JSON key that must be present (e.g., "steps", "valid")
+        log_prefix: Prefix for log messages (e.g., "IdentificationOutput")
+        
+    Returns:
+        JSON string if extraction successful, None if failed
+    """
+    # Strategy 1: Check if it's already valid JSON
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and required_key in data:
+            logger.info(f"✅ Guardrail: {log_prefix} is already valid JSON")
+            return raw
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 2 & 3: Find ALL valid JSON objects with the required key, then pick the best one
+    # For 'code' key: prefer the one with actual content (not "..." placeholder)
+    # For other keys: prefer the last one (LLMs self-correct)
+    candidates = []
+    
+    search_start = 0
+    while True:
+        brace_start = raw.find('{', search_start)
+        if brace_start == -1:
+            break
+        try:
+            decoder = json.JSONDecoder()
+            data, _ = decoder.raw_decode(raw[brace_start:])
+            if isinstance(data, dict) and required_key in data:
+                candidates.append({
+                    'data': data,
+                    'position': brace_start,
+                    'value': data.get(required_key, '')
+                })
+                logger.debug(f"Found candidate {log_prefix} at position {brace_start}")
+        except json.JSONDecodeError:
+            pass
+        search_start = brace_start + 1
+    
+    if not candidates:
+        return None
+    
+    # For 'code' key: filter out placeholders like "..." and prefer substantive content
+    if required_key == 'code':
+        # Filter candidates: remove placeholders (empty, "...", very short values)
+        substantive = [
+            c for c in candidates 
+            if isinstance(c['value'], str) and len(c['value']) > 20 and c['value'].strip() != '...'
+        ]
+        if substantive:
+            # Return the LAST substantive one (LLMs often self-correct)
+            best = substantive[-1]
+            logger.info(f"✅ Guardrail: Selected {log_prefix} with substantive code (position {best['position']}, {len(best['value'])} chars)")
+            return json.dumps(best['data'])
+        else:
+            # No substantive candidates, fall back to last one
+            best = candidates[-1]
+            logger.warning(f"⚠️ Guardrail: No substantive {log_prefix} found, using last candidate")
+            return json.dumps(best['data'])
+    else:
+        # For other keys: return the last valid JSON (LLMs self-correct)
+        best = candidates[-1]
+        logger.info(f"✅ Guardrail: Selected last {log_prefix} at position {best['position']}")
+        return json.dumps(best['data'])
+
+
+def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
+    """
+    Guardrail for assemble_code_task that fixes output format without retry.
+    
+    The LLM often outputs valid RF code but in wrong format (not JSON).
+    This guardrail extracts the code and wraps it in proper JSON format.
+    
+    Returns:
+        (True, fixed_output) - If we can fix the format, PASS immediately
+        (False, feedback) - Only if truly no code found, triggers retry
+    """
+    raw = result.raw
+    logger.debug(f"Guardrail received output (length: {len(raw)})")
+    
+    # Strategy 1-2: Try common JSON extraction (handles already-valid JSON and mixed content)
+    extracted = _extract_json_by_key(raw, "code", "AssemblyOutput")
+    if extracted:
+        return (True, extracted)
+    
+    # Strategy 3: Extract RF code and wrap in JSON (unique to assembly)
+    # Find LAST occurrence of *** Settings *** - LLMs often self-correct and output
+    # code multiple times, with the last version being the corrected one
+    rf_pattern = r'\*\*\*\s*(Settings|Variables|Test Cases|Keywords|Tasks)\s*\*\*\*'
+    rf_matches = list(re.finditer(rf_pattern, raw, re.IGNORECASE))
+    
+    if rf_matches:
+        # Find the last *** Settings *** section (or fall back to last match)
+        last_settings = None
+        for match in rf_matches:
+            if match.group(1).lower() == 'settings':
+                last_settings = match
+        
+        # Use last Settings, or last match if no Settings found
+        rf_match = last_settings if last_settings else rf_matches[-1]
+        code_start = rf_match.start()
+        rf_code = raw[code_start:].strip()
+        
+        # Log if duplicates were found and handled
+        if len(rf_matches) > 1:
+            logger.info(f"🧹 Guardrail: Found {len(rf_matches)} RF sections, using last *** Settings ***")
+        
+        # Clean trailing non-code text (explanations after the code)
+        for pattern in [r'\n\s*This (is|code|should)', r'\n\s*Note:', r'\n\s*The above']:
+            end_match = re.search(pattern, rf_code, re.IGNORECASE)
+            if end_match:
+                rf_code = rf_code[:end_match.start()].strip()
+        
+        # Wrap in JSON
+        result_json = json.dumps({"code": rf_code})
+        logger.info(f"✅ Guardrail: Wrapped RF code in JSON (code length: {len(rf_code)})")
+        return (True, result_json)
+    
+    # Strategy 4: If the entire output looks like RF code but doesn't match pattern
+    # (e.g., starts with Library or has RF keywords)
+    if 'Library' in raw and ('Browser' in raw or 'SeleniumLibrary' in raw):
+        # Assume it's RF code, wrap it
+        result_json = json.dumps({"code": raw.strip()})
+        logger.info(f"✅ Guardrail: Assumed RF code and wrapped (length: {len(raw)})")
+        return (True, result_json)
+    
+    # Only fail if truly no code found - this triggers a retry
+    logger.warning("❌ Guardrail: No RF code found, requesting retry")
+    return (False, "Output must contain Robot Framework code. Start with *** Settings *** section.")
+
+
+def identification_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
+    """
+    Guardrail for identify_elements_task that handles JSON extraction.
+    
+    The LLM sometimes outputs valid JSON followed by extra text (trailing characters).
+    This guardrail extracts the valid JSON portion.
+    
+    Returns:
+        (True, fixed_output) - If we can extract valid JSON
+        (False, feedback) - If JSON extraction fails, triggers retry
+    """
+    raw = result.raw
+    logger.debug(f"IdentificationOutput guardrail received (length: {len(raw)})")
+    
+    extracted = _extract_json_by_key(raw, "steps", "IdentificationOutput")
+    if extracted:
+        return (True, extracted)
+    
+    # Failed to extract - trigger retry
+    logger.warning("❌ Guardrail: Could not extract valid IdentificationOutput JSON")
+    return (False, "Output must be a valid JSON object with 'steps' array. Ensure proper JSON formatting.")
+
+
+def validation_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
+    """
+    Guardrail for validate_code_task that handles JSON extraction.
+    
+    The LLM sometimes outputs valid JSON followed by extra text (trailing characters).
+    This guardrail extracts the valid JSON portion.
+    
+    Returns:
+        (True, fixed_output) - If we can extract valid JSON
+        (False, feedback) - If JSON extraction fails, triggers retry
+    """
+    raw = result.raw
+    logger.debug(f"ValidationOutput guardrail received (length: {len(raw)})")
+    
+    extracted = _extract_json_by_key(raw, "valid", "ValidationOutput")
+    if extracted:
+        return (True, extracted)
+    
+    # Failed to extract - trigger retry
+    logger.warning("❌ Guardrail: Could not extract valid ValidationOutput JSON")
+    return (False, "Output must be a valid JSON object with 'valid' and 'reason' fields. Ensure proper JSON formatting.")
 
 
 class RobotTasks:
-    def __init__(self, library_context=None, workflow_id: str = ""):
+    def __init__(self, library_context=None, workflow_id: str = "", hint_context: dict = None):
         """
         Initialize Robot Framework tasks.
 
         Args:
             library_context: LibraryContext instance (optional, for dynamic library knowledge)
             workflow_id: Unique workflow identifier for metrics tracking
+            hint_context: Dict mapping agent role -> hint text for task-level injection
         """
         self.library_context = library_context
         self.workflow_id = workflow_id
-        
+        self._hint_context = hint_context or {}
+
         # Cache static context - computed once on initialization
         # These values depend on library_context which is set at init time
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
@@ -191,9 +388,29 @@ Generated Test
             """
         return ""
 
+    def _get_task_hints(self, role: str) -> str:
+        """Get mandatory hint block for a task description, or empty string.
+
+        Mirrors the proven viewport instruction pattern: MANDATORY + CRITICAL framing
+        with specific, actionable directives. Hints are injected into task descriptions
+        (high salience) rather than agent backstories (low salience).
+        """
+        hint_text = self._hint_context.get(role, "")
+        if not hint_text:
+            return ""
+        logger.info(f"[LEARNING] Injecting hints into {role} task description")
+        return (
+            "--- MANDATORY USER CORRECTIONS (CRITICAL — FROM PAST FAILURES) ---\n\n"
+            "The following corrections are based on real execution failures. "
+            "You MUST apply ALL of them to your output.\n\n"
+            f"{hint_text}\n\n"
+            "**CRITICAL**: Ignoring these corrections will cause the test to FAIL again.\n"
+            "Apply every correction listed above.\n\n"
+        )
+
     def plan_steps_task(self, agent, query) -> Task:
         # Build prompt using PromptComponents for maintainability
-        description = f"""
+        description = f"""{self._get_task_hints("planner")}
             Your mission is to act as an expert Test Automation Planner. You must analyze a user's natural language query and decompose it into a comprehensive, step-by-step test plan that a junior test engineer could follow.
 
             The user query is: "{query}"
@@ -452,6 +669,7 @@ Generated Test
             expected_output="A JSON object with 'steps' key containing an array of test step objects with 'locator', 'found', and 'element_type' keys added from batch_browser_automation.",
             agent=agent,
             output_pydantic=IdentificationOutput,
+            guardrail=identification_output_guardrail,  # Fixes JSON with trailing chars
         )
 
     def assemble_code_task(self, agent) -> Task:
@@ -466,6 +684,7 @@ Generated Test
         )
         
         description = (
+            f"{self._get_task_hints('assembler')}"
             f"{PromptComponents.ASSEMBLY_OUTPUT_RULES}\n\n"
             
             "The context will be a JSON object from 'identify_elements_task' with: {\"steps\": [array of steps with locators]}.\n"
@@ -501,11 +720,11 @@ Generated Test
             expected_output=(
                 "A JSON object with 'code' key containing the complete Robot Framework code. "
                 "Format: {\"code\": \"*** Settings ***\\nLibrary    Browser\\n...\"}. "
-                "The code value must be a valid .robot file content with proper newlines (\\n). "
-                "Optionally include 'warnings' array for any issues encountered."
+                "The code value must be a valid .robot file content with proper newlines (\\n)."
             ),
             agent=agent,
             output_pydantic=AssemblyOutput,
+            guardrail=assembly_output_guardrail,  # Fixes format without retry
         )
 
     def validate_code_task(self, agent, code_assembler_agent=None) -> Task:
@@ -536,6 +755,8 @@ Generated Test
                 "⚠️ **PRIMARY TASK: VALIDATE THE ROBOT FRAMEWORK CODE** ⚠️\n"
                 "Your MAIN responsibility is to validate Robot Framework code for correctness.\n"
                 "Delegation is ONLY for invalid code - DO NOT delegate if code is valid!\n\n"
+
+                f"{self._get_task_hints('validator')}"
 
                 f"{validation_rules}"
 
@@ -608,6 +829,7 @@ Generated Test
             expected_output="A valid JSON object with 'valid': true. If errors are found, delegate to Robot Framework Code Generator FIRST using Action format, then return valid=true after code is corrected.",
             agent=agent,
             output_pydantic=ValidationOutput,  # Force structured JSON output using Pydantic model
+            guardrail=validation_output_guardrail,  # Fixes JSON with trailing chars
             # Only allow delegation to Code Assembler
             allowed_agents=[
                 code_assembler_agent] if code_assembler_agent else None,

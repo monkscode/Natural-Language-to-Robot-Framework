@@ -4,6 +4,10 @@
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 
+# Fix protobuf compatibility with Python 3.12 and robotframework-browser
+# This uses pure Python protobuf parsing (slower but compatible)
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+
 # Check for .env file
 if [ ! -f "src/backend/.env" ]; then
     echo "Error: src/backend/.env file not found."
@@ -51,4 +55,20 @@ fi
 # Run the application
 echo "Starting the application..."
 echo "You can access it at http://localhost:${APP_PORT}"
-python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}"
+python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
+UVICORN_PID=$!
+
+python tools/browser_use_service.py > bus.log 2>&1 &
+BROWSER_SERVICE_PID=$!
+
+cleanup() {
+    kill "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+wait -n "$UVICORN_PID" "$BROWSER_SERVICE_PID"
+EXIT_CODE=$?
+cleanup
+wait "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+exit "$EXIT_CODE"

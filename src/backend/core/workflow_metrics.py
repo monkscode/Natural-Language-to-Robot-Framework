@@ -168,30 +168,35 @@ def get_workflow_metrics_collector() -> WorkflowMetricsCollector:
     return _metrics_collector
 
 
-def count_tokens(text: str) -> int:
+def count_tokens(text: str, model: str = "gemini/gemini-2.5-flash") -> int:
     """
-    Count tokens in text using simple word-based estimation.
+    Count tokens in text using LiteLLM's accurate token counter.
     
-    This is a simple approximation: 1 token ≈ 0.75 words (or 1 word ≈ 1.33 tokens).
-    For more accurate counting, consider using tiktoken library.
+    LiteLLM provides accurate token counting for the specific model being used,
+    which is more reliable than word-based estimation for cost tracking.
     
     Args:
         text: Text to count tokens for
+        model: Model name for accurate tokenization (default: gemini-2.5-flash from config)
     
     Returns:
-        Estimated token count
+        Accurate token count for the specified model
     
     Example:
         >>> count_tokens("Hello world, this is a test")
-        8
+        7  # Accurate count vs estimated 8
     """
     if not text:
         return 0
     
-    words = text.split()
-    estimated_tokens = int(len(words) * 1.33)
-    
-    return estimated_tokens
+    try:
+        from litellm import token_counter
+        return token_counter(model=model, text=text)
+    except Exception as e:
+        # Fallback to word-based estimation if LiteLLM fails
+        logger.warning(f"LiteLLM token counting failed, using estimation: {e}")
+        words = text.split()
+        return int(len(words) * 1.33)
 
 
 def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.5-flash") -> dict:

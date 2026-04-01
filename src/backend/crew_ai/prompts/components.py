@@ -585,54 +585,48 @@ Structure of Action Input:
     # ═══════════════════════════════════════════════════════════════════════════
 
     ASSEMBLY_OUTPUT_RULES = """
-🚨 **YOU ARE A CODE GENERATOR - OUTPUT STRUCTURED JSON** 🚨
+🚨 **CODE GENERATOR - OUTPUT JSON FORMAT** 🚨
 
-Your ONLY task: Generate Robot Framework code from the provided steps and return it in JSON format.
+Your task: Generate Robot Framework code and return as JSON.
+
+**OUTPUT FORMAT:**
+{"code": "*** Settings ***\\nLibrary    Browser\\n..."}
+
+**RULES:**
+1. Final Answer must be a JSON object with "code" key
+2. "code" value: Complete Robot Framework code with \\n for newlines
+3. No markdown, no explanatory text - just the JSON
 
 --- KEYWORD SYNTAX LOOKUP (CRITICAL) ---
-⚠️ You have access to 'keyword_search' tool. USE IT when:
-- You encounter ANY keyword you're not 100% certain about
-- The step value contains '=' pattern (e.g., 'attr=value') - may need splitting
-- You need to verify argument count, order, or syntax
-- The keyword is NOT in the common list (New Browser, Click, Fill Text, Get Text)
+⚠️ Use 'keyword_search' tool for unfamiliar keywords.
 
 **BEFORE generating code for unfamiliar keywords:**
-1. Call keyword_search with the EXACT keyword name from the step
-2. Review the returned syntax: check argument count and whether they're separate
-3. If tool shows args like <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
-4. If step value has 'x=y' format, check if tool expects 2 args: <x> and <y> separately
+1. Call keyword_search with the EXACT keyword name
+2. Check returned syntax: argument count and order
+3. If tool shows <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
+4. If step value has 'x=y' format, check if tool expects 2 separate args
 
 **Pattern Recognition:**
-- Step value 'attr=value' → likely needs: Keyword    ${loc}    attr    value (3 args)
-- Step value 'just_text' → likely needs: Keyword    ${loc}    just_text (2 args)
-- When unsure → ALWAYS search first, then follow the tool's argument structure
+- 'attr=value' → likely: Keyword    ${loc}    attr    value (3 args)
+- 'just_text' → likely: Keyword    ${loc}    just_text (2 args)
+- When unsure → ALWAYS search first
 
-⛔ **ABSOLUTELY FORBIDDEN** ⛔
-DO NOT include in the code value:
-- Thinking process ('Thought:', 'I will', 'Let me', 'First', 'Now', 'I need')
-- Explanations ('From the first step:', 'Also add', 'Variables:', 'Test Case Steps:')
-- Markdown ('**Variables:**', '```robot', '```', '**Test Cases:**')
+**FORBIDDEN in Final Answer:**
+- Markdown code blocks (```json, ```)
+- Thinking text ('Thought:', 'I will', etc.)
+- Text before/after the JSON
 
-✅ **YOUR OUTPUT MUST BE** ✅
-A JSON object with 'code' key containing Robot Framework code:
-{"code": "*** Settings ***\nLibrary    Browser\n..."}
-
-The code value must:
-1. Start with *** Settings ***
-2. Contain ONLY valid Robot Framework syntax
-3. Use \n for newlines within the string
+**CORRECT Example:**
+{"code": "*** Settings ***\\nLibrary    Browser\\n\\n*** Variables ***\\n${browser}    chromium\\n\\n*** Test Cases ***\\nGenerated Test\\n    New Browser    ${browser}    headless=True\\n    Close Browser"}
 """
 
     ASSEMBLY_FORMAT_RULES = """
---- CRITICAL OUTPUT FORMAT RULES ---
-1. ⚠️ Output a JSON object: {"code": "<robot_code_here>"}
-2. The 'code' value must start with *** Settings ***
-3. Use \n for newlines: "*** Settings ***\nLibrary    Browser\n..."
-4. End code with the last test keyword (e.g., Close Browser)
-5. No explanatory text in the code value
-6. For price or numeric validations, use Evaluate to convert strings to numbers
-7. Optionally include 'warnings' array: {"code": "...", "warnings": ["..."]}
+--- OUTPUT FORMAT ---
+Final Answer must be: {"code": "<robot_code>"}
 
-Example of correct output:
-{"code": "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${browser}    chromium\n\n*** Test Cases ***\nGenerated Test\n    New Browser    ${browser}\n    Close Browser"}
+1. Code must start with *** Settings ***
+2. Use \\n for newlines
+3. End with last test keyword (e.g., Close Browser)
+4. No explanatory text in code value
+5. For price/numeric validations: use Evaluate to convert strings to numbers
 """
