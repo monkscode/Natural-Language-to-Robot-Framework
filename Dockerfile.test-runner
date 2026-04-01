@@ -1,5 +1,5 @@
 # Test Runner Image - Optimized build using shared base
-# Base: nlrf-base-browser (Chrome + Playwright + UV + Xvfb + system deps)
+# Base: nlrf-base-browser (Chrome + Playwright + UV + system deps)
 # Size: ~900MB (vs 2.7GB unoptimized) - 67% reduction
 
 ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
@@ -15,15 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     test -d /opt/playwright-browsers && \
     chmod -R 755 /opt/playwright-browsers
 
-# Copy virtual display helper script
-COPY scripts/start-with-display.sh /usr/local/bin/start-with-display.sh
-RUN chmod +x /usr/local/bin/start-with-display.sh
-
-# Set Chrome options for healing sessions
+# Set Chrome options for containerised headless execution
 ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
 
-# Use the display script as entrypoint
-ENTRYPOINT ["/usr/local/bin/start-with-display.sh"]
-
-# Default command (can be overridden)
 CMD ["robot", "--version"]

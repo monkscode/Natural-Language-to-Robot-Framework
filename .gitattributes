@@ -1,0 +1,7 @@
+# Ensure shell scripts always use LF line endings on all platforms.
+# Windows git with autocrlf=true would otherwise convert these to CRLF,
+# causing "no such file or directory" on the shebang line inside Linux containers.
+*.sh text eol=lf
+
+# Keep all other text files using the platform default
+* text=auto

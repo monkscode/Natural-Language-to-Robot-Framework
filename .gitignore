@@ -44,5 +44,6 @@ coverage/
 
 docs/tasks/
 .agents/workflows/development-workflow.md
-tasks/lessons.md
+tasks/*
 logs/crewai.log.txt
+CLAUDE.md

@@ -57,6 +57,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -79,22 +80,27 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.base-browser
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-buildcache,mode=max
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:base-browser-buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
           platforms: linux/amd64
 
       - name: Select base image tag output
         id: base_tag
         run: |
-          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
-          if [ -z "$first_tag" ]; then
-            echo "No base-browser tag produced by metadata-action" >&2
-            exit 1
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)"
+            if [ -z "$first_tag" ]; then
+              echo "No base-browser tag produced by metadata-action" >&2
+              exit 1
+            fi
+            echo "base_image_tag=$first_tag" >> "$GITHUB_OUTPUT"
+          else
+            # For PRs: dependent jobs use the existing stable base image since the freshly built one is not pushed
+            echo "base_image_tag=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base-browser-develop" >> "$GITHUB_OUTPUT"
           fi
-          echo "base_image_tag=$first_tag" >> "$GITHUB_OUTPUT"
 
       - name: Get image size
         id: image_size
@@ -125,6 +131,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -148,11 +155,11 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.fastapi
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache,mode=max
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:fastapi-buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
           platforms: linux/amd64
 
       - name: Get image size
@@ -185,6 +192,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -208,13 +216,13 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.browser-service
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache,mode=max
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:browser-service-buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
           platforms: linux/amd64
 
       - name: Get image size
@@ -247,6 +255,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -270,13 +279,13 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.test-runner
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache,mode=max
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:test-runner-buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
           platforms: linux/amd64
 
       - name: Get image size
