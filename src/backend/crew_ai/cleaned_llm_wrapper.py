@@ -2,8 +2,12 @@
 LLM Wrapper - LLM instantiation with output cleaning for CrewAI agents.
 
 This module provides a single CleanedLLMWrapper that works for all providers:
-- Online models (Gemini): model="gemini/gemini-2.5-flash"
-- Local  models (Ollama): model="ollama/<model_name>"
+- Gemini  models (Google AI Studio): model="gemini/gemini-2.5-flash"   (prefix added by get_llm())
+- Vertex  models (Google Cloud):     model="vertex_ai/gemini-2.5-flash" (prefix added by get_llm())
+- Local   models (Ollama):           model="ollama/<model_name>"         (prefix added by get_llm())
+
+Callers always pass bare model names (e.g. "gemini-2.5-flash") via ONLINE_MODEL.
+get_llm() derives the LiteLLM-routable string based on MODEL_PROVIDER.
 
 The wrapper intercepts every LLM call via call() to apply Action/ActionInput
 cleaning and rate-limit retry logic, then delegates to LiteLLM for the actual
@@ -217,8 +221,15 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     Get a CleanedLLMWrapper instance for the given provider and model.
 
     Works for all LiteLLM-supported providers via a single wrapper class:
-    - Online (Gemini):  model_provider="online", model_name="gemini/gemini-2.5-flash"
-    - Local  (Ollama):  model_provider="local",  model_name="qwen2.5-coder:14b"
+    - Gemini  (Google AI Studio):  model_provider="gemini", model_name="gemini-2.5-flash"
+    - Vertex  (Google Cloud):      model_provider="vertex", model_name="gemini-2.5-flash"
+    - Local   (Ollama):            model_provider="local",  model_name="qwen2.5-coder:14b"
+
+    model_name is always the bare model name (no provider prefix). This function
+    derives the correct LiteLLM-routable string automatically:
+        gemini  → "gemini/gemini-2.5-flash"
+        vertex  → "vertex_ai/gemini-2.5-flash"
+        local   → "ollama/qwen2.5-coder:14b"
 
     The returned instance:
     - Calls LiteLLM under the hood (__new__ override bypasses CrewAI's native
@@ -229,13 +240,12 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     - Tracks all responses via formatting_monitor
 
     Args:
-        model_provider: "local" for Ollama, "online" for Gemini/other API models
-        model_name: Model identifier.
-                    Online: include provider prefix (e.g. "gemini/gemini-2.5-flash")
-                    Local:  bare model name (e.g. "qwen2.5-coder:14b") — "ollama/"
-                            is prepended here so callers stay provider-agnostic.
-        api_key: API key for online models (optional, falls back to GEMINI_API_KEY
-                 env var). Not used for local Ollama models.
+        model_provider: "gemini" for Google AI Studio, "vertex" for Vertex AI,
+                        "local" for Ollama.
+        model_name: Bare model name without provider prefix (e.g. "gemini-2.5-flash",
+                    "qwen2.5-coder:14b"). The provider prefix is prepended here.
+        api_key: API key for Gemini models (optional, falls back to GEMINI_API_KEY
+                 env var). Not used for Vertex AI or local Ollama models.
 
     Returns:
         CleanedLLMWrapper instance ready for use with CrewAI agents
@@ -259,13 +269,31 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             num_retries=3,    # LiteLLM internal retry for transient API errors.
         )
 
-    # Online provider (Gemini and future API-based models).
+    if model_provider == "vertex":
+        # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend vertex_ai/.
+        # Strip any accidental provider prefix for backwards compatibility.
+        # Auth is handled automatically: VERTEXAI_CREDENTIALS, VERTEXAI_PROJECT,
+        # and VERTEXAI_LOCATION are read from os.environ by LiteLLM (loaded via python-dotenv).
+        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+        vertex_model = f"vertex_ai/{model_bare}"
+        logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {vertex_model}")
+        return CleanedLLMWrapper(
+            model=vertex_model,
+            num_retries=3,
+            is_litellm=True,
+        )
+
+    # Gemini provider (Google AI Studio).
+    # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend gemini/.
+    # Strip any accidental provider prefix for backwards compatibility.
     # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
     # LLM.__new__ entirely. Kept for documentation clarity only.
-    logger.info(f"🧹 Creating CleanedLLMWrapper for model: {model_name}")
+    model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+    gemini_model = f"gemini/{model_bare}"
+    logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {gemini_model}")
     return CleanedLLMWrapper(
         api_key=api_key or os.getenv("GEMINI_API_KEY"),
-        model=model_name,
+        model=gemini_model,
         num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
         is_litellm=True,
     )

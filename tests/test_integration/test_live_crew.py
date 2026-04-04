@@ -5,7 +5,7 @@ Purpose: Verify that run_crew() produces valid Robot Framework code when
          executed with a real LLM provider.
 
 Requires:
-  - GEMINI_API_KEY env variable set (for online provider)
+  - GEMINI_API_KEY env variable set (for gemini provider)
   - OR a running Ollama instance (for local provider)
 
 Run with:
@@ -74,8 +74,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         result = run_crew(
             "click the login button on example.com",
-            model_provider="online",
-            model_name="gemini/gemini-2.0-flash",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
             workflow_id="live-test-001",
         )
         assert len(result) == 4
@@ -85,8 +85,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         validation_output, _, _, _ = run_crew(
             "click the login button on example.com",
-            model_provider="online",
-            model_name="gemini/gemini-2.0-flash",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
             workflow_id="live-test-002",
         )
         assert isinstance(validation_output, str)
@@ -97,8 +97,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         validation_output, _, _, _ = run_crew(
             "navigate to google.com and search for python",
-            model_provider="online",
-            model_name="gemini/gemini-2.0-flash",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
             workflow_id="live-test-003",
         )
         assert _is_valid_robot_code(validation_output), (
@@ -110,8 +110,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         _, _, _, hint_metadata = run_crew(
             "click the submit button on example.com",
-            model_provider="online",
-            model_name="gemini/gemini-2.0-flash",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
             workflow_id="live-test-004",
         )
         assert isinstance(hint_metadata, dict)
@@ -121,8 +121,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         _, _, optimization_metrics, _ = run_crew(
             "open the home page of example.com",
-            model_provider="online",
-            model_name="gemini/gemini-2.0-flash",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
             workflow_id="live-test-005",
         )
         if optimization_metrics is not None:

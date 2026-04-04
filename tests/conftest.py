@@ -17,9 +17,9 @@ from unittest.mock import patch, MagicMock
 def mock_settings():
     """Patched Settings with test defaults — no real env vars read."""
     with patch.dict(os.environ, {
-        "MODEL_PROVIDER": "online",
+        "MODEL_PROVIDER": "gemini",
         "GEMINI_API_KEY": "test-key-123",
-        "ONLINE_MODEL": "gemini/gemini-2.5-flash",
+        "ONLINE_MODEL": "gemini-2.5-flash",
         "LOCAL_MODEL": "llama3",
         "APP_PORT": "5000",
         "BROWSER_USE_SERVICE_URL": "http://localhost:4999",

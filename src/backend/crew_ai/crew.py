@@ -102,7 +102,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
 
     Args:
         query: User's natural language test description
-        model_provider: "local" or "online"
+        model_provider: "local", "gemini", or "vertex"
         model_name: Model identifier
         library_type: "selenium" or "browser" (optional, defaults to config setting)
         workflow_id: Unique workflow identifier for metrics tracking
@@ -145,10 +145,20 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     baseline_context_tokens = 0
     optimized_context_tokens = 0
     
-    # Build properly prefixed model name for LiteLLM token counting
-    # Online models already have prefix (e.g., "gemini/gemini-2.5-flash")
-    # Local models need prefix added (e.g., "llama3" -> "ollama/llama3")
-    token_model = model_name if model_provider != "local" else f"ollama/{model_name}"
+    # Build properly prefixed model name for LiteLLM token counting.
+    # The token_model must match the model string passed to LiteLLM by get_llm(),
+    # because LiteLLM's model cost database has separate entries per provider prefix
+    # (e.g. gemini/ vs vertex_ai/ have different pricing).
+    if model_provider == "local":
+        token_model = f"ollama/{model_name}"
+    elif model_provider == "vertex":
+        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+        token_model = f"vertex_ai/{model_bare}"
+    else:
+        # Gemini provider: strip any accidental prefix then prepend gemini/
+        # to match the model string built by get_llm() for LiteLLM cost lookup.
+        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+        token_model = f"gemini/{model_bare}"
     
     hint_metadata = {}
 

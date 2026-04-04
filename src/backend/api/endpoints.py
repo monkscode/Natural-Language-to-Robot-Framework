@@ -33,9 +33,9 @@ async def generate_test_only(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider == "online" else settings.LOCAL_MODEL
+    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
 
-    if model_provider == "online" and not settings.GEMINI_API_KEY:
+    if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
     logging.info(f"[GENERATE ONLY] Using {model_provider} model provider: {model_name}")
@@ -84,9 +84,9 @@ async def generate_and_run_streaming(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider == "online" else settings.LOCAL_MODEL
+    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
 
-    if model_provider == "online" and not settings.GEMINI_API_KEY:
+    if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
     logging.info(f"[GENERATE AND RUN] Using {model_provider} model provider: {model_name}")

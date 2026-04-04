@@ -71,7 +71,7 @@ Close Browser
 
 ```env
 # AI Provider
-MODEL_PROVIDER=online              # or "local"
+MODEL_PROVIDER=gemini              # or "vertex" or "local"
 GEMINI_API_KEY=your-key-here      # Get from https://aistudio.google.com/app/apikey
 ONLINE_MODEL=gemini-2.5-flash     # Fast and accurate
 

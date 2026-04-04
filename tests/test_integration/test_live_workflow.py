@@ -8,7 +8,7 @@ Purpose: Verify the full workflow pipeline when the NL backend is running —
 Requires:
   - NL backend running on localhost:5000
   - Docker Desktop running
-  - GEMINI_API_KEY set in environment (for 'online' provider tests)
+  - GEMINI_API_KEY set in environment (for 'gemini' provider tests)
 
 Run with:
   pytest tests/test_integration/test_live_workflow.py -m integration -v
@@ -66,12 +66,12 @@ class TestWorkflowStreamEvents:
                 break
 
     def test_missing_api_key_yields_error_event(self):
-        """When GEMINI_API_KEY absent, online provider yields error immediately."""
+        """When GEMINI_API_KEY absent, gemini provider yields error immediately."""
         original = os.environ.pop("GEMINI_API_KEY", None)
         try:
             from src.backend.services.workflow_service import run_agentic_workflow
             # Force re-import to pick up env change
-            events = list(run_agentic_workflow("test", "online", "gemini"))
+            events = list(run_agentic_workflow("test", "gemini", "gemini"))
             statuses = [e["status"] for e in events]
             assert "error" in statuses
         finally:

@@ -24,9 +24,9 @@ class TestSettingsDefaults:
 
     def _make_settings(self, overrides=None):
         env = {
-            "MODEL_PROVIDER": "online",
+            "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
-            "ONLINE_MODEL": "gemini/gemini-2.5-flash",
+            "ONLINE_MODEL": "gemini-2.5-flash",
             "ROBOT_LIBRARY": "selenium",
             "BROWSER_HEADLESS": "true",
             "MAX_AGENT_ITERATIONS": "3",
@@ -42,9 +42,9 @@ class TestSettingsDefaults:
             return Settings()
 
     def test_default_model_provider(self):
-        """Default MODEL_PROVIDER is 'online'."""
+        """Default MODEL_PROVIDER is 'gemini'."""
         s = self._make_settings()
-        assert s.MODEL_PROVIDER == "online"
+        assert s.MODEL_PROVIDER == "gemini"
 
     def test_default_robot_library(self):
         """Default ROBOT_LIBRARY is validated and lowercased."""
@@ -72,9 +72,9 @@ class TestSettingsValidators:
 
     def _make_settings(self, overrides):
         env = {
-            "MODEL_PROVIDER": "online",
+            "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
-            "ONLINE_MODEL": "gemini/gemini-2.5-flash",
+            "ONLINE_MODEL": "gemini-2.5-flash",
             "ROBOT_LIBRARY": "selenium",
             "MAX_AGENT_ITERATIONS": "3",
             "CUSTOM_ACTION_TIMEOUT": "5",
@@ -119,3 +119,18 @@ class TestSettingsValidators:
         """MAX_LOCATOR_STRATEGIES=100 raises ValidationError."""
         with pytest.raises(ValidationError):
             self._make_settings({"MAX_LOCATOR_STRATEGIES": "100"})
+
+    def test_model_provider_accepts_vertex(self):
+        """Verify MODEL_PROVIDER=vertex passes validation."""
+        s = self._make_settings({"MODEL_PROVIDER": "vertex"})
+        assert s.MODEL_PROVIDER == "vertex"
+
+    def test_model_provider_rejects_online(self):
+        """Verify the removed 'online' value is rejected by the validator."""
+        with pytest.raises(ValidationError):
+            self._make_settings({"MODEL_PROVIDER": "online"})
+
+    def test_model_provider_rejects_invalid(self):
+        """Verify arbitrary strings are rejected."""
+        with pytest.raises(ValidationError):
+            self._make_settings({"MODEL_PROVIDER": "aws"})
