@@ -32,8 +32,8 @@ def api_client():
          patch("src.backend.api.endpoints.get_docker_status") as mock_docker_status, \
          patch("src.backend.api.endpoints.get_feedback_loop") as mock_feedback:
 
-        mock_settings.MODEL_PROVIDER = "online"
-        mock_settings.ONLINE_MODEL = "gemini/gemini-2.5-flash"
+        mock_settings.MODEL_PROVIDER = "gemini"
+        mock_settings.ONLINE_MODEL = "gemini-2.5-flash"
         mock_settings.LOCAL_MODEL = "llama3"
         mock_settings.GEMINI_API_KEY = "test-key"
 

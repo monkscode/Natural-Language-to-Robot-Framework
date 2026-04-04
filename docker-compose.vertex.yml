@@ -1,0 +1,46 @@
+# Docker Compose override for Google Cloud Vertex AI authentication.
+#
+# Use this file alongside the base docker-compose.yml when MODEL_PROVIDER=vertex
+# is set in src/backend/.env. It mounts the service account JSON key into the
+# container and sets VERTEXAI_CREDENTIALS, which is the env var LiteLLM reads
+# to locate the key file. This passes the file path directly into LiteLLM's
+# vertex auth layer, which then uses google.oauth2.service_account to load it
+# — bypassing google.auth.default() and GOOGLE_APPLICATION_CREDENTIALS entirely.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
+#
+# Prerequisites:
+#   1. Place your service account key at ./credentials.json (repo root)
+#   2. Ensure credentials.json is in .gitignore (it already is)
+#   3. Set MODEL_PROVIDER=vertex in src/backend/.env
+#   4. Set VERTEXAI_PROJECT and VERTEXAI_LOCATION in src/backend/.env
+#
+# See docs/VERTEX_AI_SETUP_GUIDE.md for full setup instructions.
+
+services:
+  fastapi:
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+    environment:
+      # LiteLLM reads VERTEXAI_CREDENTIALS to pass the key path directly to its
+      # vertex auth layer (load_auth → _credentials_from_service_account).
+      # GOOGLE_APPLICATION_CREDENTIALS is NOT needed here — that var is only
+      # used by google.auth.default(), which is never called when this is set.
+      - VERTEXAI_CREDENTIALS=/app/credentials.json
+
+  browser-service:
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+    environment:
+      # browser-service reads VERTEXAI_CREDENTIALS at startup and loads it via
+      # google.oauth2.service_account.Credentials.from_service_account_file().
+      # The resulting Credentials object is cached on config.llm.vertexai_credentials
+      # and passed to ChatGoogle(credentials=...) for each workflow — no file I/O
+      # per request. Token refresh is handled automatically by google-auth.
+      #
+      # MODEL_PROVIDER, VERTEXAI_PROJECT, and VERTEXAI_LOCATION reach this container
+      # via env_file: ./src/backend/.env in docker-compose.yml (line 64).
+      # Only VERTEXAI_CREDENTIALS needs to be overridden here because the .env value
+      # is a relative path (credentials.json) that is invalid inside the container.
+      - VERTEXAI_CREDENTIALS=/app/credentials.json

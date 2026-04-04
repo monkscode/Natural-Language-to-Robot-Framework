@@ -98,7 +98,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     
     Args:
         natural_language_query: User's test description
-        model_provider: "local" or "online"
+        model_provider: "local", "gemini", or "vertex"
         model_name: Model identifier
     """
     logging.info("--- Starting CrewAI Workflow with Vision Integration ---")
@@ -110,11 +110,29 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     # Start with welcome message
     yield {"status": "running", "message": f"{EMOJI['start']} Starting your test generation journey...", "progress": 0}
 
-    if model_provider == "online":
+    if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
-            logging.error(
-                "Orchestrator: GEMINI_API_KEY not found for online provider.")
+            logging.error("Orchestrator: GEMINI_API_KEY not found for gemini provider.")
             yield {"status": "error", "message": "GEMINI_API_KEY not found."}
+            return
+
+    elif model_provider == "vertex":
+        creds_path = os.getenv("VERTEXAI_CREDENTIALS")
+        if not creds_path:
+            logging.error("Orchestrator: VERTEXAI_CREDENTIALS not set for vertex provider.")
+            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file."}
+            return
+        if not os.path.exists(creds_path):
+            logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
+            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file."}
+            return
+        if not settings.VERTEXAI_PROJECT:
+            logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
+            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI."}
+            return
+        if not settings.VERTEXAI_LOCATION:
+            logging.error("Orchestrator: VERTEXAI_LOCATION not set for vertex provider.")
+            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI."}
             return
 
     # Run CrewAI workflow with simple progress updates

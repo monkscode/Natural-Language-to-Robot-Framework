@@ -23,18 +23,19 @@ nano src/backend/.env  # or use your preferred editor
 Controls which AI provider to use.
 
 ```env
-MODEL_PROVIDER=online  # or 'local'
+MODEL_PROVIDER=gemini  # or 'vertex' or 'local'
 ```
 
 **Options:**
-- `online` - Use cloud-based models (Google Gemini)
-- `local` - Use locally hosted models (Ollama)
+- `gemini` - Google AI Studio (requires `GEMINI_API_KEY`)
+- `vertex` - Google Cloud Vertex AI (requires service account credentials)
+- `local` - Locally hosted models via Ollama
 
-**Recommendation:** Use `online` for best results and performance.
+**Recommendation:** Use `gemini` for development, `vertex` for production/Docker.
 
 ### GEMINI_API_KEY
 
-Your Google Gemini API key (required for online mode).
+Your Google Gemini API key (required for `MODEL_PROVIDER=gemini`).
 
 ```env
 GEMINI_API_KEY=your-actual-api-key-here
@@ -50,7 +51,7 @@ GEMINI_API_KEY=your-actual-api-key-here
 
 ### ONLINE_MODEL
 
-Which Gemini model to use.
+Which model to use (bare name — the provider prefix is added automatically based on `MODEL_PROVIDER`).
 
 ```env
 ONLINE_MODEL=gemini-2.5-flash
@@ -58,8 +59,8 @@ ONLINE_MODEL=gemini-2.5-flash
 
 **Available Models:**
 - `gemini-2.5-flash` - Fast, accurate (recommended)
-- `gemini-1.5-pro-latest` - More powerful, slower
-- `gemini-1.5-flash` - Balanced performance
+- `gemini-2.0-flash` - Faster, slightly less capable
+- `gemini-1.5-pro` - More powerful, slower
 
 **Recommendation:** Use `gemini-2.5-flash` for best speed/accuracy balance.
 
@@ -302,7 +303,7 @@ TEMPERATURE=0.1
 
 ```env
 # AI Provider
-MODEL_PROVIDER=online
+MODEL_PROVIDER=gemini
 GEMINI_API_KEY=your-production-key
 ONLINE_MODEL=gemini-2.5-flash
 
@@ -363,7 +364,7 @@ LOG_LEVEL=INFO
 
 ```env
 # AI Provider
-MODEL_PROVIDER=online
+MODEL_PROVIDER=gemini
 GEMINI_API_KEY=your-key
 ONLINE_MODEL=gemini-2.5-flash
 
@@ -394,7 +395,8 @@ Mark 1 validates configuration on startup. Common validation errors:
 - Recommended: Use 'browser' for best performance
 
 ### "Invalid MODEL_PROVIDER"
-- Must be 'online' or 'local'
+- Must be `gemini`, `vertex`, or `local` (lowercase)
+- The old value `online` is no longer accepted — use `gemini` instead
 - Check spelling
 
 ## Environment-Specific Configuration
@@ -426,7 +428,7 @@ Set environment variables in your CI/CD platform:
 **GitHub Actions:**
 ```yaml
 env:
-  MODEL_PROVIDER: online
+  MODEL_PROVIDER: gemini
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
   ONLINE_MODEL: gemini-2.5-flash
 ```
@@ -434,7 +436,7 @@ env:
 **GitLab CI:**
 ```yaml
 variables:
-  MODEL_PROVIDER: "online"
+  MODEL_PROVIDER: "gemini"
   ONLINE_MODEL: "gemini-2.5-flash"
 ```
 

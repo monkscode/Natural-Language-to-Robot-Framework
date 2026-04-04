@@ -28,7 +28,7 @@ class RobotAgents:
         Initialize Robot Framework agents.
 
         Args:
-            model_provider: "local" or "online"
+            model_provider: "local", "gemini", or "vertex"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
             keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
