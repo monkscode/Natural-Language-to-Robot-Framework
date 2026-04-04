@@ -47,3 +47,4 @@ docs/tasks/
 tasks/*
 logs/crewai.log.txt
 CLAUDE.md
+credentials.json

@@ -22,6 +22,11 @@ crewai==1.8.1
 litellm==1.74.15.post2
 
 # LLM Providers
+# google-auth: required by LiteLLM's vertex_ai path for all auth routes
+# (google.auth.default() for ADC, google.oauth2.service_account for key files).
+# LiteLLM does NOT declare this as a base dependency — it only appears in the
+# optional [vertex] extra, which we do not install to avoid heavy transitive deps.
+google-auth
 
 # ChromaDB for semantic keyword search (uses default ONNX embedding - no pytorch needed)
 chromadb

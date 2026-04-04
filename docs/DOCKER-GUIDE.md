@@ -150,8 +150,8 @@ GEMINI_API_KEY=your_api_key_here
 
 # Everything below has sensible defaults — you don't need to change these to get started.
 
-MODEL_PROVIDER=online
-ONLINE_MODEL=gemini/gemini-2.5-flash
+MODEL_PROVIDER=gemini
+ONLINE_MODEL=gemini-2.5-flash
 
 ROBOT_LIBRARY=browser       # Use Playwright-based tests (recommended)
 BROWSER_HEADLESS=true       # Run browser in background (no visible window)
@@ -337,9 +337,9 @@ All settings below go in `src/backend/.env`. Only `GEMINI_API_KEY` is required t
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODEL_PROVIDER` | `online` | `online` to use Gemini, `local` to use Ollama |
-| `ONLINE_MODEL` | `gemini/gemini-2.5-flash` | Which Gemini model to use |
-| `GEMINI_API_KEY` | — | **Required for online mode.** Your Google AI Studio key |
+| `MODEL_PROVIDER` | `gemini` | `gemini` (Google AI Studio), `vertex` (Vertex AI), or `local` (Ollama) |
+| `ONLINE_MODEL` | `gemini-2.5-flash` | Bare model name — provider prefix added automatically |
+| `GEMINI_API_KEY` | — | **Required for `MODEL_PROVIDER=gemini`.** Your Google AI Studio key |
 | `LOCAL_MODEL` | `qwen2.5-coder:14b` | Which Ollama model to use (local mode only) |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | URL of your Ollama server |
 

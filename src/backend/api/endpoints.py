@@ -1,4 +1,6 @@
+import base64
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -31,9 +33,9 @@ async def generate_test_only(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider == "online" else settings.LOCAL_MODEL
+    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
 
-    if model_provider == "online" and not settings.GEMINI_API_KEY:
+    if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
     logging.info(f"[GENERATE ONLY] Using {model_provider} model provider: {model_name}")
@@ -58,9 +60,14 @@ async def execute_test_only(request: ExecuteRequest):
 
     logging.info(f"[EXECUTE ONLY] Executing user-provided test code ({len(robot_code)} characters)")
     if workflow_id:
-        logging.info(f"[EXECUTE ONLY] 🆔 Using unified workflow_id: {workflow_id}")
+        safe_workflow_id = (
+            workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
+            else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
+        )
+        logging.info("[EXECUTE ONLY] 🆔 Using unified workflow_id: %s", safe_workflow_id)
     if user_query:
-        logging.info(f"[EXECUTE ONLY] ✅ User query provided for pattern learning: {user_query[:50]}...")
+        safe_user_query = user_query.replace("\n", " ").replace("\r", "")
+        logging.info(f"[EXECUTE ONLY] ✅ User query provided for pattern learning: {safe_user_query[:50]}...")
     else:
         logging.warning("[EXECUTE ONLY] ⚠️ No user query provided - pattern learning will be skipped")
 
@@ -77,9 +84,9 @@ async def generate_and_run_streaming(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider == "online" else settings.LOCAL_MODEL
+    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
 
-    if model_provider == "online" and not settings.GEMINI_API_KEY:
+    if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
     logging.info(f"[GENERATE AND RUN] Using {model_provider} model provider: {model_name}")

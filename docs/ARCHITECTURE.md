@@ -386,11 +386,12 @@ webui --> user : 33. Display results\n+ report links
 
 7. **LLM Integration** ✅
    - ✅ **Supported Providers**:
-     - Google Gemini: `gemini/gemini-2.5-flash` (default)
+     - Google Gemini (AI Studio): `gemini/gemini-2.5-flash` (default)
+     - Google Vertex AI: `vertex_ai/gemini-2.5-flash`
      - Ollama: Local models (e.g., `llama3`)
    - ✅ **Configuration**: 
-     - `MODEL_PROVIDER` ("online" or "local")
-     - `GEMINI_API_KEY` (for online)
+     - `MODEL_PROVIDER` ("gemini", "vertex", or "local")
+     - `GEMINI_API_KEY` (for gemini provider)
      - `ONLINE_MODEL` / `LOCAL_MODEL`
    - ✅ **Rate Limiting**: REMOVED - Gemini API has sufficient limits (1500 RPM)
    - ✅ **Output Cleaning**: `get_cleaned_llm()` wrapper for robust parsing

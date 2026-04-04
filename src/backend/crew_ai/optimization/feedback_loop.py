@@ -25,8 +25,10 @@ Depends on: execution_memory.py (DAY_01), failure_analyzer.py (DAY_02),
             anti_pattern_engine.py (DAY_04), learning_config.py (DAY_00).
 """
 
+import base64
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -732,10 +734,14 @@ class FeedbackLoop:
 
             self.circuit_breaker.record_success()
 
+            safe_wid = (
+                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
+                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
+            )
             logger.info(
                 "[LEARNING] Processed execution %s: status=%s, "
                 "hints_injected=%d",
-                workflow_id, test_status, hints_injected,
+                safe_wid, test_status, hints_injected,
             )
 
             # Step 7: Update NL feedback hint effectiveness (non-blocking)
@@ -853,17 +859,21 @@ class FeedbackLoop:
                             "[LEARNING] Engine routing failed for %s: %s",
                             type(engine).__name__, e,
                         )
-            else:
+            safe_wid = (
+                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
+                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
+            )
+
+            if not record:
                 logger.warning(
                     "[LEARNING] No execution record for feedback: %s "
                     "(triage completed without engine routing)",
-                    workflow_id,
+                    safe_wid,
                 )
-
             logger.info(
                 "[LEARNING] Feedback processed for %s: type=%s "
                 "category=%s confidence=%.2f",
-                workflow_id, feedback_type,
+                safe_wid, feedback_type,
                 triage.get("category", "?"),
                 triage.get("confidence", 0.0),
             )

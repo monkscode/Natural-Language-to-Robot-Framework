@@ -10,10 +10,21 @@ load_dotenv("src/backend/.env")
 
 class Settings(BaseSettings):
     # LLM Configuration
-    MODEL_PROVIDER: str = "online"  # "online" for Gemini, "local" for Ollama
+    # MODEL_PROVIDER controls which LLM backend is used:
+    #   "vertex"  — Google Cloud Vertex AI (requires VERTEXAI_CREDENTIALS,
+    #               VERTEXAI_PROJECT, VERTEXAI_LOCATION)
+    #   "gemini"  — Google AI Studio (requires GEMINI_API_KEY)
+    #   "local"   — Ollama (requires a running Ollama server)
+    MODEL_PROVIDER: str = "vertex"
     GEMINI_API_KEY: str | None = None
-    ONLINE_MODEL: str = "gemini/gemini-2.5-flash"
+    ONLINE_MODEL: str = "gemini-2.5-flash"
     LOCAL_MODEL: str = "llama3"
+
+    # Vertex AI Configuration (only required when MODEL_PROVIDER=vertex)
+    # VERTEXAI_CREDENTIALS is the env var LiteLLM reads to locate the service account
+    # key file. Set it in .env (local dev) or via docker-compose.vertex.yml (Docker).
+    VERTEXAI_PROJECT: str | None = None
+    VERTEXAI_LOCATION: str | None = None
     
     # Note: SECONDS_BETWEEN_API_CALLS was removed during Phase 2 of codebase cleanup.
     # Rate limiting is no longer implemented as Google Gemini API has sufficient
@@ -50,6 +61,13 @@ class Settings(BaseSettings):
     
     # Learning System Configuration (Adaptive Learning — Phase 1+)
     EXECUTION_MEMORY_DB: str = Field(default="./data/execution_memory.db", description="Path to execution memory SQLite database for the learning system")
+
+    @validator('MODEL_PROVIDER')
+    def validate_model_provider(cls, v):
+        """Validate that MODEL_PROVIDER is one of the supported providers."""
+        if v.lower() not in ['gemini', 'vertex', 'local']:
+            raise ValueError(f"MODEL_PROVIDER must be 'gemini', 'vertex', or 'local', got '{v}'")
+        return v.lower()
 
     @validator('ROBOT_LIBRARY')
     def validate_robot_library(cls, v):

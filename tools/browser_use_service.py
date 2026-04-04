@@ -151,7 +151,17 @@ if __name__ == '__main__':
         logger.error("❌ Configuration validation failed:")
         for error in validation_errors:
             logger.error(f"   - {error}")
-        logger.warning("⚠️ Service starting with invalid configuration - some features may not work correctly")
+        if config.llm.model_provider == "vertex":
+            # Vertex AI failures are fatal: missing or invalid credentials mean every
+            # workflow request will fail with no possibility of recovery. Abort now
+            # so the operator is forced to fix the config before the service accepts work.
+            logger.error(
+                "💀 Vertex AI configuration is invalid. "
+                "Fix the errors above and restart the service."
+            )
+            sys.exit(1)
+        else:
+            logger.warning("⚠️ Service starting with invalid configuration - some features may not work correctly")
     else:
         logger.info("✅ Configuration validation passed")
 
