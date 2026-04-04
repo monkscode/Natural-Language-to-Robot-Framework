@@ -241,7 +241,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
 
     Args:
         model_provider: "gemini" for Google AI Studio, "vertex" for Vertex AI,
-                        "local" for Ollama.
+                        "local" for Ollama. Any other value raises ValueError.
         model_name: Bare model name without provider prefix (e.g. "gemini-2.5-flash",
                     "qwen2.5-coder:14b"). The provider prefix is prepended here.
         api_key: API key for Gemini models (optional, falls back to GEMINI_API_KEY
@@ -249,6 +249,9 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
 
     Returns:
         CleanedLLMWrapper instance ready for use with CrewAI agents
+
+    Raises:
+        ValueError: If model_provider is not one of: "gemini", "vertex", "local".
     """
     if model_provider == "local":
         # LiteLLM routes "ollama/<model>" to the Ollama HTTP API.
@@ -283,17 +286,24 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             is_litellm=True,
         )
 
-    # Gemini provider (Google AI Studio).
-    # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend gemini/.
-    # Strip any accidental provider prefix for backwards compatibility.
-    # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
-    # LLM.__new__ entirely. Kept for documentation clarity only.
-    model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-    gemini_model = f"gemini/{model_bare}"
-    logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {gemini_model}")
-    return CleanedLLMWrapper(
-        api_key=api_key or os.getenv("GEMINI_API_KEY"),
-        model=gemini_model,
-        num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
-        is_litellm=True,
+    if model_provider == "gemini":
+        # Gemini provider (Google AI Studio).
+        # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend gemini/.
+        # Strip any accidental provider prefix for backwards compatibility.
+        # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
+        # LLM.__new__ entirely. Kept for documentation clarity only.
+        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+        gemini_model = f"gemini/{model_bare}"
+        logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {gemini_model}")
+        return CleanedLLMWrapper(
+            api_key=api_key or os.getenv("GEMINI_API_KEY"),
+            model=gemini_model,
+            num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
+            is_litellm=True,
+        )
+
+    raise ValueError(
+        f"Unsupported model_provider: '{model_provider}'. "
+        f"Must be one of: 'gemini', 'vertex', 'local'. "
+        f"Check your MODEL_PROVIDER environment variable."
     )

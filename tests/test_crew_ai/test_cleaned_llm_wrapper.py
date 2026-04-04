@@ -100,6 +100,17 @@ class TestGetLlm:
         with patch.dict(os.environ, {"VERTEXAI_CREDENTIALS": "creds.json",
                                       "VERTEXAI_PROJECT": "test-project",
                                       "VERTEXAI_LOCATION": "us-central1"}):
-            get_llm(model_provider="vertex", model_name="gemini/gemini-2.5-flash")
-            call_kwargs = MockCleanedLLMWrapper.call_args[1]
+            llm = get_llm(model_provider="vertex", model_name="gemini/gemini-2.5-flash")
+            assert llm == MockCleanedLLMWrapper.return_value
+            MockCleanedLLMWrapper.assert_called_once()
+            call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
+            assert call_kwargs["model"] == "vertex_ai/gemini-2.5-flash"
             assert "api_key" not in call_kwargs
+
+    @pytest.mark.parametrize("bad_provider", ["openai", "anthropic", "gemni", "", "GEMINI", "gpt-4"])
+    def test_unsupported_provider_raises_value_error(self, bad_provider):
+        """Unknown model_provider values must raise ValueError immediately, not silently route."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with pytest.raises(ValueError, match="Unsupported model_provider"):
+            get_llm(model_provider=bad_provider, model_name="some-model")

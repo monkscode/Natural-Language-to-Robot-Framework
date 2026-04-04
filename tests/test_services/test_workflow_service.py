@@ -14,7 +14,6 @@ Tests:
   - Workflow metrics collection
 """
 
-import json
 import os
 import tempfile
 import pytest

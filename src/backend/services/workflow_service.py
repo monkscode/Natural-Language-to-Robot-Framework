@@ -124,7 +124,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             return
         if not os.path.exists(creds_path):
             logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
-            yield {"status": "error", "message": f"Credentials file not found: {creds_path}. Check VERTEXAI_CREDENTIALS in your .env."}
+            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file."}
             return
         if not settings.VERTEXAI_PROJECT:
             logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
