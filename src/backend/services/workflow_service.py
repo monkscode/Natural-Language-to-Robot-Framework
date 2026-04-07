@@ -84,7 +84,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
-def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
     yielding progress updates and the final code.
@@ -108,7 +108,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     logging.info(f"🆔 Workflow ID: {workflow_id}")
     
     # Start with welcome message
-    yield {"status": "running", "message": f"{EMOJI['start']} Starting your test generation journey...", "progress": 0}
+    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
 
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
@@ -135,38 +135,22 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI."}
             return
 
-    # Run CrewAI workflow with simple progress updates
+    # Run CrewAI workflow with real-time progress events.
     # Note: Rate limiting was removed during Phase 2 of codebase cleanup.
     # Direct LLM calls are now used without wrappers. Google Gemini API has
     # sufficient rate limits (1500 RPM) for our use case.
     try:
-        # Start AI workflow
-        yield {"status": "running", "message": f"{EMOJI['ai']} Starting AI workflow...", "progress": 5}
-        
-        # Stage 1: Planning (10-25%)
-        yield {"status": "running", "message": f"{EMOJI['ai']} Planning test steps...", "progress": 10}
-        yield {"status": "info", "message": "💡 AI breaks complex tasks into atomic steps for better accuracy", "progress": 10}
-        
-        # Stage 2: Identifying (25-50%)
-        yield {"status": "running", "message": f"{EMOJI['search']} Identifying page elements...", "progress": 30}
-        yield {"status": "info", "message": "🎯 Using AI detection with 95%+ accuracy", "progress": 30}
-        
-        # Run CrewAI workflow (this takes most of the time - 10-15 seconds)
-        # User sees progress messages above while this runs
+        yield {"status": "running", "message": f"{EMOJI['ai']} Initializing AI agents...", "progress": 3}
+
+        # Real-time progress events are pushed directly to progress_queue by the
+        # CrewAI event bus handlers in progress_events.py during crew.kickoff().
         validation_output, crew_with_results, optimization_metrics, hint_metadata = run_crew(
-            natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id)
+            natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
+            progress_queue=progress_queue)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
             _hint_metadata_cache[workflow_id] = hint_metadata
-        
-        # Stage 3: Generating (50-75%)
-        yield {"status": "running", "message": f"{EMOJI['code']} Generating test code...", "progress": 60}
-        yield {"status": "info", "message": "⚡ Browser Library is 2-3x faster than Selenium", "progress": 60}
-        
-        # Stage 4: Validating (75-95%)
-        yield {"status": "running", "message": f"{EMOJI['validate']} Validating code...", "progress": 85}
-        yield {"status": "info", "message": "🔬 Validating syntax, structure, and best practices", "progress": 85}
 
         # Extract robot code from task[2] (code_assembler)
         # With output_pydantic=AssemblyOutput, code is in output.pydantic.code
@@ -498,10 +482,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             lines = len(robot_code.split('\n'))
             
             # Show finalizing step before completion
-            yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code...", "progress": 95}
-            
-            # Show 100% progress with running status (so UI displays it)
-            yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code.", "progress": 100}
+            yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code..."}
+
+            # Confirm success with line count (progress already at 100% from event bus)
+            yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
             
             # Final completion message (without progress, as it's already at 100%)
             yield {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
@@ -535,10 +519,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
 
 def run_workflow_in_thread(queue: Queue, user_query: str, model_provider: str, model_name: str):
-    """Runs the synchronous agentic workflow and puts results in a queue."""
+    """Runs the synchronous agentic workflow and puts results in a queue.
+
+    Passes the queue to run_agentic_workflow() so it can be forwarded to run_crew(),
+    where the CrewAI event bus handlers push real-time progress events directly.
+    """
     try:
-        # Run workflow and put all yielded events into queue
-        for event in run_agentic_workflow(user_query, model_provider, model_name):
+        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue):
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")

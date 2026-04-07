@@ -96,7 +96,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = ""):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = "", progress_queue=None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -350,6 +350,16 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     assemble_code = tasks.assemble_code_task(code_assembler_agent)
     validate_code = tasks.validate_code_task(code_validator_agent, code_assembler_agent)
 
+    # Register real-time progress event routing (no-op when progress_queue is None)
+    if progress_queue is not None:
+        from src.backend.crew_ai.progress_events import register_workflow, unregister_workflow
+        register_workflow(workflow_id, progress_queue, {
+            str(plan_steps.id): 0,
+            str(identify_elements.id): 1,
+            str(assemble_code.id): 2,
+            str(validate_code.id): 3,
+        })
+
     # Rotate crewai.log if it exceeds size limit (before creating the Crew)
     _rotate_crewai_log()
 
@@ -375,39 +385,44 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         f"📊 LLM Output Cleaner Status: {formatting_monitor.get_stats()}")
 
     try:
-        result = crew.kickoff()
-        logger.info("✅ CrewAI workflow completed successfully")
-        logger.info(f"🏁 Crew execution finished - delegation cycle complete")
-        # formatting_monitor is the authoritative call count: incremented once per
-        # CleanedLLMWrapper.call() invocation. Compare against "Raw CrewAI usage metrics"
-        # in workflow_service.py — that figure is N_agents × real_calls due to CrewAI
-        # summing the shared LLM instance once per agent in calculate_usage_metrics().
-        logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
-        
-        # NOTE: Pattern learning is NOT done here!
-        # Learning should only happen AFTER test execution succeeds (test_status == "passed")
-        # This ensures we only learn from validated, working code.
-        # The learning is triggered in workflow_service.py after Docker execution completes successfully.
-        
-        # Return optimization metrics separately (Crew object doesn't allow dynamic attributes)
-        if optimization_metrics:
-            logger.info("📊 Optimization metrics collected")
-        
-        return result, crew, optimization_metrics, hint_metadata
+        try:
+            result = crew.kickoff()
+            logger.info("✅ CrewAI workflow completed successfully")
+            logger.info(f"🏁 Crew execution finished - delegation cycle complete")
+            # formatting_monitor is the authoritative call count: incremented once per
+            # CleanedLLMWrapper.call() invocation. Compare against "Raw CrewAI usage metrics"
+            # in workflow_service.py — that figure is N_agents × real_calls due to CrewAI
+            # summing the shared LLM instance once per agent in calculate_usage_metrics().
+            logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
 
-    except Exception as e:
-        error_msg = str(e)
+            # NOTE: Pattern learning is NOT done here!
+            # Learning should only happen AFTER test execution succeeds (test_status == "passed")
+            # This ensures we only learn from validated, working code.
+            # The learning is triggered in workflow_service.py after Docker execution completes successfully.
 
-        # Check if this is a formatting error that slipped through
-        if LLMOutputCleaner.is_formatting_error(error_msg):
-            logger.error("❌ LLM formatting error detected despite cleaning!")
-            logger.error(f"   Error: {error_msg[:200]}...")
-            logger.error(
-                f"   This indicates the cleaning logic needs improvement")
-            formatting_monitor.log_formatting_error(was_recovered=False)
-        else:
-            logger.error(f"❌ CrewAI workflow failed: {error_msg[:200]}...")
+            # Return optimization metrics separately (Crew object doesn't allow dynamic attributes)
+            if optimization_metrics:
+                logger.info("📊 Optimization metrics collected")
 
-        logger.info(
-            f"📊 LLM Stats at failure: {formatting_monitor.get_stats()}")
-        raise
+            return result, crew, optimization_metrics, hint_metadata
+
+        except Exception as e:
+            error_msg = str(e)
+
+            # Check if this is a formatting error that slipped through
+            if LLMOutputCleaner.is_formatting_error(error_msg):
+                logger.error("❌ LLM formatting error detected despite cleaning!")
+                logger.error(f"   Error: {error_msg[:200]}...")
+                logger.error(
+                    f"   This indicates the cleaning logic needs improvement")
+                formatting_monitor.log_formatting_error(was_recovered=False)
+            else:
+                logger.error(f"❌ CrewAI workflow failed: {error_msg[:200]}...")
+
+            logger.info(
+                f"📊 LLM Stats at failure: {formatting_monitor.get_stats()}")
+            raise
+
+    finally:
+        if progress_queue is not None:
+            unregister_workflow(workflow_id)

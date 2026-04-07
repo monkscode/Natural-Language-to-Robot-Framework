@@ -308,6 +308,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const logEntry = document.createElement('div');
         logEntry.className = 'log-entry';
 
+        // Guard against missing message field (defensive — backend always sends it,
+        // but protects against future changes or malformed SSE events)
+        logEvent.message = logEvent.message || '';
+
         // Determine log level styling based on message content or status
         let logLevel = 'info';
         if (logEvent.status === 'error' || logEvent.message.includes('⚠️') || logEvent.message.includes('ERROR')) {
@@ -323,16 +327,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         logEntry.classList.add(`log-${logLevel}`);
 
-        // Build the log message HTML
-        let html = `<div class="log-timestamp">[${new Date().toLocaleTimeString()}]</div>`;
-        html += `<div class="log-message">${escapeHtml(logEvent.message)}`;
+        // Build the log message HTML — single-line: [HH:MM:SS] emoji Message
+        let html = `<span class="log-timestamp">[${new Date().toLocaleTimeString()}]</span> `;
+        html += `<span class="log-message">${escapeHtml(logEvent.message)}`;
 
         // Add step info if present (no individual progress bars)
         if (logEvent.step) {
             html += ` <span class="log-step-info">(Step ${logEvent.step})</span>`;
         }
 
-        html += `</div>`;
+        html += `</span>`;
 
         logEntry.innerHTML = html;
 
