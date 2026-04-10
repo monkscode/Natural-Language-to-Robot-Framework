@@ -34,13 +34,15 @@ class AgentContextResult(NamedTuple):
 
     Fields:
         context: The assembled context string for the agent.
-        hints_count: Number of learning hints injected (0 if none).
+        hints_count: Number of learning hints injected (capped by budget).
+        hints_available: Total hint candidates found before budget cap.
         hint_sources: Engine names that contributed hints,
                       e.g. ["structural", "anti_pattern"].
         hint_text: Raw formatted hint block for task-level injection.
     """
     context: str
     hints_count: int = 0
+    hints_available: int = 0
     hint_sources: tuple = ()
     hint_text: str = ""
 
@@ -119,7 +121,7 @@ class SmartKeywordProvider:
         - Complex (6+ steps):  max 10 hints, 120 tokens each = 1,200 max
         """
         if self._db_conn is None:
-            return {"text": None, "count": 0, "sources": []}
+            return {"text": None, "count": 0, "available": 0, "sources": []}
 
         # Determine complexity tier
         tier = self._determine_complexity_tier(user_query)
@@ -184,13 +186,14 @@ class SmartKeywordProvider:
             logger.warning(f"[LEARNING] NL feedback engine hint retrieval failed: {e}")
 
         if not candidates:
-            return {"text": None, "count": 0, "sources": []}
+            return {"text": None, "count": 0, "available": 0, "sources": []}
 
         # Select top N, format within budget
+        available = len(candidates)
         formatted = self._format_hints(candidates, max_hints, tokens_per_hint)
-        count = min(len(candidates), max_hints)
+        count = min(available, max_hints)
 
-        return {"text": formatted, "count": count, "sources": sources}
+        return {"text": formatted, "count": count, "available": available, "sources": sources}
 
     def _determine_complexity_tier(self, user_query: str) -> dict:
         """
@@ -470,6 +473,7 @@ Use keyword_search tool if you need additional keywords.
         """
         context_parts = []
         hints_count = 0
+        hints_available = 0
         hint_sources = []
         hint_text = ""
 
@@ -481,9 +485,10 @@ Use keyword_search tool if you need additional keywords.
             if hint_result and hint_result["text"]:
                 hint_text = hint_result["text"]
                 hints_count = hint_result["count"]
+                hints_available = hint_result["available"]
                 hint_sources = hint_result["sources"]
                 logger.info(
-                    f"[LEARNING] Injected {hints_count} hints from "
+                    f"[LEARNING] Injected {hints_count}/{hints_available} hints from "
                     f"{hint_sources} for {agent_role} agent"
                 )
         except Exception as e:
@@ -551,6 +556,7 @@ Use keyword_search tool if you need additional keywords.
         return AgentContextResult(
             context="\n\n".join(context_parts),
             hints_count=hints_count,
+            hints_available=hints_available,
             hint_sources=tuple(hint_sources),
             hint_text=hint_text,
         )

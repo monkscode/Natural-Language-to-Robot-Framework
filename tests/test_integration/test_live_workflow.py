@@ -83,21 +83,21 @@ class TestWorkflowApiEndpoints:
     """Verify the NL backend API endpoints for workflow submission."""
 
     def test_generate_endpoint_accepts_post(self):
-        """POST /generate returns a streaming response."""
+        """POST /generate-test returns a streaming response."""
         resp = requests.post(
-            f"{SERVICE_URL}/generate",
-            json={"query": "click the submit button", "model_provider": "local", "model_name": "ollama"},
+            f"{SERVICE_URL}/generate-test",
+            json={"query": "click the submit button"},
             stream=True,
             timeout=10,
         )
         assert resp.status_code == 200
 
     def test_generate_endpoint_streams_json_lines(self):
-        """SSE stream contains parseable JSON lines."""
+        """SSE stream from /generate-test contains parseable JSON lines."""
         import json
         resp = requests.post(
-            f"{SERVICE_URL}/generate",
-            json={"query": "click submit on example.com", "model_provider": "local", "model_name": "ollama"},
+            f"{SERVICE_URL}/generate-test",
+            json={"query": "click submit on example.com"},
             stream=True,
             timeout=30,
         )
@@ -115,10 +115,10 @@ class TestWorkflowApiEndpoints:
         assert lines_seen >= 1
 
     def test_execute_endpoint_exists(self):
-        """POST /execute is reachable (may return error without Docker, but not 404)."""
+        """POST /execute-test is reachable (may return error without valid code, but not 404)."""
         resp = requests.post(
-            f"{SERVICE_URL}/execute",
-            json={"code": "*** Test Cases ***\nDummy\n    Log    hello", "run_id": "test-run"},
+            f"{SERVICE_URL}/execute-test",
+            json={"robot_code": "*** Test Cases ***\nDummy\n    Log    hello"},
             timeout=10,
         )
         # Anything except 404 — the endpoint exists

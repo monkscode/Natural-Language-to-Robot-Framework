@@ -116,11 +116,12 @@ class TestAgentContextResult:
 
     def test_tuple_unpacking(self):
         r = AgentContextResult(
-            context="ctx", hints_count=2, hint_sources=["a", "b"]
+            context="ctx", hints_count=2, hints_available=3, hint_sources=["a", "b"]
         )
-        c, n, s, h = r
+        c, n, avail, s, h = r
         assert c == "ctx"
         assert n == 2
+        assert avail == 3
         assert s == ["a", "b"]
         assert h == ""  # Default hint_text
 
@@ -303,6 +304,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "click button")
         assert result["text"] is None
         assert result["count"] == 0
+        assert result["available"] == 0
         assert result["sources"] == []
 
     def test_all_engines_return_none(self, in_memory_db):
@@ -314,6 +316,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "click button")
         assert result["text"] is None
         assert result["count"] == 0
+        assert result["available"] == 0
 
     def test_structural_only(self, in_memory_db):
         p = create_provider(db_conn=in_memory_db)
@@ -323,6 +326,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "get all rows")
         assert result["text"] is not None
         assert result["count"] == 1
+        assert result["available"] == 1
         assert result["sources"] == ["structural"]
         assert "Use FOR loop" in result["text"]
 

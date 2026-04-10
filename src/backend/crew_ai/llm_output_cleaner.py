@@ -208,6 +208,18 @@ class LLMFormattingMonitor:
         if was_recovered:
             self.formatting_errors_recovered += 1
 
+    def get_numeric_stats(self) -> dict:
+        """Return raw counters as a dict for structured storage."""
+        total = self.total_responses
+        cleaned = self.cleaned_responses
+        return {
+            "total_responses": total,
+            "cleaned_responses": cleaned,
+            "clean_rate": round((cleaned / total * 100), 1) if total > 0 else 0.0,
+            "formatting_errors_detected": self.formatting_errors_detected,
+            "formatting_errors_recovered": self.formatting_errors_recovered,
+        }
+
     def get_stats(self) -> str:
         """Get formatted statistics string."""
         if self.total_responses == 0:
@@ -231,6 +243,3 @@ class LLMFormattingMonitor:
                 f"No formatting errors detected"
             )
 
-
-# Global monitor instance
-formatting_monitor = LLMFormattingMonitor()

@@ -42,7 +42,7 @@ import os
 from typing import Optional
 from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
 
-from .llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class CleanedLLMWrapper(LLM):
     def __init__(self, *args, **kwargs):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
+        self._monitor = LLMFormattingMonitor()
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
 
     def get_context_window_size(self) -> int:
@@ -205,14 +206,14 @@ class CleanedLLMWrapper(LLM):
         """
         result = super().call(messages, *args, **kwargs)
         if not isinstance(result, str):
-            formatting_monitor.log_response(was_cleaned=False)
+            self._monitor.log_response(was_cleaned=False)
             return result
 
         cleaned = LLMOutputCleaner.clean_output(result)
         was_cleaned = cleaned != result
         if was_cleaned:
             logger.debug(f"🧹 Cleaned LLM response (length: {len(result)} → {len(cleaned)})")
-        formatting_monitor.log_response(was_cleaned=was_cleaned)
+        self._monitor.log_response(was_cleaned=was_cleaned)
         return cleaned
 
 
@@ -237,7 +238,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'
     - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
     - Retries on transient API errors via LiteLLM (num_retries=3)
-    - Tracks all responses via formatting_monitor
+    - Tracks all responses via self._monitor (per-instance, never shared across workflows)
 
     Args:
         model_provider: "gemini" for Google AI Studio, "vertex" for Vertex AI,
