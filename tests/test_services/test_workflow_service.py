@@ -219,8 +219,9 @@ class TestWorkflowSlotManagement:
             def worker():
                 try:
                     for _ in range(100):
-                        _acquire_workflow_slot()
-                        _release_workflow_slot()
+                        acquired = _acquire_workflow_slot()
+                        if acquired:
+                            _release_workflow_slot()
                 except Exception as e:
                     errors.append(e)
 

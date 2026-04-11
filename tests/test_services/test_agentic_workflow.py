@@ -575,7 +575,13 @@ class TestWorkflowCompletionPaths:
         assert any(e.get("status") == "error" for e in events)
 
     def test_hint_metadata_stored_in_cache_during_generation(self):
-        """When run_crew returns hint_metadata, it is placed in _hint_metadata_cache."""
+        """When run_crew returns hint_metadata, it is placed in _hint_metadata_cache.
+
+        run_agentic_workflow (generate-only path) stores hint_metadata but does NOT
+        consume it — that happens later in stream_execute_only via _process_learning.
+        The cache entry must exist under the workflow_id emitted in the complete event,
+        and its data (minus the internal _stored_at timestamp) must match hint_data.
+        """
         import src.backend.services.workflow_service as ws
         hint_data = {"planner": {"count": 3, "sources": ["structural"]}}
 
@@ -593,16 +599,27 @@ class TestWorkflowCompletionPaths:
 
             mock_s.return_value.read_browser_metrics.return_value = {}
 
-            # Capture the workflow_id by intercepting the complete event
             from src.backend.services.workflow_service import run_agentic_workflow
             events = list(run_agentic_workflow("query", "gemini", "model"))
 
-        # The hint cache should have been populated then consumed by _process_learning
-        # (which is NOT called in run_agentic_workflow — it's called from stream_execute_only)
-        # On the success path _process_learning is not triggered here, so cache may still hold it
-        # OR it was never written because the success path calls _process_learning immediately.
-        # What matters: no exception was raised and complete event arrived.
-        assert any(e.get("status") == "complete" for e in events)
+        complete_event = next((e for e in events if e.get("status") == "complete"), None)
+        assert complete_event is not None, "Expected a complete event"
+
+        workflow_id = complete_event.get("workflow_id")
+        assert workflow_id is not None, "complete event must carry workflow_id"
+
+        # The cache entry must exist and contain the hint_data written during generation.
+        # _stored_at is an internal timestamp added by _store_hint_metadata — strip it.
+        cached = ws._hint_metadata_cache.get(workflow_id)
+        assert cached is not None, (
+            f"_hint_metadata_cache has no entry for workflow_id={workflow_id!r}; "
+            "hint metadata was not stored"
+        )
+        cached_data = {k: v for k, v in cached.items() if k != "_stored_at"}
+        assert cached_data == hint_data
+
+        # Clean up so the module-level cache does not leak between tests
+        ws._hint_metadata_cache.pop(workflow_id, None)
 
     def test_metrics_collection_failure_does_not_abort_workflow(self):
         """If calculate_usage_metrics() fails, the workflow still completes."""

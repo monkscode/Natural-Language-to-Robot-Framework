@@ -188,10 +188,13 @@ class SmartKeywordProvider:
         if not candidates:
             return {"text": None, "count": 0, "available": 0, "sources": []}
 
-        # Select top N, format within budget
+        # Apply hard cap before formatting so count and formatted output agree
+        hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
+        effective_max = min(max_hints, hard_cap)
+
         available = len(candidates)
-        formatted = self._format_hints(candidates, max_hints, tokens_per_hint)
-        count = min(available, max_hints)
+        formatted = self._format_hints(candidates, effective_max, tokens_per_hint)
+        count = min(available, effective_max)
 
         return {"text": formatted, "count": count, "available": available, "sources": sources}
 
@@ -229,10 +232,8 @@ class SmartKeywordProvider:
         priority_order = {"high": 0, "medium": 1, "low": 2}
         candidates.sort(key=lambda x: priority_order.get(x["priority"], 1))
 
-        # Take top N (respect hard cap)
-        hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
-        effective_max = min(max_hints, hard_cap)
-        selected = candidates[:effective_max]
+        # Take top N (hard cap already applied by caller)
+        selected = candidates[:max_hints]
 
         # Truncate each hint within token budget (~4 chars per token)
         max_chars = tokens_per_hint * 4

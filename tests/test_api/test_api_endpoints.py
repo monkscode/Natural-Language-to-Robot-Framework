@@ -133,43 +133,18 @@ class TestFeedbackEndpoints:
 def health_app_client():
     """FastAPI test client with only the health endpoints, no main.py import.
 
-    Mounts health_check and api_health_check directly onto a fresh FastAPI app
-    so we can test them without importing src.backend.main (which reconfigures
-    sys.stdout/sys.stderr at module load time, breaking pytest's output capture).
+    Mounts the same callables used in production (src.backend.api.health) onto a
+    fresh FastAPI app so we can test them without importing src.backend.main (which
+    reconfigures sys.stdout/sys.stderr at module load time, breaking pytest's output
+    capture). Using the real handlers means regressions in main.py are caught here.
     """
-    import asyncio
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    from src.backend.api.health import health_check, api_health_check
 
     app = FastAPI()
-
-    @app.get("/health")
-    async def health_check():
-        from src.backend.services.workflow_service import get_active_workflow_count
-        from src.backend.core.config import settings
-        active = get_active_workflow_count()
-        max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-        return {
-            "status": "healthy",
-            "service": "nlrf-fastapi",
-            "active_workflows": active,
-            "max_workflows": max_wf,
-            "available_slots": max_wf - active,
-        }
-
-    @app.get("/api/health")
-    async def api_health_check():
-        from src.backend.services.workflow_service import get_active_workflow_count
-        from src.backend.core.config import settings
-        active = get_active_workflow_count()
-        max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-        return {
-            "status": "healthy",
-            "service": "nlrf-api",
-            "active_workflows": active,
-            "max_workflows": max_wf,
-            "available_slots": max_wf - active,
-        }
+    app.get("/health")(health_check)
+    app.get("/api/health")(api_health_check)
 
     with TestClient(app) as client:
         yield client
@@ -180,8 +155,10 @@ class TestHealthCapacityFields:
 
     def test_idle_health_shows_zero_active_workflows(self, health_app_client):
         """/health with no active workflows returns expected capacity fields."""
-        with patch("src.backend.services.workflow_service.get_active_workflow_count", return_value=0), \
-             patch("src.backend.core.config.settings") as mock_settings:
+        # Patch in health.py's namespace — the handlers import both names at module
+        # level, so patching the source module has no effect on the bound references.
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch("src.backend.api.health.settings") as mock_settings:
             mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
             resp = health_app_client.get("/health")
         assert resp.status_code == 200
@@ -192,8 +169,8 @@ class TestHealthCapacityFields:
 
     def test_under_load_shows_correct_available_slots(self, health_app_client):
         """/health with 5 active workflows shows available_slots = max - 5."""
-        with patch("src.backend.services.workflow_service.get_active_workflow_count", return_value=5), \
-             patch("src.backend.core.config.settings") as mock_settings:
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=5), \
+             patch("src.backend.api.health.settings") as mock_settings:
             mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
             resp = health_app_client.get("/health")
         assert resp.status_code == 200
@@ -203,8 +180,8 @@ class TestHealthCapacityFields:
 
     def test_health_response_has_all_required_fields(self, health_app_client):
         """/health response contains all 5 required fields."""
-        with patch("src.backend.services.workflow_service.get_active_workflow_count", return_value=0), \
-             patch("src.backend.core.config.settings") as mock_settings:
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch("src.backend.api.health.settings") as mock_settings:
             mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
             resp = health_app_client.get("/health")
         data = resp.json()
@@ -212,14 +189,16 @@ class TestHealthCapacityFields:
             assert field in data, f"Missing field: {field}"
 
     def test_api_health_parity_with_health(self, health_app_client):
-        """/api/health returns the same capacity fields as /health."""
-        with patch("src.backend.services.workflow_service.get_active_workflow_count", return_value=3), \
-             patch("src.backend.core.config.settings") as mock_settings:
+        """/api/health returns identical capacity values to /health."""
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=3), \
+             patch("src.backend.api.health.settings") as mock_settings:
             mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
             health = health_app_client.get("/health").json()
             api_health = health_app_client.get("/api/health").json()
         for field in ("active_workflows", "max_workflows", "available_slots"):
-            assert field in health
-            assert field in api_health
+            assert health[field] == api_health[field], (
+                f"/health and /api/health disagree on '{field}': "
+                f"{health[field]!r} vs {api_health[field]!r}"
+            )
 
 

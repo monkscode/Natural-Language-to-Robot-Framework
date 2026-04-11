@@ -33,34 +33,37 @@ def _rotate_crewai_log():
 
     Rotation scheme: crewai.log.txt -> crewai.log.txt.1 -> ... -> crewai.log.txt.9
     """
-    with _log_rotation_lock:
-        if not os.path.exists(CREWAI_LOG_FILE):
-            return
+    try:
+        with _log_rotation_lock:
+            if not os.path.exists(CREWAI_LOG_FILE):
+                return
 
-        file_size = os.path.getsize(CREWAI_LOG_FILE)
-        if file_size < CREWAI_LOG_MAX_BYTES:
-            return
+            file_size = os.path.getsize(CREWAI_LOG_FILE)
+            if file_size < CREWAI_LOG_MAX_BYTES:
+                return
 
-        logger.info(
-            f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
-            f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
-        )
+            logger.info(
+                f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
+                f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
+            )
 
-        # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
-        for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
-            src = f"{CREWAI_LOG_FILE}.{i}"
-            dst = f"{CREWAI_LOG_FILE}.{i + 1}"
-            if os.path.exists(src):
-                if os.path.exists(dst):
-                    os.remove(dst)
-                os.rename(src, dst)
+            # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
+            for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
+                src = f"{CREWAI_LOG_FILE}.{i}"
+                dst = f"{CREWAI_LOG_FILE}.{i + 1}"
+                if os.path.exists(src):
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    os.rename(src, dst)
 
-        # Current log -> .1
-        backup_path = f"{CREWAI_LOG_FILE}.1"
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-        os.rename(CREWAI_LOG_FILE, backup_path)
-        logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
+            # Current log -> .1
+            backup_path = f"{CREWAI_LOG_FILE}.1"
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            os.rename(CREWAI_LOG_FILE, backup_path)
+            logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
+    except OSError as e:
+        logger.warning(f"📂 Log rotation skipped due to OS error: {e}")
 
 
 def extract_url_from_query(query: str) -> str:

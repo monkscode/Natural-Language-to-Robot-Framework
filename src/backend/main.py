@@ -85,35 +85,11 @@ app.include_router(api_router)
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
 
-# --- Health Check Endpoint ---
-from src.backend.core.config import settings
-from src.backend.services.workflow_service import get_active_workflow_count
+# --- Health Check Endpoints ---
+from src.backend.api.health import health_check, api_health_check
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker health monitoring."""
-    active = get_active_workflow_count()
-    max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-    return {
-        "status": "healthy",
-        "service": "nlrf-fastapi",
-        "active_workflows": active,
-        "max_workflows": max_wf,
-        "available_slots": max_wf - active,
-    }
-
-@app.get("/api/health")
-async def api_health_check():
-    """API health check endpoint."""
-    active = get_active_workflow_count()
-    max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-    return {
-        "status": "healthy",
-        "service": "nlrf-api",
-        "active_workflows": active,
-        "max_workflows": max_wf,
-        "available_slots": max_wf - active,
-    }
+app.get("/health")(health_check)
+app.get("/api/health")(api_health_check)
 
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")

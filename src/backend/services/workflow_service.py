@@ -8,7 +8,7 @@ from queue import Queue, Empty
 from threading import Thread
 import threading
 from typing import Generator, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
@@ -30,7 +30,14 @@ from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 
 # Hint metadata cache — bridges generation phase (crew.py) and execution phase
 # (_process_learning). Keyed by workflow_id, consumed via .pop() in _process_learning().
+#
+# Leak mitigation: entries are timestamped on write. _store_hint_metadata() evicts
+# entries older than _HINT_CACHE_TTL_SECONDS and caps total size at _HINT_CACHE_MAX_SIZE
+# before inserting, so generate-only flows (no subsequent execution) cannot grow the
+# cache indefinitely.
 _hint_metadata_cache: Dict[str, dict] = {}
+_HINT_CACHE_TTL_SECONDS = 3600   # 1 hour — enough to cover any realistic generate→execute gap
+_HINT_CACHE_MAX_SIZE = 500       # hard ceiling independent of TTL
 
 # Active workflow tracking — prevents accepting more workflows than the server can handle.
 # Counter + lock pattern. Incremented when a workflow SSE stream starts, decremented
@@ -153,6 +160,43 @@ def _safe_evict_hint_metadata(workflow_id: str) -> None:
         pass
 
 
+def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
+    """Write hint metadata to the cache, evicting stale and excess entries first.
+
+    Entries are timestamped on write. Before inserting, entries older than
+    _HINT_CACHE_TTL_SECONDS are purged, and if the cache still exceeds
+    _HINT_CACHE_MAX_SIZE the oldest entries are removed until it fits.
+    This prevents unbounded growth from generate-only flows that never
+    reach _process_learning() or _safe_evict_hint_metadata().
+    """
+    try:
+        now = datetime.now(tz=timezone.utc).timestamp()
+        with _hint_metadata_lock:
+            # Evict TTL-expired entries
+            expired = [
+                wid for wid, entry in _hint_metadata_cache.items()
+                if now - entry.get("_stored_at", now) > _HINT_CACHE_TTL_SECONDS
+            ]
+            for wid in expired:
+                del _hint_metadata_cache[wid]
+                logging.debug("hint_metadata_cache: evicted expired entry %s", wid)
+
+            # Evict oldest entries if still over size cap
+            overflow = len(_hint_metadata_cache) - _HINT_CACHE_MAX_SIZE + 1
+            if overflow > 0:
+                oldest = sorted(
+                    _hint_metadata_cache.keys(),
+                    key=lambda wid: _hint_metadata_cache[wid].get("_stored_at", 0),
+                )[:overflow]
+                for wid in oldest:
+                    del _hint_metadata_cache[wid]
+                    logging.warning("hint_metadata_cache: evicted oldest entry %s (size cap)", wid)
+
+            _hint_metadata_cache[workflow_id] = {**hint_metadata, "_stored_at": now}
+    except Exception:
+        pass
+
+
 def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
     """Feed execution results into the adaptive learning system.
 
@@ -181,9 +225,12 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         exit_code = result.get('exit_code')
         url = extract_url_from_query(user_query) if user_query else None
 
-        # Retrieve and consume hint metadata stored during generation phase
+        # Retrieve and consume hint metadata stored during generation phase.
+        # Strip _stored_at (internal timestamp added by _store_hint_metadata)
+        # so iteration over .values() only sees per-agent metadata dicts.
         with _hint_metadata_lock:
             hint_meta = _hint_metadata_cache.pop(run_id, {})
+        hint_meta.pop("_stored_at", None)
         hints_injected = sum(d.get("count", 0) for d in hint_meta.values())
         hints_available = sum(d.get("available", d.get("count", 0)) for d in hint_meta.values())
         all_sources = []
@@ -273,8 +320,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
-            with _hint_metadata_lock:
-                _hint_metadata_cache[workflow_id] = hint_metadata
+            _store_hint_metadata(workflow_id, hint_metadata)
 
         # Extract robot code from task[2] (code_assembler)
         # With output_pydantic=AssemblyOutput, code is in output.pydantic.code
