@@ -805,8 +805,19 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         return
 
     try:
-        # Use provided workflow_id for unified tracking, or generate new one for standalone execution
-        run_id = workflow_id if workflow_id else str(uuid.uuid4())
+        # Validate or generate the run ID.
+        # workflow_id comes from an untrusted request body; if present it must be a
+        # canonical UUID4 string so it is safe to use as a directory name.
+        # Path traversal (e.g. "../../tmp/x") is blocked because uuid.UUID() rejects
+        # anything that is not a 32-hex-digit UUID representation.
+        if workflow_id:
+            try:
+                run_id = str(uuid.UUID(workflow_id))  # normalises and validates format
+            except ValueError:
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'Invalid workflow_id: must be a UUID'})}\n\n"
+                return
+        else:
+            run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
         robot_tests_dir = os.path.join(os.path.dirname(
             os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')

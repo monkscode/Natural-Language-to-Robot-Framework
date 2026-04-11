@@ -583,7 +583,10 @@ class TestWorkflowCompletionPaths:
         and its data (minus the internal _stored_at timestamp) must match hint_data.
         """
         import src.backend.services.workflow_service as ws
-        hint_data = {"planner": {"count": 3, "sources": ["structural"]}}
+        # Full production schema: count (injected), available (candidates before cap), sources.
+        # _process_learning reads both count and available; omitting available causes it to
+        # silently fall back to count, masking a regression in the generation contract.
+        hint_data = {"planner": {"count": 3, "available": 7, "sources": ["structural"]}}
 
         # Build a run_crew mock that returns non-empty hint_metadata
         crew_result = _make_run_crew_result()

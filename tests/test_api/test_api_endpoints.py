@@ -178,6 +178,19 @@ class TestHealthCapacityFields:
         assert data["active_workflows"] == 5
         assert data["available_slots"] == 5
 
+    def test_overload_clamps_available_slots_to_zero(self, health_app_client):
+        """/health clamps available_slots to 0 when active exceeds max."""
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=12), \
+             patch("src.backend.api.health.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
+            resp = health_app_client.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active_workflows"] == 12
+        assert data["available_slots"] == 0, (
+            f"expected available_slots=0 when active > max, got {data['available_slots']}"
+        )
+
     def test_health_response_has_all_required_fields(self, health_app_client):
         """/health response contains all 5 required fields."""
         with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
