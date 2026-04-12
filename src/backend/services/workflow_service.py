@@ -832,6 +832,7 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
             logging.info(f"📝 Saved test code to {test_filepath}")
         except Exception as e:
             logging.error(f"Failed to save test code: {e}")
+            _safe_evict_hint_metadata(run_id)  # Prevent cache leak — _process_learning won't run
             yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
             return
 
@@ -922,8 +923,17 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
                 yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
                 return
 
-        # Use workflow_id from generation for unified tracking (same ID for metrics and files)
-        run_id = workflow_id if workflow_id else str(uuid.uuid4())
+        # Use workflow_id from generation for unified tracking (same ID for metrics and files).
+        # Validate before using as a directory name: uuid.UUID() rejects anything that is
+        # not a canonical UUID, blocking path traversal like "../../tmp/x".
+        if workflow_id:
+            try:
+                run_id = str(uuid.UUID(workflow_id))
+            except ValueError:
+                yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'Invalid workflow_id'})}\n\n"
+                return
+        else:
+            run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
         robot_tests_dir = os.path.join(os.path.dirname(
             os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
@@ -938,6 +948,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             logging.info(f"📝 Saved test code to {test_filepath}")
         except Exception as e:
             logging.error(f"Failed to save test code: {e}")
+            _safe_evict_hint_metadata(run_id)  # Prevent cache leak — _process_learning won't run
             yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
             return
 
