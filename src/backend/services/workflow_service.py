@@ -105,8 +105,10 @@ class _SlotReleaser:
         self._lock = threading.Lock()
 
     def done(self) -> None:
-        """Signal that one participant has finished.  Thread-safe; safe to call from any thread."""
+        """Signal that one participant has finished.  Thread-safe; no-op after cancel()."""
         with self._lock:
+            if self._count <= 0:
+                return
             self._count -= 1
             if self._count == 0:
                 _release_workflow_slot()
@@ -837,23 +839,32 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
             return
 
         try:
-            client = get_docker_client()
-            for event in build_image(client):
+            # Offload all blocking Docker I/O to a thread so the event loop
+            # remains free to serve heartbeats and other concurrent requests.
+            # Lambda keeps build_image() generator creation and consumption in
+            # the same worker thread, avoiding cross-thread generator handoff.
+            client = await asyncio.to_thread(get_docker_client)
+            build_events = await asyncio.to_thread(lambda: list(build_image(client)))
+            for event in build_events:
                 yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
 
             # Execute test
             logging.info(f"🚀 Executing test: {test_filename}")
-            result = run_test_in_container(client, run_id, test_filename)
+            result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
             yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
 
             # Unified learning: pattern learning (passed only) + adaptive learning (all)
-            _process_learning(run_id, user_query, robot_code, result)
+            await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
 
         except (ConnectionError, RuntimeError, Exception) as e:
             logging.error(f"An error occurred during Docker execution: {e}")
             _safe_evict_hint_metadata(run_id)  # Prevent cache leak when _process_learning is not called
             yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
     finally:
+        # Guard against CancelledError (BaseException, not caught by except above):
+        # if the task was cancelled between await points, _process_learning never
+        # ran and its cache pop never fired. No-op if already consumed.
+        _safe_evict_hint_metadata(run_id)
         _release_workflow_slot()
 
 
@@ -953,23 +964,32 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             return
 
         try:
-            client = get_docker_client()
-            for event in build_image(client):
+            # Offload all blocking Docker I/O to a thread so the event loop
+            # remains free to serve heartbeats and other concurrent requests.
+            # Lambda keeps build_image() generator creation and consumption in
+            # the same worker thread, avoiding cross-thread generator handoff.
+            client = await asyncio.to_thread(get_docker_client)
+            build_events = await asyncio.to_thread(lambda: list(build_image(client)))
+            for event in build_events:
                 yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
 
             # Execute test (healing system removed - locators are validated during generation)
             logging.info(f"🚀 Executing test: {test_filename}")
-            result = run_test_in_container(client, run_id, test_filename)
+            result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
             yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
 
             # Unified learning: pattern learning (passed only) + adaptive learning (all)
-            _process_learning(run_id, user_query, robot_code, result)
+            await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
 
         except (ConnectionError, RuntimeError, Exception) as e:
             logging.error(f"An error occurred during Docker execution: {e}")
             _safe_evict_hint_metadata(run_id)  # Prevent cache leak when _process_learning is not called
             yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
     finally:
+        # Guard against CancelledError (BaseException, not caught by except above):
+        # if the task was cancelled between await points, _process_learning never
+        # ran and its cache pop never fired. No-op if already consumed.
+        _safe_evict_hint_metadata(run_id)
         releaser.done()  # Generator's share of the latch
 
 
