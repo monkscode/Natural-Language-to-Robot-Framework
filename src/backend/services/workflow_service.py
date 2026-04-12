@@ -7,7 +7,7 @@ import asyncio
 from queue import Queue, Empty
 from threading import Thread
 import threading
-from typing import Generator, Dict, Any
+from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
@@ -224,7 +224,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         test_status = result.get('test_status', 'unknown')
         output_xml_path = result.get('output_xml_path')
-        exit_code = result.get('exit_code')
+        _exit_code = result.get('exit_code')
         url = extract_url_from_query(user_query) if user_query else None
 
         # Retrieve and consume hint metadata stored during generation phase.
@@ -316,7 +316,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
         # Real-time progress events are pushed directly to progress_queue by the
         # CrewAI event bus handlers in progress_events.py during crew.kickoff().
-        validation_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+        _validation_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
             natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
             progress_queue=progress_queue)
 
@@ -714,15 +714,143 @@ def run_workflow_in_thread(
             releaser.done()
 
 
-async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
+# ---------------------------------------------------------------------------
+# Private helpers — eliminate duplication across the three stream functions
+# ---------------------------------------------------------------------------
+
+class _GenerationError(Exception):
+    """Sentinel raised inside _drain_generation_queue to signal the caller should return early.
+
+    Not a real error — caught immediately by the caller's try/except block.
+    Using an exception avoids polluting the generator's yield type and keeps
+    the caller's control flow explicit.
+    """
+
+
+def _capacity_error_sse(stage: str) -> str:
+    """Return a formatted SSE capacity-exceeded error string for the given pipeline stage."""
+    max_wf = settings.MAX_CONCURRENT_WORKFLOWS
+    return (
+        f"data: {json.dumps({'stage': stage, 'status': 'error', 'message': f'Service is at capacity ({max_wf}/{max_wf} active workflows). Please try again later.'})}\n\n"
+    )
+
+
+def _start_workflow_thread(
+    q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser"
+) -> Thread:
+    """Start the workflow thread, pre-decrementing the releaser if start() raises.
+
+    If Thread.start() fails before the thread ever runs, the thread's share of the
+    latch will never be decremented by run_workflow_in_thread's finally block.
+    Pre-decrementing here ensures the generator's own done() still reaches zero.
+    """
+    thread = Thread(
+        target=run_workflow_in_thread,
+        args=(q, user_query, model_provider, model_name, releaser),
+    )
+    try:
+        thread.start()
+    except Exception:
+        releaser.done()
+        raise
+    return thread
+
+
+async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict):
+    """Drain the workflow queue, yielding SSE generation events.
+
+    Populates result_store with 'robot_code' and 'workflow_id' on completion.
+    Raises _GenerationError when an error event is seen or no code is produced,
+    so the caller can return early.  The error SSE is always yielded before
+    raising, so the client receives it.
+    """
+    while workflow_thread.is_alive():
+        try:
+            event = q.get_nowait()
+            yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
+            if event.get("status") == "complete" and "robot_code" in event:
+                result_store["robot_code"] = event["robot_code"]
+                result_store["workflow_id"] = event.get("workflow_id")
+                workflow_thread.join()
+                return
+            elif event.get("status") == "error":
+                workflow_thread.join()
+                raise _GenerationError()
+        except Empty:
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+
+    # Thread finished — drain any remaining buffered events
+    while not q.empty():
+        event = q.get_nowait()
+        yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
+        if event.get("status") == "complete" and "robot_code" in event:
+            result_store["robot_code"] = event["robot_code"]
+            result_store["workflow_id"] = event.get("workflow_id")
+        elif event.get("status") == "error":
+            raise _GenerationError()
+
+    if not result_store.get("robot_code"):
+        msg = "Agentic workflow finished without generating code."
+        logging.error(msg)
+        yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': msg})}\n\n"
+        raise _GenerationError()
+
+
+async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str | None):
+    """Save robot_code to disk, run in Docker, and trigger learning.
+
+    Yields SSE data strings for all execution events (build progress, result, errors).
+    Handles all error paths internally — the caller's finally block remains
+    responsible for slot and hint-cache cleanup.
+    """
+    robot_tests_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "robot_tests"
+    )
+    run_dir = os.path.join(robot_tests_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    test_filename = "test.robot"
+    test_filepath = os.path.join(run_dir, test_filename)
+
+    try:
+        with open(test_filepath, "w", encoding="utf-8") as f:
+            f.write(robot_code)
+        logging.info(f"📝 Saved test code to {test_filepath}")
+    except Exception as e:
+        logging.error(f"Failed to save test code: {e}")
+        _safe_evict_hint_metadata(run_id)
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
+        return
+
+    try:
+        # Offload all blocking Docker I/O to a thread so the event loop
+        # remains free to serve heartbeats and other concurrent requests.
+        # Lambda keeps build_image() generator creation and consumption in
+        # the same worker thread, avoiding cross-thread generator handoff.
+        client = await asyncio.to_thread(get_docker_client)
+        build_events = await asyncio.to_thread(lambda: list(build_image(client)))
+        for event in build_events:
+            yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
+
+        logging.info(f"🚀 Executing test: {test_filename}")
+        result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
+        yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
+
+        await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
+
+    except Exception as e:
+        logging.error(f"An error occurred during Docker execution: {e}")
+        _safe_evict_hint_metadata(run_id)
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+
+
+async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> AsyncGenerator[str, None]:
     """
     Generates Robot Framework test code without executing it.
     Allows user to review and edit before execution.
     """
-    # Check capacity before starting (avoids wasting LLM tokens)
     if not _acquire_workflow_slot():
-        max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-        yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': f'Service is at capacity ({max_wf}/{max_wf} active workflows). Please try again later.'})}\n\n"
+        yield _capacity_error_sse("generation")
         return
 
     # Two-party latch: thread + generator both call done().
@@ -731,66 +859,24 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
     # while the LLM thread is still running.
     releaser = _SlotReleaser()
     try:
-        robot_code = None
         q = Queue()
-
-        workflow_thread = Thread(
-            target=run_workflow_in_thread,
-            args=(q, user_query, model_provider, model_name, releaser)
-        )
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
+        result_store: dict = {}
         try:
-            workflow_thread.start()
-        except Exception:
-            # Thread never started — pre-decrement its share so the generator's
-            # done() in the outer finally still brings the count to zero.
-            releaser.done()
-            raise
-
-        # Wait for workflow to complete and stream events
-        while workflow_thread.is_alive():
-            try:
-                event = q.get_nowait()
-                event_data = {'stage': 'generation', **event}
-                yield f"data: {json.dumps(event_data)}\n\n"
-
-                if event.get("status") == "complete" and "robot_code" in event:
-                    robot_code = event["robot_code"]
-                    workflow_thread.join()
-                    break
-                elif event.get("status") == "error":
-                    workflow_thread.join()
-                    return
-            except Empty:
-                yield ": heartbeat\n\n"
-                await asyncio.sleep(1)
-
-        # Process remaining events in queue
-        if not robot_code:
-            while not q.empty():
-                event = q.get_nowait()
-                event_data = {'stage': 'generation', **event}
-                yield f"data: {json.dumps(event_data)}\n\n"
-                if event.get("status") == "complete" and "robot_code" in event:
-                    robot_code = event["robot_code"]
-                elif event.get("status") == "error":
-                    return
-            if not robot_code:
-                final_error_message = "Agentic workflow finished without generating code."
-                logging.error(final_error_message)
-                yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
-                return
-
-        # Generation complete - return code without execution
+            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+                yield sse
+        except _GenerationError:
+            return
         logging.info("✅ Test generation complete. Ready for user review.")
     finally:
         releaser.done()  # Generator's share of the latch
 
 
-async def stream_execute_only(robot_code: str, user_query: str = None, workflow_id: str = None) -> Generator[str, None, None]:
+async def stream_execute_only(robot_code: str, user_query: str = None, workflow_id: str = None) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
-    
+
     Args:
         robot_code: Robot Framework test code to execute
         user_query: Optional original user query for pattern learning
@@ -800,12 +886,13 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
         return
 
-    # Check capacity before starting
     if not _acquire_workflow_slot():
-        max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Service is at capacity ({max_wf}/{max_wf} active workflows). Please try again later.'})}\n\n"
+        yield _capacity_error_sse("execution")
         return
 
+    # Guard: finally must not raise NameError if we return before run_id is assigned
+    # (happens when workflow_id is present but fails UUID validation).
+    run_id = None
     try:
         # Validate or generate the run ID.
         # workflow_id comes from an untrusted request body; if present it must be a
@@ -821,122 +908,50 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         else:
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
-        robot_tests_dir = os.path.join(os.path.dirname(
-            os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
-        run_dir = os.path.join(robot_tests_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        test_filename = "test.robot"
-        test_filepath = os.path.join(run_dir, test_filename)
 
-        try:
-            with open(test_filepath, 'w', encoding='utf-8') as f:
-                f.write(robot_code)
-            logging.info(f"📝 Saved test code to {test_filepath}")
-        except Exception as e:
-            logging.error(f"Failed to save test code: {e}")
-            _safe_evict_hint_metadata(run_id)  # Prevent cache leak — _process_learning won't run
-            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
-            return
-
-        try:
-            # Offload all blocking Docker I/O to a thread so the event loop
-            # remains free to serve heartbeats and other concurrent requests.
-            # Lambda keeps build_image() generator creation and consumption in
-            # the same worker thread, avoiding cross-thread generator handoff.
-            client = await asyncio.to_thread(get_docker_client)
-            build_events = await asyncio.to_thread(lambda: list(build_image(client)))
-            for event in build_events:
-                yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
-
-            # Execute test
-            logging.info(f"🚀 Executing test: {test_filename}")
-            result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
-            yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-
-            # Unified learning: pattern learning (passed only) + adaptive learning (all)
-            await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
-
-        except (ConnectionError, RuntimeError, Exception) as e:
-            logging.error(f"An error occurred during Docker execution: {e}")
-            _safe_evict_hint_metadata(run_id)  # Prevent cache leak when _process_learning is not called
-            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        async for sse in _stream_docker_execution(run_id, robot_code, user_query):
+            yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
         # if the task was cancelled between await points, _process_learning never
         # ran and its cache pop never fired. No-op if already consumed.
-        _safe_evict_hint_metadata(run_id)
+        if run_id is not None:
+            _safe_evict_hint_metadata(run_id)
         _release_workflow_slot()
 
 
-async def stream_generate_and_run(user_query: str, model_provider: str, model_name: str) -> Generator[str, None, None]:
+async def stream_generate_and_run(user_query: str, model_provider: str, model_name: str) -> AsyncGenerator[str, None]:
     """
     Legacy endpoint: Generates and executes test in one flow.
     Kept for backward compatibility.
     """
-    # Check capacity before starting (avoids wasting LLM tokens)
     if not _acquire_workflow_slot():
-        max_wf = settings.MAX_CONCURRENT_WORKFLOWS
-        yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': f'Service is at capacity ({max_wf}/{max_wf} active workflows). Please try again later.'})}\n\n"
+        yield _capacity_error_sse("generation")
         return
 
     # Two-party latch: thread (phase 1 — LLM generation) + generator (phase 2 — Docker).
     # Slot is released only when both have finished, preventing premature release on
     # client disconnect during phase 1 while the LLM thread is still consuming quota.
     releaser = _SlotReleaser()
+    # Guard: finally must not raise NameError if we return before run_id is assigned
+    # (happens when UUID validation fails or generation errors before reaching execution).
+    run_id = None
     try:
-        robot_code = None
-        workflow_id = None  # Capture workflow_id from generation for unified tracking
         q = Queue()
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
 
-        workflow_thread = Thread(
-            target=run_workflow_in_thread,
-            args=(q, user_query, model_provider, model_name, releaser)
-        )
+        result_store: dict = {}
         try:
-            workflow_thread.start()
-        except Exception:
-            # Thread never started — pre-decrement its share so the generator's
-            # done() in the outer finally still brings the count to zero.
-            releaser.done()
-            raise
+            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+                yield sse
+        except _GenerationError:
+            return
 
-        while workflow_thread.is_alive():
-            try:
-                event = q.get_nowait()
-                event_data = {'stage': 'generation', **event}
-                yield f"data: {json.dumps(event_data)}\n\n"
+        robot_code = result_store["robot_code"]
+        workflow_id = result_store.get("workflow_id")
 
-                if event.get("status") == "complete" and "robot_code" in event:
-                    robot_code = event["robot_code"]
-                    workflow_id = event.get("workflow_id")  # Capture for unified execution
-                    workflow_thread.join()
-                    break
-                elif event.get("status") == "error":
-                    workflow_thread.join()
-                    return
-            except Empty:
-                yield ": heartbeat\n\n"
-                await asyncio.sleep(1)
-
-        if not robot_code:
-            while not q.empty():
-                event = q.get_nowait()
-                event_data = {'stage': 'generation', **event}
-                yield f"data: {json.dumps(event_data)}\n\n"
-                if event.get("status") == "complete" and "robot_code" in event:
-                    robot_code = event["robot_code"]
-                    workflow_id = event.get("workflow_id")  # Capture for unified execution
-                elif event.get("status") == "error":
-                    return
-            if not robot_code:
-                final_error_message = "Agentic workflow finished without generating code."
-                logging.error(final_error_message)
-                yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': final_error_message})}\n\n"
-                return
-
-        # Use workflow_id from generation for unified tracking (same ID for metrics and files).
-        # Validate before using as a directory name: uuid.UUID() rejects anything that is
-        # not a canonical UUID, blocking path traversal like "../../tmp/x".
+        # Validate workflow_id before using as a directory name: uuid.UUID() rejects
+        # anything that is not a canonical UUID, blocking path traversal like "../../tmp/x".
         if workflow_id:
             try:
                 run_id = str(uuid.UUID(workflow_id))
@@ -946,52 +961,13 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         else:
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
-        robot_tests_dir = os.path.join(os.path.dirname(
-            os.path.abspath(__file__)), '..', '..', '..', 'robot_tests')
-        run_dir = os.path.join(robot_tests_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        test_filename = "test.robot"
-        test_filepath = os.path.join(run_dir, test_filename)
 
-        try:
-            with open(test_filepath, 'w', encoding='utf-8') as f:
-                f.write(robot_code)
-            logging.info(f"📝 Saved test code to {test_filepath}")
-        except Exception as e:
-            logging.error(f"Failed to save test code: {e}")
-            _safe_evict_hint_metadata(run_id)  # Prevent cache leak — _process_learning won't run
-            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
-            return
-
-        try:
-            # Offload all blocking Docker I/O to a thread so the event loop
-            # remains free to serve heartbeats and other concurrent requests.
-            # Lambda keeps build_image() generator creation and consumption in
-            # the same worker thread, avoiding cross-thread generator handoff.
-            client = await asyncio.to_thread(get_docker_client)
-            build_events = await asyncio.to_thread(lambda: list(build_image(client)))
-            for event in build_events:
-                yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
-
-            # Execute test (healing system removed - locators are validated during generation)
-            logging.info(f"🚀 Executing test: {test_filename}")
-            result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
-            yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
-
-            # Unified learning: pattern learning (passed only) + adaptive learning (all)
-            await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
-
-        except (ConnectionError, RuntimeError, Exception) as e:
-            logging.error(f"An error occurred during Docker execution: {e}")
-            _safe_evict_hint_metadata(run_id)  # Prevent cache leak when _process_learning is not called
-            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        async for sse in _stream_docker_execution(run_id, robot_code, user_query):
+            yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
         # if the task was cancelled between await points, _process_learning never
         # ran and its cache pop never fired. No-op if already consumed.
-        _safe_evict_hint_metadata(run_id)
+        if run_id is not None:
+            _safe_evict_hint_metadata(run_id)
         releaser.done()  # Generator's share of the latch
-
-
-# Healing system removed - locators are validated during generation by browser-use
-# No need for post-failure healing since validation happens upfront with F12-style checks
