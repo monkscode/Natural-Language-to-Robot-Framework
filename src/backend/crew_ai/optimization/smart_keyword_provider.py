@@ -34,13 +34,15 @@ class AgentContextResult(NamedTuple):
 
     Fields:
         context: The assembled context string for the agent.
-        hints_count: Number of learning hints injected (0 if none).
+        hints_count: Number of learning hints injected (capped by budget).
+        hints_available: Total hint candidates found before budget cap.
         hint_sources: Engine names that contributed hints,
                       e.g. ["structural", "anti_pattern"].
         hint_text: Raw formatted hint block for task-level injection.
     """
     context: str
     hints_count: int = 0
+    hints_available: int = 0
     hint_sources: tuple = ()
     hint_text: str = ""
 
@@ -119,7 +121,7 @@ class SmartKeywordProvider:
         - Complex (6+ steps):  max 10 hints, 120 tokens each = 1,200 max
         """
         if self._db_conn is None:
-            return {"text": None, "count": 0, "sources": []}
+            return {"text": None, "count": 0, "available": 0, "sources": []}
 
         # Determine complexity tier
         tier = self._determine_complexity_tier(user_query)
@@ -184,13 +186,17 @@ class SmartKeywordProvider:
             logger.warning(f"[LEARNING] NL feedback engine hint retrieval failed: {e}")
 
         if not candidates:
-            return {"text": None, "count": 0, "sources": []}
+            return {"text": None, "count": 0, "available": 0, "sources": []}
 
-        # Select top N, format within budget
-        formatted = self._format_hints(candidates, max_hints, tokens_per_hint)
-        count = min(len(candidates), max_hints)
+        # Apply hard cap before formatting so count and formatted output agree
+        hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
+        effective_max = min(max_hints, hard_cap)
 
-        return {"text": formatted, "count": count, "sources": sources}
+        available = len(candidates)
+        formatted = self._format_hints(candidates, effective_max, tokens_per_hint)
+        count = min(available, effective_max)
+
+        return {"text": formatted, "count": count, "available": available, "sources": sources}
 
     def _determine_complexity_tier(self, user_query: str) -> dict:
         """
@@ -226,10 +232,8 @@ class SmartKeywordProvider:
         priority_order = {"high": 0, "medium": 1, "low": 2}
         candidates.sort(key=lambda x: priority_order.get(x["priority"], 1))
 
-        # Take top N (respect hard cap)
-        hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
-        effective_max = min(max_hints, hard_cap)
-        selected = candidates[:effective_max]
+        # Take top N (hard cap already applied by caller)
+        selected = candidates[:max_hints]
 
         # Truncate each hint within token budget (~4 chars per token)
         max_chars = tokens_per_hint * 4
@@ -470,6 +474,7 @@ Use keyword_search tool if you need additional keywords.
         """
         context_parts = []
         hints_count = 0
+        hints_available = 0
         hint_sources = []
         hint_text = ""
 
@@ -481,9 +486,10 @@ Use keyword_search tool if you need additional keywords.
             if hint_result and hint_result["text"]:
                 hint_text = hint_result["text"]
                 hints_count = hint_result["count"]
+                hints_available = hint_result["available"]
                 hint_sources = hint_result["sources"]
                 logger.info(
-                    f"[LEARNING] Injected {hints_count} hints from "
+                    f"[LEARNING] Injected {hints_count}/{hints_available} hints from "
                     f"{hint_sources} for {agent_role} agent"
                 )
         except Exception as e:
@@ -551,6 +557,7 @@ Use keyword_search tool if you need additional keywords.
         return AgentContextResult(
             context="\n\n".join(context_parts),
             hints_count=hints_count,
+            hints_available=hints_available,
             hint_sources=tuple(hint_sources),
             hint_text=hint_text,
         )

@@ -128,7 +128,7 @@ logger.info(
 # SERVICE INITIALIZATION
 # ========================================
 # Initialize task processor with thread pool executor
-executor = ThreadPoolExecutor(max_workers=1)
+executor = ThreadPoolExecutor(max_workers=config.max_concurrent_tasks)
 task_processor = TaskProcessor(executor)
 
 # Log configuration

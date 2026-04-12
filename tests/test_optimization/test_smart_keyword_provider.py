@@ -116,11 +116,12 @@ class TestAgentContextResult:
 
     def test_tuple_unpacking(self):
         r = AgentContextResult(
-            context="ctx", hints_count=2, hint_sources=["a", "b"]
+            context="ctx", hints_count=2, hints_available=3, hint_sources=["a", "b"]
         )
-        c, n, s, h = r
+        c, n, avail, s, h = r
         assert c == "ctx"
         assert n == 2
+        assert avail == 3
         assert s == ["a", "b"]
         assert h == ""  # Default hint_text
 
@@ -226,11 +227,17 @@ class TestFormatHints:
         assert len(lines) == 3, f"Expected 3 hints, got {len(lines)}: {lines}"
 
     def test_hard_cap(self):
-        """Even if max_hints is large, HARD_CAP_HINTS limits output."""
+        """HARD_CAP_HINTS is enforced by _get_learning_hints before calling _format_hints.
+
+        _format_hints respects whatever max_hints it receives; the cap is applied
+        by the caller so both count and formatted output agree on the same limit.
+        """
         p = create_provider()
         hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(15)]
-        result = p._format_hints(candidates, max_hints=15, tokens_per_hint=80)
+        # Simulate what _get_learning_hints does: compute effective_max before calling.
+        effective_max = min(15, hard_cap)
+        result = p._format_hints(candidates, max_hints=effective_max, tokens_per_hint=80)
         lines = [l for l in result.split("\n") if l.startswith("hint_")]
         assert len(lines) <= hard_cap, f"Expected <= {hard_cap}, got {len(lines)}"
 
@@ -303,6 +310,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "click button")
         assert result["text"] is None
         assert result["count"] == 0
+        assert result["available"] == 0
         assert result["sources"] == []
 
     def test_all_engines_return_none(self, in_memory_db):
@@ -314,6 +322,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "click button")
         assert result["text"] is None
         assert result["count"] == 0
+        assert result["available"] == 0
 
     def test_structural_only(self, in_memory_db):
         p = create_provider(db_conn=in_memory_db)
@@ -323,6 +332,7 @@ class TestGetLearningHints:
         result = p._get_learning_hints("planner", "get all rows")
         assert result["text"] is not None
         assert result["count"] == 1
+        assert result["available"] == 1
         assert result["sources"] == ["structural"]
         assert "Use FOR loop" in result["text"]
 

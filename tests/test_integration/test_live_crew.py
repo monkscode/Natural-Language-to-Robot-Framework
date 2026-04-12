@@ -69,8 +69,8 @@ class TestExtractUrlFromQueryLive:
 class TestLiveLLMCrewOnline:
     """Tests that invoke a real Gemini LLM call."""
 
-    def test_run_crew_returns_four_values(self):
-        """run_crew() always returns (output, crew, metrics, hint_metadata)."""
+    def test_run_crew_returns_five_values(self):
+        """run_crew() always returns (output, crew, metrics, hint_metadata, llm_monitor)."""
         from src.backend.crew_ai.crew import run_crew
         result = run_crew(
             "click the login button on example.com",
@@ -78,12 +78,12 @@ class TestLiveLLMCrewOnline:
             model_name="gemini-2.0-flash",
             workflow_id="live-test-001",
         )
-        assert len(result) == 4
+        assert len(result) == 5
 
     def test_run_crew_output_is_non_empty_string(self):
         """First return value (validation_output) is a non-empty string."""
         from src.backend.crew_ai.crew import run_crew
-        validation_output, _, _, _ = run_crew(
+        validation_output, _, _, _, _ = run_crew(
             "click the login button on example.com",
             model_provider="gemini",
             model_name="gemini-2.0-flash",
@@ -95,7 +95,7 @@ class TestLiveLLMCrewOnline:
     def test_run_crew_output_contains_robot_sections(self):
         """Generated code has Robot Framework section markers."""
         from src.backend.crew_ai.crew import run_crew
-        validation_output, _, _, _ = run_crew(
+        validation_output, _, _, _, _ = run_crew(
             "navigate to google.com and search for python",
             model_provider="gemini",
             model_name="gemini-2.0-flash",
@@ -108,7 +108,7 @@ class TestLiveLLMCrewOnline:
     def test_hint_metadata_is_dict(self):
         """Fourth return value is always a dict (possibly empty)."""
         from src.backend.crew_ai.crew import run_crew
-        _, _, _, hint_metadata = run_crew(
+        _, _, _, hint_metadata, _ = run_crew(
             "click the submit button on example.com",
             model_provider="gemini",
             model_name="gemini-2.0-flash",
@@ -119,7 +119,7 @@ class TestLiveLLMCrewOnline:
     def test_optimization_metrics_structure(self):
         """optimization_metrics is None or has expected numeric fields."""
         from src.backend.crew_ai.crew import run_crew
-        _, _, optimization_metrics, _ = run_crew(
+        _, _, optimization_metrics, _, _ = run_crew(
             "open the home page of example.com",
             model_provider="gemini",
             model_name="gemini-2.0-flash",
@@ -128,6 +128,20 @@ class TestLiveLLMCrewOnline:
         if optimization_metrics is not None:
             assert hasattr(optimization_metrics, "total_llm_calls")
             assert hasattr(optimization_metrics, "total_cost")
+
+    def test_llm_monitor_is_per_workflow(self):
+        """Fifth return value is an LLMFormattingMonitor scoped to this workflow only."""
+        from src.backend.crew_ai.crew import run_crew
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        _, _, _, _, llm_monitor = run_crew(
+            "click the submit button on example.com",
+            model_provider="gemini",
+            model_name="gemini-2.0-flash",
+            workflow_id="live-test-006",
+        )
+        assert isinstance(llm_monitor, LLMFormattingMonitor)
+        # A real workflow always makes at least one LLM call
+        assert llm_monitor.total_responses >= 1
 
 
 class TestLiveCrewFallbackBehaviour:

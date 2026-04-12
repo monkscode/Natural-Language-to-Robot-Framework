@@ -127,11 +127,14 @@ class WorkflowMetrics(WorkflowMetricsBase):
     )
     
     timestamp: datetime
-    
+
     # Optimization metrics
     keyword_search_stats: Optional[Dict[str, Any]] = None
     pattern_learning_stats: Optional[Dict[str, Any]] = None
     context_reduction: Optional[Dict[str, Any]] = None
+
+    # LLM output cleaning metrics (per-workflow, never cross-contaminated)
+    llm_cleaning_stats: Optional[Dict[str, Any]] = None
     
     @field_validator('timestamp', mode='before')
     @classmethod
@@ -163,6 +166,15 @@ class WorkflowMetrics(WorkflowMetricsBase):
                 "optimized_tokens": 0,
                 "reduction_percentage": 0.0
             }
+
+        if self.llm_cleaning_stats is None:
+            self.llm_cleaning_stats = {
+                "total_responses": 0,
+                "cleaned_responses": 0,
+                "clean_rate": 0.0,
+                "formatting_errors_detected": 0,
+                "formatting_errors_recovered": 0,
+            }
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with ISO format timestamp."""
@@ -173,7 +185,8 @@ class WorkflowMetrics(WorkflowMetricsBase):
         data['optimization'] = {
             'keyword_search': self.keyword_search_stats,
             'pattern_learning': self.pattern_learning_stats,
-            'context_reduction': self.context_reduction
+            'context_reduction': self.context_reduction,
+            'llm_cleaning': self.llm_cleaning_stats,
         }
         
         return data
@@ -216,6 +229,7 @@ class WorkflowMetrics(WorkflowMetricsBase):
             data.setdefault('keyword_search_stats', opt.get('keyword_search'))
             data.setdefault('pattern_learning_stats', opt.get('pattern_learning'))
             data.setdefault('context_reduction', opt.get('context_reduction'))
+            data.setdefault('llm_cleaning_stats', opt.get('llm_cleaning'))
         
         return cls.model_validate(data)
     
@@ -228,7 +242,8 @@ class WorkflowMetrics(WorkflowMetricsBase):
             self.keyword_search_stats["total_latency_ms"] / 
             self.keyword_search_stats["calls"]
         )
-        self.keyword_search_stats["returned_keywords"].extend(returned_keywords)
+        all_kws = self.keyword_search_stats["returned_keywords"] + returned_keywords
+        self.keyword_search_stats["returned_keywords"] = list(dict.fromkeys(all_kws))
     
     def track_pattern_learning(self, predicted: bool, keyword_count: int) -> None:
         """Track pattern learning usage."""
@@ -251,7 +266,15 @@ class WorkflowMetrics(WorkflowMetricsBase):
 class WorkflowMetricsResponse(WorkflowMetricsBase):
     """API response model for workflow metrics."""
     timestamp: str  # ISO format string for JSON serialization
-    
+
+    # Optimization metrics — previously stored in JSONL but omitted from API response
+    keyword_search_stats: Optional[Dict[str, Any]] = None
+    pattern_learning_stats: Optional[Dict[str, Any]] = None
+    context_reduction: Optional[Dict[str, Any]] = None
+
+    # LLM output cleaning metrics — per-workflow, accurate under concurrent load
+    llm_cleaning_stats: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_workflow_metrics(cls, m: WorkflowMetrics) -> 'WorkflowMetricsResponse':
         """Convert from WorkflowMetrics model."""
@@ -283,6 +306,10 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             custom_action_usage_count=m.custom_action_usage_count,
             session_id=m.session_id,
             element_approach_metrics=m.element_approach_metrics,
+            keyword_search_stats=m.keyword_search_stats,
+            pattern_learning_stats=m.pattern_learning_stats,
+            context_reduction=m.context_reduction,
+            llm_cleaning_stats=m.llm_cleaning_stats,
         )
 
 

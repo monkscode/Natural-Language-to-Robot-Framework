@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # Learning System Configuration (Adaptive Learning — Phase 1+)
     EXECUTION_MEMORY_DB: str = Field(default="./data/execution_memory.db", description="Path to execution memory SQLite database for the learning system")
 
+    # Concurrency configuration
+    MAX_CONCURRENT_WORKFLOWS: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of concurrent test generation/execution workflows"
+    )
+
     @validator('MODEL_PROVIDER')
     def validate_model_provider(cls, v):
         """Validate that MODEL_PROVIDER is one of the supported providers."""

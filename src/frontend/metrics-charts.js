@@ -69,6 +69,15 @@ function processChartData(runs) {
         llmPerElement: sortedRuns.map(r => r.avg_llm_calls_per_element || 0),
         costPerElement: sortedRuns.map(r => r.avg_cost_per_element || 0),
         urls: sortedRuns.map(r => r.url || 'Unknown'),
+        // LLM cleaning stats (per-workflow, accurate under concurrent load — BUG-01 fix)
+        cleaningRates: sortedRuns.map(r => r.llm_cleaning_stats?.clean_rate || 0),
+        cleaningTotals: sortedRuns.map(r => r.llm_cleaning_stats?.total_responses || 0),
+        cleaningCleaned: sortedRuns.map(r => r.llm_cleaning_stats?.cleaned_responses || 0),
+        formattingErrors: sortedRuns.map(r => r.llm_cleaning_stats?.formatting_errors_detected || 0),
+        // Context reduction stats (optimization system — previously orphaned in JSONL)
+        contextReductions: sortedRuns.map(r => r.context_reduction?.reduction_percentage || 0),
+        contextBaseline: sortedRuns.map(r => r.context_reduction?.baseline_tokens || 0),
+        contextOptimized: sortedRuns.map(r => r.context_reduction?.optimized_tokens || 0),
         // Aggregates
         totalCrewCost: runs.reduce((acc, r) => acc + (r.crewai_cost || 0), 0),
         totalBrowserCost: runs.reduce((acc, r) => acc + (r.browser_use_cost || 0), 0),
@@ -465,6 +474,109 @@ function renderChart1() {
             break;
 
         // ========= LOCATOR STRATEGY DISTRIBUTION =========
+        case 'llm-cleaning-rate':
+            chart1 = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'Clean Rate (%)',
+                            data: data.cleaningRates,
+                            borderColor: colors.warning,
+                            backgroundColor: `${colors.warning}20`,
+                            borderWidth: colors.borderWidth + 1,
+                            tension: 0.4,
+                            fill: true,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Formatting Errors',
+                            data: data.formattingErrors,
+                            borderColor: colors.danger,
+                            borderDash: [5, 5],
+                            borderWidth: colors.borderWidth,
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    ...getCommonOptions(),
+                    scales: {
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            min: 0,
+                            max: 100,
+                            title: { display: true, text: 'Clean Rate (%)' },
+                            grid: { color: colors.gridColor },
+                            ticks: { color: '#888', callback: v => v + '%' }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            min: 0,
+                            title: { display: true, text: 'Errors' },
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#888' }
+                        },
+                        x: { display: false }
+                    }
+                }
+            });
+            break;
+
+        case 'context-reduction':
+            chart1 = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'Baseline Tokens',
+                            data: data.contextBaseline,
+                            backgroundColor: `${colors.secondary}80`,
+                            borderColor: colors.borderWidth > 1 ? '#000' : colors.secondary,
+                            borderWidth: colors.borderWidth,
+                            stack: 'tokens'
+                        },
+                        {
+                            label: 'Optimized Tokens',
+                            data: data.contextOptimized,
+                            backgroundColor: `${colors.success}80`,
+                            borderColor: colors.borderWidth > 1 ? '#000' : colors.success,
+                            borderWidth: colors.borderWidth,
+                            stack: 'tokens'
+                        }
+                    ]
+                },
+                options: {
+                    ...getCommonOptions('Context Reduction per Workflow'),
+                    plugins: {
+                        legend: { display: true, position: 'bottom' },
+                        tooltip: {
+                            callbacks: {
+                                afterBody: (items) => {
+                                    const idx = items[0]?.dataIndex;
+                                    const pct = data.contextReductions[idx];
+                                    return pct > 0 ? [`Reduction: ${pct.toFixed(1)}%`] : [];
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        ...getCommonOptions().scales,
+                        x: { stacked: true, display: false },
+                        y: { stacked: false, ...getCommonOptions().scales.y,
+                             title: { display: true, text: 'Tokens' } }
+                    }
+                }
+            });
+            break;
+
         case 'fallback-depth': {
             // Count occurrences of each fallback depth (0-7)
             const depthCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 };

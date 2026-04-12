@@ -85,16 +85,11 @@ app.include_router(api_router)
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
 
-# --- Health Check Endpoint ---
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker health monitoring."""
-    return {"status": "healthy", "service": "nlrf-fastapi"}
+# --- Health Check Endpoints ---
+from src.backend.api.health import health_check, api_health_check
 
-@app.get("/api/health")
-async def api_health_check():
-    """API health check endpoint."""
-    return {"status": "healthy", "service": "nlrf-api"}
+app.get("/health")(health_check)
+app.get("/api/health")(api_health_check)
 
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
@@ -111,6 +106,13 @@ app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 async def startup_event():
     logging.info("Application startup complete.")
     _check_learning_health()
+
+    # Clean up orphaned temp metrics files left by crashed/incomplete workflows
+    try:
+        from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
+        get_temp_metrics_storage().cleanup_old_files(max_age_hours=24)
+    except Exception as e:
+        logging.warning(f"Startup temp metrics cleanup failed (non-fatal): {e}")
 
 
 def _check_learning_health():
