@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
-from src.backend.config.logging_config import EMOJI
+from src.backend.config.logging_config import EMOJI, bind_workflow_context
+from src.backend.core.observability import create_workflow_span
 from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
 from src.backend.core.workflow_metrics import (
     get_workflow_metrics_collector,
@@ -274,11 +275,20 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         model_name: Model identifier
     """
     logging.info("--- Starting CrewAI Workflow with Vision Integration ---")
-    
+
     # Generate unique workflow ID for metrics tracking
     workflow_id = str(uuid.uuid4())
     logging.info(f"🆔 Workflow ID: {workflow_id}")
-    
+
+    # Bind workflow context so all subsequent log entries include workflow_id
+    # without modifying any individual log call sites.
+    bind_workflow_context(
+        workflow_id=workflow_id,
+        model_provider=model_provider,
+        model_name=model_name,
+        library_type=settings.ROBOT_LIBRARY,
+    )
+
     # Start with welcome message
     yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
 
@@ -316,9 +326,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
         # Real-time progress events are pushed directly to progress_queue by the
         # CrewAI event bus handlers in progress_events.py during crew.kickoff().
-        _validation_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
-            natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
-            progress_queue=progress_queue)
+        # The OTel span wraps only run_crew() — all 4 LiteLLM calls inside are
+        # auto-captured as child spans by OpenLLMetry.
+        with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
+            _validation_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+                natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
+                progress_queue=progress_queue)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
