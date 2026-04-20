@@ -87,14 +87,18 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
         logging.warning("Cannot open log file, falling back to stdout: %s", e)
         file_handler = logging.StreamHandler(sys.stdout)
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    for h in (file_handler, console_handler):
-        h.setFormatter(formatter)
-
+    file_handler.setFormatter(formatter)
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(file_handler)
-    root.addHandler(console_handler)
+
+    # Only add a separate console handler when file logging is active; if the
+    # file handler already fell back to stdout, a second StreamHandler(stdout)
+    # would double-emit every record.
+    if not isinstance(file_handler, logging.StreamHandler) or file_handler.stream is not sys.stdout:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
     root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
     for name in _NOISY_LOGGERS:
@@ -121,7 +125,9 @@ def bind_workflow_context(
         ctx["model_name"] = model_name
     if library_type:
         ctx["library_type"] = library_type
-    structlog.contextvars.clear_contextvars()
+    # Unbind only the keys we own so prior request-scoped context
+    # (OTel trace/span IDs, request_id, etc.) is preserved.
+    structlog.contextvars.unbind_contextvars(*ctx.keys())
     structlog.contextvars.bind_contextvars(**ctx)
 
 
