@@ -256,7 +256,7 @@ def validation_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     
     # Failed to extract - trigger retry
     logger.warning("❌ Guardrail: Could not extract valid ValidationOutput JSON")
-    return (False, "Output must be a valid JSON object with 'valid' and 'reason' fields. Ensure proper JSON formatting.")
+    return (False, "Output ONLY a raw JSON object with 'valid' (boolean) and 'reason' (string) fields — no text before it, no markdown fences, no explanation after it. Example: {\"valid\": true, \"reason\": \"Code is syntactically correct.\"}")
 
 
 class RobotTasks:
@@ -799,6 +799,8 @@ Generated Test
                 "Action Input: {\"coworker\": \"Robot Framework Code Generator (Output ONLY Code)\", \"task\": \"Fix these errors: 1) Missing Variable Assignment on line 15, 2) Incorrect Keyword 'Input Text' should be 'Fill Text'\", \"context\": \"Original code:\\n*** Settings ***\\nLibrary Browser\\n...\\n\\nErrors to fix:\\n- Line 15: 'Get Text' returns value but no variable assigned. Fix: ${result}=    Get Text    ${locator}\\n- 'Input Text' is SeleniumLibrary keyword, use 'Fill Text' for Browser Library\"}\n\n"
 
                 "--- JSON OUTPUT FORMAT (for Final Answer only) ---\n"
+                "⚠️ Your Final Answer must be ONLY the raw JSON object — no text before it, "
+                "no markdown fences (no ```json), no explanation after it.\n\n"
                 "**If code is VALID (no errors found) - use Final Answer directly:**\n"
                 "{\n"
                 "  \"valid\": true,\n"

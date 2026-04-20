@@ -62,6 +62,29 @@ class Settings(BaseSettings):
     # Learning System Configuration (Adaptive Learning — Phase 1+)
     EXECUTION_MEMORY_DB: str = Field(default="./data/execution_memory.db", description="Path to execution memory SQLite database for the learning system")
 
+    # LLM Observability Configuration (Enhancement #3)
+    # OBSERVABILITY_BACKEND controls where OTel traces are exported:
+    #   "sqlite"  — Built-in SQLite trace store (zero infra, default for pilots)
+    #   "grafana" — Grafana Tempo via OTLP (requires Tempo in docker-compose)
+    #   "otlp"    — Any OTel-compatible endpoint (Langfuse, Jaeger, Datadog, etc.)
+    #   "none"    — Tracing disabled
+    OBSERVABILITY_BACKEND: str = Field(
+        default="sqlite",
+        description="Trace export backend: sqlite | grafana | otlp | none",
+    )
+    OTLP_ENDPOINT: str = Field(
+        default="http://localhost:4318",
+        description="OTLP HTTP endpoint for grafana or otlp backends",
+    )
+
+    # Concurrency configuration
+    MAX_CONCURRENT_WORKFLOWS: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of concurrent test generation/execution workflows"
+    )
+
     @validator('MODEL_PROVIDER')
     def validate_model_provider(cls, v):
         """Validate that MODEL_PROVIDER is one of the supported providers."""
@@ -97,6 +120,12 @@ class Settings(BaseSettings):
             raise ValueError(f"MAX_LOCATOR_STRATEGIES must be between 1 and 50, got {v}")
         return v
     
+    @validator('OBSERVABILITY_BACKEND')
+    def validate_observability_backend(cls, v):
+        if v.lower() not in ('sqlite', 'grafana', 'otlp', 'none'):
+            raise ValueError(f"OBSERVABILITY_BACKEND must be sqlite, grafana, otlp, or none, got '{v}'")
+        return v.lower()
+
     @validator('OPTIMIZATION_PATTERN_CONFIDENCE_THRESHOLD', 'OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD')
     def validate_confidence_threshold(cls, v):
         """Validate that confidence thresholds are between 0.0 and 1.0."""

@@ -5,6 +5,7 @@ Each workflow stores its metrics in a separate JSON file.
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -140,11 +141,17 @@ class TempMetricsStorage:
 
 # Global instance
 _temp_storage: Optional[TempMetricsStorage] = None
+# Guards singleton initialisation — prevents two concurrent first-callers from
+# creating separate instances with separate locks pointing to the same directory,
+# which would break the per-file write safety that relies on a single instance.
+_temp_storage_init_lock = threading.Lock()
 
 
 def get_temp_metrics_storage() -> TempMetricsStorage:
-    """Get the global temp metrics storage instance."""
+    """Get the global temp metrics storage instance (thread-safe)."""
     global _temp_storage
     if _temp_storage is None:
-        _temp_storage = TempMetricsStorage()
+        with _temp_storage_init_lock:
+            if _temp_storage is None:  # double-checked locking
+                _temp_storage = TempMetricsStorage()
     return _temp_storage

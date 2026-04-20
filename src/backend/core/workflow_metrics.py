@@ -158,13 +158,19 @@ class WorkflowMetricsCollector:
 
 # Global instance
 _metrics_collector: Optional[WorkflowMetricsCollector] = None
+# Guards singleton initialisation so two concurrent first-callers cannot create
+# two separate instances each with their own self._lock, which would allow
+# concurrent file writes from different lock objects to the same JSONL file.
+_metrics_collector_init_lock = Lock()
 
 
 def get_workflow_metrics_collector() -> WorkflowMetricsCollector:
-    """Get the global workflow metrics collector instance."""
+    """Get the global workflow metrics collector instance (thread-safe)."""
     global _metrics_collector
     if _metrics_collector is None:
-        _metrics_collector = WorkflowMetricsCollector()
+        with _metrics_collector_init_lock:
+            if _metrics_collector is None:  # double-checked locking
+                _metrics_collector = WorkflowMetricsCollector()
     return _metrics_collector
 
 

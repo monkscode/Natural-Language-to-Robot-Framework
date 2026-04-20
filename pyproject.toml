@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "natural-language-to-robot-framework"
+version = "1.0.0"
+description = "AI-powered natural language to Robot Framework test generation"
+requires-python = ">=3.12"
+authors = [
+    {name = "monkscode", email = "1dhruvilvyas@gmail.com"},
+]
+
+dependencies = [
+    # FastAPI core
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "pydantic-settings",
+    "sse-starlette",
+    "aiohttp",
+    "requests",
+    # Configuration
+    "python-dotenv",
+    "PyYAML",
+    # Docker SDK (robot test execution)
+    "docker",
+    # crewai 1.8.1 requires openai<1.84.dev0 (openai 1.83.x only).
+    # litellm 1.75.3 is the last version that accepts openai>=1.68.2 (compatible).
+    # litellm 1.75.4+ bumped to openai>=1.99.5 which crewai 1.8.1 blocks.
+    # Upgrade crewai to 1.14.2 (requires openai>=2.0.0) planned separately.
+    "crewai==1.8.1",
+    "litellm==1.75.3",
+    # LLM providers
+    "google-auth",
+    # ChromaDB — uses default ONNX embeddings (no pytorch/sentence-transformers)
+    "chromadb",
+    "posthog>=2.4.0,<8.0.0",
+    # LLM Observability — OTel-first (Enhancement #3)
+    "traceloop-sdk>=0.30.0",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+    "opentelemetry-instrumentation-requests>=0.41b0",
+    # Structured Logging (Enhancement #4)
+    "structlog>=24.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+markers = [
+    "integration: marks tests as integration tests (may be slow)",
+    "performance: marks tests as performance benchmarks",
+]
+
+[tool.coverage.run]
+source = ["src/backend"]
+omit = ["*/venv/*", "*/__pycache__/*"]

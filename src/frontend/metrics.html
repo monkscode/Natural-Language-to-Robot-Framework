@@ -226,6 +226,66 @@
             color: var(--error);
         }
 
+        /* Expandable row detail */
+        .detail-row td {
+            padding: 0;
+            border-bottom: var(--border-width) solid var(--border-color);
+        }
+
+        .detail-panel {
+            display: none;
+            padding: 1rem 1.5rem;
+            background: var(--bg-surface-secondary);
+            font-size: 0.85rem;
+        }
+
+        .detail-panel.open {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+
+        .detail-section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 0.4rem;
+            letter-spacing: 0.5px;
+        }
+
+        .detail-kv {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+            color: var(--text-secondary);
+        }
+
+        .detail-kv span:last-child {
+            font-weight: 600;
+            color: var(--text-main);
+            font-family: var(--font-mono);
+        }
+
+        tr.data-row {
+            cursor: pointer;
+        }
+
+        tr.data-row:hover td {
+            background: var(--bg-surface-secondary);
+        }
+
+        .expand-icon {
+            display: inline-block;
+            transition: transform 0.15s ease;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        .expand-icon.rotated {
+            transform: rotate(90deg);
+        }
+
         /* Responsive */
         @media (max-width: 1024px) {
             .dashboard-grid {
@@ -364,6 +424,9 @@
                         <option value="performance-scatter">Time vs Cost Scatter</option>
                         <!-- Locator Strategy Analysis -->
                         <option value="fallback-depth">Locator Strategy Distribution</option>
+                        <!-- LLM Quality & Optimization -->
+                        <option value="llm-cleaning-rate">LLM Cleaning Rate</option>
+                        <option value="context-reduction">Context Reduction (Optimization)</option>
                     </select>
                 </div>
                 <div class="chart-wrapper">
@@ -412,6 +475,7 @@
                 <table>
                     <thead>
                         <tr>
+                            <th></th>
                             <th>Status</th>
                             <th>Workflow ID</th>
                             <th>Timestamp</th>
@@ -425,7 +489,7 @@
                     <tbody id="table-body">
                         <!-- Rows populated by JS -->
                         <tr>
-                            <td colspan="8" style="text-align:center; padding: 2rem;">Loading data...</td>
+                            <td colspan="9" style="text-align:center; padding: 2rem;">Loading data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -553,17 +617,40 @@
             tbody.innerHTML = '';
 
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 2rem;">No workflow data available yet. Run some tests to see metrics!</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding: 2rem;">No workflow data available yet. Run some tests to see metrics!</td></tr>';
                 renderCharts([]);
                 return;
             }
 
-            runs.forEach(run => {
+            runs.forEach((run, idx) => {
                 const statusClass = run.success_rate >= 1.0 ? 'status-success' : 'status-fail';
                 const statusText = run.success_rate >= 1.0 ? 'PASS' : 'FAIL';
+                const detailId = `detail-${idx}`;
+
+                // Build detail panel content
+                const cs = run.llm_cleaning_stats || {};
+                const cr = run.context_reduction || {};
+                const ks = run.keyword_search_stats || {};
+                const pl = run.pattern_learning_stats || {};
+
+                const cleanRate = cs.clean_rate != null ? cs.clean_rate.toFixed(1) + '%' : 'N/A';
+                const cleanTotal = cs.total_responses != null ? cs.total_responses : 'N/A';
+                const cleanCleaned = cs.cleaned_responses != null ? cs.cleaned_responses : 'N/A';
+                const cleanErrors = cs.formatting_errors_detected != null ? cs.formatting_errors_detected : 'N/A';
+
+                const ctxBaseline = cr.baseline_tokens != null ? cr.baseline_tokens.toLocaleString() : 'N/A';
+                const ctxOptimized = cr.optimized_tokens != null ? cr.optimized_tokens.toLocaleString() : 'N/A';
+                const ctxReduction = cr.reduction_percentage != null ? cr.reduction_percentage.toFixed(1) + '%' : 'N/A';
+
+                const ksLatency = ks.avg_latency_ms != null ? ks.avg_latency_ms.toFixed(1) + 'ms' : 'N/A';
+                const ksCalls = ks.calls != null ? ks.calls : 'N/A';
+                const plUsed = pl.prediction_used != null ? (pl.prediction_used ? 'Yes' : 'No') : 'N/A';
+                const plCount = pl.predicted_keywords_count != null ? pl.predicted_keywords_count : 'N/A';
 
                 const tr = document.createElement('tr');
+                tr.className = 'data-row';
                 tr.innerHTML = `
+                    <td style="width:24px; text-align:center;"><span class="expand-icon" id="icon-${idx}">&#9658;</span></td>
                     <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                     <td><span style="font-family:var(--font-mono); font-size:0.85rem;">${run.workflow_id}</span></td>
                     <td>${new Date(run.timestamp).toLocaleString()}</td>
@@ -573,7 +660,44 @@
                     <td>$${run.total_cost.toFixed(4)}</td>
                     <td>${run.execution_time.toFixed(1)}s</td>
                 `;
+                tr.addEventListener('click', () => {
+                    const panel = document.getElementById(detailId);
+                    const icon = document.getElementById(`icon-${idx}`);
+                    panel.classList.toggle('open');
+                    icon.classList.toggle('rotated');
+                });
                 tbody.appendChild(tr);
+
+                // Detail row
+                const detailTr = document.createElement('tr');
+                detailTr.className = 'detail-row';
+                detailTr.innerHTML = `
+                    <td colspan="9">
+                        <div class="detail-panel" id="${detailId}">
+                            <div>
+                                <div class="detail-section-title">LLM Cleaning</div>
+                                <div class="detail-kv"><span>Total Responses</span><span>${cleanTotal}</span></div>
+                                <div class="detail-kv"><span>Cleaned</span><span>${cleanCleaned}</span></div>
+                                <div class="detail-kv"><span>Clean Rate</span><span>${cleanRate}</span></div>
+                                <div class="detail-kv"><span>Formatting Errors</span><span>${cleanErrors}</span></div>
+                            </div>
+                            <div>
+                                <div class="detail-section-title">Context Reduction</div>
+                                <div class="detail-kv"><span>Baseline Tokens</span><span>${ctxBaseline}</span></div>
+                                <div class="detail-kv"><span>Optimized Tokens</span><span>${ctxOptimized}</span></div>
+                                <div class="detail-kv"><span>Reduction</span><span>${ctxReduction}</span></div>
+                            </div>
+                            <div>
+                                <div class="detail-section-title">Pattern Learning</div>
+                                <div class="detail-kv"><span>Keyword Search Calls</span><span>${ksCalls}</span></div>
+                                <div class="detail-kv"><span>Avg Search Latency</span><span>${ksLatency}</span></div>
+                                <div class="detail-kv"><span>Pattern Used</span><span>${plUsed}</span></div>
+                                <div class="detail-kv"><span>Keywords Predicted</span><span>${plCount}</span></div>
+                            </div>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(detailTr);
             });
 
             // 3. Render Charts using modular system

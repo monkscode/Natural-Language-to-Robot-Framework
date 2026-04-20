@@ -12,10 +12,15 @@ Tests:
   - stream_execute_only handles Docker failure
   - stream_generate_and_run yields combined events
   - Workflow metrics collection
+  - Concurrency slot management (acquire/release/capacity)
+  - Hint metadata cache thread safety
 """
 
 import os
 import tempfile
+import threading
+import asyncio
+import json
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -146,3 +151,136 @@ class TestVertexCredentialValidation:
             assert any("VERTEXAI_LOCATION" in e.get("message", "") for e in events)
         finally:
             os.unlink(creds_path)
+
+
+class TestWorkflowSlotManagement:
+    """Tests for _acquire_workflow_slot / _release_workflow_slot / get_active_workflow_count."""
+
+    def setup_method(self):
+        """Reset slot counter to 0 before each test."""
+        import src.backend.services.workflow_service as ws
+        with ws._active_workflow_lock:
+            ws._active_workflow_count = 0
+
+    def teardown_method(self):
+        """Reset slot counter to 0 after each test (in case test left it dirty)."""
+        import src.backend.services.workflow_service as ws
+        with ws._active_workflow_lock:
+            ws._active_workflow_count = 0
+
+    def test_acquire_fills_to_capacity_then_rejects(self):
+        """Acquire MAX_CONCURRENT_WORKFLOWS slots; the next acquire returns False."""
+        from src.backend.services.workflow_service import _acquire_workflow_slot
+        with patch("src.backend.services.workflow_service.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 3
+            assert _acquire_workflow_slot() is True
+            assert _acquire_workflow_slot() is True
+            assert _acquire_workflow_slot() is True
+            # At capacity — next must be rejected
+            assert _acquire_workflow_slot() is False
+
+    def test_release_frees_slot_allowing_new_acquire(self):
+        """Acquire 3 slots, release 1; a new acquire should succeed."""
+        from src.backend.services.workflow_service import _acquire_workflow_slot, _release_workflow_slot
+        with patch("src.backend.services.workflow_service.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 3
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            assert _acquire_workflow_slot() is False  # at capacity
+            _release_workflow_slot()
+            assert _acquire_workflow_slot() is True   # slot freed
+
+    def test_release_without_acquire_stays_at_zero(self):
+        """Release without a prior acquire must not take count below 0."""
+        from src.backend.services.workflow_service import _release_workflow_slot, get_active_workflow_count
+        _release_workflow_slot()
+        assert get_active_workflow_count() == 0
+
+    def test_get_active_workflow_count_reflects_acquired_slots(self):
+        """get_active_workflow_count() returns the number of held slots."""
+        from src.backend.services.workflow_service import _acquire_workflow_slot, get_active_workflow_count
+        with patch("src.backend.services.workflow_service.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            _acquire_workflow_slot()
+            assert get_active_workflow_count() == 5
+
+    def test_concurrent_acquire_release_final_count_is_zero(self):
+        """20 threads each acquire+release 100 times; final count must be 0."""
+        from concurrent.futures import ThreadPoolExecutor
+        from src.backend.services.workflow_service import _acquire_workflow_slot, _release_workflow_slot, get_active_workflow_count
+        with patch("src.backend.services.workflow_service.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 50
+
+            def worker():
+                for _ in range(100):
+                    acquired = _acquire_workflow_slot()
+                    if acquired:
+                        _release_workflow_slot()
+
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                futures = [executor.submit(worker) for _ in range(20)]
+            for f in futures:
+                f.result()  # propagates any thread exception to the test
+
+            assert get_active_workflow_count() == 0
+
+    def test_stream_generate_only_yields_capacity_error_when_full(self):
+        """When at capacity, stream_generate_only yields a capacity error immediately."""
+        from src.backend.services.workflow_service import stream_generate_only
+        with patch("src.backend.services.workflow_service.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 1
+            # Manually fill the one slot
+            import src.backend.services.workflow_service as ws
+            with ws._active_workflow_lock:
+                ws._active_workflow_count = 1
+
+            async def run_gen():
+                events = []
+                async for e in stream_generate_only("test query", "gemini", "gemini-2.5-flash"):
+                    events.append(e)
+                return events
+
+            events = asyncio.run(run_gen())
+            assert len(events) == 1
+            payload = json.loads(events[0].replace("data: ", "").strip())
+            assert payload["status"] == "error"
+            assert "at capacity" in payload["message"]
+
+
+class TestHintMetadataCacheConcurrency:
+    """Tests for _hint_metadata_cache thread safety under concurrent access."""
+
+    def test_concurrent_write_and_pop_no_exceptions(self):
+        """Two threads write/pop from _hint_metadata_cache 1000 times without errors."""
+        from concurrent.futures import ThreadPoolExecutor
+        import src.backend.services.workflow_service as ws
+
+        def writer():
+            for i in range(1000):
+                key = f"workflow-writer-{i}"
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache[key] = {"count": i, "sources": []}
+
+        def popper():
+            for i in range(1000):
+                key = f"workflow-popper-{i}"
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache[key] = {"count": i, "sources": []}
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache.pop(key, {})
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(writer)
+                f2 = executor.submit(popper)
+            f1.result()  # propagates any thread exception to the test
+            f2.result()
+        finally:
+            with ws._hint_metadata_lock:
+                for i in range(1000):
+                    ws._hint_metadata_cache.pop(f"workflow-writer-{i}", None)

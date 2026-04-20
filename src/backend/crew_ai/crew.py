@@ -1,13 +1,14 @@
 from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
 from src.backend.crew_ai.tasks import RobotTasks
-from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from datetime import datetime
 import os
 import re
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,14 @@ CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not endi
 CREWAI_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB per file
 CREWAI_LOG_BACKUP_COUNT = 9              # 9 backups = 450MB max
 
+_log_rotation_lock = threading.Lock()
+
 
 def _rotate_crewai_log():
     """Rotate crewai.log.txt if it exceeds the size limit.
+
+    Thread-safe: guarded by _log_rotation_lock to prevent race conditions
+    when multiple workflows trigger rotation simultaneously.
 
     CrewAI's output_log_file appends .txt to any path not ending in .json or .txt,
     so "logs/crewai.log" becomes "logs/crewai.log.txt". CREWAI_LOG_FILE reflects
@@ -27,33 +33,37 @@ def _rotate_crewai_log():
 
     Rotation scheme: crewai.log.txt -> crewai.log.txt.1 -> ... -> crewai.log.txt.9
     """
-    if not os.path.exists(CREWAI_LOG_FILE):
-        return
+    try:
+        with _log_rotation_lock:
+            if not os.path.exists(CREWAI_LOG_FILE):
+                return
 
-    file_size = os.path.getsize(CREWAI_LOG_FILE)
-    if file_size < CREWAI_LOG_MAX_BYTES:
-        return
+            file_size = os.path.getsize(CREWAI_LOG_FILE)
+            if file_size < CREWAI_LOG_MAX_BYTES:
+                return
 
-    logger.info(
-        f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
-        f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
-    )
+            logger.info(
+                f"📂 Rotating {CREWAI_LOG_FILE} ({file_size / (1024*1024):.1f}MB exceeds "
+                f"{CREWAI_LOG_MAX_BYTES / (1024*1024):.0f}MB limit)"
+            )
 
-    # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
-    for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
-        src = f"{CREWAI_LOG_FILE}.{i}"
-        dst = f"{CREWAI_LOG_FILE}.{i + 1}"
-        if os.path.exists(src):
-            if os.path.exists(dst):
-                os.remove(dst)
-            os.rename(src, dst)
+            # Shift existing backups: .8 -> .9, .7 -> .8, ... , .1 -> .2
+            for i in range(CREWAI_LOG_BACKUP_COUNT - 1, 0, -1):
+                src = f"{CREWAI_LOG_FILE}.{i}"
+                dst = f"{CREWAI_LOG_FILE}.{i + 1}"
+                if os.path.exists(src):
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    os.rename(src, dst)
 
-    # Current log -> .1
-    backup_path = f"{CREWAI_LOG_FILE}.1"
-    if os.path.exists(backup_path):
-        os.remove(backup_path)
-    os.rename(CREWAI_LOG_FILE, backup_path)
-    logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
+            # Current log -> .1
+            backup_path = f"{CREWAI_LOG_FILE}.1"
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            os.rename(CREWAI_LOG_FILE, backup_path)
+            logger.info(f"📂 Rotated {CREWAI_LOG_FILE} -> {backup_path}")
+    except OSError as e:
+        logger.warning(f"📂 Log rotation skipped due to OS error: {e}")
 
 
 def extract_url_from_query(query: str) -> str:
@@ -96,7 +106,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = ""):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = "", progress_queue=None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -264,11 +274,12 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             assembler_context = assembler_result.context
             validator_context = validator_result.context
 
-            # Capture hint metadata for future FeedbackLoop integration
+            # Capture hint metadata for FeedbackLoop integration
+            # count = injected (budget-capped), available = found before cap
             hint_metadata = {
-                "planner": {"count": planner_result.hints_count, "sources": planner_result.hint_sources},
-                "assembler": {"count": assembler_result.hints_count, "sources": assembler_result.hint_sources},
-                "validator": {"count": validator_result.hints_count, "sources": validator_result.hint_sources},
+                "planner": {"count": planner_result.hints_count, "available": planner_result.hints_available, "sources": planner_result.hint_sources},
+                "assembler": {"count": assembler_result.hints_count, "available": assembler_result.hints_available, "sources": assembler_result.hint_sources},
+                "validator": {"count": validator_result.hints_count, "available": validator_result.hints_available, "sources": validator_result.hint_sources},
             }
             total_hints = sum(r["count"] for r in hint_metadata.values())
             if total_hints > 0:
@@ -350,6 +361,16 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     assemble_code = tasks.assemble_code_task(code_assembler_agent)
     validate_code = tasks.validate_code_task(code_validator_agent, code_assembler_agent)
 
+    # Register real-time progress event routing (no-op when progress_queue is None)
+    if progress_queue is not None:
+        from src.backend.crew_ai.progress_events import register_workflow, unregister_workflow
+        register_workflow(workflow_id, progress_queue, {
+            str(plan_steps.id): 0,
+            str(identify_elements.id): 1,
+            str(assemble_code.id): 2,
+            str(validate_code.id): 3,
+        })
+
     # Rotate crewai.log if it exceeds size limit (before creating the Crew)
     _rotate_crewai_log()
 
@@ -372,42 +393,48 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     logger.info(
         f"🔄 Agent delegation enabled with max_iter={settings.MAX_AGENT_ITERATIONS}")
     logger.info(
-        f"📊 LLM Output Cleaner Status: {formatting_monitor.get_stats()}")
+        f"📊 LLM Output Cleaner Status: {agents.llm._monitor.get_stats()}")
 
     try:
-        result = crew.kickoff()
-        logger.info("✅ CrewAI workflow completed successfully")
-        logger.info(f"🏁 Crew execution finished - delegation cycle complete")
-        # formatting_monitor is the authoritative call count: incremented once per
-        # CleanedLLMWrapper.call() invocation. Compare against "Raw CrewAI usage metrics"
-        # in workflow_service.py — that figure is N_agents × real_calls due to CrewAI
-        # summing the shared LLM instance once per agent in calculate_usage_metrics().
-        logger.info(f"📊 Final LLM Stats: {formatting_monitor.get_stats()}")
-        
-        # NOTE: Pattern learning is NOT done here!
-        # Learning should only happen AFTER test execution succeeds (test_status == "passed")
-        # This ensures we only learn from validated, working code.
-        # The learning is triggered in workflow_service.py after Docker execution completes successfully.
-        
-        # Return optimization metrics separately (Crew object doesn't allow dynamic attributes)
-        if optimization_metrics:
-            logger.info("📊 Optimization metrics collected")
-        
-        return result, crew, optimization_metrics, hint_metadata
+        try:
+            result = crew.kickoff()
+            logger.info("✅ CrewAI workflow completed successfully")
+            logger.info(f"🏁 Crew execution finished - delegation cycle complete")
+            # agents.llm._monitor is the authoritative call count: incremented once per
+            # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
+            # Compare against "Raw CrewAI usage metrics" in workflow_service.py — that
+            # figure is N_agents × real_calls due to CrewAI summing the shared LLM
+            # instance once per agent in calculate_usage_metrics().
+            logger.info(f"📊 Final LLM Stats: {agents.llm._monitor.get_stats()}")
 
-    except Exception as e:
-        error_msg = str(e)
+            # NOTE: Pattern learning is NOT done here!
+            # Learning should only happen AFTER test execution succeeds (test_status == "passed")
+            # This ensures we only learn from validated, working code.
+            # The learning is triggered in workflow_service.py after Docker execution completes successfully.
 
-        # Check if this is a formatting error that slipped through
-        if LLMOutputCleaner.is_formatting_error(error_msg):
-            logger.error("❌ LLM formatting error detected despite cleaning!")
-            logger.error(f"   Error: {error_msg[:200]}...")
-            logger.error(
-                f"   This indicates the cleaning logic needs improvement")
-            formatting_monitor.log_formatting_error(was_recovered=False)
-        else:
-            logger.error(f"❌ CrewAI workflow failed: {error_msg[:200]}...")
+            # Return optimization metrics separately (Crew object doesn't allow dynamic attributes)
+            if optimization_metrics:
+                logger.info("📊 Optimization metrics collected")
 
-        logger.info(
-            f"📊 LLM Stats at failure: {formatting_monitor.get_stats()}")
-        raise
+            return result, crew, optimization_metrics, hint_metadata, agents.llm._monitor
+
+        except Exception as e:
+            error_msg = str(e)
+
+            # Check if this is a formatting error that slipped through
+            if LLMOutputCleaner.is_formatting_error(error_msg):
+                logger.error("❌ LLM formatting error detected despite cleaning!")
+                logger.error(f"   Error: {error_msg[:200]}...")
+                logger.error(
+                    f"   This indicates the cleaning logic needs improvement")
+                agents.llm._monitor.log_formatting_error(was_recovered=False)
+            else:
+                logger.error(f"❌ CrewAI workflow failed: {error_msg[:200]}...")
+
+            logger.info(
+                f"📊 LLM Stats at failure: {agents.llm._monitor.get_stats()}")
+            raise
+
+    finally:
+        if progress_queue is not None:
+            unregister_workflow(workflow_id)

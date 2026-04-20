@@ -7,65 +7,30 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-# ========================================
-# FIX: Unicode/Emoji Encoding on Windows
-# ========================================
-# Reconfigure stdout/stderr to use UTF-8 encoding
-# This fixes UnicodeEncodeError for emojis (🚀, 🐳, etc.) in logs
+# Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
 if sys.platform.startswith('win'):
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-from src.backend.api.endpoints import router as api_router
-
-# --- Logging Configuration ---
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
-# Configure logging with both console and file handlers
-log_format = '%(asctime)s - %(levelname)-8s [%(name)s] %(message)s'
-date_format = '%Y-%m-%d %H:%M:%S'
-
-# Create formatters
-formatter = logging.Formatter(log_format, datefmt=date_format)
-
-# File handler - rotates logs to prevent huge files
-from logging.handlers import RotatingFileHandler
-try:
-    file_handler = RotatingFileHandler(
-        'logs/application.log',
-        maxBytes=10*1024*1024,  # 10MB per file
-        backupCount=5,           # Keep 5 backup files
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-except (OSError, IOError, Exception) as e:
-    fallback_handler = logging.StreamHandler()
-    fallback_handler.setLevel(logging.INFO)
-    fallback_handler.setFormatter(formatter)
-    file_handler = fallback_handler
-    logging.warning(f"Failed to initialize file logging, using stream fallback: {type(e).__name__}: {e}")
-
-# Console handler
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(formatter)
-
-# Configure root logger
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[file_handler, console_handler],
-    force=True,
-)
+# --- Structured Logging (must be FIRST — before any logger calls) ---
+from src.backend.config.logging_config import setup_logging
+setup_logging()
 
 # Disable crewai tracing prompts to prevent log spam
 os.environ['CREWAI_TRACING_ENABLED'] = 'false'
 
 logger = logging.getLogger(__name__)
-logger.info("🚀 Starting application with file logging enabled at logs/application.log")
+logger.info("Starting application with structured logging enabled at logs/application.log")
+
+# --- LLM Observability (must be BEFORE any import that loads CrewAI/LiteLLM) ---
+from src.backend.core.observability import init_observability
+init_observability()
+
+# This import chain pulls in endpoints → workflow_service → crew_ai → litellm.
+# Observability must be initialized before this line so OpenLLMetry patches apply.
+from src.backend.api.endpoints import router as api_router
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -78,23 +43,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- API Router ---
+# --- Global Exception Handler ---
+from src.backend.api.error_handlers import register_error_handlers
+register_error_handlers(app)
+
+# --- API Routers ---
 app.include_router(api_router)
 
-# --- Workflow Metrics API Router ---
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
 
-# --- Health Check Endpoint ---
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker health monitoring."""
-    return {"status": "healthy", "service": "nlrf-fastapi"}
+from src.backend.api.trace_endpoints import router as trace_router
+app.include_router(trace_router, prefix="/api")
 
-@app.get("/api/health")
-async def api_health_check():
-    """API health check endpoint."""
-    return {"status": "healthy", "service": "nlrf-api"}
+# --- Health Check Endpoints ---
+from src.backend.api.health import health_check, api_health_check
+
+app.get("/health")(health_check)
+app.get("/api/health")(api_health_check)
 
 # --- Static Files and Root Endpoint ---
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
@@ -111,6 +77,13 @@ app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 async def startup_event():
     logging.info("Application startup complete.")
     _check_learning_health()
+
+    # Clean up orphaned temp metrics files left by crashed/incomplete workflows
+    try:
+        from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
+        get_temp_metrics_storage().cleanup_old_files(max_age_hours=24)
+    except Exception as e:
+        logging.warning(f"Startup temp metrics cleanup failed (non-fatal): {e}")
 
 
 def _check_learning_health():

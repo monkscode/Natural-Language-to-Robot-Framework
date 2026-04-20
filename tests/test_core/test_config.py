@@ -134,3 +134,23 @@ class TestSettingsValidators:
         """Verify arbitrary strings are rejected."""
         with pytest.raises(ValidationError):
             self._make_settings({"MODEL_PROVIDER": "aws"})
+
+    def test_observability_backend_accepts_sqlite(self):
+        s = self._make_settings({"OBSERVABILITY_BACKEND": "sqlite"})
+        assert s.OBSERVABILITY_BACKEND == "sqlite"
+
+    def test_observability_backend_accepts_none(self):
+        s = self._make_settings({"OBSERVABILITY_BACKEND": "none"})
+        assert s.OBSERVABILITY_BACKEND == "none"
+
+    def test_observability_backend_accepts_grafana(self):
+        s = self._make_settings({"OBSERVABILITY_BACKEND": "grafana"})
+        assert s.OBSERVABILITY_BACKEND == "grafana"
+
+    def test_observability_backend_accepts_otlp(self):
+        s = self._make_settings({"OBSERVABILITY_BACKEND": "otlp"})
+        assert s.OBSERVABILITY_BACKEND == "otlp"
+
+    def test_observability_backend_rejects_invalid(self):
+        with pytest.raises(ValidationError):
+            self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})

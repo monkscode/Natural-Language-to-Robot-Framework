@@ -39,6 +39,10 @@ logs/temp_metrics
 
 # Ignore the local browser_service
 tools/browser_service/*
+
+# requirements.txt is a generated artifact (compiled from pyproject.toml at Docker build time)
+# Do not commit — the Dockerfile runs `uv pip compile pyproject.toml` at build time
+src/backend/requirements.txt
 node_modules/
 coverage/
 
@@ -48,3 +52,4 @@ tasks/*
 logs/crewai.log.txt
 CLAUDE.md
 credentials.json
+FuturePlans/*

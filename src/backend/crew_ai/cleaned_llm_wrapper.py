@@ -13,6 +13,16 @@ The wrapper intercepts every LLM call via call() to apply Action/ActionInput
 cleaning and rate-limit retry logic, then delegates to LiteLLM for the actual
 API call.
 
+LiteLLM Callback for per-call traces:
+    _litellm_trace_callback() is registered once in litellm.success_callback.
+    It fires after every successful LiteLLM completion, capturing per-call
+    tokens and cost (computed by LiteLLM's pricing tables) and writing a row
+    to data/llm_traces.db via get_trace_store(). This bypasses the broken
+    opentelemetry-instrumentation-vertexai which creates empty-attribute spans.
+    The callback is thread-safe: get_trace_store() uses WAL + threading.Lock.
+    OTel context (trace_id, span_id, workflow_id) is read from the calling
+    thread's OTel context, so each concurrent workflow's callbacks are isolated.
+
 WHY CleanedLLMWrapper OVERRIDES __new__:
     LLM.__new__ is a factory method that, for known providers (gemini, openai,
     anthropic, azure, bedrock), unconditionally calls _get_native_provider()
@@ -39,12 +49,138 @@ RATE LIMITING:
 
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
+
 from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
 
-from .llm_output_cleaner import LLMOutputCleaner, formatting_monitor
+from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM per-call trace callback
+# ---------------------------------------------------------------------------
+
+def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datetime, end_time: datetime) -> None:
+    """
+    LiteLLM success_callback — writes one row to the trace store per LLM call.
+
+    Fires synchronously after every successful litellm.completion() in the
+    calling thread. OTel context is thread-local (Python contextvars), so
+    concurrent workflows don't bleed into each other.
+
+    Errors are fully swallowed: a tracing failure must never abort an LLM call.
+    """
+    try:
+        # --- duration ---
+        duration_ms = (end_time - start_time).total_seconds() * 1000.0
+
+        # --- model ---
+        model: str = kwargs.get("model", "unknown")
+
+        # --- prompt text — serialize messages list as JSON for queryability ---
+        prompt_text: str | None = None
+        messages = kwargs.get("messages")
+        if messages:
+            try:
+                import json as _json
+                prompt_text = _json.dumps(messages, ensure_ascii=False)
+            except Exception as _exc:
+                logger.debug("[LLM_TRACE] Failed to serialize prompt messages: %s", _exc)
+
+        # --- response text — first choice content ---
+        response_text: str | None = None
+        try:
+            choices = getattr(completion_response, "choices", None)
+            if choices:
+                msg = getattr(choices[0], "message", None)
+                if msg:
+                    response_text = getattr(msg, "content", None)
+        except Exception as _exc:
+            logger.debug("[LLM_TRACE] Failed to extract response text: %s", _exc)
+
+        # --- tokens ---
+        usage = getattr(completion_response, "usage", None)
+        prompt_tokens: int = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens: int = getattr(usage, "completion_tokens", 0) or 0
+        total_tokens: int = getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
+
+        # --- cost — LiteLLM calculates this from its own pricing tables ---
+        hidden = getattr(completion_response, "_hidden_params", {}) or {}
+        cost_usd: float = float(hidden.get("response_cost") or 0.0)
+
+        # --- OTel context — read from the calling thread ---
+        # When no parent workflow span exists, synthesize a per-call trace_id so
+        # orphan calls (health checks, misc LLM use) don't all collapse into a
+        # single "0000..." bucket in the trace DB.
+        trace_id_hex = uuid.uuid4().hex
+        parent_span_id_hex: str | None = None
+        workflow_id: str | None = None
+        try:
+            from opentelemetry import baggage, trace as otel_trace
+            span_ctx = otel_trace.get_current_span().get_span_context()
+            if span_ctx and span_ctx.trace_id:
+                trace_id_hex = format(span_ctx.trace_id, "032x")
+                parent_span_id_hex = format(span_ctx.span_id, "016x")
+            workflow_id = baggage.get_baggage("workflow.id")
+        except Exception as _exc:
+            logger.debug("[LLM_TRACE] OTel context unavailable: %s", _exc)
+
+        # Each LiteLLM call gets its own span_id so it appears as a distinct row.
+        span_id_hex = uuid.uuid4().hex[:16]
+
+        from src.backend.core.trace_store import get_trace_store
+        store = get_trace_store()
+        if store is None:
+            return
+
+        store.insert_litellm_call(
+            span_id=span_id_hex,
+            trace_id=trace_id_hex,
+            parent_span_id=parent_span_id_hex,
+            name=f"{model}.litellm",
+            model=model,
+            prompt_text=prompt_text,
+            response_text=response_text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            workflow_id=workflow_id,
+        )
+    except Exception as e:
+        logger.debug("[LLM_TRACE] callback error (non-fatal): %s", e)
+
+
+def _register_litellm_callback() -> None:
+    """Register _litellm_trace_callback once in litellm.success_callback.
+
+    Skipped entirely when OBSERVABILITY_BACKEND=none so the trace DB file is
+    never created for users who opted out of tracing.
+
+    litellm.success_callback is a process-global list. Importing this module
+    multiple times (or creating multiple CleanedLLMWrapper instances) must not
+    register duplicates — checked by identity before appending.
+    """
+    try:
+        from src.backend.core.config import settings
+        if settings.OBSERVABILITY_BACKEND == "none":
+            logger.info("[LLM_TRACE] Tracing disabled — LiteLLM callback not registered")
+            return
+
+        import litellm
+        if _litellm_trace_callback not in litellm.success_callback:
+            litellm.success_callback.append(_litellm_trace_callback)
+            logger.info("[LLM_TRACE] LiteLLM trace callback registered")
+    except Exception as e:
+        logger.warning("[LLM_TRACE] Could not register LiteLLM callback (non-fatal): %s", e)
+
+
+_register_litellm_callback()
 
 
 class CleanedLLMWrapper(LLM):
@@ -102,6 +238,7 @@ class CleanedLLMWrapper(LLM):
     def __init__(self, *args, **kwargs):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
+        self._monitor = LLMFormattingMonitor()
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
 
     def get_context_window_size(self) -> int:
@@ -205,14 +342,14 @@ class CleanedLLMWrapper(LLM):
         """
         result = super().call(messages, *args, **kwargs)
         if not isinstance(result, str):
-            formatting_monitor.log_response(was_cleaned=False)
+            self._monitor.log_response(was_cleaned=False)
             return result
 
         cleaned = LLMOutputCleaner.clean_output(result)
         was_cleaned = cleaned != result
         if was_cleaned:
             logger.debug(f"🧹 Cleaned LLM response (length: {len(result)} → {len(cleaned)})")
-        formatting_monitor.log_response(was_cleaned=was_cleaned)
+        self._monitor.log_response(was_cleaned=was_cleaned)
         return cleaned
 
 
@@ -237,7 +374,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'
     - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
     - Retries on transient API errors via LiteLLM (num_retries=3)
-    - Tracks all responses via formatting_monitor
+    - Tracks all responses via self._monitor (per-instance, never shared across workflows)
 
     Args:
         model_provider: "gemini" for Google AI Studio, "vertex" for Vertex AI,
