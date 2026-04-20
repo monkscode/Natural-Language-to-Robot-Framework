@@ -570,7 +570,7 @@ python-dotenv==1.1.1
     #   uvicorn
 python-multipart==0.0.26
     # via mcp
-pywin32==311
+pywin32==311 ; sys_platform == "win32"
     # via
     #   docker
     #   mcp

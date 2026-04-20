@@ -14,7 +14,7 @@ import logging
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -81,9 +81,16 @@ async def list_traces(
             rows = conn.execute(query, params).fetchall()
         return {"traces": [dict(r) for r in rows], "limit": limit, "offset": offset}
     except FileNotFoundError as e:
-        return {"traces": [], "limit": limit, "offset": offset, "note": str(e)}
+        logger.info("Trace database unavailable in list_traces: %s", e)
+        return {
+            "traces": [],
+            "limit": limit,
+            "offset": offset,
+            "note": "Trace database is not available yet. No traces have been recorded.",
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("Unexpected error in list_traces")
+        raise HTTPException(status_code=500, detail="An internal error occurred.") from e
 
 
 @router.get("/stats/cost")
@@ -93,7 +100,7 @@ async def get_cost_stats(
     """Aggregate cost and token usage per model for the last N days."""
     try:
         with closing(_get_db()) as conn:
-            cutoff = (datetime.now() - timedelta(days=last_days)).isoformat()
+            cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=last_days)).strftime("%Y-%m-%d %H:%M:%S")
 
             row = conn.execute(
                 """SELECT
@@ -132,9 +139,15 @@ async def get_cost_stats(
             "per_model": [dict(r) for r in model_rows],
         }
     except FileNotFoundError as e:
-        return {"period_days": last_days, "note": str(e), "total_llm_calls": 0}
+        logger.info("Trace database unavailable in get_cost_stats: %s", e)
+        return {
+            "period_days": last_days,
+            "note": "Trace database not found. No traces have been recorded yet.",
+            "total_llm_calls": 0,
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("Unexpected error in get_cost_stats")
+        raise HTTPException(status_code=500, detail="An internal error occurred.") from e
 
 
 @router.get("/workflow/{workflow_id}")
@@ -184,9 +197,16 @@ async def get_workflow_traces(workflow_id: str):
             "traces": traces,
         }
     except FileNotFoundError as e:
-        return {"workflow_id": workflow_id, "llm_calls": 0, "traces": [], "note": str(e)}
+        logger.info("Trace database unavailable in get_workflow_traces: %s", e)
+        return {
+            "workflow_id": workflow_id,
+            "llm_calls": 0,
+            "traces": [],
+            "note": "Trace data is currently unavailable.",
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("Unexpected error in get_workflow_traces")
+        raise HTTPException(status_code=500, detail="An internal error occurred.") from e
 
 
 @router.get("/{span_id}")
@@ -204,6 +224,8 @@ async def get_trace_detail(span_id: str):
     except HTTPException:
         raise
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        logger.info("Trace database unavailable in get_trace_detail: %s", e)
+        raise HTTPException(status_code=404, detail="Trace store unavailable.") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("Unexpected error in get_trace_detail")
+        raise HTTPException(status_code=500, detail="An internal error occurred.") from e

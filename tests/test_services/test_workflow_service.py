@@ -211,27 +211,22 @@ class TestWorkflowSlotManagement:
 
     def test_concurrent_acquire_release_final_count_is_zero(self):
         """20 threads each acquire+release 100 times; final count must be 0."""
+        from concurrent.futures import ThreadPoolExecutor
         from src.backend.services.workflow_service import _acquire_workflow_slot, _release_workflow_slot, get_active_workflow_count
         with patch("src.backend.services.workflow_service.settings") as mock_settings:
             mock_settings.MAX_CONCURRENT_WORKFLOWS = 50
-            errors = []
 
             def worker():
-                try:
-                    for _ in range(100):
-                        acquired = _acquire_workflow_slot()
-                        if acquired:
-                            _release_workflow_slot()
-                except Exception as e:
-                    errors.append(e)
+                for _ in range(100):
+                    acquired = _acquire_workflow_slot()
+                    if acquired:
+                        _release_workflow_slot()
 
-            threads = [threading.Thread(target=worker) for _ in range(20)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                futures = [executor.submit(worker) for _ in range(20)]
+            for f in futures:
+                f.result()  # propagates any thread exception to the test
 
-            assert not errors
             assert get_active_workflow_count() == 0
 
     def test_stream_generate_only_yields_capacity_error_when_full(self):
@@ -262,38 +257,30 @@ class TestHintMetadataCacheConcurrency:
 
     def test_concurrent_write_and_pop_no_exceptions(self):
         """Two threads write/pop from _hint_metadata_cache 1000 times without errors."""
+        from concurrent.futures import ThreadPoolExecutor
         import src.backend.services.workflow_service as ws
-        errors = []
 
         def writer():
-            try:
-                for i in range(1000):
-                    key = f"workflow-writer-{i}"
-                    with ws._hint_metadata_lock:
-                        ws._hint_metadata_cache[key] = {"count": i, "sources": []}
-            except Exception as e:
-                errors.append(e)
+            for i in range(1000):
+                key = f"workflow-writer-{i}"
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache[key] = {"count": i, "sources": []}
 
         def popper():
-            try:
-                for i in range(1000):
-                    key = f"workflow-popper-{i}"
-                    with ws._hint_metadata_lock:
-                        ws._hint_metadata_cache[key] = {"count": i, "sources": []}
-                    with ws._hint_metadata_lock:
-                        ws._hint_metadata_cache.pop(key, {})
-            except Exception as e:
-                errors.append(e)
-
-        t1 = threading.Thread(target=writer)
-        t2 = threading.Thread(target=popper)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        assert not errors
-        # Cleanup keys left by writer thread
-        with ws._hint_metadata_lock:
             for i in range(1000):
-                ws._hint_metadata_cache.pop(f"workflow-writer-{i}", None)
+                key = f"workflow-popper-{i}"
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache[key] = {"count": i, "sources": []}
+                with ws._hint_metadata_lock:
+                    ws._hint_metadata_cache.pop(key, {})
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(writer)
+                f2 = executor.submit(popper)
+            f1.result()  # propagates any thread exception to the test
+            f2.result()
+        finally:
+            with ws._hint_metadata_lock:
+                for i in range(1000):
+                    ws._hint_metadata_cache.pop(f"workflow-writer-{i}", None)

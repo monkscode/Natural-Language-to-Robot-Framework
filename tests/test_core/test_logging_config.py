@@ -20,8 +20,17 @@ def restore_root_logger():
     original_handlers = root.handlers[:]
     original_level = root.level
     yield
+    for handler in list(root.handlers):
+        if handler not in original_handlers:
+            root.removeHandler(handler)
+            handler.close()
     root.handlers = original_handlers
     root.setLevel(original_level)
+    try:
+        import structlog
+        structlog.contextvars.clear_contextvars()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

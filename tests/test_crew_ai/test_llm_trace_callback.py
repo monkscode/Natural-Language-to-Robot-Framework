@@ -157,14 +157,17 @@ class TestRegisterLitellmCallback:
             _register_litellm_callback,
             _litellm_trace_callback,
         )
-        # Ensure it's registered at least once
-        mock_settings = MagicMock()
-        mock_settings.OBSERVABILITY_BACKEND = "sqlite"
-        with patch("src.backend.core.config.settings", mock_settings):
-            _register_litellm_callback()
-            _register_litellm_callback()
-        count = litellm.success_callback.count(_litellm_trace_callback)
-        assert count <= 1
+        original = litellm.success_callback[:]
+        try:
+            mock_settings = MagicMock()
+            mock_settings.OBSERVABILITY_BACKEND = "sqlite"
+            with patch("src.backend.core.config.settings", mock_settings):
+                _register_litellm_callback()
+                _register_litellm_callback()
+            count = litellm.success_callback.count(_litellm_trace_callback)
+            assert count <= 1
+        finally:
+            litellm.success_callback = original
 
 
 # ---------------------------------------------------------------------------

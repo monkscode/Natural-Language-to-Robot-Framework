@@ -541,7 +541,6 @@ function renderChart1() {
                             backgroundColor: `${colors.secondary}80`,
                             borderColor: colors.borderWidth > 1 ? '#000' : colors.secondary,
                             borderWidth: colors.borderWidth,
-                            stack: 'tokens'
                         },
                         {
                             label: 'Optimized Tokens',
@@ -549,7 +548,6 @@ function renderChart1() {
                             backgroundColor: `${colors.success}80`,
                             borderColor: colors.borderWidth > 1 ? '#000' : colors.success,
                             borderWidth: colors.borderWidth,
-                            stack: 'tokens'
                         }
                     ]
                 },
@@ -569,8 +567,8 @@ function renderChart1() {
                     },
                     scales: {
                         ...getCommonOptions().scales,
-                        x: { stacked: true, display: false },
-                        y: { stacked: false, ...getCommonOptions().scales.y,
+                        x: { display: false },
+                        y: { ...getCommonOptions().scales.y,
                              title: { display: true, text: 'Tokens' } }
                     }
                 }

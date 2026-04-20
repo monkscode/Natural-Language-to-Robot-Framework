@@ -638,11 +638,11 @@
                 const cleanCleaned = cs.cleaned_responses != null ? cs.cleaned_responses : 'N/A';
                 const cleanErrors = cs.formatting_errors_detected != null ? cs.formatting_errors_detected : 'N/A';
 
-                const ctxBaseline = cr.baseline_tokens ? cr.baseline_tokens.toLocaleString() : 'N/A';
-                const ctxOptimized = cr.optimized_tokens ? cr.optimized_tokens.toLocaleString() : 'N/A';
+                const ctxBaseline = cr.baseline_tokens != null ? cr.baseline_tokens.toLocaleString() : 'N/A';
+                const ctxOptimized = cr.optimized_tokens != null ? cr.optimized_tokens.toLocaleString() : 'N/A';
                 const ctxReduction = cr.reduction_percentage != null ? cr.reduction_percentage.toFixed(1) + '%' : 'N/A';
 
-                const ksLatency = ks.avg_latency_ms ? ks.avg_latency_ms.toFixed(1) + 'ms' : 'N/A';
+                const ksLatency = ks.avg_latency_ms != null ? ks.avg_latency_ms.toFixed(1) + 'ms' : 'N/A';
                 const ksCalls = ks.calls != null ? ks.calls : 'N/A';
                 const plUsed = pl.prediction_used != null ? (pl.prediction_used ? 'Yes' : 'No') : 'N/A';
                 const plCount = pl.predicted_keywords_count != null ? pl.predicted_keywords_count : 'N/A';

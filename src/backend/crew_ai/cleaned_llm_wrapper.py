@@ -88,8 +88,8 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
             try:
                 import json as _json
                 prompt_text = _json.dumps(messages, ensure_ascii=False)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug("[LLM_TRACE] Failed to serialize prompt messages: %s", _exc)
 
         # --- response text — first choice content ---
         response_text: str | None = None
@@ -99,8 +99,8 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 msg = getattr(choices[0], "message", None)
                 if msg:
                     response_text = getattr(msg, "content", None)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug("[LLM_TRACE] Failed to extract response text: %s", _exc)
 
         # --- tokens ---
         usage = getattr(completion_response, "usage", None)
@@ -126,8 +126,8 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 trace_id_hex = format(span_ctx.trace_id, "032x")
                 parent_span_id_hex = format(span_ctx.span_id, "016x")
             workflow_id = baggage.get_baggage("workflow.id")
-        except Exception:
-            pass  # OTel unavailable — proceed without context
+        except Exception as _exc:
+            logger.debug("[LLM_TRACE] OTel context unavailable: %s", _exc)
 
         # Each LiteLLM call gets its own span_id so it appears as a distinct row.
         span_id_hex = uuid.uuid4().hex[:16]
