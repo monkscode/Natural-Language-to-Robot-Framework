@@ -125,9 +125,7 @@ def bind_workflow_context(
         ctx["model_name"] = model_name
     if library_type:
         ctx["library_type"] = library_type
-    # Unbind only the keys we own so prior request-scoped context
-    # (OTel trace/span IDs, request_id, etc.) is preserved.
-    structlog.contextvars.unbind_contextvars(*ctx.keys())
+    structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(**ctx)
 
 
