@@ -66,13 +66,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
-COPY src/backend/requirements.txt /build/requirements.txt
+# Copy dependency manifest (single source of truth)
+# requirements.txt is no longer used — uv pip compile resolves fresh at build time
+# from pyproject.toml, eliminating stale-lockfile conflicts like jsonschema pin mismatches.
+COPY pyproject.toml /build/pyproject.toml
 
-# Install all Python dependencies to /build/install
-# ChromaDB will use its default ONNX-based embedding function (no pytorch needed)
+# Compile a consistent lockfile from pyproject.toml, then install from it.
+# Two-step: compile → install gives us fresh resolution (no stale pins) while
+# still using an exact lockfile for the install itself (reproducible layer).
+# ChromaDB will use its default ONNX-based embedding function (no pytorch needed).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --prefix=/build/install --no-cache -r /build/requirements.txt
+    uv pip compile /build/pyproject.toml \
+        --no-header \
+        --output-file /build/requirements-compiled.txt && \
+    uv pip install --prefix=/build/install --no-cache \
+        -r /build/requirements-compiled.txt
 
 # ============================================================================
 # STAGE 3: Runtime

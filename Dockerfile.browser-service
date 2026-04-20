@@ -12,6 +12,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     flask \
     gunicorn \
     playwright \
+    structlog>=24.1.0 \
     browser-service && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers

@@ -67,13 +67,14 @@ if str(_tools_dir) not in sys.path:
     sys.path.insert(0, str(_tools_dir))
 
 # ========================================
-# LOGGING SETUP - MUST BE BEFORE BROWSER-USE IMPORTS
+# LOGGING — already configured by browser_service/__init__.py
 # ========================================
-# CRITICAL: Configure logging BEFORE importing browser-use to ensure all loggers use UTF-8
-from browser_service.utils.logging_setup import setup_logging  # noqa: E402
-
-# Setup logging with UTF-8 support (handles Windows compatibility)
-logger = setup_logging(logger_name=__name__)
+# browser_service/__init__.py sets up JSON structlog with a RotatingFileHandler
+# for logs/browser_use.log before any other code runs (package import-time).
+# Do NOT call setup_logging() here — it would overwrite that configuration
+# with the old text format.
+import logging as _logging  # noqa: E402
+logger = _logging.getLogger(__name__)
 
 # ========================================
 # STANDARD LIBRARY & THIRD-PARTY IMPORTS
