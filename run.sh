@@ -8,6 +8,10 @@ export PYTHONUTF8=1
 # This uses pure Python protobuf parsing (slower but compatible)
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
+# Add Docker Desktop binaries to PATH so docker-credential-desktop is resolvable
+# by the Python docker SDK when authenticating against Docker Hub on Windows.
+export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"
+
 # Check for .env file
 if [ ! -f "src/backend/.env" ]; then
     echo "Error: src/backend/.env file not found."
@@ -20,10 +24,24 @@ set -a
 source src/backend/.env
 set +a
 
+# --- Local-dev overrides (run.sh process only, never containers) ---
+# These override values from src/backend/.env for processes launched by this script.
+# Docker Compose reads src/backend/.env directly and does NOT source run.sh, so the
+# on-disk value (BROWSER_HEADLESS=true) remains authoritative for containers.
+export BROWSER_HEADLESS=false
+export LOG_FORMAT=console          # human-readable colored logs
+# export CREWAI_VERBOSE=true         # show agent reasoning in console
+
 # Support both APP_PORT (new) and PORT (legacy) variables with a sane default
 APP_PORT="${APP_PORT:-${PORT:-5000}}"
 export APP_PORT
 export PORT="$APP_PORT"
+
+# When running locally (not inside Docker Compose), HOST_ROBOT_TESTS_DIR must be
+# an absolute Windows path so the Docker daemon can resolve the bind mount.
+# The .env value (./robot_tests) is relative and only valid inside Docker Compose.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -W 2>/dev/null || pwd)"
+export HOST_ROBOT_TESTS_DIR="${SCRIPT_DIR}/robot_tests"
 
 # Cross-platform venv activation and path handling
 VENV_DIR="venv"

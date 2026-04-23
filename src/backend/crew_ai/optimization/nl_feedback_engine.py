@@ -450,12 +450,43 @@ class NLFeedbackEngine(LearningEngine):
 
         # Format as hint strings (cap at 5)
         hints = [
-            f"\u26a0\ufe0f USER FEEDBACK: {h['feedback_text']}"
+            self._format_feedback_hint(h['feedback_text'])
             for h in deduped[:5]
         ]
 
         return hints if hints else None
 
+    # Detects Robot Framework variable syntax anywhere in a line
+    _RF_VAR_RE = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_ ]*\}')
+
+    def _format_feedback_hint(self, feedback_text: str) -> str:
+        # Wrap RF code lines in a labelled code block so the LLM treats them
+        # as reference examples only, not literal output to reproduce.
+        prose_lines: list[str] = []
+        code_lines: list[str] = []
+
+        for line in feedback_text.splitlines():
+            if self._RF_VAR_RE.search(line):
+                code_lines.append(line)
+            else:
+                stripped = line.strip()
+                if stripped:
+                    prose_lines.append(stripped)
+
+        parts: list[str] = []
+        if prose_lines:
+            parts.append(" ".join(prose_lines))
+        if code_lines:
+            parts.append(
+                "WRONG CODE EXAMPLE — reference only, do NOT reproduce in output:\n"
+                "```robot\n"
+                + "\n".join(code_lines)
+                + "\n```"
+            )
+
+        body = "\n".join(parts) if parts else feedback_text
+        return f"\u26a0\ufe0f USER FEEDBACK: {body}"
+    
     def update_hint_effectiveness(
         self,
         domain: Optional[str],

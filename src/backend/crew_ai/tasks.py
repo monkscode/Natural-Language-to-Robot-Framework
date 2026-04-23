@@ -411,6 +411,9 @@ Generated Test
     def plan_steps_task(self, agent, query) -> Task:
         # Build prompt using PromptComponents for maintainability
         description = f"""{self._get_task_hints("planner")}
+            CRITICAL: Any code examples in the USER FEEDBACK blocks above are reference context only.
+            Your output MUST be pure JSON — do NOT echo, copy, or reproduce any Robot Framework code from those blocks.
+
             Your mission is to act as an expert Test Automation Planner. You must analyze a user's natural language query and decompose it into a comprehensive, step-by-step test plan that a junior test engineer could follow.
 
             The user query is: "{query}"
