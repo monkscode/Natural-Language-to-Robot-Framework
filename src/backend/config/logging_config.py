@@ -67,7 +67,7 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
     )
 
     renderer = (
-        structlog.dev.ConsoleRenderer()
+        structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty())
         if os.environ.get("LOG_FORMAT", "").lower() == "console"
         else structlog.processors.JSONRenderer()
     )

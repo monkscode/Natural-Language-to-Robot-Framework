@@ -67,6 +67,21 @@ if str(_tools_dir) not in sys.path:
     sys.path.insert(0, str(_tools_dir))
 
 # ========================================
+# ENV LOADING — must happen before browser_service import
+# ========================================
+# browser_service/__init__.py configures structlog at import time, so LOG_FORMAT
+# must be in os.environ before that import. Load src/backend/.env here so that
+# running `python tools/browser_use_service.py` in a separate terminal (without
+# sourcing run.sh first) still picks up LOG_FORMAT and other shared env vars.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _env_path = _project_root / "src" / "backend" / ".env"
+    if _env_path.exists():
+        _load_dotenv(_env_path, override=False)  # override=False: shell env takes precedence
+except ImportError:
+    pass  # python-dotenv not available — rely on shell environment
+
+# ========================================
 # LOGGING — already configured by browser_service/__init__.py
 # ========================================
 # browser_service/__init__.py sets up JSON structlog with a RotatingFileHandler
@@ -104,9 +119,6 @@ from dotenv import load_dotenv  # noqa: E402
 # 1. tools/__init__.py sets up path (when imported as module)
 # 2. Fallback above sets up path (when run directly)
 from src.backend.core.config import settings  # noqa: E402
-
-# Load environment variables
-load_dotenv("src/backend/.env")
 
 # ========================================
 # FLASK APPLICATION

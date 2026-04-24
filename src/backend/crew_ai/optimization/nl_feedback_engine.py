@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 # Scope auto-determination — maps triage category to hint scope
 # ---------------------------------------------------------------------------
 
+# Scope map covers the full planned triage taxonomy, not just Phase 1.
+# "assertion" is pre-wired for DAY_08's wrong_assertion pattern (not yet implemented).
+# "positive"/"negative" are reserved for future LLM-triage paths that may bypass
+# the empty-text short-circuit. Do not remove — additions happen in Phase 3.
 _SCOPE_BY_CATEGORY = {
     "structural": "domain",
     "keyword": "global",
@@ -204,6 +208,14 @@ class NLFeedbackEngine(LearningEngine):
     _CROSS_REF_BOOST = 0.20
     _MAX_CONFIDENCE = 1.0
 
+    # Scope WHERE clause shared by get_hints and update_hint_effectiveness.
+    # Parameter order is (domain, url).
+    _SCOPE_WHERE = (
+        "scope = 'global' "
+        "OR (scope = 'domain' AND domain = ?) "
+        "OR (scope = 'url' AND url = ?)"
+    )
+
     def __init__(self, db_conn: sqlite3.Connection = None):
         """
         Initialize NLFeedbackEngine.
@@ -272,20 +284,13 @@ class NLFeedbackEngine(LearningEngine):
         best = matches[0]
         pattern_count = len(matches)
 
-        # Calculate confidence
-        confidence = min(
-            self._BASE_CONFIDENCE + (pattern_count * self._PATTERN_BOOST),
-            self._MAX_CONFIDENCE - self._CROSS_REF_BOOST,  # leave room for boost
-        )
-
-        # Cross-reference with error message
+        # Base + per-pattern boost, add cross-ref boost when error confirms, cap once.
+        confidence = self._BASE_CONFIDENCE + (pattern_count * self._PATTERN_BOOST)
         if error_message and self._error_confirms_feedback(
             best["taxonomy"], error_message
         ):
-            confidence = min(
-                confidence + self._CROSS_REF_BOOST,
-                self._MAX_CONFIDENCE,
-            )
+            confidence += self._CROSS_REF_BOOST
+        confidence = min(confidence, self._MAX_CONFIDENCE)
 
         result = {
             "category": best["category"],
@@ -331,7 +336,7 @@ class NLFeedbackEngine(LearningEngine):
 
         category = feedback_insight.get("category", "uncategorized")
         # Skip purely informational triage results (no text correction)
-        if category in ("positive",):
+        if category == "positive":
             return
 
         scope = _SCOPE_BY_CATEGORY.get(category, "domain")
@@ -422,11 +427,7 @@ class NLFeedbackEngine(LearningEngine):
                 "       success_count, evidence_count "
                 "FROM nl_feedback_corrections "
                 "WHERE is_active = 1 "
-                "AND ( "
-                "    scope = 'global' "
-                "    OR (scope = 'domain' AND domain = ?) "
-                "    OR (scope = 'url' AND url = ?) "
-                ") "
+                f"AND ({self._SCOPE_WHERE}) "
                 "ORDER BY success_count DESC, "
                 "         evidence_count DESC, "
                 "         last_seen DESC "
@@ -450,11 +451,23 @@ class NLFeedbackEngine(LearningEngine):
 
         # Format as hint strings (cap at 5)
         hints = [
-            f"\u26a0\ufe0f USER FEEDBACK: {h['feedback_text']}"
+            self._format_feedback_hint(h['feedback_text'])
             for h in deduped[:5]
         ]
 
         return hints if hints else None
+
+    def _format_feedback_hint(self, feedback_text: str) -> str:
+        # Pass feedback through verbatim with a universal warning header.
+        # The header travels with every hint to every agent (Planner, Assembler,
+        # Validator), so the "do not copy literally" guardrail applies even for
+        # agents whose task prompts lack an explicit disclaimer. Preserving the
+        # original line order retains the user's reasoning structure.
+        return (
+            "\u26a0\ufe0f USER FEEDBACK (reference context from a past test — "
+            "do NOT copy any code literally, treat as guidance only):\n"
+            f"{feedback_text.strip()}"
+        )
 
     def update_hint_effectiveness(
         self,
@@ -487,11 +500,7 @@ class NLFeedbackEngine(LearningEngine):
                 "       applied_count, success_count, failure_count "
                 "FROM nl_feedback_corrections "
                 "WHERE is_active = 1 "
-                "AND ( "
-                "    scope = 'global' "
-                "    OR (scope = 'domain' AND domain = ?) "
-                "    OR (scope = 'url' AND url = ?) "
-                ")",
+                f"AND ({self._SCOPE_WHERE})",
                 (domain, url),
             ).fetchall()
 

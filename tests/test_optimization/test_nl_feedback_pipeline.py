@@ -372,7 +372,8 @@ class TestRetrieval:
         engine = NLFeedbackEngine(in_memory_db)
         hints = engine.get_hints("click", "https://x.com", "assembler")
         assert hints is not None
-        assert hints[0].startswith("\u26a0\ufe0f USER FEEDBACK:")
+        assert hints[0].startswith("\u26a0\ufe0f USER FEEDBACK")
+        assert "Test prefix" in hints[0]
 
 
 # ===================================================================
@@ -565,13 +566,17 @@ class TestScopeMapping:
     """_SCOPE_BY_CATEGORY mapping completeness."""
 
     def test_scope_mapping_completeness(self):
-        """All expected categories should have a mapping."""
-        expected = {"structural", "keyword", "locator", "anti_pattern", "validation"}
-        mapped = set(_SCOPE_BY_CATEGORY.keys())
-        for cat in expected:
-            assert cat in mapped or True, (
-                f"Category '{cat}' has no explicit scope mapping (will default to 'domain')"
-            )
+        """Scope map must cover every category any code path can emit.
+
+        Covers Phase 1 live categories plus pre-wired entries for Phase 3
+        (assertion, positive, negative). Removing any of these would silently
+        change scope when the corresponding patterns land.
+        """
+        expected = {
+            "structural", "keyword", "locator", "timing", "data",
+            "assertion", "uncategorized", "positive", "negative",
+        }
+        assert set(_SCOPE_BY_CATEGORY.keys()) == expected
 
     def test_scope_default_domain(self):
         """Unknown categories should default to 'domain'."""

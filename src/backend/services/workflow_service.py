@@ -11,6 +11,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
@@ -378,6 +379,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             robot_code = robot_code.replace('\\t', '\t')
             robot_code = robot_code.replace('\\r', '\r')
             logging.info("✅ Normalized escaped newlines/tabs to actual characters")
+
+        # Prefix bare CSS selectors (#id, .class) with `css=` so Robot Framework does
+        # not parse them as comments. See robot_code_normalizer for full rationale.
+        robot_code = normalize_robot_code(robot_code)
 
         # Simplified cleaning logic - prompt now handles most cases
         # Keep only essential defensive measures
