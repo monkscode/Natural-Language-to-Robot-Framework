@@ -416,6 +416,16 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             if optimization_metrics:
                 logger.info("📊 Optimization metrics collected")
 
+            # CrewAI's event bus dispatches sync handlers via ThreadPoolExecutor (fire-and-forget).
+            # TaskCompletedEvent for task 3 is submitted to the pool but may execute AFTER
+            # kickoff() returns and unregister_workflow() clears the routing maps — causing
+            # _resolve() to return None and silently drop the 100% event.
+            # Pushing 100% here (success path only) guarantees delivery before unregistration.
+            # _push_if_forward deduplicates: if the thread pool wins the race, this is a no-op.
+            if progress_queue is not None:
+                from src.backend.crew_ai.progress_events import _push_if_forward
+                _push_if_forward(workflow_id, progress_queue, "🎉 Test generation complete", 100)
+
             return result, crew, optimization_metrics, hint_metadata, agents.llm._monitor
 
         except Exception as e:

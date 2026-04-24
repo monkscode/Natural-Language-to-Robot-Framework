@@ -87,7 +87,9 @@ class BrowserLibraryContext(LibraryContext):
    text > role > data-testid > id > css > xpath
    - text=<value> → Most stable
    - role=<role>[name="<name>"] → Accessibility-first
-   - CSS selectors need no prefix
+   - css=<selector> → Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`).
+     A bare `#` at the start of a variable value or argument is parsed as a Robot Framework
+     comment and the locator becomes empty at runtime.
 
 6. **COMMON PITFALLS:**
    ❌ Missing viewport config → Elements not found
@@ -205,7 +207,8 @@ Close Browser:
 2. MUST include "New Context    viewport=None" for proper element detection
 3. Browser Library uses 'browser' and 'headless' parameters (NOT 'options')
 4. Browser Library auto-waits, so explicit waits are rarely needed
-5. Locators can be CSS selectors without prefix
+5. Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`) — a bare `#` at the
+   start of a variable value is parsed as a Robot Framework comment and the locator becomes empty
 6. Text and role selectors are preferred for stability
 
 **KEYWORD REFERENCE:**
