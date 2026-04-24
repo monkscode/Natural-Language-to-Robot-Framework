@@ -174,8 +174,14 @@ def _push_if_forward(
     """Push a progress event only if it advances the current progress value.
 
     Thread-safe. Discards the event silently if progress would not increase.
+    Also ignores events for workflows whose queue has been unregistered — this
+    prevents a late async TaskCompletedEvent handler from enqueuing a duplicate
+    100% event after crew.py's manual push + unregister_workflow() have run,
+    and from re-creating the _current_progress entry (memory leak).
     """
     with _lock:
+        if _workflow_queues.get(workflow_id) is not queue:
+            return
         current = _current_progress.get(workflow_id, 0)
         if progress <= current:
             return
