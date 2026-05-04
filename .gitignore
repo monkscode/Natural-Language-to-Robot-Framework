@@ -54,6 +54,5 @@ CLAUDE.md
 credentials.json
 FuturePlans/*
 
-# Ignore clients and their tests — local only, not committed
-clients/
 tests/test_clients/
+clients/integrity/*
