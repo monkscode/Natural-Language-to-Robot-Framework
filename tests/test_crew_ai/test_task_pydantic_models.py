@@ -67,6 +67,50 @@ class TestIdentifiedElement:
         assert elem.locator == "id=submit-btn"
         assert elem.found is True
 
+    def test_tom_select_fields_accepted(self):
+        """dropdown_framework and select_id must be accepted so the Pydantic
+        model does not strip TomSelect metadata before it reaches the Code
+        Assembler."""
+        elem = IdentifiedElement(
+            step_description="Select Rate Group",
+            keyword="Select Options By",
+            locator="css=#pricelist_id-ts-control",
+            found=True,
+            element_type="dropdown",
+            dropdown_framework="tom-select",
+            select_id="pricelist_id",
+            value="label    default",
+        )
+        assert elem.dropdown_framework == "tom-select"
+        assert elem.select_id == "pricelist_id"
+
+    def test_tom_select_fields_default_to_none(self):
+        """Elements that are not TomSelect must not require these fields."""
+        elem = IdentifiedElement(
+            step_description="Click login",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.dropdown_framework is None
+        assert elem.select_id is None
+
+    def test_empty_dropdown_framework_accepted(self):
+        """browser_use_tool sends an empty string for non-TomSelect elements;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Select country",
+            keyword="Select Options By",
+            locator="id=country",
+            found=True,
+            element_type="select",
+            dropdown_framework="",
+            select_id=None,
+        )
+        assert elem.dropdown_framework == ""
+        assert elem.select_id is None
+
 
 class TestValidationOutput:
     """Tests for ValidationOutput model."""

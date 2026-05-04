@@ -213,8 +213,22 @@ Close Browser:
 
 **KEYWORD REFERENCE:**
 Use the keyword_search_tool to look up specific keyword details when needed.
-Common keywords: New Browser, New Context, New Page, Fill Text, Click, Get Text, 
+Common keywords: New Browser, New Context, New Page, Fill Text, Click, Get Text,
 Keyboard Key, Wait For Elements State, Close Browser
+
+**TOM SELECT INTERACTION (dropdown_framework='tom-select'):**
+TomSelect wraps a native `<select>` with a custom UI. Use JavaScript to find
+the option by display text and call TomSelect's `setValue()` API directly.
+This is viewport-agnostic and works on any website regardless of internal
+option values.
+
+```robot
+# Preferred — when select_id is set (targets the hidden <select> directly):
+Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt) el.tomselect.setValue(opt.value); }
+
+# Fallback — when select_id is null (locator targets the .ts-control div):
+Evaluate JavaScript    ${locator}    (el) => { const sel = el.closest('.ts-wrapper').parentElement.querySelector('select.tomselected'); if (sel && sel.tomselect) { const opt = Array.from(sel.options).find(o => o.text.trim() === '${value}'); if (opt) sel.tomselect.setValue(opt.value); } }
+```
 """
             # NOTE: keyword_search_tool is available when OPTIMIZATION_ENABLED=true (standard mode)
             self._code_assembly_context_cache = code_structure

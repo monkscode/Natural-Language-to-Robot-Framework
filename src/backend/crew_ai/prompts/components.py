@@ -318,10 +318,23 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 """
 
     DROPDOWN_HANDLING = """
---- HANDLING DROPDOWNS BASED ON element_type ---
-⚠️ **CRITICAL**: Check the 'element_type' and 'role' fields to choose the correct interaction pattern!
+--- HANDLING DROPDOWNS BASED ON element_type AND dropdown_framework ---
+⚠️ **CRITICAL**: Check `dropdown_framework` FIRST. If present (non-empty), it
+overrides `element_type` and selects a framework-specific interaction template.
+Otherwise, fall back to the `element_type` rules below.
 
-Dropdowns come in 3 types, each requiring different Robot Framework keywords:
+**FRAMEWORK ROUTING (when dropdown_framework is set):**
+
+| dropdown_framework | Template |
+|---|---|
+| `tom-select` | TYPE 4 (Tom Select — see below) |
+| `native`, `combobox-input`, `select2`, `kendo`, `react-select`, `vue-select`, `ant-design`, `material-ui`, `""` (empty) | Fall back to TYPE 1/2/3 by `element_type` |
+
+Only `tom-select` has a specialized template today. Other frameworks reach the
+Code Assembler with `dropdown_framework` set, but the assembler still routes
+them by `element_type` until a dedicated template is added.
+
+Dropdowns come in 4 templates, each requiring different Robot Framework keywords:
 
 **TYPE 1: Native HTML Select (element_type='select')**
 Use standard Select Options By keyword:
@@ -346,6 +359,24 @@ Click    ${dropdown_locator}
 Click    <iframe_prefix> >>> text=<option_text>
 ```
 
+**TYPE 4: Tom Select (dropdown_framework='tom-select')**
+TomSelect wraps a native `<select>` with a custom UI. Interact via JavaScript:
+find the option by display text at runtime and call TomSelect's `setValue()` API.
+This is viewport-agnostic and works on any website regardless of internal option
+values — no clicking, no waiting for dropdowns to open.
+
+**Preferred — when `select_id` is set:**
+`id=${select_id}` targets the hidden `<select>` directly.
+```robot
+Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt) el.tomselect.setValue(opt.value); }
+```
+
+**Fallback — when `select_id` is null (locator targets the `.ts-control` div):**
+Find the hidden `<select>` in the same container via `select.tomselected` (TomSelect always marks it) — position-independent.
+```robot
+Evaluate JavaScript    ${locator}    (el) => { const sel = el.closest('.ts-wrapper').parentElement.querySelector('select.tomselected'); if (sel && sel.tomselect) { const opt = Array.from(sel.options).find(o => o.text.trim() === '${value}'); if (opt) sel.tomselect.setValue(opt.value); } }
+```
+
 ⚠️ **CRITICAL: `>>` vs `>>>` Syntax**
 - `>>>` = **Frame entry** (enters an iframe context) - USE THIS for iframe prefixes
 - `>>` = **Selector chaining** (combines selectors, stays in same context) - NOT for iframe entry!
@@ -358,11 +389,15 @@ Click    <iframe_prefix> >>> text=<option_text>
 --- DECISION LOGIC ---
 When you see a dropdown-related step (Select Options By, dropdown, select):
 
+0. **IF dropdown_framework='tom-select'** → Use TYPE 4 (Tom Select template)
+   - Use `Evaluate JavaScript    id=${select_id}    ...` when `select_id` is non-null
+   - Use `Evaluate JavaScript    ${locator}    ...` (`select.tomselected` class lookup) when `select_id` is null
+
 1. **IF element_type='select'** → Use Select Options By keyword
-   
+
 2. **IF element_type='input'** (usually role='combobox') → Use Fill Text + Enter
    - Extract option text from value (e.g., 'label    Volvo' → 'Volvo')
-   
+
 3. **IF element_type='span', 'button', or 'div'** (without role='combobox') → Use Click + Click text
    - First: Click the trigger to open the dropdown
    - Then: Click the option text
@@ -412,6 +447,20 @@ Output:
 ```robot
     Click    [role='button']
     Click    text=Option1
+```
+
+*Example 6 - Tom Select with select_id:*
+Input: `{"locator": "css=#permission_id-ts-control", "element_type": "dropdown", "dropdown_framework": "tom-select", "select_id": "permission_id", "value": "label    Customer_permission"}`
+Output:
+```robot
+    Evaluate JavaScript    id=permission_id    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === 'Customer_permission'); if (opt) el.tomselect.setValue(opt.value); }
+```
+
+*Example 7 - Tom Select without select_id (auto-generated id, no positional assumptions):*
+Input: `{"locator": "xpath=//label[normalize-space()='Timezone']/following::div[contains(@class,'ts-wrapper')][1]//div[contains(@class,'ts-control')]", "element_type": "dropdown", "dropdown_framework": "tom-select", "select_id": null, "value": "label    Asia/Kolkata"}`
+Output:
+```robot
+    Evaluate JavaScript    xpath=//label[normalize-space()='Timezone']/following::div[contains(@class,'ts-wrapper')][1]//div[contains(@class,'ts-control')]    (el) => { const sel = el.closest('.ts-wrapper').parentElement.querySelector('select.tomselected'); if (sel && sel.tomselect) { const opt = Array.from(sel.options).find(o => o.text.trim() === 'Asia/Kolkata'); if (opt) sel.tomselect.setValue(opt.value); } }
 ```
 
 **NOTE**: For 'label    X' values, extract just 'X' for Fill Text or Click text patterns.
