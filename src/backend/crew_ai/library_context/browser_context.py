@@ -224,7 +224,7 @@ option values.
 
 ```robot
 # Preferred — when select_id is set (targets the hidden <select> directly):
-Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt) el.tomselect.setValue(opt.value); }
+Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt && el.tomselect) el.tomselect.setValue(opt.value); }
 
 # Fallback — when select_id is null (locator targets the .ts-control div):
 Evaluate JavaScript    ${locator}    (el) => { const sel = el.closest('.ts-wrapper').parentElement.querySelector('select.tomselected'); if (sel && sel.tomselect) { const opt = Array.from(sel.options).find(o => o.text.trim() === '${value}'); if (opt) sel.tomselect.setValue(opt.value); } }

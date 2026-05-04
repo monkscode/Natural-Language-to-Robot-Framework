@@ -368,7 +368,7 @@ values — no clicking, no waiting for dropdowns to open.
 **Preferred — when `select_id` is set:**
 `id=${select_id}` targets the hidden `<select>` directly.
 ```robot
-Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt) el.tomselect.setValue(opt.value); }
+Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt && el.tomselect) el.tomselect.setValue(opt.value); }
 ```
 
 **Fallback — when `select_id` is null (locator targets the `.ts-control` div):**
@@ -453,7 +453,7 @@ Output:
 Input: `{"locator": "css=#permission_id-ts-control", "element_type": "dropdown", "dropdown_framework": "tom-select", "select_id": "permission_id", "value": "label    Customer_permission"}`
 Output:
 ```robot
-    Evaluate JavaScript    id=permission_id    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === 'Customer_permission'); if (opt) el.tomselect.setValue(opt.value); }
+    Evaluate JavaScript    id=permission_id    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === 'Customer_permission'); if (opt && el.tomselect) el.tomselect.setValue(opt.value); }
 ```
 
 *Example 7 - Tom Select without select_id (auto-generated id, no positional assumptions):*
