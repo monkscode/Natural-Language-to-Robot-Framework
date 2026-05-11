@@ -36,13 +36,15 @@ class PlanOutput(BaseModel):
 
 class IdentifiedElement(PlannedStep):
     """Schema for an element with an identified locator from identify_elements_task.
-    
+
     Inherits all fields from PlannedStep and adds locator-specific fields.
     """
     # Locator information from browser automation (new fields only)
     locator: Optional[str] = Field(default=None, description="Best locator for the element")
     found: Optional[bool] = Field(default=False, description="Whether locator was found")
     element_type: Optional[str] = Field(default=None, description="Element type (input, select, etc.)")
+    dropdown_framework: Optional[str] = Field(default=None, description="Custom dropdown framework detected (e.g. 'tom-select'), empty string if none")
+    select_id: Optional[str] = Field(default=None, description="Original <select> element ID for TomSelect — used to build the Evaluate JavaScript locator")
 
 
 class IdentificationOutput(BaseModel):
@@ -487,12 +489,15 @@ Generated Test
                 "    {\"id\": \"elem_1\", \"description\": \"username input field\", \"action\": \"input\", \"value\": \"bob@example.com\"},\n"
                 "    {\"id\": \"elem_2\", \"description\": \"password input field\", \"action\": \"input\", \"value\": \"password123\"},\n"
                 "    {\"id\": \"elem_3\", \"description\": \"login submit button\", \"action\": \"click\"},\n"
-                "    {\"id\": \"elem_4\", \"description\": \"first item title in results list\", \"action\": \"get_text\"}\n"
+                "    {\"id\": \"elem_4\", \"description\": \"country dropdown\", \"action\": \"select\", \"value\": \"India\"},\n"
+                "    {\"id\": \"elem_5\", \"description\": \"first item title in results list\", \"action\": \"get_text\"}\n"
                 "]\n"
                 "```\n"
                 "\n"
-                "⚠️ **CRITICAL**: For 'input' actions, the 'value' field contains the text to type (credentials, search terms, etc.)\n"
-                "Without the 'value' field, browser-use won't know what to type!\n"
+                "⚠️ **CRITICAL**: The 'value' field is required for these actions:\n"
+                "- 'input': text to type (credentials, search terms, etc.)\n"
+                "- 'select': the exact option text to select from the dropdown (e.g. 'India', 'Male', 'Yes')\n"
+                "Without the 'value' field, browser-use won't know what to type or select!\n"
                 "\n"
                 "**STEP 4: BUILD USER QUERY CONTEXT**\n"
                 "- Summarize what the test is trying to accomplish\n"
@@ -516,13 +521,17 @@ Generated Test
                 "        \"elem_1\": {\n"
                 "            \"best_locator\": \"name=q\",\n"
                 "            \"found\": true,\n"
+                "            \"element_type\": null,\n"
                 "            \"element_info\": {\"tagName\": \"input\", \"id\": \"search\", ...},\n"
                 "            \"all_locators\": [...]\n"
                 "        },\n"
                 "        \"elem_2\": {\n"
-                "            \"best_locator\": \"id=react-select-4-input\",\n"
+                "            \"best_locator\": \"css=#pricelist_id-ts-control\",\n"
                 "            \"found\": true,\n"
-                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"react-select-4-input\", ...},\n"
+                "            \"element_type\": \"dropdown\",\n"
+                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"pricelist_id-ts-control\", ...},\n"
+                "            \"dropdown_framework\": \"tom-select\",\n"
+                "            \"select_id\": \"pricelist_id\",\n"
                 "            \"all_locators\": [...]\n"
                 "        }\n"
                 "    },\n"
@@ -530,10 +539,11 @@ Generated Test
                 "}\n"
                 "```\n"
                 "\n"
-                "⚠️ **IMPORTANT**: The 'element_info.tagName' tells you the HTML element type:\n"
-                "- 'select' = native HTML select dropdown\n"
-                "- 'input', 'div' = custom dropdown (React-Select, Material-UI, etc.)\n"
-                "You MUST include this as 'element_type' when mapping to steps!\n"
+                "⚠️ **IMPORTANT**: Extract ALL three of these fields from each locator_mapping entry:\n"
+                "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
+                "- 'dropdown_framework' → 'dropdown_framework' (e.g., 'tom-select', or empty string '')\n"
+                "- 'select_id' → 'select_id' (the original <select> element ID for TomSelect, or null)\n"
+                "You MUST copy all three to the step when mapping locators!\n"
                 "\n"
                 "**STEP 7: MAP LOCATORS TO STEPS**\n"
                 "\n"
@@ -556,7 +566,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type' from the response (e.g., 'input', 'select', 'button')\n"
+                "  * ALSO add 'element_type', 'dropdown_framework', and 'select_id' from the response\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"
@@ -566,7 +576,7 @@ Generated Test
                 "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
                 "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
                 "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"Enter\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
-                "    {\"keyword\": \"Select Options By\", \"element_description\": \"dropdown\", \"locator\": \"id=react-select-4-input\", \"element_type\": \"input\", \"value\": \"label    Volvo\"}\n"
+                "    {\"keyword\": \"Select Options By\", \"element_description\": \"Rate Group dropdown\", \"locator\": \"css=#pricelist_id-ts-control\", \"element_type\": \"dropdown\", \"dropdown_framework\": \"tom-select\", \"select_id\": \"pricelist_id\", \"value\": \"label    default\"}\n"
                 "]\n"
                 "```\n"
                 "\n"

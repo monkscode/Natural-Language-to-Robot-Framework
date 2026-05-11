@@ -80,6 +80,12 @@ class MockFailureAnalyzer:
         return None
 
 
+class NoOpPatternLearner:
+    """Prevents ChromaDB/ONNX from running inside the timing window."""
+    def learn_from_execution(self, *args, **kwargs):
+        pass
+
+
 @dataclass
 class MockMetrics:
     total_llm_calls: int = 3
@@ -104,6 +110,7 @@ def build_perf_feedback_loop(conn):
         anti_pattern_engine=ae, metrics_tracker=mt,
         contradiction_detector=cd, write_queue=wq,
         circuit_breaker=cb,
+        pattern_learner=NoOpPatternLearner(),
     )
     return fl, em, se, ke, ae, conn
 

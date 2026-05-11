@@ -53,3 +53,6 @@ logs/crewai.log.txt
 CLAUDE.md
 credentials.json
 FuturePlans/*
+
+tests/test_clients/
+clients/integrity/*
