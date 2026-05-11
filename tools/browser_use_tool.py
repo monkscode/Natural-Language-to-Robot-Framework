@@ -393,7 +393,10 @@ class BatchBrowserUseTool(BaseTool):
                             "all_locators": elem_result.get("all_locators", []),
                             "validation": elem_result.get("validation", {}),
                             "element_info": elem_result.get("element_info", {}),
-                            "found": True
+                            "found": True,
+                            "element_type": elem_result.get("element_type"),
+                            "dropdown_framework": elem_result.get("dropdown_framework", ""),
+                            "select_id": elem_result.get("select_id"),
                         }
                     else:
                         locator_mapping[element_id] = {
