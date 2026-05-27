@@ -11,24 +11,7 @@ tests/test_integration/test_conflict_detection_live.py.
 
 import json
 import pytest
-
-
-def _parse_conflict_json(content: str) -> dict:
-    """Parse JSON from the LLM response, tolerating any preamble/postamble.
-
-    The model wraps its JSON in ```json fences despite the prompt saying
-    "ONLY valid JSON".  json.loads('```json...') raises:
-        JSONDecodeError: Expecting value: line 1 column 1 (char 0)
-    because backtick is not a valid JSON start character.
-
-    raw_decode() starts at the first '{' and stops when the JSON object
-    closes, so markdown fences, leading text, and trailing text are all
-    ignored without any regex or string manipulation.
-    """
-    idx = content.find('{')
-    if idx == -1:
-        raise json.JSONDecodeError("No JSON object found in LLM response", content, 0)
-    return json.JSONDecoder().raw_decode(content, idx)[0]
+from src.backend.crew_ai.optimization.learning_config import _parse_conflict_json
 
 
 class TestParseConflictJson:

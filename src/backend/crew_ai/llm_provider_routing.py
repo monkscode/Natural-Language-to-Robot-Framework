@@ -54,7 +54,9 @@ def resolve_model_string(provider: str, model_name: str) -> str:
     """
     prefix = PROVIDER_PREFIXES.get(provider, _DEFAULT_PROVIDER)
     bare = model_name
-    for candidate in (provider, prefix):
+    # Check current provider first, then all known keys/values so cross-provider
+    # prefixes (e.g. "gemini/..." when using vertex) are also stripped.
+    for candidate in (provider, prefix, *PROVIDER_PREFIXES.keys(), *PROVIDER_PREFIXES.values()):
         if candidate and model_name.startswith(f"{candidate}/"):
             bare = model_name[len(candidate) + 1:]
             break
