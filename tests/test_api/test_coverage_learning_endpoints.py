@@ -422,9 +422,8 @@ class TestCreateHint:
 
     def test_duplicate_flagged_hint_clears_flag_and_logs_audit(self, learning_client):
         client, _, _, db_path = learning_client
-        # Insert a flagged hint directly
-        _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
-                     conflict_flagged=1, scope="global")
+        hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
+                               conflict_flagged=1, scope="global")
 
         payload = self._valid_payload()  # same text + scope → matches existing
         resp = client.post("/hints", json=payload)
@@ -432,8 +431,21 @@ class TestCreateHint:
         assert resp.status_code == 201
         data = resp.json()
         assert data["created"] is False
-        # Flag must be cleared
+        # Flag must be cleared in the API response
         assert data["hint"]["conflict_flagged"] == 0
+
+        # Both an 'unflag' and a 'create' audit row must be persisted to hint_audit
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        actions = [
+            r[0]
+            for r in conn.execute(
+                "SELECT action FROM hint_audit WHERE hint_id = ? ORDER BY id",
+                (hint_id,),
+            ).fetchall()
+        ]
+        conn.close()
+        assert "unflag" in actions, f"expected unflag audit row, got {actions}"
+        assert "create" in actions, f"expected create audit row, got {actions}"
 
     def test_run_triage_calls_nl_engine(self, learning_client):
         client, _, mock_fb, _ = learning_client
@@ -770,7 +782,7 @@ class TestGetDashboardStats:
 
 class TestGetLearningHealth:
     def test_health_ok_when_fb_returns_ok(self, learning_client):
-        client, _, mock_fb, _ = learning_client
+        _, _, mock_fb, _ = learning_client
         mock_fb.get_health_status.return_value = "OK"
 
         app = FastAPI()
@@ -1101,7 +1113,7 @@ class TestApplyReviewSession:
 
     def test_apply_disable_recommendation(self, learning_client):
         client, _, _, db_path = learning_client
-        sid, [(rec_id, hint_id)] = self._build_session_with_recs(db_path, [
+        sid, [(_, hint_id)] = self._build_session_with_recs(db_path, [
             {"recommendation": "disable", "hint_kwargs": {"is_active": 1}},
         ])
         resp = client.post(f"/review-hints/sessions/{sid}/apply")
@@ -1156,12 +1168,29 @@ class TestApplyReviewSession:
         assert resp.status_code == 200
         assert resp.json()["applied_count"] == 2
 
+        # Verify both llm_review_keep and llm_review_flagged rows landed in hint_audit
+        hint_ids = [hint_id for _, hint_id in pairs]
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        actions = [
+            r[0]
+            for r in conn.execute(
+                "SELECT action FROM hint_audit WHERE hint_id IN ({}) ORDER BY id".format(
+                    ",".join("?" * len(hint_ids))
+                ),
+                hint_ids,
+            ).fetchall()
+        ]
+        conn.close()
+        assert "llm_review_keep" in actions, f"expected llm_review_keep audit row, got {actions}"
+        assert "llm_review_flagged" in actions, f"expected llm_review_flagged audit row, got {actions}"
+
     def test_session_status_set_to_completed_after_apply(self, learning_client):
         client, _, _, db_path = learning_client
         sid, _ = self._build_session_with_recs(db_path, [
             {"recommendation": "keep"},
         ])
-        client.post(f"/review-hints/sessions/{sid}/apply")
+        resp = client.post(f"/review-hints/sessions/{sid}/apply")
+        assert resp.status_code == 200
 
         conn = sqlite3.connect(db_path, check_same_thread=False)
         row = conn.execute(

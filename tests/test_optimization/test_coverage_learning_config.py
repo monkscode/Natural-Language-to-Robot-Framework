@@ -336,6 +336,7 @@ class TestLearningWriteQueueShutdownDrain:
         release.set()
         queue._worker.join(timeout=2.0)
 
+        assert not queue._worker.is_alive(), "worker did not exit within timeout — possible deadlock"
         assert 99 in results
 
     def test_drain_loop_skips_extra_sentinel(self):
@@ -361,5 +362,5 @@ class TestLearningWriteQueueShutdownDrain:
         release.set()
         queue._worker.join(timeout=2.0)
 
-        assert 42 in results  # real item was processed
-        # Thread exited cleanly (join returned) — no deadlock or double-break
+        assert not queue._worker.is_alive(), "worker did not exit within timeout — possible deadlock"
+        assert 42 in results  # real item was processed in the drain loop, not re-blocked by extra sentinel
