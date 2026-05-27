@@ -381,12 +381,23 @@ class NLFeedbackEngine(LearningEngine):
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            # Upsert: increment evidence if exists, else insert
-            existing = self._em._writer_conn.execute(
-                "SELECT id, evidence_count, conflict_flagged FROM nl_feedback_corrections "
-                "WHERE feedback_text = ? AND domain IS ? AND scope = ?",
-                (feedback_text.strip(), domain, scope),
-            ).fetchone()
+            # Upsert: increment evidence if exists, else insert.
+            # URL-scoped hints include url in the dedup key so identical feedback
+            # on two different pages under the same domain creates separate rows.
+            if scope == "url":
+                existing = self._em._writer_conn.execute(
+                    "SELECT id, evidence_count, conflict_flagged "
+                    "FROM nl_feedback_corrections "
+                    "WHERE feedback_text = ? AND domain IS ? AND url IS ? AND scope = ?",
+                    (feedback_text.strip(), domain, url, scope),
+                ).fetchone()
+            else:
+                existing = self._em._writer_conn.execute(
+                    "SELECT id, evidence_count, conflict_flagged "
+                    "FROM nl_feedback_corrections "
+                    "WHERE feedback_text = ? AND domain IS ? AND scope = ?",
+                    (feedback_text.strip(), domain, scope),
+                ).fetchone()
 
             new_hint_id = None
             if existing:

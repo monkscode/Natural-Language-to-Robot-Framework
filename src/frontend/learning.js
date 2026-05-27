@@ -148,6 +148,9 @@ function showView(name) {
 
 function route() {
     const hash = location.hash.replace(/^#\/?/, '');
+    if (hash !== 'review') {
+        _clearReviewPoll();
+    }
 
     if (!hash) {
         showView('hints');

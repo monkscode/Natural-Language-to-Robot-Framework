@@ -52,8 +52,12 @@ def resolve_model_string(provider: str, model_name: str) -> str:
     Unknown providers fall back to the gemini prefix to match the
     historical default in get_llm()'s order-of-branches.
     """
-    bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
     prefix = PROVIDER_PREFIXES.get(provider, _DEFAULT_PROVIDER)
+    bare = model_name
+    for candidate in (provider, prefix):
+        if candidate and model_name.startswith(f"{candidate}/"):
+            bare = model_name[len(candidate) + 1:]
+            break
     return f"{prefix}/{bare}"
 
 

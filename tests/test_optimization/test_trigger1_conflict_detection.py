@@ -417,7 +417,7 @@ class TestLiteLLMSuccess:
             )
 
         flagged_ids = feedback_loop.nl_engine.conflict_flag_hints.call_args[0][0]
-        assert 22 not in flagged_ids, f"Hint 22 should not have been flagged"
+        assert 22 not in flagged_ids, "Hint 22 should not have been flagged"
 
     def test_empty_flag_list_does_not_call_conflict_flag(self):
         """When LLM returns flag=[], conflict_flag_hints must NOT be called."""

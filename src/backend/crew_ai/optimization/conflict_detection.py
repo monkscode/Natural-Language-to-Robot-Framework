@@ -126,7 +126,15 @@ def fire_conflict_detection(
             active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url)
             injected_ids = [h["id"] for h in active_hints]
         else:
-            if not injected_ids:
+            if not isinstance(injected_ids, list):
+                logger.warning(
+                    "%s injected_hint_ids decoded to non-list (%s) %r; "
+                    "falling back to domain query",
+                    tag, type(injected_ids).__name__, injected_hint_ids,
+                )
+                active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url)
+                injected_ids = [h["id"] for h in active_hints]
+            elif not injected_ids:
                 # Known-empty: '[]' stored → no hints injected → nothing to judge.
                 try:
                     feedback_loop.write_queue.submit(
@@ -146,7 +154,8 @@ def fire_conflict_detection(
                         "%s telemetry submit failed (non-blocking): %s", tag, tel_err,
                     )
                 return
-            active_hints = feedback_loop.nl_engine.get_hints_by_id(injected_ids)
+            else:
+                active_hints = feedback_loop.nl_engine.get_hints_by_id(injected_ids)
 
     if not active_hints:
         # No hints available: domain query returned [] or all injected hints

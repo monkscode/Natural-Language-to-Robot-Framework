@@ -938,7 +938,7 @@ class TestChromaObservabilityInStats:
     """
 
     def test_learning_stats_includes_execution_memory_key(self, in_memory_db):
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         stats = fl.get_learning_stats()
         assert "execution_memory" in stats, (
             "get_learning_stats() must include 'execution_memory' key for C3 observability"
@@ -946,7 +946,7 @@ class TestChromaObservabilityInStats:
 
     def test_chromadb_available_false_when_sentinel_set(self, in_memory_db):
         """When ChromaDB failed to init (sentinel set), stats report unavailable."""
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         # create_execution_memory sets _chroma_client = _CHROMADB_INIT_FAILED
         stats = fl.get_learning_stats()
         assert stats["execution_memory"]["chromadb_available"] is False
@@ -954,7 +954,7 @@ class TestChromaObservabilityInStats:
     def test_chromadb_last_error_none_when_no_failure_recorded(self, in_memory_db):
         """_chroma_last_error is None when _chroma_failed_at is not set (sentinel set
         without a real failure, as in tests)."""
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         stats = fl.get_learning_stats()
         assert stats["execution_memory"]["chromadb_last_error"] is None
 
@@ -975,17 +975,17 @@ class TestOptimizationInitFailuresCounter:
     """
 
     def test_counter_starts_at_zero(self, in_memory_db):
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         assert fl._optimization_init_failures == 0
 
     def test_learning_stats_includes_counter(self, in_memory_db):
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         stats = fl.get_learning_stats()
         assert "optimization_init_failures" in stats
 
     def test_counter_value_exposed_in_stats(self, in_memory_db):
         """Stats reports the current counter value — crew.py increments it on failure."""
-        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fl, *_ = _build_feedback_loop(in_memory_db)
         fl._optimization_init_failures = 3
         stats = fl.get_learning_stats()
         assert stats["optimization_init_failures"] == 3

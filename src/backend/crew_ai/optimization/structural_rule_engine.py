@@ -266,9 +266,9 @@ class StructuralRuleEngine(LearningEngine):
     Scoring uses EffectivenessScore.calculate() — ALWAYS absolute formula.
     """
 
-    def __init__(self, execution_memory=None, intent_extractor: IntentExtractor = None):
+    def __init__(self, execution_memory=None, intent_extractor: Optional[IntentExtractor] = None):
         self._em = execution_memory
-        self.intent_extractor = intent_extractor
+        self.intent_extractor = intent_extractor or IntentExtractor(execution_memory)
 
     def learn(self, record) -> None:
         """

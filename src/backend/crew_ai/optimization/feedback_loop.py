@@ -34,6 +34,7 @@ import time
 from datetime import datetime
 from typing import Optional, List, Dict
 
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
@@ -935,14 +936,17 @@ class FeedbackLoop:
                 )
 
             # Step 2: Build execution record. model_version is a reporting
-            # dimension only — stamp it with the SAME provider/model selection
-            # the endpoint uses (endpoints.py), so a `local`-provider run is
-            # not mis-stamped with ONLINE_MODEL.
-            model_version = (
-                f"{settings.MODEL_PROVIDER}/"
-                + (settings.LOCAL_MODEL
-                   if settings.MODEL_PROVIDER == "local"
-                   else settings.ONLINE_MODEL)
+            # dimension only — use resolve_model_string so the prefix matches
+            # what LiteLLM actually routes on (vertex_ai/..., ollama/...) and
+            # duplicate provider prefixes in the env var are stripped.
+            selected_model = (
+                settings.LOCAL_MODEL
+                if settings.MODEL_PROVIDER == "local"
+                else settings.ONLINE_MODEL
+            )
+            model_version = resolve_model_string(
+                settings.MODEL_PROVIDER,
+                selected_model,
             )
             record = ExecutionRecord(
                 workflow_id=workflow_id,

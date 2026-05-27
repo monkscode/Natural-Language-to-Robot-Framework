@@ -217,7 +217,7 @@ class TestFormatHints:
         ]
         result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
         lines = result.split("\n")
-        content_lines = [l for l in lines if "HINT" in l and "LEARNING" not in l]
+        content_lines = [line for line in lines if "HINT" in line and "LEARNING" not in line]
         assert content_lines[0] == "HIGH_HINT", f"Expected HIGH first, got {content_lines}"
         assert content_lines[1] == "MED_HINT"
         assert content_lines[2] == "LOW_HINT"
@@ -226,7 +226,7 @@ class TestFormatHints:
         p = create_provider()
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(20)]
         result, selected = p._format_hints(candidates, max_hints=3, tokens_per_hint=80)
-        lines = [l for l in result.split("\n") if l.startswith("hint_")]
+        lines = [line for line in result.split("\n") if line.startswith("hint_")]
         assert len(lines) == 3, f"Expected 3 hints, got {len(lines)}: {lines}"
         assert len(selected) == 3
 
@@ -242,7 +242,7 @@ class TestFormatHints:
         # Simulate what _get_learning_hints does: compute effective_max before calling.
         effective_max = min(15, hard_cap)
         result, selected = p._format_hints(candidates, max_hints=effective_max, tokens_per_hint=80)
-        lines = [l for l in result.split("\n") if l.startswith("hint_")]
+        lines = [line for line in result.split("\n") if line.startswith("hint_")]
         assert len(lines) <= hard_cap, f"Expected <= {hard_cap}, got {len(lines)}"
 
     def test_token_truncation(self):
@@ -252,7 +252,7 @@ class TestFormatHints:
             [{"text": long_text, "priority": "medium"}],
             max_hints=5, tokens_per_hint=20  # 20 tokens * 4 chars = 80 chars
         )
-        lines = [l for l in result.split("\n") if l.startswith("A")]
+        lines = [line for line in result.split("\n") if line.startswith("A")]
         assert len(lines) == 1
         assert len(lines[0]) <= 80, f"Expected truncated to 80, got {len(lines[0])}"
         assert lines[0].endswith("...")
@@ -265,7 +265,7 @@ class TestFormatHints:
             [{"text": exact_text, "priority": "medium"}],
             max_hints=5, tokens_per_hint=20
         )
-        lines = [l for l in result.split("\n") if l.startswith("A")]
+        lines = [line for line in result.split("\n") if line.startswith("A")]
         assert lines[0] == exact_text  # No truncation
 
     def test_header_and_footer(self):
@@ -295,8 +295,8 @@ class TestFormatHints:
             {"text": "low1", "priority": "low"},
         ]
         result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
-        lines = [l for l in result.split("\n")
-                 if l and not l.startswith("═")]
+        lines = [line for line in result.split("\n")
+                 if line and not line.startswith("═")]
         # Highs first, then meds, then lows
         assert lines[0] == "high1"
         assert lines[1] == "high2"

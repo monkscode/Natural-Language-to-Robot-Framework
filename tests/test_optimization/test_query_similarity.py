@@ -667,10 +667,12 @@ class TestFeedbackLoopInit:
         )
         # First submit in process_execution is execution_memory.store(record).
         record = fl.write_queue.submit.call_args_list[0].args[1]
-        expected = f"{settings.MODEL_PROVIDER}/" + (
+        from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+        raw_model = (
             settings.LOCAL_MODEL if settings.MODEL_PROVIDER == "local"
             else settings.ONLINE_MODEL
         )
+        expected = resolve_model_string(settings.MODEL_PROVIDER, raw_model)
         assert record.model_version == expected
 
     def test_was_holdout_forwarded_to_record_execution(self, in_memory_em):
