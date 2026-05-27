@@ -71,33 +71,18 @@ def _release_workflow_slot():
 
 
 class _SlotReleaser:
-    """Countdown latch that releases a workflow slot when all registered participants finish.
+    """Release a workflow slot exactly once, when all participants finish.
 
-    Motivation
-    ----------
-    When an SSE client disconnects, FastAPI calls aclose() on the async generator.
-    The generator's finally block fires immediately — but the background workflow thread
-    is still running and consuming LLM API quota.  Releasing the slot in the generator's
-    finally therefore understates true concurrency and allows effective concurrency to
-    exceed MAX_CONCURRENT_WORKFLOWS under unstable clients.
+    A countdown latch: each participant calls done() once, and the slot is
+    released when the count reaches zero. participant_count is the number of
+    distinct finishers — two (generator + background workflow thread) for the
+    generate flows, one (generator only) for the execute-only flow. If
+    Thread.start() raises before the thread runs, call done() once for the
+    thread's share so the generator's own done() still reaches zero.
 
-    Design
-    ------
-    Each participant (generator + thread) calls done() exactly once when it exits.
-    The slot is released only when the countdown reaches zero, i.e. when the last
-    participant finishes.  The default participant_count of 2 covers the common case
-    of one background thread + one async generator.  Pass a higher count if additional
-    parallel workers are added in the future.
-
-    Failure path
-    ------------
-    If Thread.start() raises before the thread ever runs, call done() once immediately
-    for the thread's share so the generator's own done() still brings the count to zero.
-
-    Cancellation hook (future)
-    --------------------------
-    Call cancel() to release the slot immediately regardless of remaining participants.
-    Useful if a definitive cancellation signal (e.g. stop_event) is added later.
+    done() is idempotent once the slot is released: a caller may release the
+    slot early (the moment user-facing work is done) and still call done()
+    again from a finally block as a guaranteed fallback.
     """
 
     __slots__ = ("_count", "_lock")
@@ -107,24 +92,16 @@ class _SlotReleaser:
         self._lock = threading.Lock()
 
     def done(self) -> None:
-        """Signal that one participant has finished.  Thread-safe; no-op after cancel()."""
+        """Signal one participant finished; release the slot when all are done.
+
+        No-op once the slot has been released, so over-calling is safe.
+        Thread-safe.
+        """
         with self._lock:
             if self._count <= 0:
                 return
             self._count -= 1
             if self._count == 0:
-                _release_workflow_slot()
-
-    def cancel(self) -> None:
-        """Immediately release the slot, ignoring any remaining participant count.
-
-        Intended for future use when a definitive workflow cancellation signal exists
-        (e.g. a stop_event threading.Event paired with run_crew cancellation support).
-        After cancel(), subsequent done() calls are no-ops.
-        """
-        with self._lock:
-            if self._count > 0:
-                self._count = 0
                 _release_workflow_slot()
 
 
@@ -142,8 +119,8 @@ def _safe_delete_temp_metrics(workflow_id: str) -> None:
     """
     try:
         get_temp_metrics_storage().delete_temp_file(workflow_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Temp metrics cleanup failed for %s (non-blocking): %s", workflow_id, e)
 
 
 def _safe_evict_hint_metadata(workflow_id: str) -> None:
@@ -160,8 +137,8 @@ def _safe_evict_hint_metadata(workflow_id: str) -> None:
     try:
         with _hint_metadata_lock:
             _hint_metadata_cache.pop(workflow_id, None)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Hint metadata eviction failed for %s (non-blocking): %s", workflow_id, e)
 
 
 def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
@@ -194,11 +171,178 @@ def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
                 )[:overflow]
                 for wid in oldest:
                     del _hint_metadata_cache[wid]
-                    logging.warning("hint_metadata_cache: evicted oldest entry %s (size cap)", wid)
+                    logging.info("hint_metadata_cache: evicted oldest entry %s (size cap)", wid)
 
             _hint_metadata_cache[workflow_id] = {**hint_metadata, "_stored_at": now}
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Hint metadata store failed for %s (non-blocking): %s", workflow_id, e)
+
+
+def _build_conflict_prompt(
+    failed_code: str,
+    working_code: str,
+    active_hints: list,
+    domain: str | None = None,
+    url: str | None = None,
+    user_query: str | None = None,
+) -> str:
+    """Build the LLM prompt for Trigger 1 conflict detection.
+
+    Trigger 1 fires when a previously-failed workflow re-runs with a
+    user-edited robot code and passes. The two code blobs are presented
+    to the LLM side by side, plus the list of NL feedback hints that were
+    injected at v1 generation time. The LLM identifies which of those hints
+    (if any) gave advice that the corrected code disproved.
+
+    Design principle — context-rich, non-prescriptive: state the system's
+    purpose and the evidence; let the LLM derive its analysis method.
+    Prescriptive step-by-step instructions age poorly as models improve.
+
+    Args:
+        failed_code: robot_code v1 from the DB (the auto-generated failing code).
+        working_code: robot_code v2 — the developer's manual fix that passed.
+        active_hints: [{"id": int, "feedback_text": str, ...}, ...]. Hint ids
+            are the only handle the LLM has on individual hints — they MUST be
+            preserved into the response. Metadata fields applied_count,
+            success_count, failure_count, created_at are always present for
+            live hint rows (populated by _select_hints).
+        domain: domain string for the workflow URL (e.g. "example.com").
+        url: full URL of the page under test.
+        user_query: original NL query, truncated to 200 chars in the prompt.
+
+    Returns:
+        Prompt string ready for litellm.completion().
+    """
+    from src.backend.crew_ai.optimization.conflict_detection import (
+        _hint_line,
+        _build_context_prefix,
+    )
+
+    hint_lines = "\n".join(_hint_line(h) for h in active_hints)
+    context_prefix = _build_context_prefix(domain, url, user_query)
+
+    return (
+        "You are the conflict detection component of an adaptive test automation "
+        "learning system.\n\n"
+        "This system auto-generates Robot Framework test code guided by learned hints "
+        "from past human corrections. The hints listed below were injected into the "
+        "agents when v1 was generated — the failed code reflects their influence. "
+        "When a developer manually corrects the generated output and it passes, the "
+        "system identifies which hints are now proven harmful by that correction.\n\n"
+        f"{context_prefix}\n"
+        "EXAMPLES — for reference only, do not respond to these:\n\n"
+        "Example 1 — DO flag (hint advice was the failing approach, v2 explicitly replaced it):\n"
+        "  Active hint:\n"
+        "    [17] On this domain, use `Wait For Elements State` with state=visible\n"
+        "         before clicking dynamic elements.\n"
+        "  v1 (failed):\n"
+        "    Wait For Elements State    css=#submit-btn    visible\n"
+        "    Click    css=#submit-btn\n"
+        "  v2 (passed):\n"
+        "    Wait For Elements State    css=#submit-btn    stable\n"
+        "    Click    css=#submit-btn\n"
+        '  Verdict: {"flag":[{"id":17,"reason":"v1 followed the visible-state approach;'
+        " v2 explicitly replaced it with state=stable. The visible-state wait was the"
+        ' failing approach."}]}\n\n'
+        "Example 2 — DO NOT flag (hint advice present in BOTH versions; fix was elsewhere):\n"
+        "  Active hint:\n"
+        '    [22] Use data-testid attributes for locators on this domain.\n'
+        "  v1 (failed):\n"
+        '    Click       css=[data-testid="login"]\n'
+        '    Fill Text   css=[data-testid="username"]    alice\n'
+        "  v2 (passed):\n"
+        '    Click       css=[data-testid="login"]\n'
+        "    Sleep       1s\n"
+        '    Fill Text   css=[data-testid="username"]    alice\n'
+        '  Verdict: {"flag":[]}\n\n'
+        "Example 3 — DO NOT flag (hint advice not present in v1 at all):\n"
+        "  Active hint:\n"
+        "    [44] Use `Select Options By` for native <select> dropdowns.\n"
+        "  v1 (failed):\n"
+        "    Click    css=button.menu-trigger\n"
+        "    Click    css=li.menu-item-3\n"
+        "  v2 (passed):\n"
+        "    Hover    css=button.menu-trigger\n"
+        "    Click    css=li.menu-item-3\n"
+        '  Verdict: {"flag":[]}\n\n'
+        "FAILED CODE (auto-generated using injected hints — did not pass):\n"
+        "```\n"
+        f"{failed_code.strip()}\n"
+        "```\n\n"
+        "CORRECTED CODE (developer's manual fix — passed against the real system):\n"
+        "```\n"
+        f"{working_code.strip()}\n"
+        "```\n\n"
+        "INJECTED HINTS (used at v1 generation time — numbers in brackets are unique hint IDs):\n"
+        f"{hint_lines}\n\n"
+        "Based on this evidence, identify which hints are now proven harmful — "
+        "meaning their advice, if applied in future test generation for this domain, "
+        "would likely reproduce this class of failure.\n\n"
+        "Only a hint whose advice is actually reflected in the failing code and "
+        "absent from the corrected code is a candidate for flagging. "
+        "When multiple things changed between the two versions, use your knowledge "
+        "of Robot Framework and test automation to determine which hint's advice was "
+        "causally responsible for the failure — not merely present in the failing code.\n\n"
+        "Only flag a hint when you are confident its specific advice is causally "
+        "responsible for the failure shown. If the evidence is ambiguous, the connection "
+        "is indirect, or the hint's advice is not clearly reflected in the failing code, "
+        "do not flag. Preservation is always the safer choice: a hint that survives "
+        "incorrectly will be gradually downscored by future executions and auto-disabled; "
+        "a hint wrongly flagged loses accumulated learning with no automatic recovery.\n\n"
+        "Each reason must specifically address THIS hint's advice and how v2 disproved it. "
+        "Do NOT write generic reasons that could apply to multiple hints. "
+        "If you cannot articulate a hint-specific reason, do not flag that hint.\n\n"
+        "Respond with ONLY valid JSON:\n"
+        '{"flag": [{"id": <int>, "reason": "<explanation specific to this hint>"}, ...]}\n'
+        'If no hints should be flagged: {"flag": []}'
+    )
+
+
+def _fire_llm_conflict_detection(
+    feedback_loop,
+    workflow_id: str,
+    failed_code: str,
+    working_code: str,
+    url: str | None,
+    injected_hint_ids: str | None = None,
+    user_query: str | None = None,
+) -> None:
+    """Trigger 1 — synchronous LLM conflict detection on a re-run pass.
+
+    Called inline from _process_learning when Case B is detected
+    (previously-failed workflow now passes with edited code). Already
+    runs inside an asyncio.to_thread worker — must NOT be wrapped in
+    another to_thread (no event loop in this thread → RuntimeError,
+    silently swallowed by the outer try/except).
+
+    Failure modes are all non-blocking:
+    - No active hints in scope → telemetry row written (status='no_active_hints'),
+      no LLM call, return.
+    - litellm.completion timeout/error → logged warning + telemetry row.
+    - JSON parse failure → logged warning + telemetry row.
+    - LLM returns non-list `flag` value → guarded by isinstance check.
+
+    Telemetry: one row written to trigger_events per call (including the
+    early-return no_active_hints case). Submitted via the write queue
+    fire-and-forget; failure to write telemetry never propagates.
+    """
+    from src.backend.crew_ai.optimization.learning_config import extract_domain
+    from src.backend.crew_ai.optimization.conflict_detection import fire_conflict_detection
+
+    domain = extract_domain(url) if url else None
+    fire_conflict_detection(
+        feedback_loop=feedback_loop,
+        trigger_type="trigger_1",
+        workflow_id=workflow_id,
+        domain=domain,
+        url=url,
+        feedback_text=None,
+        injected_hint_ids=injected_hint_ids,
+        prompt_builder=lambda active_hints: _build_conflict_prompt(
+            failed_code, working_code, active_hints,
+            domain=domain, url=url, user_query=user_query,
+        ),
+    )
 
 
 def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
@@ -231,15 +375,43 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         # Retrieve and consume hint metadata stored during generation phase.
         # Strip _stored_at (internal timestamp added by _store_hint_metadata)
-        # so iteration over .values() only sees per-agent metadata dicts.
+        # then iterate hint_meta["agents"] — homogeneous dict of
+        # {count, available, sources}, no isinstance guard needed.
         with _hint_metadata_lock:
             hint_meta = _hint_metadata_cache.pop(run_id, {})
         hint_meta.pop("_stored_at", None)
-        hints_injected = sum(d.get("count", 0) for d in hint_meta.values())
-        hints_available = sum(d.get("available", d.get("count", 0)) for d in hint_meta.values())
+        _agents = hint_meta.get("agents", {})
+        hints_injected = sum(d.get("count", 0) for d in _agents.values())
+        hints_available = sum(d.get("available", d.get("count", 0)) for d in _agents.values())
         all_sources = []
-        for d in hint_meta.values():
+        for d in _agents.values():
             all_sources.extend(d.get("sources", []))
+        nl_injected_ids = hint_meta.get("nl_injected_ids", [])
+        injected_hint_ids_json = json.dumps(nl_injected_ids)
+        # R7 holdout flag — crew.py sets this on hint_metadata when the
+        # holdout coin suppressed otherwise-available hints for this run.
+        was_holdout = hint_meta.get("was_holdout", False)
+
+        # Always fetch the pre-run record — DB is authoritative and restart-safe
+        # for is_first_attempt. pre_run_record is None when this is the first
+        # execution of this workflow_id.
+        # DEPENDENCY: failed re-runs do not overwrite the DB record (IntegrityError
+        # re-raise in _store_sqlite). Do not remove that behaviour without revisiting this.
+        pre_run_record = None
+        try:
+            pre_run_record = feedback_loop.execution_memory.get(run_id)
+        except Exception as e:
+            logging.warning(
+                "[LEARNING:TRIGGER1] pre-process lookup failed (non-blocking): %s",
+                e,
+            )
+
+        is_first_attempt = (pre_run_record is None)
+
+        # Trigger 1 gate: expose the pre-run record ONLY when the current run
+        # passed. Preserves exact Trigger 1 behaviour — original_record is not
+        # None only on passed outcomes, same as the previous guard.
+        original_record = pre_run_record if test_status == "passed" else None
 
         feedback_loop.process_execution(
             workflow_id=run_id,
@@ -249,10 +421,47 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
             test_status=test_status,
             output_xml_path=output_xml_path,
             metrics=None,  # execution-only mode — no LLM metrics
+            is_first_attempt=is_first_attempt,
             hints_available=hints_available,
             hints_injected=hints_injected,
             hint_sources=all_sources,
+            injected_hint_ids=injected_hint_ids_json,
+            was_holdout=was_holdout,
         )
+
+        # Trigger 1 Step C: Case B detection — previously failed workflow
+        # now passes with edited code. Synchronous LLM check on the same
+        # worker thread. Each condition matters:
+        #   - original_record exists → this is a re-run (else first run, no DB row yet)
+        #   - test_status was 'failed' → this is the Case B branch (passed/error excluded)
+        #   - both code blobs present → diff is well-defined
+        #   - .strip() comparison → whitespace-only edits do not trigger
+        #   - nl_engine available → guards the .get_hints_by_id / .get_active_hints_raw + .conflict_flag_hints calls
+        #   - circuit_breaker enabled → mirrors process_execution's own gate;
+        #     prevents Trigger 1 leaking LLM calls / DB writes when learning
+        #     has been disabled by repeated errors. Note: is_enabled() has a
+        #     legitimate OPEN→HALF_OPEN side-effect on the breaker; that's
+        #     consistent with how process_execution polls it earlier in this
+        #     function.
+        if (
+            original_record is not None
+            and original_record.test_status == "failed"
+            and original_record.robot_code
+            and robot_code
+            and original_record.robot_code.strip() != robot_code.strip()
+            and feedback_loop.nl_engine is not None
+            and feedback_loop.circuit_breaker.is_enabled()
+        ):
+            _fire_llm_conflict_detection(
+                feedback_loop=feedback_loop,
+                workflow_id=run_id,
+                failed_code=original_record.robot_code,
+                working_code=robot_code,
+                url=url,
+                injected_hint_ids=original_record.injected_hint_ids,
+                user_query=user_query,
+            )
+
         logging.info(f"✅ Learning system processed execution {run_id}")
     except Exception as e:
         logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
@@ -646,6 +855,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                         unified_metrics.keyword_search_stats = optimization_metrics.keyword_search_stats
                     if optimization_metrics.pattern_learning_stats:
                         unified_metrics.pattern_learning_stats = optimization_metrics.pattern_learning_stats
+                elif settings.OPTIMIZATION_ENABLED:
+                    unified_metrics.optimization_fallback_used = True
 
                 # Populate LLM cleaning stats — each workflow has its own monitor instance
                 # so concurrent workflows never share counts.
@@ -815,12 +1026,17 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
         raise _GenerationError()
 
 
-async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str | None):
+async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str | None, release_slot):
     """Save robot_code to disk, run in Docker, and trigger learning.
 
     Yields SSE data strings for all execution events (build progress, result, errors).
     Handles all error paths internally — the caller's finally block remains
     responsible for slot and hint-cache cleanup.
+
+    release_slot is a 0-arg callable (the caller's _SlotReleaser.done). It is
+    invoked the moment the result SSE has been sent, so the concurrency slot is
+    freed before the background learning step — which may make a 5-30s Trigger 1
+    LLM call — runs. Idempotent: the caller's finally releases the slot too.
     """
     robot_tests_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "robot_tests"
@@ -853,6 +1069,11 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         logging.info(f"🚀 Executing test: {test_filename}")
         result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
+
+        # The user now has their result. Release the workflow slot before the
+        # background learning step so a Case B re-run's Trigger 1 LLM call
+        # (~5-30s) does not hold concurrency capacity it has no need for.
+        release_slot()
 
         await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
 
@@ -908,6 +1129,13 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         yield _capacity_error_sse("execution")
         return
 
+    # Single-participant latch (no separate generation thread). The slot is
+    # released early by _stream_docker_execution the moment the result SSE is
+    # sent; this releaser's finally call is the guaranteed fallback for paths
+    # that never reach that point. done() is idempotent — calling it twice
+    # releases the slot exactly once.
+    releaser = _SlotReleaser(participant_count=1)
+
     # Guard: finally must not raise NameError if we return before run_id is assigned
     # (happens when workflow_id is present but fails UUID validation).
     run_id = None
@@ -927,7 +1155,7 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query):
+        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
@@ -935,7 +1163,7 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         # ran and its cache pop never fired. No-op if already consumed.
         if run_id is not None:
             _safe_evict_hint_metadata(run_id)
-        _release_workflow_slot()
+        releaser.done()
 
 
 async def stream_generate_and_run(user_query: str, model_provider: str, model_name: str) -> AsyncGenerator[str, None]:
@@ -980,7 +1208,7 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query):
+        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):

@@ -12,6 +12,7 @@ and hint metadata for downstream metrics tracking.
 """
 
 import logging
+import random
 from typing import Optional, List, Dict, NamedTuple
 from .pattern_learning import QueryPatternMatcher
 from .chroma_store import KeywordVectorStore
@@ -39,12 +40,15 @@ class AgentContextResult(NamedTuple):
         hint_sources: Engine names that contributed hints,
                       e.g. ["structural", "anti_pattern"].
         hint_text: Raw formatted hint block for task-level injection.
+        nl_injected_ids: IDs of NL feedback hints that survived the budget
+                         cut and were injected into this agent's prompt.
     """
     context: str
     hints_count: int = 0
     hints_available: int = 0
     hint_sources: tuple = ()
     hint_text: str = ""
+    nl_injected_ids: tuple = ()
 
 
 class SmartKeywordProvider:
@@ -56,6 +60,11 @@ class SmartKeywordProvider:
     - Tier 3: Full Context Fallback
     """
 
+    # R7 random-holdout: fraction of workflows on which otherwise-available
+    # hints are suppressed, so an unbiased control group (Cat C) accrues for
+    # the honest-lift measurement. Rolled once per provider (per workflow).
+    _HOLDOUT_RATE = 0.05
+
     def __init__(self,
                  library_context,
                  pattern_matcher: QueryPatternMatcher,
@@ -64,7 +73,8 @@ class SmartKeywordProvider:
                  pruning_enabled: bool = False,
                  pruning_threshold: float = 0.8,
                  metrics: Optional[object] = None,
-                 db_conn=None):
+                 execution_memory=None,
+                 nl_engine=None):
         """
         Initialize with library context and optimization components.
 
@@ -76,8 +86,11 @@ class SmartKeywordProvider:
             pruning_enabled: Whether to enable context pruning
             pruning_threshold: Confidence threshold for category classification (0.0-1.0)
             metrics: Optional WorkflowMetrics instance for tracking
-            db_conn: Optional sqlite3.Connection for learning engines.
-                     When None, learning hints are skipped (graceful degradation).
+            execution_memory: Optional ExecutionMemory instance for learning engines.
+                              When None, learning hints are skipped (graceful degradation).
+            nl_engine: Optional shared NLFeedbackEngine from FeedbackLoop. When provided,
+                       stats counters are shared with the FeedbackLoop singleton so
+                       /api/learning-stats reflects all activity.
         """
         self.library_context = library_context
         self.pattern_matcher = pattern_matcher
@@ -86,7 +99,22 @@ class SmartKeywordProvider:
         self.pruning_enabled = pruning_enabled and context_pruner is not None
         self.pruning_threshold = pruning_threshold
         self.metrics = metrics
-        self._db_conn = db_conn
+        self._em = execution_memory
+        self._nl_engine_shared = nl_engine  # FeedbackLoop's instance, may be None
+
+        # R7 random-holdout: roll the coin once per workflow. When it comes up
+        # AND hints are available, _get_learning_hints suppresses them and
+        # sets was_holdout — the run becomes a Cat C control sample.
+        self._holdout_decision = random.random() < self._HOLDOUT_RATE
+        self.was_holdout = False
+
+        # Per-workflow cache of the Bank 1 (NL feedback) retrieval result,
+        # keyed (user_query, url). get_agent_context runs 3x per workflow
+        # (planner/assembler/validator) with identical query+url, and Bank 1
+        # retrieval is role-independent — so the ChromaDB similarity filter
+        # need run only once. A new provider is built per workflow, so the
+        # cache lifetime is one workflow: no staleness risk.
+        self._nl_hints_cache: dict = {}
 
         # Lazy-loaded learning engine references
         self._structural_engine = None
@@ -98,8 +126,8 @@ class SmartKeywordProvider:
         logger.info(f"SmartKeywordProvider initialized for {library_context.library_name}")
         if self.pruning_enabled:
             logger.info(f"Context pruning enabled with threshold {pruning_threshold}")
-        if self._db_conn is not None:
-            logger.info("[LEARNING] Learning hint injection enabled (db_conn provided)")
+        if self._em is not None:
+            logger.info("[LEARNING] Learning hint injection enabled (execution_memory provided)")
 
     # ------------------------------------------------------------------
     # Tier 0: Learning Hints (NEW — DAY_06)
@@ -120,7 +148,7 @@ class SmartKeywordProvider:
         - Medium (4-5 steps):  max 8 hints, 100 tokens each = 800 max
         - Complex (6+ steps):  max 10 hints, 120 tokens each = 1,200 max
         """
-        if self._db_conn is None:
+        if self._em is None:
             return {"text": None, "count": 0, "available": 0, "sources": []}
 
         # Determine complexity tier
@@ -146,7 +174,7 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Structural engine hint retrieval failed: {e}")
 
-        # Anti-pattern warnings (planner + assembler + validator)
+        # Anti-pattern warnings (planner + assembler)
         try:
             anti_pattern_hints = self._get_anti_pattern_engine().get_hints(
                 user_query, safe_url, agent_role
@@ -172,31 +200,65 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Keyword engine hint retrieval failed: {e}")
 
-        # NL user feedback corrections (all roles)
+        # NL user feedback corrections (all roles). Bank 1 retrieval is
+        # role-independent, so its ChromaDB-backed result is cached per
+        # (user_query, url) and reused across the 3 per-workflow calls.
         try:
-            nl_hints = self._get_nl_feedback_engine().get_hints(
-                user_query, safe_url, agent_role
-            )
-            if nl_hints:
-                for hint in nl_hints:
-                    candidates.append({"text": hint, "priority": "high"})
+            cache_key = (user_query, safe_url)
+            if cache_key in self._nl_hints_cache:
+                nl_texts, nl_ids = self._nl_hints_cache[cache_key]
+            else:
+                nl_texts, nl_ids = self._get_nl_feedback_engine().get_hints_with_ids(
+                    user_query, safe_url, agent_role
+                )
+                self._nl_hints_cache[cache_key] = (nl_texts, nl_ids)
+            if nl_texts:
+                for text, nid in zip(nl_texts, nl_ids):
+                    candidates.append({"text": text, "priority": "high", "src": "nl", "id": nid})
                 if "nl_feedback" not in sources:
                     sources.append("nl_feedback")
         except Exception as e:
             logger.warning(f"[LEARNING] NL feedback engine hint retrieval failed: {e}")
 
         if not candidates:
-            return {"text": None, "count": 0, "available": 0, "sources": []}
+            return {"text": None, "count": 0, "available": 0, "sources": [], "nl_injected_ids": ()}
 
         # Apply hard cap before formatting so count and formatted output agree
         hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
         effective_max = min(max_hints, hard_cap)
 
         available = len(candidates)
-        formatted = self._format_hints(candidates, effective_max, tokens_per_hint)
-        count = min(available, effective_max)
 
-        return {"text": formatted, "count": count, "available": available, "sources": sources}
+        # R7 random-holdout: on a coin-flip workflow, suppress hints that
+        # would otherwise be injected so an unbiased control group accrues.
+        # The returned `available` still reports the real pre-suppression
+        # count — that is what distinguishes Cat C ("hints existed,
+        # suppressed") from Cat A ("no hints existed") in the lift report.
+        if self._holdout_decision and available > 0:
+            self.was_holdout = True
+            logger.info(
+                "[LEARNING] R7 holdout — suppressing %d available hint(s) "
+                "for %s agent", available, agent_role,
+            )
+            return {
+                "text": None,
+                "count": 0,
+                "available": available,
+                "sources": [],
+                "nl_injected_ids": (),
+            }
+
+        formatted, selected = self._format_hints(candidates, effective_max, tokens_per_hint)
+        count = min(available, effective_max)
+        nl_injected_ids = tuple(c["id"] for c in selected if c.get("src") == "nl")
+
+        return {
+            "text": formatted,
+            "count": count,
+            "available": available,
+            "sources": sources,
+            "nl_injected_ids": nl_injected_ids,
+        }
 
     def _determine_complexity_tier(self, user_query: str) -> dict:
         """
@@ -221,12 +283,17 @@ class SmartKeywordProvider:
             return tiers["medium"]
         return tiers["complex"]
 
-    def _format_hints(self, candidates: List[dict],
-                      max_hints: int, tokens_per_hint: int) -> Optional[str]:
+    def _format_hints(
+        self, candidates: List[dict], max_hints: int, tokens_per_hint: int,
+    ) -> tuple[Optional[str], List[dict]]:
         """Format hints within token budget.
 
         Sorts by priority (high → medium → low), takes top N,
         truncates each hint to fit within per-hint token budget.
+
+        Returns (formatted_str, selected_candidates). selected_candidates
+        preserves src/id fields added by _get_learning_hints so the caller
+        can identify which NL hint IDs survived the budget cut.
         """
         # Sort: high priority first
         priority_order = {"high": 0, "medium": 1, "low": 2}
@@ -245,48 +312,50 @@ class SmartKeywordProvider:
             formatted.append(text)
 
         if not formatted:
-            return None
+            return None, []
 
         header = "═══ LEARNING HINTS (from past executions) ═══"
-        return f"{header}\n" + "\n".join(formatted) + "\n" + "═" * 48
+        return f"{header}\n" + "\n".join(formatted) + "\n" + "═" * 48, selected
 
     # ------------------------------------------------------------------
     # Lazy-loaded engine accessors
     # ------------------------------------------------------------------
 
     def _get_structural_engine(self):
-        """Lazy-load StructuralRuleEngine with shared db_conn."""
+        """Lazy-load StructuralRuleEngine with shared execution_memory."""
         if self._structural_engine is None:
             from .structural_rule_engine import StructuralRuleEngine, IntentExtractor
             if self._intent_extractor is None:
-                self._intent_extractor = IntentExtractor(self._db_conn)
+                self._intent_extractor = IntentExtractor(self._em)
             self._structural_engine = StructuralRuleEngine(
-                self._db_conn, self._intent_extractor
+                self._em, self._intent_extractor
             )
             logger.debug("[LEARNING] StructuralRuleEngine lazy-loaded")
         return self._structural_engine
 
     def _get_keyword_engine(self):
-        """Lazy-load KeywordCorrectionEngine with shared db_conn."""
+        """Lazy-load KeywordCorrectionEngine with shared execution_memory."""
         if self._keyword_engine is None:
             from .keyword_correction_engine import KeywordCorrectionEngine
-            self._keyword_engine = KeywordCorrectionEngine(self._db_conn)
+            self._keyword_engine = KeywordCorrectionEngine(self._em)
             logger.debug("[LEARNING] KeywordCorrectionEngine lazy-loaded")
         return self._keyword_engine
 
     def _get_anti_pattern_engine(self):
-        """Lazy-load AntiPatternEngine with shared db_conn."""
+        """Lazy-load AntiPatternEngine with shared execution_memory."""
         if self._anti_pattern_engine is None:
             from .anti_pattern_engine import AntiPatternEngine
-            self._anti_pattern_engine = AntiPatternEngine(self._db_conn)
+            self._anti_pattern_engine = AntiPatternEngine(self._em)
             logger.debug("[LEARNING] AntiPatternEngine lazy-loaded")
         return self._anti_pattern_engine
 
     def _get_nl_feedback_engine(self):
-        """Lazy-load NLFeedbackEngine with shared db_conn."""
+        """Return NLFeedbackEngine: shared FeedbackLoop instance if injected, else lazy-load."""
+        if self._nl_engine_shared is not None:
+            return self._nl_engine_shared
         if self._nl_feedback_engine is None:
             from .nl_feedback_engine import NLFeedbackEngine
-            self._nl_feedback_engine = NLFeedbackEngine(self._db_conn)
+            self._nl_feedback_engine = NLFeedbackEngine(self._em)
             logger.debug("[LEARNING] NLFeedbackEngine lazy-loaded")
         return self._nl_feedback_engine
 
@@ -477,17 +546,24 @@ Use keyword_search tool if you need additional keywords.
         hints_available = 0
         hint_sources = []
         hint_text = ""
+        nl_injected_ids: tuple = ()
 
         # ═══ Tier 0: Surgical Learning Hints ═══
         # Hints are routed to task descriptions (high salience),
         # NOT agent backstory (low salience). See tasks.py._get_task_hints().
         try:
             hint_result = self._get_learning_hints(agent_role, user_query, url)
+            if hint_result:
+                # hints_available always reflects the real pre-suppression
+                # candidate count — including on an R7 holdout run, where
+                # text is None and count is 0. This keeps Cat C ("hints
+                # existed, suppressed") distinct from Cat A in the metrics.
+                hints_available = hint_result["available"]
             if hint_result and hint_result["text"]:
                 hint_text = hint_result["text"]
                 hints_count = hint_result["count"]
-                hints_available = hint_result["available"]
                 hint_sources = hint_result["sources"]
+                nl_injected_ids = hint_result.get("nl_injected_ids", ())
                 logger.info(
                     f"[LEARNING] Injected {hints_count}/{hints_available} hints from "
                     f"{hint_sources} for {agent_role} agent"
@@ -560,6 +636,7 @@ Use keyword_search tool if you need additional keywords.
             hints_available=hints_available,
             hint_sources=tuple(hint_sources),
             hint_text=hint_text,
+            nl_injected_ids=nl_injected_ids,
         )
 
     def _get_full_context_fallback(self, agent_role: str) -> str:

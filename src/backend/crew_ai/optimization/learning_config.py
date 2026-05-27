@@ -12,15 +12,22 @@ This module provides the foundational components for the Adaptive Learning Syste
 Referenced by: Every learning engine (DAY_01 through DAY_21).
 """
 
-import os
+import json
 import time
 import queue
 import logging
 import threading
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 
 logger = logging.getLogger(__name__)
+
+
+# Single canonical name for the LearningWriteQueue worker thread.
+# Engines assert against this in their write methods so any code path that
+# bypasses the queue and writes from a request/workflow thread fails loudly.
+WRITER_THREAD_NAME = "learning-writer"
+
 
 # ---------------------------------------------------------------------------
 # 1. Central Configuration
@@ -298,7 +305,7 @@ class LearningWriteQueue:
     def __init__(self):
         self._queue: queue.Queue = queue.Queue()
         self._worker = threading.Thread(
-            target=self._process_writes, daemon=True, name="learning-writer"
+            target=self._process_writes, daemon=True, name=WRITER_THREAD_NAME
         )
         self._worker.start()
 
@@ -481,3 +488,262 @@ class SemanticStore(ABC):
 # ---------------------------------------------------------------------------
 
 from src.backend.core.url_utils import extract_domain  # noqa: F401, E402
+
+
+# ---------------------------------------------------------------------------
+# 8. LLM Conflict Detection — provider routing helpers
+# ---------------------------------------------------------------------------
+#
+# Used by Trigger 1 (workflow_service._fire_llm_conflict_detection) and
+# Trigger 2 (feedback_loop.process_user_feedback). Defined here — NOT in
+# workflow_service.py or feedback_loop.py — because both files already
+# depend on learning_config; placing the helpers in either would force a
+# circular import.
+#
+# Provider routing logic itself lives in llm_provider_routing.py — a
+# dependency-free module shared with cleaned_llm_wrapper.get_llm(). These
+# wrappers exist to keep settings reads at this layer (call sites use the
+# `_get_*` names per the plan and shouldn't import settings themselves).
+
+
+def _get_conflict_detection_model() -> str:
+    """LiteLLM model string for conflict-detection completions.
+
+    Delegates to llm_provider_routing — same prefix mapping as
+    cleaned_llm_wrapper.get_llm(), so MODEL_PROVIDER + ONLINE_MODEL
+    govern both agent calls and conflict-detection calls.
+    """
+    from src.backend.core.config import settings
+    from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+    return resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL)
+
+
+def _get_conflict_detection_completion_kwargs() -> dict:
+    """Per-provider extra kwargs for litellm.completion().
+
+    Currently only Ollama needs api_base injected — litellm.completion()
+    does NOT read OLLAMA_API_BASE from the env on its own.
+    """
+    from src.backend.core.config import settings
+    from src.backend.crew_ai.llm_provider_routing import resolve_completion_kwargs
+    return resolve_completion_kwargs(settings.MODEL_PROVIDER)
+
+
+def _parse_conflict_json(content: str) -> dict:
+    """Parse the LLM conflict-detection response, tolerating any preamble/postamble.
+
+    Uses json.JSONDecoder.raw_decode() which starts parsing at the first '{'
+    and stops when the JSON object closes — so markdown code fences, leading
+    text, and trailing text are all ignored.  Raises json.JSONDecodeError if
+    no '{' is found or if the JSON itself is malformed.
+    """
+    idx = content.find('{')
+    if idx == -1:
+        raise json.JSONDecodeError("No JSON object found in LLM response", content, 0)
+    return json.JSONDecoder().raw_decode(content, idx)[0]
+
+
+def _parse_review_response(
+    content: str,
+    known_hint_ids: set,
+    zero_application_ids: set,
+    hint_states: dict | None = None,
+) -> dict:
+    """Parse and validate the LLM hint review response.
+
+    Returns {"decisions": [...valid...], "summary": str}
+    Skips malformed items, unknown IDs, invalid recommendation values,
+    reactivate recommendations for zero-application hints, and state-invalid
+    recommendations (e.g. unflag on an active hint, disable on a disabled hint).
+    Raises json.JSONDecodeError if no JSON object found at all.
+
+    Args:
+        hint_states: {hint_id: {"is_active": int, "conflict_flagged": int}}.
+                     When provided, state-validity checks are enforced.
+
+    Note: the LLM response includes a "warning" field but it is NOT returned
+    here. _run_hint_review computes the authoritative warning from the parsed
+    decisions via _compute_warning() — a deterministic Python calculation that
+    cannot hallucinate. The LLM "warning" instruction in the prompt acts as a
+    reasoning nudge only; its output is discarded.
+    """
+    ALLOWED_RECOMMENDATIONS = {"keep", "disable", "reactivate", "unflag", "flag_review"}
+    ZERO_APP_ALLOWED = {"keep", "disable", "flag_review"}
+
+    raw = _parse_conflict_json(content)
+
+    decisions_raw = raw.get("decisions")
+    if not isinstance(decisions_raw, list):
+        raise ValueError(f"'decisions' missing or not a list: {raw}")
+
+    valid_decisions = []
+    seen_hint_ids: set = set()
+    for item in decisions_raw:
+        if not isinstance(item, dict):
+            logger.warning("[REVIEW] Skipping non-dict decision item: %r", item)
+            continue
+        hint_id = item.get("id")
+        recommendation = item.get("recommendation")
+        reason = item.get("reason", "")
+        if not isinstance(hint_id, int):
+            logger.warning("[REVIEW] Skipping decision with non-int id: %r", item)
+            continue
+        if hint_id not in known_hint_ids:
+            logger.warning("[REVIEW] Skipping decision for unknown hint_id=%d", hint_id)
+            continue
+        if hint_id in seen_hint_ids:
+            logger.warning("[REVIEW] Skipping duplicate decision for hint_id=%d", hint_id)
+            continue
+        if recommendation not in ALLOWED_RECOMMENDATIONS:
+            logger.warning("[REVIEW] Skipping invalid recommendation %r for hint %d",
+                           recommendation, hint_id)
+            continue
+        if hint_id in zero_application_ids and recommendation not in ZERO_APP_ALLOWED:
+            logger.warning(
+                "[REVIEW] Skipping %r for zero-application hint %d (not allowed)",
+                recommendation, hint_id,
+            )
+            continue
+        # State-validity: guard against LLM recommending an action that is
+        # a no-op or contradictory given the hint's current DB state.
+        if hint_states is not None:
+            state = hint_states.get(hint_id)
+            if state is None:
+                # known_hint_ids and hint_states are built from the same query,
+                # so this should never happen. Log the anomaly and fall back to
+                # State #1 defaults (is_active=1, conflict_flagged=0): unflag
+                # and reactivate are rejected conservatively; disable/keep/
+                # flag_review are allowed.
+                logger.warning(
+                    "[REVIEW] hint_id=%d in known_hint_ids but missing from "
+                    "hint_states — falling back to State #1 defaults", hint_id,
+                )
+                state = {}
+            is_active = state.get("is_active", 1)
+            conflict_flagged = state.get("conflict_flagged", 0)
+            if recommendation == "unflag":
+                if not (is_active == 1 and conflict_flagged == 1):
+                    logger.warning(
+                        "[REVIEW] Skipping unflag for hint %d — "
+                        "requires is_active=1 AND conflict_flagged=1 "
+                        "(got is_active=%d, conflict_flagged=%d)",
+                        hint_id, is_active, conflict_flagged,
+                    )
+                    continue
+            elif recommendation == "reactivate":
+                if is_active != 0:
+                    logger.warning(
+                        "[REVIEW] Skipping reactivate for active hint %d "
+                        "(is_active=%d)", hint_id, is_active,
+                    )
+                    continue
+            elif recommendation == "disable":
+                if is_active != 1:
+                    logger.warning(
+                        "[REVIEW] Skipping disable for inactive hint %d "
+                        "(is_active=%d)", hint_id, is_active,
+                    )
+                    continue
+        if not isinstance(reason, str) or not reason.strip():
+            logger.warning("[REVIEW] Skipping decision with empty reason for hint %d", hint_id)
+            continue
+        seen_hint_ids.add(hint_id)
+        valid_decisions.append({
+            "id": hint_id,
+            "recommendation": recommendation,
+            "reason": reason.strip(),
+        })
+
+    return {
+        "decisions": valid_decisions,
+        "summary": str(raw.get("summary", "")).strip(),
+    }
+
+
+def _call_conflict_detection_llm(
+    model_string: str,
+    messages: list,
+    extra_kwargs: dict,
+    timeout: int = 30,
+):
+    """Stream a conflict-detection completion and return a reassembled ModelResponse.
+
+    Uses stream=True so Gemini 2.5 Flash extended-thinking tokens are sent
+    incrementally. Without streaming, the server sends nothing until thinking
+    completes (30+ seconds), causing a read timeout even though the connection
+    is open. With streaming, the per-chunk read timeout applies instead, so
+    the connection stays alive throughout the thinking phase.
+
+    The model still reasons with full depth — stream=True changes how bytes
+    are delivered, not what the model does. Thinking tokens arrive in
+    delta.reasoning_content; the final JSON output arrives in delta.content.
+    stream_chunk_builder assembles them into a standard ModelResponse so
+    callers read choices[0].message.content and usage identically to a
+    non-streaming response.  Callers must pass the content through
+    _parse_conflict_json to handle any markdown wrapping the model may add.
+
+    Raises RuntimeError if stream_chunk_builder returns None (no chunks
+    received at all), so callers classify it as llm_error rather than
+    json_parse_failed.
+    """
+    import litellm
+
+    # Deterministic JSON judgment task — temperature=0 removes noise.
+    # response_format eliminates the markdown-fence failure mode class;
+    # _parse_conflict_json already tolerates fences as defense-in-depth.
+    # Override is intentional: conflict detection always requires json_object.
+    if "response_format" in extra_kwargs and \
+            extra_kwargs["response_format"] != {"type": "json_object"}:
+        logger.warning(
+            "[CONFLICT_DETECT] caller's response_format=%r overridden "
+            "to {'type': 'json_object'} — conflict detection requires JSON",
+            extra_kwargs["response_format"],
+        )
+    extra_kwargs = {**extra_kwargs, "response_format": {"type": "json_object"}}
+
+    chunks = []
+    for chunk in litellm.completion(
+        model=model_string,
+        messages=messages,
+        timeout=timeout,
+        stream=True,
+        temperature=0,
+        **extra_kwargs,
+    ):
+        chunks.append(chunk)
+
+    response = litellm.stream_chunk_builder(chunks, messages=messages)
+    if response is None:
+        raise RuntimeError(
+            "stream_chunk_builder returned None — streaming response yielded no chunks"
+        )
+
+    # Fallback: Gemini 2.5 Flash thinking mode occasionally causes
+    # stream_chunk_builder to return empty content because reasoning tokens
+    # arrive in delta.reasoning_content rather than delta.content.
+    # Reassemble the final answer directly from delta.content fragments
+    # collected during streaming to fulfil the contract that callers can
+    # always read choices[0].message.content.
+    if not response.choices[0].message.content:
+        assembled = "".join(
+            (c.choices[0].delta.content or "")
+            for c in chunks
+            if c.choices
+        )
+        if assembled:
+            response.choices[0].message.content = assembled
+        else:
+            raise RuntimeError(
+                "stream_chunk_builder returned empty content and no "
+                "delta.content fragments found in stream"
+            )
+
+    return response
+
+
+def _classify_llm_error(e: Exception) -> Literal["llm_timeout", "llm_error"]:
+    type_name = type(e).__name__.lower()
+    message = str(e).lower()
+    if "timeout" in type_name or "timeout" in message or "timed out" in message:
+        return "llm_timeout"
+    return "llm_error"

@@ -18,6 +18,7 @@ import logging
 from typing import Optional, List, Dict
 
 from .learning_config import LearningEngine, EffectivenessScore
+from .execution_memory import _assert_writer_thread
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,8 @@ class KeywordCorrectionEngine(LearningEngine):
         "Page Should Contain Element": "Get Element Count",
     }
 
-    def __init__(self, db_conn):
-        self.db_conn = db_conn
+    def __init__(self, execution_memory=None):
+        self._em = execution_memory
 
     def learn(self, record) -> None:
         """
@@ -69,13 +70,17 @@ class KeywordCorrectionEngine(LearningEngine):
                 or not record.failure_category.startswith("B"):
             return
 
+        if not self._em:
+            return
+        _assert_writer_thread("KeywordCorrectionEngine.learn")
+
         # Extract wrong keyword from error message
         wrong_keyword = self._extract_wrong_keyword(record.error_message)
         if not wrong_keyword:
             return
 
         # Check if we already know this wrong keyword
-        existing = self.db_conn.execute(
+        existing = self._em._writer_conn.execute(
             "SELECT * FROM keyword_corrections WHERE wrong_keyword = ?",
             (wrong_keyword,),
         ).fetchone()
@@ -84,7 +89,7 @@ class KeywordCorrectionEngine(LearningEngine):
             # Increment evidence — same wrong keyword seen again
             new_evidence = existing["evidence_count"] + 1
             new_score = EffectivenessScore.calculate(new_evidence, 0)
-            self.db_conn.execute(
+            self._em._writer_conn.execute(
                 "UPDATE keyword_corrections "
                 "SET evidence_count = ?, "
                 "    score = ?, "
@@ -100,7 +105,7 @@ class KeywordCorrectionEngine(LearningEngine):
             # Store new correction (correct_keyword may be None if unknown)
             correct = self._infer_correct_keyword(wrong_keyword)
             initial_score = EffectivenessScore.calculate(1, 0)
-            self.db_conn.execute(
+            self._em._writer_conn.execute(
                 "INSERT INTO keyword_corrections "
                 "(wrong_keyword, correct_keyword, library, error_pattern, "
                 " score, last_seen) "
@@ -112,24 +117,27 @@ class KeywordCorrectionEngine(LearningEngine):
                 f"'{wrong_keyword}' → '{correct or 'unknown'}'"
             )
 
-        self.db_conn.commit()
+        self._em._writer_conn.commit()
 
     def get_hints(self, user_query: str, url: str,
                   agent_role: str) -> Optional[List[str]]:
         """Return keyword correction hints for the assembler only."""
         if agent_role not in ("assembler", "validator"):
             return None
+        if not self._em:
+            return None
 
         # Only return corrections with sufficient evidence
-        corrections = self.db_conn.execute(
-            "SELECT * FROM keyword_corrections "
-            "WHERE score >= ? AND evidence_count >= ? "
-            "ORDER BY evidence_count DESC LIMIT 5",
-            (
-                EffectivenessScore.INJECTION_THRESHOLD,
-                EffectivenessScore.MIN_OBSERVATIONS,
-            ),
-        ).fetchall()
+        with self._em.read_conn() as conn:
+            corrections = conn.execute(
+                "SELECT * FROM keyword_corrections "
+                "WHERE score >= ? AND evidence_count >= ? "
+                "ORDER BY evidence_count DESC LIMIT 5",
+                (
+                    EffectivenessScore.INJECTION_THRESHOLD,
+                    EffectivenessScore.MIN_OBSERVATIONS,
+                ),
+            ).fetchall()
 
         if not corrections:
             return None
@@ -147,17 +155,20 @@ class KeywordCorrectionEngine(LearningEngine):
 
     def get_stats(self) -> Dict:
         """Return engine statistics."""
-        total = self.db_conn.execute(
-            "SELECT COUNT(*) FROM keyword_corrections"
-        ).fetchone()[0]
-        active = self.db_conn.execute(
-            "SELECT COUNT(*) FROM keyword_corrections "
-            "WHERE score >= ? AND evidence_count >= ?",
-            (
-                EffectivenessScore.INJECTION_THRESHOLD,
-                EffectivenessScore.MIN_OBSERVATIONS,
-            ),
-        ).fetchone()[0]
+        if not self._em:
+            return {"total_corrections": 0, "active_corrections": 0, "engine": "keyword_correction"}
+        with self._em.read_conn() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM keyword_corrections"
+            ).fetchone()[0]
+            active = conn.execute(
+                "SELECT COUNT(*) FROM keyword_corrections "
+                "WHERE score >= ? AND evidence_count >= ?",
+                (
+                    EffectivenessScore.INJECTION_THRESHOLD,
+                    EffectivenessScore.MIN_OBSERVATIONS,
+                ),
+            ).fetchone()[0]
         return {
             "total_corrections": total,
             "active_corrections": active,

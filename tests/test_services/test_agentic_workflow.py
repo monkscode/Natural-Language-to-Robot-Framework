@@ -174,42 +174,6 @@ class TestSlotReleaser:
             releaser.done()
             assert get_active_workflow_count() == 0
 
-    def test_cancel_releases_slot_immediately(self):
-        """cancel() releases slot regardless of remaining participant count."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-            assert get_active_workflow_count() == 1
-
-            releaser = _SlotReleaser(participant_count=5)
-            releaser.cancel()
-            assert get_active_workflow_count() == 0
-
-    def test_cancel_is_idempotent(self):
-        """Calling cancel() twice does not double-release (count cannot go below 0)."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-
-            releaser = _SlotReleaser(participant_count=2)
-            releaser.cancel()
-            releaser.cancel()  # second call — must be no-op
-            assert get_active_workflow_count() == 0
-
-    def test_done_after_cancel_is_noop(self):
-        """done() after cancel() must not release a second time."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-
-            releaser = _SlotReleaser(participant_count=2)
-            releaser.cancel()
-            releaser.done()  # should be a no-op (count already 0)
-            assert get_active_workflow_count() == 0
-
     def test_concurrent_done_releases_exactly_once(self):
         """20 threads each call done() once on a 20-participant latch — slot released once."""
         from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
@@ -236,6 +200,27 @@ class TestSlotReleaser:
 
             assert not errors
             assert get_active_workflow_count() == 0
+
+    def test_done_idempotent_when_over_called(self):
+        """done() releases the slot exactly once even when called more times
+        than participant_count — the early-release + finally-fallback pattern
+        used by _stream_docker_execution. Extra calls must not release another
+        workflow's slot, and the count must not underflow."""
+        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
+        with patch("src.backend.services.workflow_service.settings") as mock_s:
+            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
+            _acquire_workflow_slot()  # workflow A
+            _acquire_workflow_slot()  # workflow B — a different, concurrent workflow
+            assert get_active_workflow_count() == 2
+
+            releaser = _SlotReleaser(participant_count=1)
+            releaser.done()  # A's early release (from _stream_docker_execution) — 2→1
+            assert get_active_workflow_count() == 1
+
+            releaser.done()  # A's finally-block fallback — must be a no-op
+            releaser.done()  # extra over-call — still a no-op
+            assert get_active_workflow_count() == 1  # B's slot untouched
+            assert releaser._count == 0  # guard floored the count; no underflow
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from src.backend.crew_ai.tasks import RobotTasks
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from datetime import datetime
 import os
 import re
@@ -155,22 +156,15 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     baseline_context_tokens = 0
     optimized_context_tokens = 0
     
-    # Build properly prefixed model name for LiteLLM token counting.
-    # The token_model must match the model string passed to LiteLLM by get_llm(),
-    # because LiteLLM's model cost database has separate entries per provider prefix
-    # (e.g. gemini/ vs vertex_ai/ have different pricing).
-    if model_provider == "local":
-        token_model = f"ollama/{model_name}"
-    elif model_provider == "vertex":
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        token_model = f"vertex_ai/{model_bare}"
-    else:
-        # Gemini provider: strip any accidental prefix then prepend gemini/
-        # to match the model string built by get_llm() for LiteLLM cost lookup.
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        token_model = f"gemini/{model_bare}"
+    # Build the LiteLLM-routable model string for token counting.
+    # Must match what get_llm() produces so LiteLLM looks up the right
+    # entry in its model cost database (gemini/ vs vertex_ai/ have separate pricing).
+    # Delegates to resolve_model_string() so any new provider added to
+    # PROVIDER_PREFIXES is picked up here automatically.
+    token_model = resolve_model_string(model_provider, model_name)
     
     hint_metadata = {}
+    feedback_loop = None
 
     if settings.OPTIMIZATION_ENABLED:
         try:
@@ -182,18 +176,17 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 ContextPruner,
             )
 
-            # Get learning db_conn from FeedbackLoop singleton (shared connection)
+            # Get learning execution_memory from FeedbackLoop singleton
             # Must be initialized BEFORE QueryPatternMatcher and SmartKeywordProvider
-            learning_db_conn = None
-            feedback_loop = None
+            learning_em = None
             try:
                 from src.backend.crew_ai.optimization.learning_registry import (
                     get_feedback_loop,
                 )
                 feedback_loop = get_feedback_loop()
                 if feedback_loop is not None:
-                    learning_db_conn = feedback_loop.execution_memory.conn
-                    logger.info("✅ Learning DB connection obtained from FeedbackLoop singleton")
+                    learning_em = feedback_loop.execution_memory
+                    logger.info("✅ Learning execution_memory obtained from FeedbackLoop singleton")
                 else:
                     logger.warning("⚠️ FeedbackLoop unavailable — learning hints will be disabled")
             except Exception as e:
@@ -255,7 +248,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 pruning_enabled=settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED,
                 pruning_threshold=settings.OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD,
                 metrics=optimization_metrics,
-                db_conn=learning_db_conn,
+                execution_memory=learning_em,
+                nl_engine=feedback_loop.nl_engine if feedback_loop is not None else None,
             )
             
             # Calculate baseline context size (full context)
@@ -276,12 +270,32 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
 
             # Capture hint metadata for FeedbackLoop integration
             # count = injected (budget-capped), available = found before cap
+            # nl_injected_ids = union of NL hint IDs across all agents;
+            # any hint that reached any agent could have shaped the output.
+            all_nl_ids = sorted(
+                set(planner_result.nl_injected_ids)
+                | set(assembler_result.nl_injected_ids)
+                | set(validator_result.nl_injected_ids)
+            )
             hint_metadata = {
-                "planner": {"count": planner_result.hints_count, "available": planner_result.hints_available, "sources": planner_result.hint_sources},
-                "assembler": {"count": assembler_result.hints_count, "available": assembler_result.hints_available, "sources": assembler_result.hint_sources},
-                "validator": {"count": validator_result.hints_count, "available": validator_result.hints_available, "sources": validator_result.hint_sources},
+                "agents": {
+                    "planner":   {"count": planner_result.hints_count,   "available": planner_result.hints_available,   "sources": planner_result.hint_sources},
+                    "assembler": {"count": assembler_result.hints_count, "available": assembler_result.hints_available, "sources": assembler_result.hint_sources},
+                    "validator": {"count": validator_result.hints_count, "available": validator_result.hints_available, "sources": validator_result.hint_sources},
+                },
+                "nl_injected_ids": all_nl_ids,
             }
-            total_hints = sum(r["count"] for r in hint_metadata.values())
+            # R7 holdout flag for this workflow. smart_provider.was_holdout is
+            # True only when the coin came up AND hints were actually
+            # available to suppress; re-confirming total available > 0 keeps
+            # a coin flip on a hint-less (Cat A) workflow out of Cat C.
+            total_hints_available = sum(
+                r["available"] for r in hint_metadata["agents"].values()
+            )
+            hint_metadata["was_holdout"] = (
+                smart_provider.was_holdout and total_hints_available > 0
+            )
+            total_hints = sum(r["count"] for r in hint_metadata["agents"].values())
             if total_hints > 0:
                 logger.info(f"📚 Learning hints injected: {hint_metadata}")
 
@@ -319,6 +333,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             keyword_search_tool = smart_provider.get_keyword_search_tool()
             
             logger.info("✅ Optimization system initialized successfully for ALL agents")
+            if feedback_loop is not None:
+                feedback_loop._optimization_init_ok = True
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
@@ -330,6 +346,10 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             smart_provider = None
             optimization_metrics = None
             hint_context = {}
+            hint_metadata = {}    # prevent corrupted-shape leakage downstream
+            if feedback_loop is not None:
+                feedback_loop._optimization_init_failures += 1
+                feedback_loop._optimization_init_ok = False
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
         planner_context = None

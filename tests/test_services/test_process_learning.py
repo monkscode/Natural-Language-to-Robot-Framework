@@ -153,9 +153,12 @@ class TestProcessLearningHintMetadata:
         from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
         run_id = "hint-sum-run"
         _hint_metadata_cache[run_id] = {
-            "planner": {"count": 3, "sources": ["structural_rules", "anti_patterns"]},
-            "assembler": {"count": 2, "sources": ["keyword_corrections"]},
-            "validator": {"count": 0, "sources": []},
+            "agents": {
+                "planner":   {"count": 3, "available": 3, "sources": ["structural_rules", "anti_patterns"]},
+                "assembler": {"count": 2, "available": 2, "sources": ["keyword_corrections"]},
+                "validator": {"count": 0, "available": 0, "sources": []},
+            },
+            "nl_injected_ids": [],
         }
 
         _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
@@ -175,7 +178,10 @@ class TestProcessLearningHintMetadata:
 
         from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
         run_id = "consume-run"
-        _hint_metadata_cache[run_id] = {"planner": {"count": 1, "sources": ["s1"]}}
+        _hint_metadata_cache[run_id] = {
+            "agents": {"planner": {"count": 1, "available": 1, "sources": ["s1"]}},
+            "nl_injected_ids": [],
+        }
 
         _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
 
@@ -204,3 +210,49 @@ class TestProcessLearningNonBlocking:
 
         from src.backend.services.workflow_service import _process_learning
         _process_learning("err-fl", "test on example.com", "code", {"test_status": "passed"})
+
+
+class TestProcessLearningHoldout:
+    """R7 holdout flag is read from hint metadata and forwarded."""
+
+    @patch("src.backend.services.workflow_service.extract_url_from_query")
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    def test_was_holdout_forwarded_from_metadata(self, mock_get_fl, mock_extract_url):
+        """was_holdout=True in hint_metadata reaches process_execution."""
+        mock_fl = MagicMock()
+        mock_get_fl.return_value = mock_fl
+        mock_extract_url.return_value = "https://x.com"
+
+        from src.backend.services.workflow_service import (
+            _process_learning, _hint_metadata_cache,
+        )
+        run_id = "holdout-run"
+        _hint_metadata_cache[run_id] = {
+            "agents": {"planner": {"count": 0, "available": 4, "sources": []}},
+            "nl_injected_ids": [],
+            "was_holdout": True,
+        }
+
+        _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+
+        kwargs = mock_fl.process_execution.call_args.kwargs
+        assert kwargs["was_holdout"] is True
+
+    @patch("src.backend.services.workflow_service.extract_url_from_query")
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    def test_was_holdout_defaults_false_when_absent(self, mock_get_fl, mock_extract_url):
+        """No was_holdout key (or no metadata at all) → False."""
+        mock_fl = MagicMock()
+        mock_get_fl.return_value = mock_fl
+        mock_extract_url.return_value = "https://x.com"
+
+        from src.backend.services.workflow_service import (
+            _process_learning, _hint_metadata_cache,
+        )
+        _hint_metadata_cache.clear()
+
+        _process_learning("no-holdout-run", "test on x.com", "code",
+                          {"test_status": "passed"})
+
+        kwargs = mock_fl.process_execution.call_args.kwargs
+        assert kwargs["was_holdout"] is False

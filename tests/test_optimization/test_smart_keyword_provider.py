@@ -82,7 +82,7 @@ class MockEngine:
         return {"total_rules": 0, "active_rules": 0}
 
 
-def create_provider(db_conn=None, pattern_matcher=None,
+def create_provider(execution_memory=None, pattern_matcher=None,
                     predicted_keywords=None, pruning_enabled=False):
     """Factory for SmartKeywordProvider with mock dependencies."""
     return SmartKeywordProvider(
@@ -91,7 +91,7 @@ def create_provider(db_conn=None, pattern_matcher=None,
         vector_store=MockVectorStore(),
         context_pruner=None,
         pruning_enabled=pruning_enabled,
-        db_conn=db_conn,
+        execution_memory=execution_memory,
     )
 
 
@@ -118,12 +118,13 @@ class TestAgentContextResult:
         r = AgentContextResult(
             context="ctx", hints_count=2, hints_available=3, hint_sources=["a", "b"]
         )
-        c, n, avail, s, h = r
+        c, n, avail, s, h, nl_ids = r
         assert c == "ctx"
         assert n == 2
         assert avail == 3
         assert s == ["a", "b"]
         assert h == ""  # Default hint_text
+        assert nl_ids == ()  # Default nl_injected_ids
 
     def test_context_is_string(self):
         r = AgentContextResult(context="some context string")
@@ -193,17 +194,19 @@ class TestFormatHints:
 
     def test_empty_list(self):
         p = create_provider()
-        result = p._format_hints([], max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints([], max_hints=5, tokens_per_hint=80)
         assert result is None
+        assert selected == []
 
     def test_single_hint(self):
         p = create_provider()
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": "Use FOR loop", "priority": "high"}],
             max_hints=5, tokens_per_hint=80
         )
         assert "Use FOR loop" in result
         assert "LEARNING HINTS" in result
+        assert len(selected) == 1
 
     def test_priority_sorting(self):
         p = create_provider()
@@ -212,7 +215,7 @@ class TestFormatHints:
             {"text": "HIGH_HINT", "priority": "high"},
             {"text": "MED_HINT", "priority": "medium"},
         ]
-        result = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
         lines = result.split("\n")
         content_lines = [l for l in lines if "HINT" in l and "LEARNING" not in l]
         assert content_lines[0] == "HIGH_HINT", f"Expected HIGH first, got {content_lines}"
@@ -222,9 +225,10 @@ class TestFormatHints:
     def test_max_hints_cap(self):
         p = create_provider()
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(20)]
-        result = p._format_hints(candidates, max_hints=3, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=3, tokens_per_hint=80)
         lines = [l for l in result.split("\n") if l.startswith("hint_")]
         assert len(lines) == 3, f"Expected 3 hints, got {len(lines)}: {lines}"
+        assert len(selected) == 3
 
     def test_hard_cap(self):
         """HARD_CAP_HINTS is enforced by _get_learning_hints before calling _format_hints.
@@ -237,14 +241,14 @@ class TestFormatHints:
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(15)]
         # Simulate what _get_learning_hints does: compute effective_max before calling.
         effective_max = min(15, hard_cap)
-        result = p._format_hints(candidates, max_hints=effective_max, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=effective_max, tokens_per_hint=80)
         lines = [l for l in result.split("\n") if l.startswith("hint_")]
         assert len(lines) <= hard_cap, f"Expected <= {hard_cap}, got {len(lines)}"
 
     def test_token_truncation(self):
         p = create_provider()
         long_text = "A" * 500
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": long_text, "priority": "medium"}],
             max_hints=5, tokens_per_hint=20  # 20 tokens * 4 chars = 80 chars
         )
@@ -257,7 +261,7 @@ class TestFormatHints:
         """Hint exactly at token limit should NOT be truncated."""
         p = create_provider()
         exact_text = "A" * 80  # Exactly 20 tokens * 4
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": exact_text, "priority": "medium"}],
             max_hints=5, tokens_per_hint=20
         )
@@ -266,7 +270,7 @@ class TestFormatHints:
 
     def test_header_and_footer(self):
         p = create_provider()
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": "test hint", "priority": "medium"}],
             max_hints=5, tokens_per_hint=80
         )
@@ -275,7 +279,7 @@ class TestFormatHints:
 
     def test_unicode_hint(self):
         p = create_provider()
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": "⚠️ AVOID: Don't use single Get Text", "priority": "high"}],
             max_hints=5, tokens_per_hint=80
         )
@@ -290,7 +294,7 @@ class TestFormatHints:
             {"text": "high2", "priority": "high"},
             {"text": "low1", "priority": "low"},
         ]
-        result = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
         lines = [l for l in result.split("\n")
                  if l and not l.startswith("═")]
         # Highs first, then meds, then lows
@@ -306,7 +310,7 @@ class TestGetLearningHints:
 
     def test_no_db_conn(self):
         """No db_conn -> no hints (graceful degradation)."""
-        p = create_provider(db_conn=None)
+        p = create_provider(execution_memory=None)
         result = p._get_learning_hints("planner", "click button")
         assert result["text"] is None
         assert result["count"] == 0
@@ -315,7 +319,7 @@ class TestGetLearningHints:
 
     def test_all_engines_return_none(self, in_memory_db):
         """All engines return None -> no hints."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -325,7 +329,7 @@ class TestGetLearningHints:
         assert result["available"] == 0
 
     def test_structural_only(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=["Use FOR loop"])
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -337,7 +341,7 @@ class TestGetLearningHints:
         assert "Use FOR loop" in result["text"]
 
     def test_anti_pattern_only(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=["Don't use Get Text for tables"])
@@ -346,7 +350,7 @@ class TestGetLearningHints:
         assert result["count"] == 1
 
     def test_keyword_only(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=["Use Fill Text not Input Text"])
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -355,7 +359,7 @@ class TestGetLearningHints:
         assert "Fill Text" in result["text"]
 
     def test_mixed_engines(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=["Structural hint"])
         p._keyword_engine = MockEngine(hints=["Keyword hint"])
         p._anti_pattern_engine = MockEngine(hints=["Anti-pattern hint"])
@@ -367,7 +371,7 @@ class TestGetLearningHints:
 
     def test_engine_error_non_blocking(self, in_memory_db):
         """One engine failing should not block others."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(raise_on_call=True)
         p._keyword_engine = MockEngine(hints=["Good hint"])
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -377,7 +381,7 @@ class TestGetLearningHints:
 
     def test_all_engines_fail(self, in_memory_db):
         """All engines raising -> same as no hints."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(raise_on_call=True)
         p._keyword_engine = MockEngine(raise_on_call=True)
         p._anti_pattern_engine = MockEngine(raise_on_call=True)
@@ -387,7 +391,7 @@ class TestGetLearningHints:
 
     def test_url_passed_to_engines(self, in_memory_db):
         """URL should be forwarded to each engine."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         mock_s = MockEngine(hints=None)
         mock_k = MockEngine(hints=None)
         mock_a = MockEngine(hints=None)
@@ -400,7 +404,7 @@ class TestGetLearningHints:
 
     def test_none_url_becomes_empty_string(self, in_memory_db):
         """When url=None, engines should receive empty string."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         mock_s = MockEngine(hints=None)
         p._structural_engine = mock_s
         p._keyword_engine = MockEngine(hints=None)
@@ -425,14 +429,14 @@ class TestGetAgentContext:
 
     def test_no_hints_no_db(self):
         """Without db_conn, no hints but context still returned."""
-        p = create_provider(db_conn=None)
+        p = create_provider(execution_memory=None)
         result = p.get_agent_context("click button", "planner")
         assert result.hints_count == 0
         assert result.hint_sources == ()
         assert len(result.context) > 0  # Should have existing tier context
 
     def test_hints_prepended_to_context(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=["STRUCTURAL_HINT_MARKER"])
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -444,10 +448,10 @@ class TestGetAgentContext:
 
     def test_no_hints_context_unchanged(self, in_memory_db):
         """When no hints available, context should be same as without Tier 0."""
-        p_no_db = create_provider(db_conn=None)
+        p_no_db = create_provider(execution_memory=None)
         result_no_db = p_no_db.get_agent_context("click button", "assembler")
 
-        p_with_db = create_provider(db_conn=in_memory_db)
+        p_with_db = create_provider(execution_memory=in_memory_db)
         p_with_db._structural_engine = MockEngine(hints=None)
         p_with_db._keyword_engine = MockEngine(hints=None)
         p_with_db._anti_pattern_engine = MockEngine(hints=None)
@@ -457,7 +461,7 @@ class TestGetAgentContext:
         assert result_no_db.context == result_with_db.context
 
     def test_hint_metadata_in_result(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=["hint1", "hint2"])
         p._keyword_engine = MockEngine(hints=["hint3"])
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -473,7 +477,7 @@ class TestGetAgentContext:
         assert isinstance(result, AgentContextResult)
 
     def test_url_param_forwarded(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         mock_s = MockEngine(hints=None)
         p._structural_engine = mock_s
         p._keyword_engine = MockEngine(hints=None)
@@ -483,7 +487,7 @@ class TestGetAgentContext:
 
     def test_hint_failure_nonblocking(self, in_memory_db):
         """If _get_learning_hints raises, context should still be returned."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
 
         # Make _get_learning_hints raise
         def exploding_hints(*args, **kwargs):
@@ -496,7 +500,7 @@ class TestGetAgentContext:
 
     def test_all_four_roles(self, in_memory_db):
         """All four agent roles should work."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -508,7 +512,7 @@ class TestGetAgentContext:
 
     def test_identifier_no_hints(self, in_memory_db):
         """Identifier role should get no hints (engines filter by role)."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         # Structural only returns for planner/assembler
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
@@ -524,20 +528,20 @@ class TestGetAgentContext:
 class TestLazyLoading:
 
     def test_engines_not_created_at_init(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         assert p._structural_engine is None
         assert p._keyword_engine is None
         assert p._anti_pattern_engine is None
 
     def test_engines_created_on_first_hint_call(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._get_learning_hints("planner", "click button")
         assert p._structural_engine is not None
         assert p._keyword_engine is not None
         assert p._anti_pattern_engine is not None
 
     def test_engine_reused_on_second_call(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._get_learning_hints("planner", "click button")
         engine1 = p._structural_engine
         p._get_learning_hints("assembler", "fill form")
@@ -545,14 +549,14 @@ class TestLazyLoading:
         assert engine1 is engine2, "Engine should be reused, not recreated"
 
     def test_no_creation_without_db(self):
-        p = create_provider(db_conn=None)
+        p = create_provider(execution_memory=None)
         p._get_learning_hints("planner", "click button")
         assert p._structural_engine is None
         assert p._keyword_engine is None
         assert p._anti_pattern_engine is None
 
     def test_intent_extractor_shared(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._get_learning_hints("planner", "click button")
         assert p._intent_extractor is not None
 
@@ -683,7 +687,7 @@ class TestIntegration:
         ie = IntentExtractor(in_memory_db)
         se = StructuralRuleEngine(in_memory_db, ie)
 
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = se
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -708,7 +712,7 @@ class TestIntegration:
         )
         in_memory_db.commit()
 
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = ke
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -733,7 +737,7 @@ class TestIntegration:
         )
         in_memory_db.commit()
 
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = ke
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -747,7 +751,7 @@ class TestIntegration:
 
     def test_empty_db_no_crash(self, in_memory_db):
         """Empty database should produce no hints without errors."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         # Use real engines -- they'll find nothing
         result = p.get_agent_context("click button", "planner", url="https://test.com")
         assert result.hints_count == 0
@@ -767,7 +771,7 @@ class TestIntegration:
         )
         in_memory_db.commit()
 
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = ke
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -786,7 +790,7 @@ class TestIntegration:
 class TestEdgeCases:
 
     def test_empty_query(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -794,7 +798,7 @@ class TestEdgeCases:
         assert isinstance(result, AgentContextResult)
 
     def test_very_long_query(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -808,7 +812,7 @@ class TestEdgeCases:
         assert isinstance(result, AgentContextResult)
 
     def test_url_with_special_chars(self, in_memory_db):
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -820,7 +824,7 @@ class TestEdgeCases:
 
     def test_multiple_same_source_hints(self, in_memory_db):
         """Multiple hints from same engine should count correctly."""
-        p = create_provider(db_conn=in_memory_db)
+        p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=["hint1", "hint2", "hint3"])
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
@@ -830,8 +834,9 @@ class TestEdgeCases:
 
     def test_hint_with_newlines(self):
         p = create_provider()
-        result = p._format_hints(
+        result, selected = p._format_hints(
             [{"text": "Line1\nLine2\nLine3", "priority": "high"}],
             max_hints=5, tokens_per_hint=80
         )
-        assert result is not None
+        assert "Line1\nLine2\nLine3" in result
+        assert len(selected) == 1

@@ -174,27 +174,33 @@ def get_workflow_metrics_collector() -> WorkflowMetricsCollector:
     return _metrics_collector
 
 
-def count_tokens(text: str, model: str = "gemini/gemini-2.5-flash") -> int:
+def count_tokens(text: str, model: str | None = None) -> int:
     """
     Count tokens in text using LiteLLM's accurate token counter.
-    
+
     LiteLLM provides accurate token counting for the specific model being used,
     which is more reliable than word-based estimation for cost tracking.
-    
+
     Args:
         text: Text to count tokens for
-        model: Model name for accurate tokenization (default: gemini-2.5-flash from config)
-    
+        model: LiteLLM model string (e.g. "gemini/gemini-2.5-flash"). Defaults
+               to the currently configured ONLINE_MODEL when not specified.
+
     Returns:
         Accurate token count for the specified model
-    
+
     Example:
         >>> count_tokens("Hello world, this is a test")
         7  # Accurate count vs estimated 8
     """
     if not text:
         return 0
-    
+
+    if model is None:
+        from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+        from src.backend.core.config import settings
+        model = resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL)
+
     try:
         from litellm import token_counter
         return token_counter(model=model, text=text)
@@ -205,7 +211,7 @@ def count_tokens(text: str, model: str = "gemini/gemini-2.5-flash") -> int:
         return int(len(words) * 1.33)
 
 
-def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.5-flash") -> dict:
+def calculate_crewai_cost(usage_metrics: dict, model_name: str | None = None) -> dict:
     """
     Extract cost and token metrics from CrewAI's usage_metrics.
     
@@ -241,10 +247,15 @@ def calculate_crewai_cost(usage_metrics: dict, model_name: str = "gemini-2.5-fla
     Note:
         If total_cost is not available (old CrewAI versions), falls back to LiteLLM calculation.
     """
+    if model_name is None:
+        from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+        from src.backend.core.config import settings
+        model_name = resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL)
+
     prompt_tokens = usage_metrics.get('prompt_tokens', 0)
     completion_tokens = usage_metrics.get('completion_tokens', 0)
     total_tokens = usage_metrics.get('total_tokens', 0)
-    
+
     # First, try to use the cost already calculated by CrewAI
     cost = usage_metrics.get('total_cost', None)
     

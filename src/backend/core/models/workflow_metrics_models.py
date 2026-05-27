@@ -135,7 +135,10 @@ class WorkflowMetrics(WorkflowMetricsBase):
 
     # LLM output cleaning metrics (per-workflow, never cross-contaminated)
     llm_cleaning_stats: Optional[Dict[str, Any]] = None
-    
+
+    # True when optimization init failed and this run proceeded without hints.
+    optimization_fallback_used: bool = False
+
     @field_validator('timestamp', mode='before')
     @classmethod
     def parse_timestamp(cls, v) -> datetime:

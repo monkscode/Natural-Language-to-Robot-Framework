@@ -1440,6 +1440,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             console.log('[Feedback] Response:', result);
 
+            if (!response.ok) {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '❌ ' + (result.detail || 'Could not submit');
+                }
+                return;
+            }
+
             // Show success state
             if (submitBtn) {
                 submitBtn.classList.add('success');

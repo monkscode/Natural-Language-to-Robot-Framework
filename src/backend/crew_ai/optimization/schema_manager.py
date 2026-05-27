@@ -232,6 +232,7 @@ SCHEMA_MIGRATIONS = {
             "ON structural_rules(score DESC, evidence_count DESC)",
         ],
     },
+    # 4: deliberately skipped during development — never released to any DB
     5: {
         # Remediation: learning_metrics was added to v1's SQL list after v1
         # had already been applied to existing databases.  SchemaManager
@@ -262,6 +263,259 @@ SCHEMA_MIGRATIONS = {
             "CREATE INDEX IF NOT EXISTS idx_metrics_workflow ON learning_metrics(workflow_id)",
             "CREATE INDEX IF NOT EXISTS idx_metrics_first_attempt ON learning_metrics(is_first_attempt)",
             "CREATE INDEX IF NOT EXISTS idx_metrics_hints ON learning_metrics(hints_injected)",
+        ],
+    },
+    6: {
+        # Case B re-run support + LLM-trigger conflict flagging columns.
+        # - execution_records.working_code: stores the corrected passing
+        #   robot code when a previously-failed workflow re-runs and passes.
+        #   The original failing robot_code is preserved unchanged so failure
+        #   context (failure_category, error_message, failed_keyword) stays
+        #   intact for `process_user_feedback`.
+        # - nl_feedback_corrections.conflict_flagged + metadata: Trigger 1
+        #   and Trigger 2 LLM conflict detection (Step 5) suspend hints from
+        #   injection without permanently deactivating them. is_active=0
+        #   stays the sole automated path to permanent deactivation,
+        #   reachable only via update_hint_effectiveness.
+        #
+        # ALTER TABLE ADD COLUMN does not support IF NOT EXISTS in SQLite;
+        # the schema-version gate guarantees each ALTER runs once per DB.
+        "description": "Case B fix — working_code column + conflict_flagged for safe LLM hint suspension",
+        "sql": [
+            "ALTER TABLE execution_records ADD COLUMN working_code TEXT",
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN conflict_flagged INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN conflict_flagged_at TEXT",
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN conflict_flag_reason TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_nlfc_conflict ON nl_feedback_corrections(conflict_flagged)",
+        ],
+    },
+    7: {
+        # Trigger telemetry — observability for Trigger 1 / Trigger 2 LLM calls.
+        # One row per trigger fire (or per "no active hints in scope" early
+        # return — those rows have status='no_active_hints' and zero tokens
+        # so cost dashboards reflect no charge). Failure to write a row is
+        # absorbed by LearningWriteQueue's per-item try/except — telemetry
+        # NEVER blocks the pipeline.
+        #
+        # Phase 2 stats SQL (LLM-accuracy KPI, cost) reads this table directly.
+        # Column / index shapes are locked against those queries:
+        # - flagged_hint_ids stored as JSON text array ("[13,42]"), expanded
+        #   via json_each in the engagement/reversal queries.
+        # - status is the discriminator the success-rate / timeout-rate queries
+        #   group on.
+        # - idx_created_at supports the 30-day window predicate.
+        # - idx_workflow supports the per-workflow drilldown on the Trigger
+        #   1 detail page.
+        # - idx_type supports GROUP BY trigger_type aggregates.
+        "description": "trigger_events audit log for Trigger 1 + Trigger 2 LLM conflict detection",
+        "sql": [
+            """
+            CREATE TABLE IF NOT EXISTS trigger_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_type TEXT NOT NULL,
+                workflow_id TEXT,
+                domain TEXT,
+                url TEXT,
+                feedback_text TEXT,
+                active_hint_ids TEXT,
+                flagged_hint_ids TEXT,
+                reason TEXT,
+                llm_model TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                llm_latency_ms INTEGER,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_trigger_events_created ON trigger_events(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_trigger_events_workflow ON trigger_events(workflow_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trigger_events_type ON trigger_events(trigger_type)",
+        ],
+    },
+    8: {
+        # Phase 2 admin curation support.
+        # - nl_feedback_corrections.created_via: distinguishes hints submitted
+        #   via the workflow /api/feedback path ('workflow', the default for all
+        #   existing rows) from hints added directly by an admin via the Phase 2
+        #   dashboard ('admin'). Affects hint inventory display and stats SQL;
+        #   does NOT affect retrieval ordering or get_hints() filtering.
+        # - hint_audit: append-only manual-action log. Every unflag/retract/
+        #   reactivate/scope-change/category-change/create action writes one row.
+        #   Also receives implicit 'unflag' rows from the UPSERT path in
+        #   learn_from_feedback when a user re-submits identical feedback that
+        #   was previously LLM-flagged (Gap 7 refinement). The Phase 2 LLM-
+        #   accuracy KPI (reversal rate) counts both explicit and implicit
+        #   unflags via this table.
+        #
+        # ADD COLUMN does not support IF NOT EXISTS in SQLite; the schema-
+        # version gate guarantees this ALTER runs exactly once per database.
+        "description": "Phase 2 — admin curation: hint_audit table + created_via column",
+        "sql": [
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN created_via TEXT NOT NULL DEFAULT 'workflow'",
+            """CREATE TABLE IF NOT EXISTS hint_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hint_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                reason TEXT,
+                before_value TEXT,
+                after_value TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(hint_id) REFERENCES nl_feedback_corrections(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_hint_audit_hint ON hint_audit(hint_id)",
+            "CREATE INDEX IF NOT EXISTS idx_hint_audit_created ON hint_audit(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_hint_audit_actor ON hint_audit(actor)",
+        ],
+    },
+    9: {
+        # LLM admin hint review system.
+        # - nl_feedback_corrections.disabled_at: exact timestamp when a hint was
+        #   deactivated (auto-disable or admin-disable). NULL = never disabled.
+        #   Used by the LLM review fetch to include recently-disabled hints (30d)
+        #   without relying on last_seen (ambiguous). ADD COLUMN runs once per DB
+        #   via the schema-version gate.
+        # - hint_review_sessions: one row per admin-triggered LLM review cycle.
+        # - hint_review_recommendations: individual LLM decisions within a session.
+        "description": "LLM admin hint review — disabled_at column + hint_review_sessions + hint_review_recommendations",
+        "sql": [
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN disabled_at TEXT",
+            """CREATE TABLE IF NOT EXISTS hint_review_sessions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                status          TEXT NOT NULL DEFAULT 'pending_llm',
+                hint_count      INTEGER NOT NULL DEFAULT 0,
+                llm_model       TEXT,
+                llm_latency_ms  INTEGER,
+                warning         TEXT,
+                error_message   TEXT,
+                created_at      TEXT NOT NULL,
+                completed_at    TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS hint_review_recommendations (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id       INTEGER NOT NULL REFERENCES hint_review_sessions(id),
+                hint_id          INTEGER NOT NULL REFERENCES nl_feedback_corrections(id),
+                recommendation   TEXT NOT NULL,
+                reason           TEXT NOT NULL,
+                exoneration_count INTEGER NOT NULL DEFAULT 0,
+                admin_decision   TEXT,
+                admin_notes      TEXT,
+                decided_at       TEXT,
+                applied          INTEGER NOT NULL DEFAULT 0,
+                created_at       TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_hrr_session ON hint_review_recommendations(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_hrr_hint ON hint_review_recommendations(hint_id)",
+        ],
+    },
+    10: {
+        # Learning-prompt hardening (docs/LEARNING_PROMPTS_ANALYSIS.md §7 Q2, §12).
+        # - execution_records.injected_hint_ids: JSON array of the hint IDs
+        #   SmartKeywordProvider actually injected into the agents when this
+        #   workflow's v1 code was generated. Trigger 1 / Trigger 2 read this
+        #   instead of get_active_hints_raw() so the LLM only judges hints that
+        #   could have shaped v1 (resolves analysis C1/C2). Placed on
+        #   execution_records (not learning_metrics) because workflow_id is
+        #   UNIQUE here — both trigger paths already load this single row, and
+        #   the Case-B re-run path preserves it unchanged (correct v1 set).
+        #   Value semantics: '[]' = known-empty (no hints shaped v1 → Trigger
+        #   has nothing to judge); NULL = legacy / unknown → Trigger 1/2 skip
+        #   the LLM call entirely (preservation is safer than judging against
+        #   an unknown set). ADD COLUMN does not support IF NOT EXISTS in
+        #   SQLite; the schema-version gate guarantees this ALTER runs once
+        #   per DB.
+        # - hint_review_pages: per-chunk status for paginated P3 hint review
+        #   (§12). One row per chunk (globals chunk + one per domain) within a
+        #   hint_review_sessions row. Separate table (not JSON on the session)
+        #   so "which scopes failed?" is plain SQL and a future "re-run one
+        #   failed chunk" needs no schema change.
+        "description": "Learning-prompt hardening — injected_hint_ids column + hint_review_pages table",
+        "sql": [
+            "ALTER TABLE execution_records ADD COLUMN injected_hint_ids TEXT",
+            """CREATE TABLE IF NOT EXISTS hint_review_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_value TEXT,
+                status TEXT NOT NULL,
+                hint_count INTEGER NOT NULL,
+                llm_latency_ms INTEGER,
+                error_message TEXT,
+                retry_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (session_id) REFERENCES hint_review_sessions(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_review_pages_session ON hint_review_pages(session_id)",
+        ],
+    },
+    11: {
+        # Query-similarity hint filtering + measurement instrumentation
+        # (docs/QUERY_SIMILARITY_HINT_INJECTION_PLAN.md).
+        # - nl_feedback_corrections.anchor_query: the natural-language user
+        #   query that produced the hint (or the admin-typed anchor for
+        #   admin-created hints). The similarity filter embeds this and keeps
+        #   a hint only when it is semantically close to the current request.
+        #   SQL-authoritative; the learning_anchors ChromaDB collection is a
+        #   rebuildable index over it.
+        # - execution_records.model_version: "{provider}/{model}" stamped at
+        #   write time. A reporting dimension only (never a retrieval filter)
+        #   so pass rate / cost / lift can be sliced by model.
+        # - learning_metrics.was_holdout: 1 when the R7 random-holdout
+        #   suppressed otherwise-available hints for this run, enabling an
+        #   unbiased lift measurement (Cat B - Cat C).
+        #
+        # The UPDATE backfills anchor_query for rows that pre-date this
+        # migration; it MUST follow the ADD COLUMN above — statements run in
+        # list order and an UPDATE before its column fails "no such column".
+        # execution_records.workflow_id is UNIQUE so the subquery is
+        # single-valued; a row whose source_workflow_id does not resolve
+        # stays NULL (fail-closed, harmless). The migration is atomic via the
+        # schema-version gate's transaction — all four statements commit
+        # together or roll back together.
+        #
+        # ADD COLUMN does not support IF NOT EXISTS in SQLite; the schema-
+        # version gate guarantees these ALTERs run exactly once per database.
+        "description": "Query-similarity anchors — anchor_query/model_version/was_holdout columns + anchor_query backfill",
+        "sql": [
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN anchor_query TEXT",
+            "ALTER TABLE execution_records ADD COLUMN model_version TEXT",
+            "ALTER TABLE learning_metrics ADD COLUMN was_holdout INTEGER NOT NULL DEFAULT 0",
+            """
+            UPDATE nl_feedback_corrections
+            SET anchor_query = (
+                SELECT user_query FROM execution_records
+                WHERE execution_records.workflow_id
+                      = nl_feedback_corrections.source_workflow_id
+            )
+            WHERE anchor_query IS NULL
+            """,
+        ],
+    },
+    12: {
+        # Split the dual-meaning `flagged_hint_ids` column on trigger_events.
+        # Until v12, that column was simultaneously asked to mean:
+        #   1. "What the LLM recommended to flag" — read by the weekly hint
+        #      review's _compute_exonerations to score per-hint LLM judgment
+        #      frequency.
+        #   2. "What was actually flagged" — used by the engagement/reversal
+        #      KPIs to measure whether humans followed up on flag actions.
+        # Those two meanings diverge whenever the strong-history protection
+        # guard in conflict_flag_hints suppresses an LLM recommendation: the
+        # row stayed unflagged in nl_feedback_corrections but still appeared
+        # in flagged_hint_ids, inflating the engagement-rate denominator with
+        # events no admin could ever review.
+        #
+        # `actually_flagged_hint_ids` is the post-guard enforcement set,
+        # written by the same task that updates conflict_flagged. Existing
+        # rows have NULL here — KPI queries fall back via COALESCE so legacy
+        # data preserves its pre-v12 (potentially over-counted) behavior, and
+        # the 30-day rolling window ages it out cleanly.
+        "description": "Split trigger_events.flagged_hint_ids into recommendation vs enforcement",
+        "sql": [
+            "ALTER TABLE trigger_events ADD COLUMN actually_flagged_hint_ids TEXT",
         ],
     },
 }

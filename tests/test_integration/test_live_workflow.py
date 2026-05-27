@@ -135,7 +135,8 @@ class TestHintMetadataCache:
 
         run_id = f"live-test-{int(time.time())}"
         _hint_metadata_cache[run_id] = {
-            "planner": {"count": 2, "sources": ["structural_rules"]},
+            "agents": {"planner": {"count": 2, "available": 2, "sources": ["structural_rules"]}},
+            "nl_injected_ids": [],
         }
 
         mock_fl = MagicMock()
@@ -152,7 +153,10 @@ class TestHintMetadataCache:
 
         run_ids = [f"stale-test-{i}-{int(time.time())}" for i in range(3)]
         for rid in run_ids:
-            _hint_metadata_cache[rid] = {"planner": {"count": 1, "sources": ["s"]}}
+            _hint_metadata_cache[rid] = {
+                "agents": {"planner": {"count": 1, "available": 1, "sources": ["s"]}},
+                "nl_injected_ids": [],
+            }
 
         mock_fl = MagicMock()
         with patch("src.backend.services.workflow_service.get_feedback_loop", return_value=mock_fl):
@@ -162,3 +166,36 @@ class TestHintMetadataCache:
 
         for rid in run_ids:
             assert rid not in _hint_metadata_cache
+
+    def test_process_learning_handles_nl_injected_ids_in_hint_metadata(self):
+        """Regression (Finding 1 / F-10): hint_meta must reach process_execution
+        with correct counts. Agent dicts live under hint_meta["agents"]; nl_injected_ids
+        is a sibling key. _process_learning iterates agents.values() — no isinstance
+        guard needed, no crash risk from the list entry.
+        """
+        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from unittest.mock import patch, MagicMock
+
+        run_id = f"nl-ids-test-{int(time.time())}"
+        _hint_metadata_cache[run_id] = {
+            "agents": {
+                "planner":   {"count": 2, "available": 5, "sources": ["nl_feedback"]},
+                "assembler": {"count": 1, "available": 3, "sources": ["nl_feedback"]},
+                "validator": {"count": 0, "available": 0, "sources": []},
+            },
+            "nl_injected_ids": [5, 12],
+        }
+
+        mock_fl = MagicMock()
+        mock_fl.execution_memory.get.return_value = None  # first attempt
+        with patch("src.backend.services.workflow_service.get_feedback_loop", return_value=mock_fl):
+            with patch("src.backend.services.workflow_service.extract_url_from_query", return_value="https://x.com"):
+                _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+
+        # The function must run to completion; process_execution must be called
+        # with the correct injected_hint_ids JSON.
+        mock_fl.process_execution.assert_called_once()
+        call_kwargs = mock_fl.process_execution.call_args.kwargs
+        assert call_kwargs["injected_hint_ids"] == "[5, 12]"
+        assert call_kwargs["hints_injected"] == 3  # 2 + 1 + 0
+        assert run_id not in _hint_metadata_cache

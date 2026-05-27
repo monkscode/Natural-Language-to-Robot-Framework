@@ -18,9 +18,11 @@ Referenced by: FeedbackLoop (DAY_05), SmartKeywordProvider (DAY_06)
 import re
 import json
 import logging
+import threading
 from typing import Optional, List, Dict
 
-from .learning_config import LearningEngine, EffectivenessScore
+from .learning_config import LearningEngine, EffectivenessScore, WRITER_THREAD_NAME
+from .execution_memory import _assert_writer_thread
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +104,8 @@ class IntentExtractor:
         },
     }
 
-    def __init__(self, db_conn):
-        self.db_conn = db_conn
+    def __init__(self, execution_memory=None):
+        self._em = execution_memory
 
     def extract_intents(self, user_query: str) -> List[dict]:
         """
@@ -136,11 +138,14 @@ class IntentExtractor:
         Performance: Only loads patterns above injection threshold at SQL level.
         This prevents unbounded memory growth as patterns accumulate.
         """
-        rows = self.db_conn.execute(
-            "SELECT * FROM intent_patterns WHERE score >= ? "
-            "ORDER BY score DESC",
-            (EffectivenessScore.INJECTION_THRESHOLD,),
-        ).fetchall()
+        if not self._em:
+            return []
+        with self._em.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM intent_patterns WHERE score >= ? "
+                "ORDER BY score DESC",
+                (EffectivenessScore.INJECTION_THRESHOLD,),
+            ).fetchall()
 
         matches = []
         for row in rows:
@@ -203,8 +208,15 @@ class IntentExtractor:
         initial_evidence = match.get("initial_evidence", 2)
         initial_score = EffectivenessScore.calculate(initial_evidence, 0)
 
+        if not self._em:
+            return
+        # Migration is a write; skip on read threads (e.g. get_hints calls).
+        # Will execute next time extract_intents is called from learn().
+        if threading.current_thread().name != WRITER_THREAD_NAME:
+            return
+
         try:
-            self.db_conn.execute("""
+            self._em._writer_conn.execute("""
                 INSERT OR IGNORE INTO intent_patterns
                 (intent_name, triggers_json, requires_json, source, score,
                  evidence_count, last_updated, created_at)
@@ -216,7 +228,7 @@ class IntentExtractor:
                 initial_score,
                 initial_evidence,
             ))
-            self.db_conn.commit()
+            self._em._writer_conn.commit()
             logger.debug(
                 f"[LEARNING:STRUCTURAL] Seed pattern '{intent_name}' "
                 f"migrated to learned patterns (score={initial_score}, "
@@ -254,8 +266,8 @@ class StructuralRuleEngine(LearningEngine):
     Scoring uses EffectivenessScore.calculate() — ALWAYS absolute formula.
     """
 
-    def __init__(self, db_conn, intent_extractor: IntentExtractor):
-        self.db_conn = db_conn
+    def __init__(self, execution_memory=None, intent_extractor: IntentExtractor = None):
+        self._em = execution_memory
         self.intent_extractor = intent_extractor
 
     def learn(self, record) -> None:
@@ -269,6 +281,10 @@ class StructuralRuleEngine(LearningEngine):
         - Checks if the intent's required keywords are present
         - No hardcoded structure detectors or label comparison
         """
+        if not self._em:
+            return
+        _assert_writer_thread("StructuralRuleEngine.learn")
+
         intents = self.intent_extractor.extract_intents(record.user_query)
 
         for intent in intents:
@@ -327,17 +343,20 @@ class StructuralRuleEngine(LearningEngine):
 
     def get_stats(self) -> Dict:
         """Return engine statistics."""
-        total = self.db_conn.execute(
-            "SELECT COUNT(*) FROM structural_rules"
-        ).fetchone()[0]
-        active = self.db_conn.execute(
-            "SELECT COUNT(*) FROM structural_rules "
-            "WHERE score >= ? AND (evidence_count + counter_evidence) >= ?",
-            (
-                EffectivenessScore.INJECTION_THRESHOLD,
-                EffectivenessScore.MIN_OBSERVATIONS,
-            ),
-        ).fetchone()[0]
+        if not self._em:
+            return {"total_rules": 0, "active_rules": 0, "engine": "structural_rule"}
+        with self._em.read_conn() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM structural_rules"
+            ).fetchone()[0]
+            active = conn.execute(
+                "SELECT COUNT(*) FROM structural_rules "
+                "WHERE score >= ? AND (evidence_count + counter_evidence) >= ?",
+                (
+                    EffectivenessScore.INJECTION_THRESHOLD,
+                    EffectivenessScore.MIN_OBSERVATIONS,
+                ),
+            ).fetchone()[0]
         return {
             "total_rules": total,
             "active_rules": active,
@@ -349,9 +368,14 @@ class StructuralRuleEngine(LearningEngine):
     # ------------------------------------------------------------------
 
     def _get_or_create_rule(self, intent: dict) -> dict:
-        """Get existing rule or create new one with zero counts."""
+        """Get existing rule or create new one with zero counts.
+
+        Called from learn() which is already on the writer thread.
+        Uses _writer_conn throughout so the SELECT and INSERT are on the
+        same connection — avoids a TOCTOU race in the INSERT OR IGNORE path.
+        """
         rule_name = intent["intent"]
-        row = self.db_conn.execute(
+        row = self._em._writer_conn.execute(
             "SELECT * FROM structural_rules WHERE rule_name = ?",
             (rule_name,),
         ).fetchone()
@@ -365,7 +389,7 @@ class StructuralRuleEngine(LearningEngine):
         required_keywords = requires.get("keywords", [])
         query_pattern = "|".join(intent.get("triggered_by", []))
 
-        self.db_conn.execute("""
+        self._em._writer_conn.execute("""
             INSERT INTO structural_rules
             (rule_name, query_pattern, required_structure,
              required_keywords_json, score, evidence_count, counter_evidence,
@@ -377,7 +401,7 @@ class StructuralRuleEngine(LearningEngine):
             required_structure,
             json.dumps(required_keywords),
         ))
-        self.db_conn.commit()
+        self._em._writer_conn.commit()
 
         logger.debug(
             f"[LEARNING:STRUCTURAL] Created rule '{rule_name}' "
@@ -386,7 +410,7 @@ class StructuralRuleEngine(LearningEngine):
         )
 
         # Re-fetch to get the row with id
-        return dict(self.db_conn.execute(
+        return dict(self._em._writer_conn.execute(
             "SELECT * FROM structural_rules WHERE rule_name = ?",
             (rule_name,),
         ).fetchone())
@@ -401,7 +425,7 @@ class StructuralRuleEngine(LearningEngine):
         new_score = EffectivenessScore.calculate(
             new_evidence, rule["counter_evidence"]
         )
-        self.db_conn.execute(
+        self._em._writer_conn.execute(
             "UPDATE structural_rules "
             "SET evidence_count = ?, score = ?, "
             "    last_triggered = datetime('now', 'localtime'), "
@@ -409,7 +433,7 @@ class StructuralRuleEngine(LearningEngine):
             "WHERE id = ?",
             (new_evidence, new_score, rule["id"]),
         )
-        self.db_conn.commit()
+        self._em._writer_conn.commit()
 
         logger.debug(
             f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
@@ -423,14 +447,14 @@ class StructuralRuleEngine(LearningEngine):
         new_score = EffectivenessScore.calculate(
             rule["evidence_count"], new_ce
         )
-        self.db_conn.execute(
+        self._em._writer_conn.execute(
             "UPDATE structural_rules "
             "SET counter_evidence = ?, score = ?, "
             "    last_updated = datetime('now', 'localtime') "
             "WHERE id = ?",
             (new_ce, new_score, rule["id"]),
         )
-        self.db_conn.commit()
+        self._em._writer_conn.commit()
 
         logger.debug(
             f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
@@ -440,10 +464,13 @@ class StructuralRuleEngine(LearningEngine):
 
     def _find_rule(self, intent_name: str) -> Optional[dict]:
         """Find a rule by intent name."""
-        row = self.db_conn.execute(
-            "SELECT * FROM structural_rules WHERE rule_name = ?",
-            (intent_name,),
-        ).fetchone()
+        if not self._em:
+            return None
+        with self._em.read_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM structural_rules WHERE rule_name = ?",
+                (intent_name,),
+            ).fetchone()
         return dict(row) if row else None
 
     def _extract_code_elements(self, robot_code: str) -> frozenset:

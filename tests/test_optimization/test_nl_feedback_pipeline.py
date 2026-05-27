@@ -96,31 +96,40 @@ class FakeRecord:
 
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection."""
+    """Create ExecutionMemory backed by existing connection.
+
+    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
+    real ExecutionMemory it wraps so read_conn() works correctly.
+    """
+    if hasattr(conn, '_em'):
+        return conn._em
     em = ExecutionMemory.__new__(ExecutionMemory)
     em.db_path = ":memory:"
     em._chroma_dir = None
-    em.conn = conn
+    em._writer_conn = conn
     em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
     em._execution_collection = None
+    em._chroma_failed_at = None
+    em._chroma_last_error = None
     return em
 
 
 def _insert_hint(conn, text, scope="global", domain=None, url=None,
                  category="keyword", is_active=1, success_count=0,
                  evidence_count=1, failure_count=0, applied_count=0,
-                 original_failure_category=None):
+                 original_failure_category=None, conflict_flagged=0):
     """Insert a hint row directly into nl_feedback_corrections."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, domain, url, "
         " original_failure_category, evidence_count, applied_count, "
-        " success_count, failure_count, is_active, created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " success_count, failure_count, is_active, conflict_flagged, "
+        " created_at, last_seen) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (text, category, scope, domain, url,
          original_failure_category, evidence_count, applied_count,
-         success_count, failure_count, is_active, now, now),
+         success_count, failure_count, is_active, conflict_flagged, now, now),
     )
     conn.commit()
 
@@ -555,6 +564,44 @@ class TestAttribution:
             domain="example.com", url="https://example.com",
             test_passed=True,
         )
+
+    def test_conflict_flagged_hint_skipped(self, in_memory_db):
+        """conflict_flagged=1 hints must NOT receive applied_count or success_count increments."""
+        _insert_hint(in_memory_db, "Bad hint", scope="global",
+                     applied_count=5, success_count=2, failure_count=3,
+                     conflict_flagged=1)
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.update_hint_effectiveness(
+            domain="example.com", url="https://example.com",
+            test_passed=True,
+        )
+        row = in_memory_db.execute(
+            "SELECT applied_count, success_count, failure_count "
+            "FROM nl_feedback_corrections"
+        ).fetchone()
+        assert row["applied_count"] == 5, (
+            f"conflict_flagged hint applied_count must not change; got {row['applied_count']}"
+        )
+        assert row["success_count"] == 2, (
+            f"conflict_flagged hint success_count must not change; got {row['success_count']}"
+        )
+        assert row["failure_count"] == 3
+
+    def test_conflict_flagged_filter_regression(self, in_memory_db):
+        """Regression: conflict_flagged=0 hint must still be credited normally."""
+        _insert_hint(in_memory_db, "Good hint", scope="global",
+                     applied_count=0, success_count=0, failure_count=0,
+                     conflict_flagged=0)
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.update_hint_effectiveness(
+            domain="example.com", url="https://example.com",
+            test_passed=True,
+        )
+        row = in_memory_db.execute(
+            "SELECT applied_count, success_count FROM nl_feedback_corrections"
+        ).fetchone()
+        assert row["applied_count"] == 1
+        assert row["success_count"] == 1
 
 
 # ===================================================================
