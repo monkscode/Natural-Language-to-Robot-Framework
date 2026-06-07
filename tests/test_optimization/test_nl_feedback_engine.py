@@ -16,6 +16,7 @@ Tests:
 """
 
 import inspect
+import sqlite3
 
 import pytest
 
@@ -466,3 +467,532 @@ class TestEngineStats:
         engine = NLFeedbackEngine()
         hints = engine.get_hints("test query", "http://example.com", "tester")
         assert hints is None
+
+
+# ===================================================================
+# 10. UPSERT hint_audit unflag (schema v8 refinement)
+# ===================================================================
+
+
+class TestUpsertHintAuditUnflag:
+    """Gap 7 deferred refinement: UPSERT writes hint_audit row iff it clears a flag."""
+
+    def _store_hint(self, conn, conflict_flagged: int) -> int:
+        """Insert a hint row directly and return its id."""
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, "
+            " original_failure_category, evidence_count, "
+            " source_workflow_id, created_at, last_seen, conflict_flagged) "
+            "VALUES (?, 'structural', 'domain', 'example.com', NULL, NULL, 1, NULL, "
+            "        datetime('now'), datetime('now'), ?)",
+            ("Use data-testid for all selectors", conflict_flagged),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def test_upsert_flagged_hint_writes_audit_row(self, in_memory_db):
+        """Re-submitting identical feedback on a flagged hint writes action='unflag'."""
+        conn = in_memory_db
+        hint_id = self._store_hint(conn, conflict_flagged=1)
+        engine = NLFeedbackEngine(conn)
+
+        from unittest.mock import MagicMock
+        record = MagicMock()
+        record.workflow_id = "wf-resubmit"
+        record.domain = "example.com"
+        record.url = None
+        record.failure_category = None
+
+        engine.learn_from_feedback(record, {
+            "feedback_text": "Use data-testid for all selectors",
+            "category": "structural",
+        })
+
+        audit_rows = conn.execute(
+            "SELECT action, actor, reason FROM hint_audit WHERE hint_id = ?",
+            (hint_id,),
+        ).fetchall()
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["action"] == "unflag"
+        assert audit_rows[0]["actor"] == "user1"
+        assert "implicit override" in audit_rows[0]["reason"]
+
+    def test_upsert_unflagged_hint_writes_no_audit_row(self, in_memory_db):
+        """Re-submitting identical feedback on a non-flagged hint does NOT write hint_audit."""
+        conn = in_memory_db
+        hint_id = self._store_hint(conn, conflict_flagged=0)
+        engine = NLFeedbackEngine(conn)
+
+        from unittest.mock import MagicMock
+        record = MagicMock()
+        record.workflow_id = "wf-resubmit-clean"
+        record.domain = "example.com"
+        record.url = None
+        record.failure_category = None
+
+        engine.learn_from_feedback(record, {
+            "feedback_text": "Use data-testid for all selectors",
+            "category": "structural",
+        })
+
+        audit_rows = conn.execute(
+            "SELECT * FROM hint_audit WHERE hint_id = ?",
+            (hint_id,),
+        ).fetchall()
+        assert len(audit_rows) == 0
+
+
+# ===================================================================
+# 11. get_hints_by_id
+# ===================================================================
+
+
+class TestGetHintsById:
+    """get_hints_by_id returns only active, unflagged hints for the given IDs."""
+
+    def _insert_hint(self, conn, text: str, is_active: int, conflict_flagged: int) -> int:
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, "
+            " original_failure_category, evidence_count, "
+            " source_workflow_id, created_at, last_seen, "
+            " is_active, conflict_flagged) "
+            "VALUES (?, 'structural', 'global', NULL, NULL, NULL, 1, NULL, "
+            "        datetime('now'), datetime('now'), ?, ?)",
+            (text, is_active, conflict_flagged),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def test_none_ids_returns_empty_logs_warning(self, in_memory_db, caplog):
+        engine = NLFeedbackEngine(in_memory_db)
+        import logging
+        with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.optimization.nl_feedback_engine"):
+            result = engine.get_hints_by_id(None)
+        assert result == []
+        assert any("None" in r.message for r in caplog.records)
+
+    def test_empty_ids_returns_empty_no_query(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        result = engine.get_hints_by_id([])
+        assert result == []
+
+    def test_returns_only_active_unflagged(self, in_memory_db):
+        conn = in_memory_db
+        id_active = self._insert_hint(conn, "use data-testid", is_active=1, conflict_flagged=0)
+        id_flagged = self._insert_hint(conn, "use xpath", is_active=1, conflict_flagged=1)
+        id_disabled = self._insert_hint(conn, "use css", is_active=0, conflict_flagged=0)
+
+        engine = NLFeedbackEngine(conn)
+        result = engine.get_hints_by_id([id_active, id_flagged, id_disabled])
+
+        returned_ids = {r["id"] for r in result}
+        assert returned_ids == {id_active}, (
+            f"Expected only the active+unflagged hint, got {returned_ids}"
+        )
+
+    def test_all_disabled_returns_empty(self, in_memory_db):
+        conn = in_memory_db
+        id1 = self._insert_hint(conn, "hint a", is_active=0, conflict_flagged=0)
+        id2 = self._insert_hint(conn, "hint b", is_active=1, conflict_flagged=1)
+
+        engine = NLFeedbackEngine(conn)
+        result = engine.get_hints_by_id([id1, id2])
+        assert result == []
+
+    def test_no_db_conn_returns_empty(self):
+        engine = NLFeedbackEngine(execution_memory=None)
+        result = engine.get_hints_by_id([1, 2, 3])
+        assert result == []
+
+    def test_result_shape(self, in_memory_db):
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "use stable state", is_active=1, conflict_flagged=0)
+        engine = NLFeedbackEngine(conn)
+        result = engine.get_hints_by_id([hint_id])
+        assert len(result) == 1
+        assert result[0]["id"] == hint_id
+        assert result[0]["feedback_text"] == "use stable state"
+
+
+# ===================================================================
+# 12. conflict_flag_hints (new signature — per-hint reasons + audit)
+# ===================================================================
+
+
+class TestConflictFlagHints:
+    """conflict_flag_hints writes per-hint flags + hint_audit rows atomically."""
+
+    def _insert_hint(
+        self, conn, text: str = "some hint",
+        applied: int = 0, success: int = 0,
+    ) -> int:
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, "
+            " original_failure_category, evidence_count, applied_count, success_count, "
+            " source_workflow_id, created_at, last_seen) "
+            "VALUES (?, 'structural', 'global', NULL, NULL, NULL, 1, ?, ?, NULL, "
+            "        datetime('now'), datetime('now'))",
+            (text, applied, success),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def test_empty_dict_returns_without_db_write(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.conflict_flag_hints({}, trigger_type="trigger_1")
+        rows = in_memory_db.execute(
+            "SELECT * FROM nl_feedback_corrections WHERE conflict_flagged = 1"
+        ).fetchall()
+        assert rows == []
+
+    def test_flags_hint_and_writes_audit_row(self, in_memory_db):
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "use data-testid")
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints(
+            {hint_id: "v2 replaced data-testid approach"},
+            trigger_type="trigger_1",
+        )
+
+        row = conn.execute(
+            "SELECT conflict_flagged, conflict_flag_reason "
+            "FROM nl_feedback_corrections WHERE id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert row["conflict_flagged"] == 1
+        assert row["conflict_flag_reason"] == "v2 replaced data-testid approach"
+
+        import json
+        audit = conn.execute(
+            "SELECT action, actor, reason, before_value, after_value "
+            "FROM hint_audit WHERE hint_id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert audit["action"] == "trigger_1_flag"
+        assert audit["actor"] == "trigger_1"
+        assert audit["reason"] == "v2 replaced data-testid approach"
+        assert json.loads(audit["before_value"]) == {"conflict_flagged": 0}
+        after = json.loads(audit["after_value"])
+        assert after["conflict_flagged"] == 1
+        assert after["conflict_flag_reason"] == "v2 replaced data-testid approach"
+
+    def test_per_hint_reasons_stored_individually(self, in_memory_db):
+        conn = in_memory_db
+        id_a = self._insert_hint(conn, "hint A")
+        id_b = self._insert_hint(conn, "hint B")
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints(
+            {id_a: "reason for A", id_b: "reason for B"},
+            trigger_type="trigger_2",
+        )
+
+        row_a = conn.execute(
+            "SELECT conflict_flag_reason FROM nl_feedback_corrections WHERE id = ?",
+            (id_a,),
+        ).fetchone()
+        row_b = conn.execute(
+            "SELECT conflict_flag_reason FROM nl_feedback_corrections WHERE id = ?",
+            (id_b,),
+        ).fetchone()
+        assert row_a["conflict_flag_reason"] == "reason for A"
+        assert row_b["conflict_flag_reason"] == "reason for B"
+
+    def test_no_db_conn_returns_silently(self):
+        engine = NLFeedbackEngine(execution_memory=None)
+        engine.conflict_flag_hints({99: "some reason"}, trigger_type="trigger_1")
+
+    def test_trigger_type_stored_in_audit_action(self, in_memory_db):
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn)
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints({hint_id: "test reason"}, trigger_type="trigger_2")
+
+        audit = conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ?", (hint_id,)
+        ).fetchone()
+        assert audit["action"] == "trigger_2_flag"
+
+    def test_conflict_flag_hints_rollback_on_partial_failure(self, in_memory_db):
+        """Regression: if a mid-loop UPDATE raises, partial writes must be
+        rolled back so they do not piggy-back the next caller's commit on
+        the shared connection.
+
+        sqlite3.Connection.execute is C-level read-only, so direct attribute
+        monkey-patching raises AttributeError. A FlakyConn wrapper with
+        __getattr__ delegation is used instead (same pattern as SpyConn in
+        TestUpdateHintEffectivenessWithInjectedIds).
+        """
+        conn = in_memory_db
+        id_a = self._insert_hint(conn, "hint A")
+        id_b = self._insert_hint(conn, "hint B")
+
+        update_count = [0]
+
+        class FlakyWriterConn:
+            """Wraps _writer_conn; raises on the 2nd UPDATE."""
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().upper().startswith("UPDATE"):
+                    update_count[0] += 1
+                    if update_count[0] == 2:
+                        raise sqlite3.OperationalError("simulated mid-loop failure")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        class FlakyEm:
+            """execution_memory stub exposing a flaky _writer_conn."""
+            def __init__(self, real_compat_conn):
+                self._writer_conn = FlakyWriterConn(real_compat_conn._writer_conn)
+                self._real = real_compat_conn
+
+            def read_conn(self):
+                return self._real.read_conn()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        engine = NLFeedbackEngine(FlakyEm(conn))
+        engine.conflict_flag_hints(
+            {id_a: "reason A", id_b: "reason B"},
+            trigger_type="trigger_1",
+        )
+
+        # With rollback() in the except block, neither hint should be flagged:
+        # the first iteration's UPDATE was rolled back before it could piggyback
+        # any future commit on the shared connection.
+        rows = conn.execute(
+            "SELECT id, conflict_flagged FROM nl_feedback_corrections "
+            "WHERE id IN (?, ?)", (id_a, id_b),
+        ).fetchall()
+        flagged_states = {r["id"]: r["conflict_flagged"] for r in rows}
+        assert flagged_states[id_a] == 0, (
+            f"Partial UPDATE on hint {id_a} leaked past rollback — "
+            "this is the exact bug we are guarding against."
+        )
+        assert flagged_states[id_b] == 0
+
+    def test_conflict_flag_protected_high_history_hint(self, in_memory_db):
+        """Hint with applied=10, success=8 (80%) must NOT be flagged by a single trigger."""
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints({hint_id: "contradicts new approach"}, trigger_type="trigger_1")
+
+        row = conn.execute(
+            "SELECT conflict_flagged FROM nl_feedback_corrections WHERE id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert row["conflict_flagged"] == 0, (
+            "Hint with 80% success rate over 10 applications must be protected "
+            "from single-trigger flagging (strong-history guard)"
+        )
+
+    def test_conflict_flag_low_history_hint_still_flagged(self, in_memory_db):
+        """Hint with applied=3, success=3 (100% but N<5) must still be flagged."""
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "low history hint", applied=3, success=3)
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints({hint_id: "LLM says conflict"}, trigger_type="trigger_1")
+
+        row = conn.execute(
+            "SELECT conflict_flagged FROM nl_feedback_corrections WHERE id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert row["conflict_flagged"] == 1, (
+            "Hint with applied=3 is below the protection threshold of 5 — "
+            "must be flagged even at 100% success rate"
+        )
+
+    def test_conflict_flag_records_trigger_event_when_protected(self, in_memory_db):
+        """Documents the contract: suppressed flagging leaves conflict_flagged=0 and
+        the hint still queryable. The caller's trigger_events write is unaffected
+        (caller path unchanged — not tested here)."""
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "high-history hint", applied=10, success=8)
+        engine = NLFeedbackEngine(conn)
+
+        engine.conflict_flag_hints({hint_id: "trigger fired"}, trigger_type="trigger_1")
+
+        row = conn.execute(
+            "SELECT conflict_flagged FROM nl_feedback_corrections WHERE id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert row["conflict_flagged"] == 0, "Protected hint must remain unflagged"
+
+        result = engine.get_hints_by_id([hint_id])
+        assert len(result) == 1, "Protected hint must still be returned by get_hints_by_id"
+        assert result[0]["id"] == hint_id
+
+
+# ===================================================================
+# 12b. conflict_flag_hints return-value contract (schema v12)
+# ===================================================================
+# Schema v12 split trigger_events.flagged_hint_ids (LLM recommendation) from
+# actually_flagged_hint_ids (enforcement, post-strong-history-guard).
+# conflict_flag_hints is now the source of truth for the enforcement list —
+# fire_conflict_detection forwards the return value into the telemetry row.
+
+
+class TestConflictFlagHintsReturnValue:
+
+    def _insert_hint(
+        self, conn, text: str = "some hint",
+        applied: int = 0, success: int = 0,
+    ) -> int:
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, "
+            " original_failure_category, evidence_count, applied_count, success_count, "
+            " source_workflow_id, created_at, last_seen) "
+            "VALUES (?, 'structural', 'global', NULL, NULL, NULL, 1, ?, ?, NULL, "
+            "        datetime('now'), datetime('now'))",
+            (text, applied, success),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def test_returns_actually_flagged_ids_on_success(self, in_memory_db):
+        """A non-protected hint that gets flagged must appear in the return list."""
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "flagme")
+        engine = NLFeedbackEngine(conn)
+
+        result = engine.conflict_flag_hints(
+            {hint_id: "v2 disproves this"}, trigger_type="trigger_1",
+        )
+
+        assert result == [hint_id], (
+            f"Expected [{hint_id}] returned, got {result!r}"
+        )
+
+    def test_returns_empty_list_when_all_suppressed_by_strong_history(self, in_memory_db):
+        """Strong-history-protected hints must NOT appear in the return list."""
+        conn = in_memory_db
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        engine = NLFeedbackEngine(conn)
+
+        result = engine.conflict_flag_hints(
+            {hint_id: "contradicts new approach"}, trigger_type="trigger_1",
+        )
+
+        assert result == [], (
+            f"Protected hint must be excluded from the actually-flagged list; "
+            f"got {result!r}"
+        )
+
+    def test_returns_only_unprotected_ids_in_mixed_set(self, in_memory_db):
+        """A mix of protected + unprotected hints must yield only the unprotected
+        ones — matches the trigger_events.actually_flagged_hint_ids semantic."""
+        conn = in_memory_db
+        protected_id   = self._insert_hint(conn, "old proven", applied=10, success=8)
+        unprotected_id = self._insert_hint(conn, "new untested", applied=2, success=1)
+        engine = NLFeedbackEngine(conn)
+
+        result = engine.conflict_flag_hints(
+            {protected_id: "guard kicks in",
+             unprotected_id: "low-history flags through"},
+            trigger_type="trigger_1",
+        )
+
+        assert result == [unprotected_id], (
+            f"Expected only the unprotected hint {unprotected_id} returned; "
+            f"got {result!r}"
+        )
+
+    def test_returns_empty_list_for_empty_input(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        assert engine.conflict_flag_hints({}, trigger_type="trigger_1") == []
+
+    def test_returns_empty_list_on_rollback(self, in_memory_db):
+        """Mid-loop failure → rollback → empty list (no false positives).
+
+        Mirrors the existing rollback test but additionally asserts the
+        return-value contract: nothing is committed, nothing is returned.
+        """
+        conn = in_memory_db
+        id_a = self._insert_hint(conn, "hint A")
+        id_b = self._insert_hint(conn, "hint B")
+
+        update_count = [0]
+
+        class FlakyWriterConn:
+            def __init__(self, real):
+                self._real = real
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().upper().startswith("UPDATE"):
+                    update_count[0] += 1
+                    if update_count[0] == 2:
+                        raise sqlite3.OperationalError("simulated mid-loop failure")
+                return self._real.execute(sql, *args, **kwargs)
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        class FlakyEm:
+            def __init__(self, real_compat_conn):
+                self._writer_conn = FlakyWriterConn(real_compat_conn._writer_conn)
+                self._real = real_compat_conn
+            def read_conn(self):
+                return self._real.read_conn()
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        engine = NLFeedbackEngine(FlakyEm(conn))
+        result = engine.conflict_flag_hints(
+            {id_a: "reason A", id_b: "reason B"},
+            trigger_type="trigger_1",
+        )
+
+        assert result == [], (
+            f"On rollback, the actually-flagged list must be empty (DB is "
+            f"unchanged); got {result!r}"
+        )
+
+
+# ===================================================================
+# 13. C1 regression — admin triage failure logs a warning
+# ===================================================================
+
+
+class TestAdminTriageWarning:
+    """Regression: create_hint logs WARNING when run_triage=True and process_feedback raises."""
+
+    def test_triage_failure_logs_warning(self, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+
+        from src.backend.api.learning_endpoints import HintCreateRequest, create_hint
+
+        request = HintCreateRequest(
+            feedback_text="Click the submit button",
+            anchor_query="submit the form on the page",
+            scope="global",
+            run_triage=True,
+            actor="test-admin",
+        )
+        fb = MagicMock()
+        fb.nl_engine.process_feedback.side_effect = RuntimeError("regex crash")
+
+        # _admin_conn is called after the triage block; raising here keeps the
+        # test isolated (no real DB) while still exercising the warning path.
+        with patch("src.backend.api.learning_endpoints._admin_conn",
+                   side_effect=RuntimeError("db-not-needed")), \
+             caplog.at_level(logging.WARNING, logger="src.backend.api.learning_endpoints"):
+            with pytest.raises(RuntimeError, match="db-not-needed"):
+                create_hint(request, fb=fb)
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("Admin triage failed" in m for m in warning_msgs), (
+            f"Expected WARNING about triage failure; got: {warning_msgs}"
+        )

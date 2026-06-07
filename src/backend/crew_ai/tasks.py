@@ -52,14 +52,6 @@ class IdentificationOutput(BaseModel):
     steps: List[IdentifiedElement] = Field(description="Steps with identified locators")
 
 
-class ValidationOutput(BaseModel):
-    """Pydantic model for validation task output."""
-    valid: bool = Field(description="Whether the code is valid or not")
-    reason: str = Field(description="Explanation of validation result")
-    errors: Optional[List[str]] = Field(
-        default=None, description="List of error messages if code is invalid")
-
-
 class AssemblyOutput(BaseModel):
     """Pydantic model for assemble_code_task output - Robot Framework code."""
     code: str = Field(description="Complete Robot Framework code ready to save as .robot file")
@@ -236,29 +228,6 @@ def identification_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     # Failed to extract - trigger retry
     logger.warning("❌ Guardrail: Could not extract valid IdentificationOutput JSON")
     return (False, "Output must be a valid JSON object with 'steps' array. Ensure proper JSON formatting.")
-
-
-def validation_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
-    """
-    Guardrail for validate_code_task that handles JSON extraction.
-    
-    The LLM sometimes outputs valid JSON followed by extra text (trailing characters).
-    This guardrail extracts the valid JSON portion.
-    
-    Returns:
-        (True, fixed_output) - If we can extract valid JSON
-        (False, feedback) - If JSON extraction fails, triggers retry
-    """
-    raw = result.raw
-    logger.debug(f"ValidationOutput guardrail received (length: {len(raw)})")
-    
-    extracted = _extract_json_by_key(raw, "valid", "ValidationOutput")
-    if extracted:
-        return (True, extracted)
-    
-    # Failed to extract - trigger retry
-    logger.warning("❌ Guardrail: Could not extract valid ValidationOutput JSON")
-    return (False, "Output ONLY a raw JSON object with 'valid' (boolean) and 'reason' (string) fields — no text before it, no markdown fences, no explanation after it. Example: {\"valid\": true, \"reason\": \"Code is syntactically correct.\"}")
 
 
 class RobotTasks:
@@ -740,114 +709,55 @@ Generated Test
             guardrail=assembly_output_guardrail,  # Fixes format without retry
         )
 
-    def validate_code_task(self, agent, code_assembler_agent=None) -> Task:
-        # Get library-specific validation rules
-        validation_rules = ""
-        if self.library_context:
-            validation_rules = f"\n\n{self.library_context.validation_context}\n\n"
-        else:
-            # Fallback validation rules
-            validation_rules = """
-                --- VALIDATION CHECKLIST ---
-                1. All required libraries are imported (SeleniumLibrary, BuiltIn, String if needed)
-                2. All keywords have the correct number of arguments
-                3. Variables are properly declared before use
-                4. Should Be True statements have valid expressions
-                5. Run Keyword If statements have proper syntax
-                6. Price/numeric comparisons use proper conversion (Evaluate)
+    def repair_code_task(self, agent, robot_code: str, dryrun_errors: str) -> Task:
+        """Conservative repair task for the dryrun gate's bounded repair loop.
 
-                --- COMMON ERRORS TO CHECK ---
-                1. Get Text without locator argument
-                2. Invalid expressions in Should Be True
-                3. Missing variable assignments (${var}=)
-                4. Incorrect conditional syntax
-                """
+        Built by the top-level repair mini-crew in dryrun_service.repair_robot_code
+        (NOT part of the main 3-agent crew). The agent receives the current code and
+        the exact `robot --dryrun` error text, and is instructed to change ONLY the
+        flagged keyword/syntax while reproducing every locator and value VERBATIM
+        (production-hardening §8.1 — prevents a one-keyword fix from silently
+        rewriting a carefully-chosen locator from the Element Identifier).
 
+        Reuses AssemblyOutput + assembly_output_guardrail so the repaired output is
+        parsed by the SAME pipeline (dryrun_service.extract_and_normalize_robot_code)
+        as the main assembler output — no special-casing.
+        """
+        description = (
+            "⚠️ **CONSERVATIVE REPAIR TASK — FIX ONLY WHAT IS FLAGGED** ⚠️\n"
+            "The Robot Framework code below FAILED `robot --dryrun` — a compile-time "
+            "check of keyword names, argument counts, library imports, and syntax. "
+            "Your ONLY job is to correct the specific problem(s) reported, then output "
+            "the COMPLETE corrected file.\n\n"
+
+            "🔒 **CRITICAL — PRESERVE EVERYTHING ELSE VERBATIM** 🔒\n"
+            "1. Change ONLY the keyword(s)/syntax the error names. Touch nothing else.\n"
+            "2. Reproduce EVERY locator (css=, xpath=, id=, name=, etc.) and EVERY "
+            "value/argument EXACTLY as given. Do NOT re-style, rename, reorder, "
+            "'improve', or substitute any locator or value.\n"
+            "3. Do NOT add, remove, or reorder test steps, settings, or variables.\n"
+            "4. If the error says a keyword does not exist and SUGGESTS an alternative "
+            "(e.g. \"Did you mean: Browser.Click\"), use the suggested keyword.\n"
+            "5. Keep the same library (Browser vs SeleniumLibrary) — fix to the keyword "
+            "that belongs to the library already imported in the Settings section.\n\n"
+
+            "--- ROBOT --DRYRUN ERRORS (fix exactly these) ---\n"
+            f"{dryrun_errors}\n\n"
+
+            "--- CURRENT CODE (correct in place, preserve all locators/values verbatim) ---\n"
+            f"{robot_code}\n"
+        )
         return Task(
-            description=(
-                "⚠️ **PRIMARY TASK: VALIDATE THE ROBOT FRAMEWORK CODE** ⚠️\n"
-                "Your MAIN responsibility is to validate Robot Framework code for correctness.\n"
-                "Delegation is ONLY for invalid code - DO NOT delegate if code is valid!\n\n"
-
-                f"{self._get_task_hints('validator')}"
-
-                f"{validation_rules}"
-
-                "--- KEYWORD VERIFICATION (CRITICAL - PREVENT FALSE POSITIVES) ---\n"
-                "⚠️ BEFORE flagging ANY keyword as having wrong/missing arguments:\n"
-                "1. **USE keyword_search tool** to look up the actual keyword signature\n"
-                "2. **CHECK required vs optional arguments** - many parameters look required but are optional\n"
-                "3. **ONLY flag an error** if the code truly violates the documented syntax\n\n"
-                "Example false positives to avoid:\n"
-                "- 'Keyboard Key    press    Enter' is VALID (selector is optional)\n"
-                "- 'Click    ${locator}' is VALID (other args are optional)\n"
-                "When in doubt, SEARCH FIRST before flagging!\n\n"
-
-                "--- VALIDATION WORKFLOW ---\n"
-                "1. **Analyze the code thoroughly** - Check syntax, keywords, variables, locators\n"
-                "2. **If code is VALID:**\n"
-                "   - Provide your Final Answer with: {\"valid\": true, \"reason\": \"Code is syntactically correct...\"}\n"
-                "   - ⚠️ DO NOT delegate to any agent - your job is DONE\n"
-                "3. **If code is INVALID (has errors):**\n"
-                "   - You MUST call the delegation tool FIRST using this EXACT format:\n"
-                "     Action: Delegate work to coworker\n"
-                "     Action Input: {\"coworker\": \"Robot Framework Code Generator (Output ONLY Code)\", \"task\": \"Fix errors: [list your errors]\", \"context\": \"[paste the original code]\"}\n"
-                "   - WAIT for the coworker to return corrected code\n"
-                "   - THEN provide your Final Answer with the corrected code\n\n"
-
-                "⚠️ **CRITICAL DELEGATION RULES** ⚠️\n"
-                "- If code has errors: You MUST use 'Action: Delegate work to coworker' format\n"
-                "- DO NOT output 'Final Answer' until AFTER delegation completes\n"
-                "- The delegation tool will return corrected code from the Code Generator\n"
-                "- Only after receiving corrected code should you provide your Final Answer\n\n"
-
-                "--- DELEGATION FORMAT (USE EXACTLY) ---\n"
-                "When you find errors, output THIS format (not Final Answer):\n"
-                "Thought: I found errors in the code. I need to delegate to the Code Generator to fix them.\n"
-                "Action: Delegate work to coworker\n"
-                "Action Input: {\"coworker\": \"Robot Framework Code Generator (Output ONLY Code)\", \"task\": \"Fix these errors in the Robot Framework code: [ERROR LIST]\", \"context\": \"Original code:\\n[PASTE CODE HERE]\\n\\nErrors to fix:\\n[ERROR DETAILS]\"}\n\n"
-
-                "**Example delegation for errors:**\n"
-                "Action: Delegate work to coworker\n"
-                "Action Input: {\"coworker\": \"Robot Framework Code Generator (Output ONLY Code)\", \"task\": \"Fix these errors: 1) Missing Variable Assignment on line 15, 2) Incorrect Keyword 'Input Text' should be 'Fill Text'\", \"context\": \"Original code:\\n*** Settings ***\\nLibrary Browser\\n...\\n\\nErrors to fix:\\n- Line 15: 'Get Text' returns value but no variable assigned. Fix: ${result}=    Get Text    ${locator}\\n- 'Input Text' is SeleniumLibrary keyword, use 'Fill Text' for Browser Library\"}\n\n"
-
-                "--- JSON OUTPUT FORMAT (for Final Answer only) ---\n"
-                "⚠️ Your Final Answer must be ONLY the raw JSON object — no text before it, "
-                "no markdown fences (no ```json), no explanation after it.\n\n"
-                "**If code is VALID (no errors found) - use Final Answer directly:**\n"
-                "{\n"
-                "  \"valid\": true,\n"
-                "  \"reason\": \"Code is syntactically correct and follows all validation rules.\"\n"
-                "}\n\n"
-
-                "**If code WAS INVALID but now FIXED after delegation:**\n"
-                "{\n"
-                "  \"valid\": true,\n"
-                "  \"reason\": \"Code was corrected by delegation. All errors have been fixed.\"\n"
-                "}\n\n"
-
-                "--- ERROR REPORTING GUIDELINES (Only if code is invalid) ---\n"
-                "For each error in the errors array, provide:\n"
-                "- Error type (e.g., Missing Variable Assignment, Syntax Error, Incorrect Keyword)\n"
-                "- Specific location (line number or keyword name)\n"
-                "- What is wrong\n"
-                "- How to fix it (with example if possible)\n\n"
-
-                "--- CRITICAL RULES ---\n"
-                "1. ⚠️ **MOST IMPORTANT:** If code is valid, return valid=true and DO NOT delegate!\n"
-                "2. If code is INVALID: Use 'Action: Delegate work to coworker' format - DO NOT output Final Answer with valid=false!\n"
-                "3. Your Final Answer should ONLY contain valid=true (either code was valid or fixed after delegation)\n"
-                "4. The JSON must have 'valid' (boolean) and 'reason' (string) fields\n"
-                "5. Be specific and actionable in error descriptions when delegating\n"
-                "6. After delegation completes, provide Final Answer with the corrected result"
+            description=description,
+            expected_output=(
+                "A JSON object with 'code' key containing the COMPLETE corrected Robot "
+                "Framework file. Format: {\"code\": \"*** Settings ***\\n...\"}. Only the "
+                "flagged keyword/syntax is changed; all locators and values are reproduced "
+                "verbatim. No explanations, no markdown — only the JSON object."
             ),
-            expected_output="A valid JSON object with 'valid': true. If errors are found, delegate to Robot Framework Code Generator FIRST using Action format, then return valid=true after code is corrected.",
             agent=agent,
-            output_pydantic=ValidationOutput,  # Force structured JSON output using Pydantic model
-            guardrail=validation_output_guardrail,  # Fixes JSON with trailing chars
-            # Only allow delegation to Code Assembler
-            allowed_agents=[
-                code_assembler_agent] if code_assembler_agent else None,
+            output_pydantic=AssemblyOutput,
+            guardrail=assembly_output_guardrail,  # same format-fixer as the main assembler
         )
 
     # NOTE: analyze_popup_strategy_task has been REMOVED

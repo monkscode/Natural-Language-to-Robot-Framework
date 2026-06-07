@@ -58,13 +58,21 @@ from src.backend.crew_ai.optimization.nl_feedback_engine import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing in-memory connection."""
+    """Create ExecutionMemory backed by existing connection.
+
+    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
+    real ExecutionMemory it wraps so read_conn() works correctly.
+    """
+    if hasattr(conn, '_em'):
+        return conn._em
     em = ExecutionMemory.__new__(ExecutionMemory)
     em.db_path = ":memory:"
     em._chroma_dir = None
-    em.conn = conn
+    em._writer_conn = conn
     em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
     em._execution_collection = None
+    em._chroma_failed_at = None
+    em._chroma_last_error = None
     return em
 
 

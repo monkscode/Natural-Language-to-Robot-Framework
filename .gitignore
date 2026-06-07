@@ -8,7 +8,7 @@ __pycache__/
 *.pyd
 
 # Logs
-*.log
+*.log*
 logs/audit
 
 # Virtual environment

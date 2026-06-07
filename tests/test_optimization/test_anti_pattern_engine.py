@@ -5,6 +5,7 @@ Pytest conversion of scripts/verify_day04.py.
 Uses in-memory SQLite database -- does NOT modify real data.
 """
 
+import contextlib
 import sqlite3
 
 from src.backend.crew_ai.optimization.learning_config import (
@@ -34,7 +35,47 @@ class MockRecord:
         self.domain = domain
 
 
-def _create_test_db() -> sqlite3.Connection:
+class _EmCompat:
+    """Minimal ExecutionMemory stand-in for AntiPatternEngine unit tests.
+
+    Exposes ._writer_conn and .read_conn() so the engine's thread-checked
+    write paths and read_conn() context manager both work. Also proxies
+    .execute() and .commit() so helper functions like _seed_anti_pattern
+    can use the returned object directly.
+    """
+
+    def __init__(self, writer_conn):
+        self._writer_conn = writer_conn
+
+    def execute(self, *args, **kwargs):
+        return self._writer_conn.execute(*args, **kwargs)
+
+    def commit(self):
+        return self._writer_conn.commit()
+
+    def rollback(self):
+        return self._writer_conn.rollback()
+
+    def close(self):
+        return self._writer_conn.close()
+
+    @contextlib.contextmanager
+    def read_conn(self):
+        yield self._writer_conn
+
+    def filter_by_query_similarity(self, user_query, candidate_ids,
+                                   kind, threshold=0.55):
+        # This unit-test shim has no ChromaDB — mirror the real
+        # ExecutionMemory's documented "ChromaDB unavailable" degradation:
+        # fail open (score/evidence gating only, no semantic narrowing).
+        return set(candidate_ids)
+
+    def add_anchor(self, *args, **kwargs):
+        # No ChromaDB in this shim — anchor embedding is a no-op.
+        pass
+
+
+def _create_test_db() -> "_EmCompat":
     """Create in-memory SQLite DB with anti_patterns schema."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -53,7 +94,7 @@ def _create_test_db() -> sqlite3.Connection:
         )
     """)
     conn.commit()
-    return conn
+    return _EmCompat(conn)
 
 
 def _seed_anti_pattern(conn, **overrides):
@@ -534,8 +575,8 @@ class TestGetHints:
 
         conn.close()
 
-    def test_role_filtering_validator_returns_none(self):
-        """Verify get_hints() returns None for validator."""
+    def test_role_filtering_identifier_returns_none(self):
+        """Verify get_hints() returns None for identifier."""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
         _seed_anti_pattern(conn,
@@ -545,9 +586,9 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "validator")
+                                 "https://demoqa.com", "identifier")
         assert hints is None, \
-            "get_hints() returns None for validator"
+            "get_hints() returns None for identifier"
 
         conn.close()
 
@@ -903,8 +944,11 @@ class TestInternals:
 
         conn.close()
 
-    def test_find_matching_permissive_threshold(self):
-        """Verify _find_matching_anti_patterns with permissive 2-word overlap."""
+    def test_find_matching_returns_score_gated_rows(self):
+        """_find_matching_anti_patterns returns score/evidence-gated rows.
+        Query-relevance narrowing is the query-similarity filter's job
+        (tested against real ChromaDB in test_query_similarity.py); with no
+        ChromaDB the filter fails open, so every gated row is returned."""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
 
@@ -922,8 +966,7 @@ class TestInternals:
         )
 
         result = engine._find_matching_anti_patterns("verify the table")
-        assert len(result) == 1 and result[0]["failure_category"] == "A1", \
-            "2-word overlap: matches (permissive)"
+        assert {r["failure_category"] for r in result} == {"A1", "B1"}
 
         conn.close()
 
@@ -951,8 +994,11 @@ class TestInternals:
 
         conn.close()
 
-    def test_find_matching_no_overlap_empty(self):
-        """Verify empty result when no word overlap."""
+    def test_find_matching_empty_query_returns_empty(self):
+        """C5: an empty user_query short-circuits to [] — it carries no
+        relevance signal and cannot be embedded. (An unrelated non-empty
+        query being dropped is semantic behaviour, tested with real ChromaDB
+        in test_query_similarity.py.)"""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
 
@@ -963,9 +1009,8 @@ class TestInternals:
             score=0.8,
         )
 
-        result = engine._find_matching_anti_patterns("completely unrelated query xyz")
-        assert len(result) == 0, \
-            "No overlap: empty result"
+        assert engine._find_matching_anti_patterns("") == []
+        assert engine._find_matching_anti_patterns("   ") == []
 
         conn.close()
 
@@ -1234,8 +1279,12 @@ class TestEdgeCases:
             "learn() stores domain from record"
         conn.close()
 
-    def test_multiple_anti_patterns_hints_only_matching(self):
-        """Verify hints come only from matching anti-patterns."""
+    def test_multiple_anti_patterns_each_yields_hint(self):
+        """get_hints emits one planner hint per anti-pattern returned by
+        _find_matching_anti_patterns. Relevance narrowing is the
+        query-similarity filter's job (tested with real ChromaDB in
+        test_query_similarity.py); with no ChromaDB the filter fails open,
+        so all three gated anti-patterns yield hints."""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
 
@@ -1260,8 +1309,7 @@ class TestEdgeCases:
 
         hints = engine.get_hints("verify the table rows",
                                  "https://demoqa.com", "planner")
-        assert hints is not None and len(hints) == 1, \
-            f"Hints only from matching anti-patterns: count={len(hints) if hints else 0}"
+        assert hints is not None and len(hints) == 3
 
         conn.close()
 

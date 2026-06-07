@@ -9,6 +9,7 @@ Focuses on genuine coverage gaps NOT tested by verify_day01-08:
   5. Real engine context injection with temp DB
   6. NLFeedbackEngine edge cases
   7. LEARNING_CONFIG invariants
+  8. _call_conflict_detection_llm response_format override warning (M2)
 
 Migrated from scripts/verify_day09_unit.py to pytest format.
 Subprocess regression tests removed (pytest discovers all tests).
@@ -60,13 +61,21 @@ from src.backend.crew_ai.optimization.nl_feedback_engine import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing in-memory connection."""
+    """Create ExecutionMemory backed by existing connection.
+
+    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
+    real ExecutionMemory it wraps so read_conn() works correctly.
+    """
+    if hasattr(conn, '_em'):
+        return conn._em
     em = ExecutionMemory.__new__(ExecutionMemory)
     em.db_path = ":memory:"
     em._chroma_dir = None
-    em.conn = conn
+    em._writer_conn = conn
     em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
     em._execution_collection = None
+    em._chroma_failed_at = None
+    em._chroma_last_error = None
     return em
 
 
@@ -304,13 +313,6 @@ def test_fa_classify_none_graceful():
 # Section 3: StructuralRuleEngine Gaps -- Role Filtering
 # ===================================================================
 
-def test_sre_hints_validator_returns_none(in_memory_db):
-    sre, conn = _create_sre_with_active_rule(in_memory_db)
-    hints = sre.get_hints("verify all rows show Active",
-                          "https://example.com", "validator")
-    assert hints is None, f"Expected None for validator, got {hints}"
-
-
 def test_sre_hints_identifier_returns_none(in_memory_db):
     sre, conn = _create_sre_with_active_rule(in_memory_db)
     hints = sre.get_hints("verify all rows show Active",
@@ -484,13 +486,18 @@ def test_fl_process_execution_submit_count(in_memory_db):
         contradiction_detector=ContradictionDetector(conn),
         write_queue=cq, circuit_breaker=LearningCircuitBreaker(),
     )
+    # FeedbackLoop.__init__ submits the one-time anchor reconcile; reset so
+    # the count below reflects only process_execution's own submits.
+    cq.count = 0
     fl.process_execution(
         workflow_id="wf-cnt", user_query="q",
         url="https://example.com", robot_code="code",
         test_status="passed",
     )
-    # Expected submits: store(1) + 3 engines(3) + pattern_learner(1) + metrics(1) + daily_stats(1) + nl_engine(1) = 8
-    assert cq.count == 8, f"Expected 8 submits, got {cq.count}"
+    # Expected submits: store(1) + 3 engines(3) + pattern_learner(1) + metrics(1) + daily_stats(1) = 7.
+    # The old Step-7 nl_engine submit (update_hint_effectiveness) was removed —
+    # NL-hint usage attribution now runs from workflow_service._process_learning.
+    assert cq.count == 7, f"Expected 7 submits, got {cq.count}"
 
 
 def test_fl_process_user_feedback_persists(in_memory_db):
@@ -915,3 +922,74 @@ def test_registry_caches_after_first_call():
     finally:
         registry._feedback_loop_instance = saved_instance
         registry._feedback_loop_init_attempted = saved_attempted
+
+
+# ---------------------------------------------------------------------------
+# M2 — _call_conflict_detection_llm response_format override warning
+# ---------------------------------------------------------------------------
+
+class TestCallConflictDetectionLlmResponseFormatWarning:
+    """_call_conflict_detection_llm warns when caller passes a conflicting response_format."""
+
+    def _run(self, extra_kwargs):
+        from unittest.mock import MagicMock, patch
+        from src.backend.crew_ai.optimization.learning_config import _call_conflict_detection_llm
+
+        mock_chunk = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"flag": false}'
+
+        with patch("litellm.completion", return_value=iter([mock_chunk])), \
+             patch("litellm.stream_chunk_builder", return_value=mock_response):
+            return _call_conflict_detection_llm(
+                model_string="gemini/gemini-2.5-flash",
+                messages=[{"role": "user", "content": "test"}],
+                extra_kwargs=extra_kwargs,
+            )
+
+    def test_warns_when_caller_response_format_conflicts(self, caplog):
+        """Warning is emitted when caller passes a response_format != json_object."""
+        import logging
+        with caplog.at_level(logging.WARNING,
+                             logger="src.backend.crew_ai.optimization.learning_config"):
+            self._run({"response_format": {"type": "text"}})
+
+        conflict_warns = [
+            r for r in caplog.records
+            if "[CONFLICT_DETECT]" in r.message and "overridden" in r.message
+        ]
+        assert len(conflict_warns) == 1, (
+            f"Expected exactly 1 override warning, got {len(conflict_warns)}: "
+            + str([r.message for r in conflict_warns])
+        )
+
+    def test_no_warning_when_format_already_json_object(self, caplog):
+        """No warning when caller passes the same response_format we enforce."""
+        import logging
+        with caplog.at_level(logging.WARNING,
+                             logger="src.backend.crew_ai.optimization.learning_config"):
+            self._run({"response_format": {"type": "json_object"}})
+
+        conflict_warns = [
+            r for r in caplog.records
+            if "[CONFLICT_DETECT]" in r.message and "overridden" in r.message
+        ]
+        assert len(conflict_warns) == 0, (
+            "No warning expected when format already matches json_object"
+        )
+
+    def test_no_warning_when_no_response_format_in_extra_kwargs(self, caplog):
+        """No warning when caller does not pass response_format at all."""
+        import logging
+        with caplog.at_level(logging.WARNING,
+                             logger="src.backend.crew_ai.optimization.learning_config"):
+            self._run({})
+
+        conflict_warns = [
+            r for r in caplog.records
+            if "[CONFLICT_DETECT]" in r.message and "overridden" in r.message
+        ]
+        assert len(conflict_warns) == 0, (
+            "No warning expected when no response_format was passed"
+        )

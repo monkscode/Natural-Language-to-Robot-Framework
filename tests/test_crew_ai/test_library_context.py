@@ -130,14 +130,6 @@ class TestBrowserLibraryContext:
         # Old click-chain class selectors must be absent.
         assert ".ts-option" not in ctx_str
 
-    def test_validation_context_is_string(self, ctx):
-        assert isinstance(ctx.validation_context, str)
-
-    def test_validation_context_warns_about_selenium_keywords(self, ctx):
-        context = ctx.validation_context
-        # Should mention that SeleniumLibrary keywords are invalid
-        assert "Input Text" in context or "Open Browser" in context
-
     def test_get_full_context_planner(self, ctx):
         context = ctx.get_full_context("planner")
         assert isinstance(context, str)
@@ -145,11 +137,6 @@ class TestBrowserLibraryContext:
 
     def test_get_full_context_assembler(self, ctx):
         context = ctx.get_full_context("assembler")
-        assert isinstance(context, str)
-        assert len(context) > 0
-
-    def test_get_full_context_validator(self, ctx):
-        context = ctx.get_full_context("validator")
         assert isinstance(context, str)
         assert len(context) > 0
 
@@ -199,11 +186,8 @@ class TestSeleniumLibraryContext:
     def test_code_assembly_context_is_string(self, ctx):
         assert isinstance(ctx.code_assembly_context, str)
 
-    def test_validation_context_is_string(self, ctx):
-        assert isinstance(ctx.validation_context, str)
-
     def test_get_full_context_all_roles(self, ctx):
-        for role in ("planner", "assembler", "validator"):
+        for role in ("planner", "assembler"):
             result = ctx.get_full_context(role)
             assert isinstance(result, str)
             assert len(result) > 0

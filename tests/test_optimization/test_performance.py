@@ -26,6 +26,7 @@ from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
     LearningWriteQueue,
+    WRITER_THREAD_NAME,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
     ExecutionMemory,
@@ -53,13 +54,21 @@ from src.backend.crew_ai.optimization.feedback_loop import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection."""
+    """Create ExecutionMemory backed by existing connection.
+
+    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
+    real ExecutionMemory it wraps so read_conn() works correctly.
+    """
+    if hasattr(conn, '_em'):
+        return conn._em
     em = ExecutionMemory.__new__(ExecutionMemory)
     em.db_path = ":memory:"
     em._chroma_dir = None
-    em.conn = conn
+    em._writer_conn = conn
     em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
     em._execution_collection = None
+    em._chroma_failed_at = None
+    em._chroma_last_error = None
     return em
 
 
@@ -353,18 +362,14 @@ def test_perf_process_execution_with_async_queue(tmp_db_path):
     LearningWriteQueue submits work to a background thread, and
     in-memory SQLite connections cannot be shared across threads.
     """
-    conn = sqlite3.connect(tmp_db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    SchemaManager.ensure_current(conn)
-
+    em = ExecutionMemory(db_path=tmp_db_path)
     try:
-        em = create_execution_memory(conn)
-        ie = IntentExtractor(conn)
-        se = StructuralRuleEngine(conn, ie)
-        ke = KeywordCorrectionEngine(conn)
-        ae = AntiPatternEngine(conn)
-        mt = LearningMetricsTracker(conn)
-        cd = ContradictionDetector(conn)
+        ie = IntentExtractor(em)
+        se = StructuralRuleEngine(em, ie)
+        ke = KeywordCorrectionEngine(em)
+        ae = AntiPatternEngine(em)
+        mt = LearningMetricsTracker(em)
+        cd = ContradictionDetector(em)
         wq = LearningWriteQueue()  # Real async queue
         cb = LearningCircuitBreaker()
         fa = MockFailureAnalyzer()
@@ -393,7 +398,7 @@ def test_perf_process_execution_with_async_queue(tmp_db_path):
             "Record should be stored after async queue drains"
         )
     finally:
-        conn.close()
+        em.close()
 
 
 # ===================================================================
@@ -559,30 +564,24 @@ def test_concurrent_engine_learns(tmp_db_path):
     Each thread creates its own FeedbackLoop with a shared file-based DB,
     simulating 5 users submitting test results simultaneously.
     """
-    conn = sqlite3.connect(tmp_db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    SchemaManager.ensure_current(conn)
-    conn.close()
+    # Initialize schema + WAL then close so threads open fresh connections.
+    _init_em = ExecutionMemory(db_path=tmp_db_path)
+    _init_em.close()
 
     errors = []
 
     def user_thread(user_id):
         try:
-            # Each user gets their own connection (like real multi-user scenario)
-            tc = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            tc.row_factory = sqlite3.Row
-            tc.execute("PRAGMA journal_mode=WAL")
-            tc.execute("PRAGMA busy_timeout=5000")
-
-            em = create_execution_memory(tc)
-            ie = IntentExtractor(tc)
-            se = StructuralRuleEngine(tc, ie)
-            ke = KeywordCorrectionEngine(tc)
-            ae = AntiPatternEngine(tc)
-            mt = LearningMetricsTracker(tc)
-            cd = ContradictionDetector(tc)
+            # Rename to writer name so _assert_writer_thread passes for this user.
+            threading.current_thread().name = WRITER_THREAD_NAME
+            # Each user gets their own ExecutionMemory (its own _writer_conn).
+            em = ExecutionMemory(db_path=tmp_db_path)
+            ie = IntentExtractor(em)
+            se = StructuralRuleEngine(em, ie)
+            ke = KeywordCorrectionEngine(em)
+            ae = AntiPatternEngine(em)
+            mt = LearningMetricsTracker(em)
+            cd = ContradictionDetector(em)
             sq = SynchronousWriteQueue()
             cb = LearningCircuitBreaker()
             fa = MockFailureAnalyzer()
@@ -609,7 +608,7 @@ def test_concurrent_engine_learns(tmp_db_path):
                     test_status="passed" if i % 2 == 0 else "failed",
                 )
 
-            tc.close()
+            em.close()
         except Exception as e:
             errors.append(f"User {user_id}: {e}")
 

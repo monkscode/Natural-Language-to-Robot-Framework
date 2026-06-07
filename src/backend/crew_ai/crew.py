@@ -4,6 +4,7 @@ from src.backend.crew_ai.tasks import RobotTasks
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from datetime import datetime
 import os
 import re
@@ -155,22 +156,15 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     baseline_context_tokens = 0
     optimized_context_tokens = 0
     
-    # Build properly prefixed model name for LiteLLM token counting.
-    # The token_model must match the model string passed to LiteLLM by get_llm(),
-    # because LiteLLM's model cost database has separate entries per provider prefix
-    # (e.g. gemini/ vs vertex_ai/ have different pricing).
-    if model_provider == "local":
-        token_model = f"ollama/{model_name}"
-    elif model_provider == "vertex":
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        token_model = f"vertex_ai/{model_bare}"
-    else:
-        # Gemini provider: strip any accidental prefix then prepend gemini/
-        # to match the model string built by get_llm() for LiteLLM cost lookup.
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        token_model = f"gemini/{model_bare}"
+    # Build the LiteLLM-routable model string for token counting.
+    # Must match what get_llm() produces so LiteLLM looks up the right
+    # entry in its model cost database (gemini/ vs vertex_ai/ have separate pricing).
+    # Delegates to resolve_model_string() so any new provider added to
+    # PROVIDER_PREFIXES is picked up here automatically.
+    token_model = resolve_model_string(model_provider, model_name)
     
     hint_metadata = {}
+    feedback_loop = None
 
     if settings.OPTIMIZATION_ENABLED:
         try:
@@ -180,20 +174,20 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 QueryPatternMatcher,
                 SmartKeywordProvider,
                 ContextPruner,
+                reconcile_selection_traces,
             )
 
-            # Get learning db_conn from FeedbackLoop singleton (shared connection)
+            # Get learning execution_memory from FeedbackLoop singleton
             # Must be initialized BEFORE QueryPatternMatcher and SmartKeywordProvider
-            learning_db_conn = None
-            feedback_loop = None
+            learning_em = None
             try:
                 from src.backend.crew_ai.optimization.learning_registry import (
                     get_feedback_loop,
                 )
                 feedback_loop = get_feedback_loop()
                 if feedback_loop is not None:
-                    learning_db_conn = feedback_loop.execution_memory.conn
-                    logger.info("✅ Learning DB connection obtained from FeedbackLoop singleton")
+                    learning_em = feedback_loop.execution_memory
+                    logger.info("✅ Learning execution_memory obtained from FeedbackLoop singleton")
                 else:
                     logger.warning("⚠️ FeedbackLoop unavailable — learning hints will be disabled")
             except Exception as e:
@@ -255,7 +249,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 pruning_enabled=settings.OPTIMIZATION_CONTEXT_PRUNING_ENABLED,
                 pruning_threshold=settings.OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD,
                 metrics=optimization_metrics,
-                db_conn=learning_db_conn,
+                execution_memory=learning_em,
+                nl_engine=feedback_loop.nl_engine if feedback_loop is not None else None,
             )
             
             # Calculate baseline context size (full context)
@@ -268,22 +263,49 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             logger.info("🎯 Generating optimized contexts for all agents...")
             planner_result = smart_provider.get_agent_context(query, "planner", url=url)
             assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
-            validator_result = smart_provider.get_agent_context(query, "validator", url=url)
 
             planner_context = planner_result.context
             assembler_context = assembler_result.context
-            validator_context = validator_result.context
 
             # Capture hint metadata for FeedbackLoop integration
             # count = injected (budget-capped), available = found before cap
+            # nl_injected_ids = union of NL hint IDs across all agents;
+            # any hint that reached any agent could have shaped the output.
+            all_nl_ids = sorted(
+                set(planner_result.nl_injected_ids)
+                | set(assembler_result.nl_injected_ids)
+            )
             hint_metadata = {
-                "planner": {"count": planner_result.hints_count, "available": planner_result.hints_available, "sources": planner_result.hint_sources},
-                "assembler": {"count": assembler_result.hints_count, "available": assembler_result.hints_available, "sources": assembler_result.hint_sources},
-                "validator": {"count": validator_result.hints_count, "available": validator_result.hints_available, "sources": validator_result.hint_sources},
+                "agents": {
+                    "planner":   {"count": planner_result.hints_count,   "available": planner_result.hints_available,   "sources": planner_result.hint_sources},
+                    "assembler": {"count": assembler_result.hints_count, "available": assembler_result.hints_available, "sources": assembler_result.hint_sources},
+                },
+                "nl_injected_ids": all_nl_ids,
             }
-            total_hints = sum(r["count"] for r in hint_metadata.values())
+            # R7 holdout flag for this workflow. smart_provider.was_holdout is
+            # True only when the coin came up AND hints were actually
+            # available to suppress; re-confirming total available > 0 keeps
+            # a coin flip on a hint-less (Cat A) workflow out of Cat C.
+            total_hints_available = sum(
+                r["available"] for r in hint_metadata["agents"].values()
+            )
+            hint_metadata["was_holdout"] = (
+                smart_provider.was_holdout and total_hints_available > 0
+            )
+            total_hints = sum(r["count"] for r in hint_metadata["agents"].values())
             if total_hints > 0:
                 logger.info(f"📚 Learning hints injected: {hint_metadata}")
+
+            # N3 (F2c): fold the per-agent NL selection traces into one record
+            # keyed by hint_id, injected-wins against the SAME union attribution
+            # credits (all_nl_ids). Observability only — never mutates all_nl_ids.
+            # Attached AFTER the log above so the per-candidate trace can't bloat
+            # it; the helper is fully defensive (None on any error).
+            hint_metadata["selection_trace"] = reconcile_selection_traces(
+                [planner_result.selection_trace,
+                 assembler_result.selection_trace],
+                all_nl_ids,
+            )
 
             # Build hint_context for task-level injection
             hint_context = {}
@@ -291,16 +313,13 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 hint_context["planner"] = planner_result.hint_text
             if assembler_result.hint_text:
                 hint_context["assembler"] = assembler_result.hint_text
-            if validator_result.hint_text:
-                hint_context["validator"] = validator_result.hint_text
-            
+
             # Calculate total optimized tokens
             planner_tokens = count_tokens(planner_context, token_model)
             assembler_tokens = count_tokens(assembler_context, token_model)
-            validator_tokens = count_tokens(validator_context, token_model)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
-            
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}, Validator={validator_tokens}")
+
+            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -319,47 +338,51 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             keyword_search_tool = smart_provider.get_keyword_search_tool()
             
             logger.info("✅ Optimization system initialized successfully for ALL agents")
+            if feedback_loop is not None:
+                feedback_loop._optimization_init_ok = True
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
             planner_context = None
             assembler_context = None
-            validator_context = None
             keyword_search_tool = None
             smart_provider = None
             optimization_metrics = None
             hint_context = {}
+            hint_metadata = {}    # prevent corrupted-shape leakage downstream
+            if feedback_loop is not None:
+                feedback_loop._optimization_init_failures += 1
+                feedback_loop._optimization_init_ok = False
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
         planner_context = None
         assembler_context = None
-        validator_context = None
         hint_context = {}
 
     # Initialize agents and tasks with library context and workflow_id
     agents = RobotAgents(
-        model_provider, 
-        model_name, 
+        model_provider,
+        model_name,
         library_context,
         assembler_context=assembler_context,
         keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
-        validator_context=validator_context
     )
     tasks = RobotTasks(library_context, workflow_id=workflow_id, hint_context=hint_context)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
+    # The CrewAI LLM validator agent was removed in favour of a deterministic
+    # `robot --dryrun` gate (see src/backend/services/dryrun_service.py). The crew
+    # now ends at the Code Assembler — delivered code comes from tasks[2].
     step_planner_agent = agents.step_planner_agent()
     element_identifier_agent = agents.element_identifier_agent()
     code_assembler_agent = agents.code_assembler_agent()
-    code_validator_agent = agents.code_validator_agent()
 
     # Define Tasks (removed popup analysis - focus only on user's explicit query)
     plan_steps = tasks.plan_steps_task(step_planner_agent, query)
     identify_elements = tasks.identify_elements_task(element_identifier_agent)
     assemble_code = tasks.assemble_code_task(code_assembler_agent)
-    validate_code = tasks.validate_code_task(code_validator_agent, code_assembler_agent)
 
     # Register real-time progress event routing (no-op when progress_queue is None)
     if progress_queue is not None:
@@ -368,7 +391,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             str(plan_steps.id): 0,
             str(identify_elements.id): 1,
             str(assemble_code.id): 2,
-            str(validate_code.id): 3,
         })
 
     # Rotate crewai.log if it exceeds size limit (before creating the Crew)
@@ -379,8 +401,8 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     # Create and run the crew
     crew = Crew(
         agents=[step_planner_agent, element_identifier_agent,
-                code_assembler_agent, code_validator_agent],
-        tasks=[plan_steps, identify_elements, assemble_code, validate_code],
+                code_assembler_agent],
+        tasks=[plan_steps, identify_elements, assemble_code],
         process=Process.sequential,
         verbose=True,
         output_log_file=CREWAI_LOG_FILE,
@@ -390,8 +412,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     )
 
     logger.info("🚀 Starting CrewAI workflow execution...")
-    logger.info(
-        f"🔄 Agent delegation enabled with max_iter={settings.MAX_AGENT_ITERATIONS}")
+    logger.info("🔄 Sequential 3-agent pipeline (planner → identifier → assembler)")
     logger.info(
         f"📊 LLM Output Cleaner Status: {agents.llm._monitor.get_stats()}")
 
@@ -399,7 +420,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         try:
             result = crew.kickoff()
             logger.info("✅ CrewAI workflow completed successfully")
-            logger.info(f"🏁 Crew execution finished - delegation cycle complete")
+            logger.info("🏁 Crew execution finished")
             # agents.llm._monitor is the authoritative call count: incremented once per
             # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
             # Compare against "Raw CrewAI usage metrics" in workflow_service.py — that
@@ -416,15 +437,13 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             if optimization_metrics:
                 logger.info("📊 Optimization metrics collected")
 
-            # CrewAI's event bus dispatches sync handlers via ThreadPoolExecutor (fire-and-forget).
-            # TaskCompletedEvent for task 3 is submitted to the pool but may execute AFTER
-            # kickoff() returns and unregister_workflow() clears the routing maps — causing
-            # _resolve() to return None and silently drop the 100% event.
-            # Pushing 100% here (success path only) guarantees delivery before unregistration.
-            # _push_if_forward deduplicates: if the thread pool wins the race, this is a no-op.
-            if progress_queue is not None:
-                from src.backend.crew_ai.progress_events import _push_if_forward
-                _push_if_forward(workflow_id, progress_queue, "🎉 Test generation complete", 100)
+            # Progress intentionally caps at 80 here (TaskCompleted for the Code
+            # Assembler — the last crew task — maps to 80 in progress_events.py).
+            # The terminal 100% is NO LONGER pushed here: it now belongs to the
+            # deterministic dryrun gate in workflow_service.run_agentic_workflow,
+            # which runs AFTER this returns. Pushing 100% here would hide the
+            # progress bar (frontend hides at >=100%) while the gate is still
+            # verifying/repairing. See dryrun_service.validate_and_repair (prog-2).
 
             return result, crew, optimization_metrics, hint_metadata, agents.llm._monitor
 

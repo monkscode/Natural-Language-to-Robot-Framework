@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import re
@@ -11,6 +12,8 @@ from src.backend.core.config import settings
 from src.backend.services.workflow_service import stream_generate_and_run, stream_generate_only, stream_execute_only
 from src.backend.services.docker_service import get_docker_client, rebuild_image, get_docker_status, cleanup_test_containers
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
+from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 
 router = APIRouter()
 
@@ -33,7 +36,7 @@ async def generate_test_only(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
+    model_name = settings.LOCAL_MODEL if model_provider == "local" else settings.ONLINE_MODEL
 
     if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
@@ -84,7 +87,7 @@ async def generate_and_run_streaming(query: Query):
         raise HTTPException(status_code=400, detail="Query not provided")
 
     model_provider = settings.MODEL_PROVIDER
-    model_name = settings.ONLINE_MODEL if model_provider in ("gemini", "vertex") else settings.LOCAL_MODEL
+    model_name = settings.LOCAL_MODEL if model_provider == "local" else settings.ONLINE_MODEL
 
     if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
@@ -175,11 +178,19 @@ async def submit_feedback(request: FeedbackRequest):
                    f"Must be 'close_enough' or 'completely_wrong'.",
         )
 
-    # Truncate feedback text for safety
-    text = request.feedback_text[:500] if request.feedback_text else ""
+    if request.feedback_text and len(request.feedback_text) > MAX_FEEDBACK_TEXT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Feedback must be {MAX_FEEDBACK_TEXT_CHARS} characters or fewer",
+        )
+    text = request.feedback_text or ""
 
     try:
-        triage = feedback_loop.process_user_feedback(
+        # process_user_feedback runs a blocking conflict-detection LLM call
+        # (up to 30s). Offload it so this async handler does not freeze the
+        # event loop for every other request while it waits.
+        triage = await asyncio.to_thread(
+            feedback_loop.process_user_feedback,
             request.workflow_id, text, request.feedback_type,
         )
         return {"status": "success", "triage": triage}

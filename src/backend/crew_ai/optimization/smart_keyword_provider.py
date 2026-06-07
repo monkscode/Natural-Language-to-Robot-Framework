@@ -12,6 +12,7 @@ and hint metadata for downstream metrics tracking.
 """
 
 import logging
+import random
 from typing import Optional, List, Dict, NamedTuple
 from .pattern_learning import QueryPatternMatcher
 from .chroma_store import KeywordVectorStore
@@ -20,6 +21,15 @@ from .context_pruner import ContextPruner
 from .learning_config import LEARNING_CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+# Flat per-hint character cap applied in _format_hints. 650 covers the longest
+# possible NL feedback hint — the ~112-char "USER FEEDBACK" header
+# (NLFeedbackEngine._format_feedback_hint) plus a full MAX_FEEDBACK_TEXT_CHARS
+# (500) body = 612 — with headroom, so injected NL text is shown in full and
+# matches the stored feedback the usage-attribution LLM later judges. A guard
+# test (test_smart_keyword_provider.py) locks this header/cap relationship.
+_HINT_CHAR_CAP = 650
 
 
 # ---------------------------------------------------------------------------
@@ -39,12 +49,79 @@ class AgentContextResult(NamedTuple):
         hint_sources: Engine names that contributed hints,
                       e.g. ["structural", "anti_pattern"].
         hint_text: Raw formatted hint block for task-level injection.
+        nl_injected_ids: IDs of NL feedback hints that survived the budget
+                         cut and were injected into this agent's prompt.
+        selection_trace: opt-in N3 trace {hint_id: {scope, source, priority,
+                         similarity_score, available, injected, drop_reason}}
+                         for this agent's NL candidates, or None when capture
+                         is off. Default None — NOT {} — to avoid a shared
+                         mutable default across NamedTuple instances.
     """
     context: str
     hints_count: int = 0
     hints_available: int = 0
     hint_sources: tuple = ()
     hint_text: str = ""
+    nl_injected_ids: tuple = ()
+    selection_trace: dict | None = None
+
+
+def reconcile_selection_traces(traces, injected_ids):
+    """Fold per-agent NL selection traces (F2b) into ONE record keyed by
+    hint_id for the N3 trace (F2c). Injected-wins reconciliation:
+
+      - a hint is injected (drop_reason=None) IFF it is in injected_ids — the
+        union nl_injected_ids that apply_hint_attribution credits — so the
+        trace can never contradict the counters;
+      - otherwise the highest-precedence drop reason across agents is kept
+        (holdout > similarity_below/no_anchor > dedup > cap);
+      - similarity_score is the first non-null (identical across agents);
+      - scope/source/priority come from any agent (identical, cached fragment).
+
+    Reads injected_ids; never mutates it (FR4 guard #2). Observability only and
+    fully defensive — returns None when no trace was captured or on any error,
+    so it can never affect the union or the pipeline.
+    """
+    present = [t for t in traces if t]
+    if not present:
+        return None
+    try:
+        precedence = {"holdout": 0, "similarity_below": 1, "no_anchor": 1,
+                      "dedup": 2, "cap": 3}
+        injected = set(injected_ids)
+        all_ids = set()
+        for t in present:
+            all_ids.update(t.keys())
+        out = {}
+        for hid in all_ids:
+            entries = [t[hid] for t in present if hid in t]
+            base = entries[0]
+            sim = next((e.get("similarity_score") for e in entries
+                        if e.get("similarity_score") is not None), None)
+            if hid in injected:
+                inj, reason = 1, None
+            else:
+                reasons = [e.get("drop_reason") for e in entries
+                           if e.get("drop_reason")]
+                reason = (min(reasons, key=lambda r: precedence.get(r, 99))
+                          if reasons else None)
+                inj = 0
+            out[hid] = {
+                "scope": base.get("scope"),
+                "source": base.get("source"),
+                "priority": base.get("priority"),
+                "similarity_score": sim,
+                "available": 1 if any(e.get("available") for e in entries) else 0,
+                "injected": inj,
+                "drop_reason": reason,
+            }
+        return out
+    except Exception as e:
+        logger.warning(
+            "[LEARNING] selection_trace reconciliation failed (non-blocking): %s",
+            e,
+        )
+        return None
 
 
 class SmartKeywordProvider:
@@ -56,6 +133,11 @@ class SmartKeywordProvider:
     - Tier 3: Full Context Fallback
     """
 
+    # R7 random-holdout: fraction of workflows on which otherwise-available
+    # hints are suppressed, so an unbiased control group (Cat C) accrues for
+    # the honest-lift measurement. Rolled once per provider (per workflow).
+    _HOLDOUT_RATE = 0.05
+
     def __init__(self,
                  library_context,
                  pattern_matcher: QueryPatternMatcher,
@@ -64,7 +146,8 @@ class SmartKeywordProvider:
                  pruning_enabled: bool = False,
                  pruning_threshold: float = 0.8,
                  metrics: Optional[object] = None,
-                 db_conn=None):
+                 execution_memory=None,
+                 nl_engine=None):
         """
         Initialize with library context and optimization components.
 
@@ -76,8 +159,11 @@ class SmartKeywordProvider:
             pruning_enabled: Whether to enable context pruning
             pruning_threshold: Confidence threshold for category classification (0.0-1.0)
             metrics: Optional WorkflowMetrics instance for tracking
-            db_conn: Optional sqlite3.Connection for learning engines.
-                     When None, learning hints are skipped (graceful degradation).
+            execution_memory: Optional ExecutionMemory instance for learning engines.
+                              When None, learning hints are skipped (graceful degradation).
+            nl_engine: Optional shared NLFeedbackEngine from FeedbackLoop. When provided,
+                       stats counters are shared with the FeedbackLoop singleton so
+                       /api/learning-stats reflects all activity.
         """
         self.library_context = library_context
         self.pattern_matcher = pattern_matcher
@@ -86,7 +172,22 @@ class SmartKeywordProvider:
         self.pruning_enabled = pruning_enabled and context_pruner is not None
         self.pruning_threshold = pruning_threshold
         self.metrics = metrics
-        self._db_conn = db_conn
+        self._em = execution_memory
+        self._nl_engine_shared = nl_engine  # FeedbackLoop's instance, may be None
+
+        # R7 random-holdout: roll the coin once per workflow. When it comes up
+        # AND hints are available, _get_learning_hints suppresses them and
+        # sets was_holdout — the run becomes a Cat C control sample.
+        self._holdout_decision = random.random() < self._HOLDOUT_RATE
+        self.was_holdout = False
+
+        # Per-workflow cache of the Bank 1 (NL feedback) retrieval result,
+        # keyed (user_query, url). get_agent_context runs 2x per workflow
+        # (planner/assembler) with identical query+url, and Bank 1
+        # retrieval is role-independent — so the ChromaDB similarity filter
+        # need run only once. A new provider is built per workflow, so the
+        # cache lifetime is one workflow: no staleness risk.
+        self._nl_hints_cache: dict = {}
 
         # Lazy-loaded learning engine references
         self._structural_engine = None
@@ -98,8 +199,8 @@ class SmartKeywordProvider:
         logger.info(f"SmartKeywordProvider initialized for {library_context.library_name}")
         if self.pruning_enabled:
             logger.info(f"Context pruning enabled with threshold {pruning_threshold}")
-        if self._db_conn is not None:
-            logger.info("[LEARNING] Learning hint injection enabled (db_conn provided)")
+        if self._em is not None:
+            logger.info("[LEARNING] Learning hint injection enabled (execution_memory provided)")
 
     # ------------------------------------------------------------------
     # Tier 0: Learning Hints (NEW — DAY_06)
@@ -116,17 +217,25 @@ class SmartKeywordProvider:
             sources: Engine names that contributed hints
 
         Complexity-adaptive budget from LEARNING_CONFIG:
-        - Simple (1-3 steps):  max 5 hints, 80 tokens each = 400 max
-        - Medium (4-5 steps):  max 8 hints, 100 tokens each = 800 max
-        - Complex (6+ steps):  max 10 hints, 120 tokens each = 1,200 max
+        - Simple (1-3 steps):  max 5 hints
+        - Medium (4-5 steps):  max 8 hints
+        - Complex (6+ steps):  max 10 hints
+        Each selected hint is shown in full up to a flat per-hint character cap
+        (_HINT_CHAR_CAP), so injected NL text matches the stored feedback the
+        usage-attribution LLM later judges.
         """
-        if self._db_conn is None:
+        if self._em is None:
             return {"text": None, "count": 0, "available": 0, "sources": []}
+
+        # N3 selection-trace capture (F2b) is opt-in via HINT_TRACE_ENABLED
+        # (OPTIMIZATION_ENABLED is already True on this path). When off, no sink
+        # is threaded into the NL engine → zero capture cost.
+        from src.backend.core.config import settings
+        trace_on = settings.HINT_TRACE_ENABLED
 
         # Determine complexity tier
         tier = self._determine_complexity_tier(user_query)
         max_hints = tier["max_hints"]
-        tokens_per_hint = tier["tokens_per_hint"]
 
         # Collect candidates from all engines with source tracking
         candidates = []
@@ -146,7 +255,7 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Structural engine hint retrieval failed: {e}")
 
-        # Anti-pattern warnings (planner + assembler + validator)
+        # Anti-pattern warnings (planner + assembler)
         try:
             anti_pattern_hints = self._get_anti_pattern_engine().get_hints(
                 user_query, safe_url, agent_role
@@ -159,7 +268,7 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Anti-pattern engine hint retrieval failed: {e}")
 
-        # Keyword corrections (assembler + validator)
+        # Keyword corrections (assembler only)
         try:
             keyword_hints = self._get_keyword_engine().get_hints(
                 user_query, safe_url, agent_role
@@ -172,31 +281,117 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Keyword engine hint retrieval failed: {e}")
 
-        # NL user feedback corrections (all roles)
+        # NL user feedback corrections (all roles). Bank 1 retrieval is
+        # role-independent, so its ChromaDB-backed result is cached per
+        # (user_query, url) and reused across the 2 per-workflow calls.
+        # nl_trace is the cached STAGE 2-4 fragment (agent-independent); the
+        # per-agent stage-5 overlay runs on a copy at return time. Defined
+        # before the try so it is always bound for the returns below.
+        nl_trace = None
         try:
-            nl_hints = self._get_nl_feedback_engine().get_hints(
-                user_query, safe_url, agent_role
-            )
-            if nl_hints:
-                for hint in nl_hints:
-                    candidates.append({"text": hint, "priority": "high"})
+            cache_key = (user_query, safe_url)
+            if cache_key in self._nl_hints_cache:
+                nl_texts, nl_ids, nl_trace = self._nl_hints_cache[cache_key]
+            else:
+                nl_trace = {} if trace_on else None
+                nl_texts, nl_ids = self._get_nl_feedback_engine().get_hints_with_ids(
+                    user_query, safe_url, agent_role, selection_trace=nl_trace,
+                )
+                self._nl_hints_cache[cache_key] = (nl_texts, nl_ids, nl_trace)
+            if nl_texts:
+                for text, nid in zip(nl_texts, nl_ids):
+                    candidates.append({"text": text, "priority": "high", "src": "nl", "id": nid})
                 if "nl_feedback" not in sources:
                     sources.append("nl_feedback")
         except Exception as e:
             logger.warning(f"[LEARNING] NL feedback engine hint retrieval failed: {e}")
+            nl_trace = None
 
         if not candidates:
-            return {"text": None, "count": 0, "available": 0, "sources": []}
+            # NL may still have recorded similarity/dedup drops in nl_trace
+            # (no survivors reached the pool) — surface them (no available=1
+            # entries → the overlay is a no-op copy).
+            return {"text": None, "count": 0, "available": 0, "sources": [],
+                    "nl_injected_ids": (),
+                    "selection_trace": self._overlay_selection_trace(
+                        nl_trace, set(), holdout=False)}
 
         # Apply hard cap before formatting so count and formatted output agree
         hard_cap = LEARNING_CONFIG.get("HARD_CAP_HINTS", 10)
         effective_max = min(max_hints, hard_cap)
 
         available = len(candidates)
-        formatted = self._format_hints(candidates, effective_max, tokens_per_hint)
-        count = min(available, effective_max)
 
-        return {"text": formatted, "count": count, "available": available, "sources": sources}
+        # R7 random-holdout: on a coin-flip workflow, suppress hints that
+        # would otherwise be injected so an unbiased control group accrues.
+        # The returned `available` still reports the real pre-suppression
+        # count — that is what distinguishes Cat C ("hints existed,
+        # suppressed") from Cat A ("no hints existed") in the lift report.
+        if self._holdout_decision and available > 0:
+            self.was_holdout = True
+            logger.info(
+                "[LEARNING] R7 holdout — suppressing %d available hint(s) "
+                "for %s agent", available, agent_role,
+            )
+            return {
+                "text": None,
+                "count": 0,
+                "available": available,
+                "sources": [],
+                "nl_injected_ids": (),
+                "selection_trace": self._overlay_selection_trace(
+                    nl_trace, set(), holdout=True),
+            }
+
+        formatted, selected = self._format_hints(candidates, effective_max)
+        count = min(available, effective_max)
+        nl_injected_ids = tuple(c["id"] for c in selected if c.get("src") == "nl")
+
+        return {
+            "text": formatted,
+            "count": count,
+            "available": available,
+            "sources": sources,
+            "nl_injected_ids": nl_injected_ids,
+            "selection_trace": self._overlay_selection_trace(
+                nl_trace, set(nl_injected_ids), holdout=False),
+        }
+
+    @staticmethod
+    def _overlay_selection_trace(nl_trace, injected_ids, holdout):
+        """Stage-5 overlay (F2b): resolve each available NL trace entry to its
+        final per-agent fate on a COPY — the cached stage 2-4 fragment is
+        shared across agents and must never be mutated. Returns None on any
+        failure so capture never blocks hint selection (FR4).
+
+        - holdout → every available hint suppressed (drop_reason='holdout').
+        - else injected (id in injected_ids → drop_reason=None) or pushed out
+          by the per-agent budget cap (drop_reason='cap').
+        Entries already dropped at stages 2-4 are copied through unchanged.
+        """
+        if nl_trace is None:
+            return None
+        try:
+            overlaid = {}
+            for rid, entry in nl_trace.items():
+                e = dict(entry)                      # copy — never mutate cache
+                if e.get("available"):
+                    if holdout:
+                        e["injected"] = 0
+                        e["drop_reason"] = "holdout"
+                    elif rid in injected_ids:
+                        e["injected"] = 1
+                        e["drop_reason"] = None
+                    else:
+                        e["injected"] = 0
+                        e["drop_reason"] = "cap"
+                overlaid[rid] = e
+            return overlaid
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] selection_trace overlay failed (non-blocking): %s", e
+            )
+            return None
 
     def _determine_complexity_tier(self, user_query: str) -> dict:
         """
@@ -221,12 +416,20 @@ class SmartKeywordProvider:
             return tiers["medium"]
         return tiers["complex"]
 
-    def _format_hints(self, candidates: List[dict],
-                      max_hints: int, tokens_per_hint: int) -> Optional[str]:
-        """Format hints within token budget.
+    def _format_hints(
+        self, candidates: List[dict], max_hints: int,
+    ) -> tuple[Optional[str], List[dict]]:
+        """Format the selected hints into the injectable block.
 
-        Sorts by priority (high → medium → low), takes top N,
-        truncates each hint to fit within per-hint token budget.
+        Sorts by priority (high → medium → low), takes top N, and shows each
+        hint in full up to a flat per-hint character cap (_HINT_CHAR_CAP).
+        Earlier this truncated each hint to a per-tier token budget, which cut
+        long NL feedback below the text the usage-attribution LLM later judges;
+        the flat cap (≥ the longest possible NL hint) removes that mismatch.
+
+        Returns (formatted_str, selected_candidates). selected_candidates
+        preserves src/id fields added by _get_learning_hints so the caller
+        can identify which NL hint IDs survived the budget cut.
         """
         # Sort: high priority first
         priority_order = {"high": 0, "medium": 1, "low": 2}
@@ -235,58 +438,59 @@ class SmartKeywordProvider:
         # Take top N (hard cap already applied by caller)
         selected = candidates[:max_hints]
 
-        # Truncate each hint within token budget (~4 chars per token)
-        max_chars = tokens_per_hint * 4
+        # Show each hint in full up to a flat per-hint character cap.
         formatted = []
         for hint in selected:
             text = hint["text"]
-            if len(text) > max_chars:
-                text = text[:max_chars - 3] + "..."
+            if len(text) > _HINT_CHAR_CAP:
+                text = text[:_HINT_CHAR_CAP - 3] + "..."
             formatted.append(text)
 
         if not formatted:
-            return None
+            return None, []
 
         header = "═══ LEARNING HINTS (from past executions) ═══"
-        return f"{header}\n" + "\n".join(formatted) + "\n" + "═" * 48
+        return f"{header}\n" + "\n".join(formatted) + "\n" + "═" * 48, selected
 
     # ------------------------------------------------------------------
     # Lazy-loaded engine accessors
     # ------------------------------------------------------------------
 
     def _get_structural_engine(self):
-        """Lazy-load StructuralRuleEngine with shared db_conn."""
+        """Lazy-load StructuralRuleEngine with shared execution_memory."""
         if self._structural_engine is None:
             from .structural_rule_engine import StructuralRuleEngine, IntentExtractor
             if self._intent_extractor is None:
-                self._intent_extractor = IntentExtractor(self._db_conn)
+                self._intent_extractor = IntentExtractor(self._em)
             self._structural_engine = StructuralRuleEngine(
-                self._db_conn, self._intent_extractor
+                self._em, self._intent_extractor
             )
             logger.debug("[LEARNING] StructuralRuleEngine lazy-loaded")
         return self._structural_engine
 
     def _get_keyword_engine(self):
-        """Lazy-load KeywordCorrectionEngine with shared db_conn."""
+        """Lazy-load KeywordCorrectionEngine with shared execution_memory."""
         if self._keyword_engine is None:
             from .keyword_correction_engine import KeywordCorrectionEngine
-            self._keyword_engine = KeywordCorrectionEngine(self._db_conn)
+            self._keyword_engine = KeywordCorrectionEngine(self._em)
             logger.debug("[LEARNING] KeywordCorrectionEngine lazy-loaded")
         return self._keyword_engine
 
     def _get_anti_pattern_engine(self):
-        """Lazy-load AntiPatternEngine with shared db_conn."""
+        """Lazy-load AntiPatternEngine with shared execution_memory."""
         if self._anti_pattern_engine is None:
             from .anti_pattern_engine import AntiPatternEngine
-            self._anti_pattern_engine = AntiPatternEngine(self._db_conn)
+            self._anti_pattern_engine = AntiPatternEngine(self._em)
             logger.debug("[LEARNING] AntiPatternEngine lazy-loaded")
         return self._anti_pattern_engine
 
     def _get_nl_feedback_engine(self):
-        """Lazy-load NLFeedbackEngine with shared db_conn."""
+        """Return NLFeedbackEngine: shared FeedbackLoop instance if injected, else lazy-load."""
+        if self._nl_engine_shared is not None:
+            return self._nl_engine_shared
         if self._nl_feedback_engine is None:
             from .nl_feedback_engine import NLFeedbackEngine
-            self._nl_feedback_engine = NLFeedbackEngine(self._db_conn)
+            self._nl_feedback_engine = NLFeedbackEngine(self._em)
             logger.debug("[LEARNING] NLFeedbackEngine lazy-loaded")
         return self._nl_feedback_engine
 
@@ -311,7 +515,7 @@ class SmartKeywordProvider:
         Target: core rules (300) + tool instructions (200) = 500 tokens
 
         Args:
-            agent_role: "planner", "assembler", or "validator"
+            agent_role: "planner" or "assembler"
 
         Returns:
             Formatted context string with core rules + tool usage instructions
@@ -358,7 +562,7 @@ Use this tool whenever you need to find the right keyword for an action.
 
         Args:
             predicted_keywords: List of keyword names predicted by pattern learning
-            agent_role: "planner", "assembler", or "validator"
+            agent_role: "planner" or "assembler"
             user_query: User's query (used for pruning if enabled)
 
         Returns:
@@ -466,7 +670,7 @@ Use keyword_search tool if you need additional keywords.
 
         Args:
             user_query: User's natural language query
-            agent_role: "planner", "identifier", "assembler", or "validator"
+            agent_role: "planner", "identifier", or "assembler"
             url: Optional target URL for domain-scoped hints
 
         Returns:
@@ -477,17 +681,27 @@ Use keyword_search tool if you need additional keywords.
         hints_available = 0
         hint_sources = []
         hint_text = ""
+        nl_injected_ids: tuple = ()
+        selection_trace = None
 
         # ═══ Tier 0: Surgical Learning Hints ═══
         # Hints are routed to task descriptions (high salience),
         # NOT agent backstory (low salience). See tasks.py._get_task_hints().
         try:
             hint_result = self._get_learning_hints(agent_role, user_query, url)
+            if hint_result:
+                # hints_available always reflects the real pre-suppression
+                # candidate count — including on an R7 holdout run, where
+                # text is None and count is 0. This keeps Cat C ("hints
+                # existed, suppressed") distinct from Cat A in the metrics.
+                hints_available = hint_result["available"]
+                # Captured even on a holdout run (text is None there).
+                selection_trace = hint_result.get("selection_trace")
             if hint_result and hint_result["text"]:
                 hint_text = hint_result["text"]
                 hints_count = hint_result["count"]
-                hints_available = hint_result["available"]
                 hint_sources = hint_result["sources"]
+                nl_injected_ids = hint_result.get("nl_injected_ids", ())
                 logger.info(
                     f"[LEARNING] Injected {hints_count}/{hints_available} hints from "
                     f"{hint_sources} for {agent_role} agent"
@@ -560,6 +774,8 @@ Use keyword_search tool if you need additional keywords.
             hints_available=hints_available,
             hint_sources=tuple(hint_sources),
             hint_text=hint_text,
+            nl_injected_ids=nl_injected_ids,
+            selection_trace=selection_trace,
         )
 
     def _get_full_context_fallback(self, agent_role: str) -> str:
@@ -569,7 +785,7 @@ Use keyword_search tool if you need additional keywords.
         This ensures graceful degradation to baseline behavior.
 
         Args:
-            agent_role: "planner", "assembler", or "validator"
+            agent_role: "planner" or "assembler"
 
         Returns:
             Full context string from library_context
@@ -583,8 +799,6 @@ Use keyword_search tool if you need additional keywords.
             return "Expert web element locator. Use batch_browser_automation tool to find all elements in one call."
         elif agent_role == "assembler":
             return self.library_context.code_assembly_context
-        elif agent_role == "validator":
-            return self.library_context.validation_context
         else:
             # Default to code assembly context
             logger.warning(f"Unknown agent role '{agent_role}', using code_assembly_context")

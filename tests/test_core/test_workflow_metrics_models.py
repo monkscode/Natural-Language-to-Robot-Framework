@@ -100,3 +100,57 @@ class TestWorkflowMetricsModel:
         import json
         json_str = json.dumps(d, default=str)
         assert "wf-resp" in json_str
+
+
+# ===================================================================
+# C4 — optimization_fallback_used field
+# ===================================================================
+
+class TestOptimizationFallbackUsed:
+    """C4: WorkflowMetrics.optimization_fallback_used signals a silent init failure.
+
+    Concrete scenario: SmartKeywordProvider raises on startup (DB lock or schema
+    mismatch). Without C4 this run silently uses no hints and the metrics dashboard
+    shows no sign anything went wrong. With C4, the per-run record has
+    optimization_fallback_used=True so a dashboard alert or a log query can catch it.
+    """
+
+    def _make_metrics(self, **kwargs):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        defaults = {
+            "workflow_id": "wf-c4",
+            "url": "https://example.com",
+            "total_llm_calls": 0,
+            "total_cost": 0.0,
+            "execution_time": 1.0,
+            "timestamp": datetime.now(),
+        }
+        defaults.update(kwargs)
+        return WorkflowMetrics(**defaults)
+
+    def test_defaults_to_false(self):
+        """optimization_fallback_used defaults to False for normal runs."""
+        m = self._make_metrics()
+        assert m.optimization_fallback_used is False
+
+    def test_can_be_set_to_true(self):
+        """optimization_fallback_used can be set to True (e.g., by workflow_service)."""
+        m = self._make_metrics()
+        m.optimization_fallback_used = True
+        assert m.optimization_fallback_used is True
+
+    def test_old_records_without_field_round_trip(self):
+        """JSONL records written before C4 (no optimization_fallback_used key)
+        must still deserialize correctly — the default of False is applied."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        old_record = {
+            "workflow_id": "wf-old",
+            "url": "https://example.com",
+            "total_llm_calls": 5,
+            "total_cost": 0.02,
+            "execution_time": 3.0,
+            "timestamp": datetime.now().isoformat(),
+            # optimization_fallback_used is absent — simulates a pre-C4 record
+        }
+        m = WorkflowMetrics.from_dict(old_record)
+        assert m.optimization_fallback_used is False

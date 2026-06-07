@@ -14,7 +14,8 @@ Key design:
 - Anti-patterns are generated from FAILURES, not passes
 - "correct_alternative" backfilled when a subsequent similar query passes
 - Score uses EffectivenessScore.calculate(evidence, 0) — never decrements
-- Two similarity thresholds: conservative (>= 3) for merging, permissive (>= 2) for hints
+- learn() merging uses word overlap (>= 3 words); hint relevance uses the
+  query-similarity embedding filter (learning_anchors)
 
 Referenced by: Hint injection pipeline (DAY_06+).
 Depends on: learning_config.py (DAY_00), schema_manager.py (DAY_00).
@@ -28,6 +29,7 @@ from src.backend.crew_ai.optimization.learning_config import (
     EffectivenessScore,
     extract_domain,
 )
+from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +51,13 @@ class AntiPatternEngine(LearningEngine):
     Key design:
     - Anti-patterns are generated from failures, NOT from passes
     - The "correct alternative" comes from subsequent successful executions
-      of similar queries, or from validator fixes
+      of similar queries
     - Score increases when the same anti-pattern is seen again; never decreases
     """
 
-    # Similarity thresholds for word overlap matching
-    _MERGE_OVERLAP_THRESHOLD = 3   # Conservative: for learn() merging
-    _HINTS_OVERLAP_THRESHOLD = 2   # Permissive: for get_hints() warnings
+    # Word-overlap threshold for learn() anti-pattern merging. Hint relevance
+    # uses the query-similarity filter instead (see _find_matching_anti_patterns).
+    _MERGE_OVERLAP_THRESHOLD = 3
 
     # Score and evidence gates (consistent with all engines)
     _INJECTION_THRESHOLD = EffectivenessScore.INJECTION_THRESHOLD  # 0.4
@@ -65,14 +67,15 @@ class AntiPatternEngine(LearningEngine):
     _CONTEXT_LINES = 2   # ±2 lines around failed keyword
     _MAX_SNIPPET_LINES = 5
 
-    def __init__(self, db_conn):
+    def __init__(self, execution_memory=None):
         """
-        Initialize AntiPatternEngine with a SQLite connection.
+        Initialize AntiPatternEngine with an ExecutionMemory instance.
 
         Args:
-            db_conn: sqlite3.Connection with row_factory=sqlite3.Row
+            execution_memory: ExecutionMemory instance. Optional — engine
+                              works without it (learning disabled).
         """
-        self.db_conn = db_conn
+        self._em = execution_memory
 
     def learn(self, record) -> None:
         """
@@ -86,6 +89,10 @@ class AntiPatternEngine(LearningEngine):
         When a test passes, checks if it resolves an existing anti-pattern
         by providing the correct alternative code.
         """
+        if not self._em:
+            return
+        _assert_writer_thread("AntiPatternEngine.learn")
+
         if record.test_status != "failed":
             # Check if this passing execution resolves an existing anti-pattern
             self._check_for_correct_alternative(record)
@@ -102,11 +109,12 @@ class AntiPatternEngine(LearningEngine):
             record.failure_category, record.user_query
         )
 
+        new_anti_id = None
         if existing:
             # Reinforce existing anti-pattern
             new_evidence = existing["evidence_count"] + 1
             new_score = EffectivenessScore.calculate(new_evidence, 0)
-            self.db_conn.execute(
+            self._em._writer_conn.execute(
                 "UPDATE anti_patterns SET evidence_count = ?, score = ?, "
                 "last_seen = datetime('now', 'localtime') WHERE id = ?",
                 (new_evidence, new_score, existing["id"])
@@ -114,7 +122,7 @@ class AntiPatternEngine(LearningEngine):
         else:
             # Create new anti-pattern
             initial_score = EffectivenessScore.calculate(1, 0)
-            self.db_conn.execute("""
+            cursor = self._em._writer_conn.execute("""
                 INSERT INTO anti_patterns
                 (failure_category, query_pattern, bad_code_snippet, error_message,
                  domain, score, evidence_count, last_seen)
@@ -128,7 +136,18 @@ class AntiPatternEngine(LearningEngine):
                 getattr(record, 'domain', None),
                 initial_score,
             ))
-        self.db_conn.commit()
+            new_anti_id = cursor.lastrowid
+        self._em._writer_conn.commit()
+
+        # After the SQL commit, embed a newly created anti-pattern's anchor
+        # (its query_pattern, which equals record.user_query) into
+        # learning_anchors so the similarity filter can match it. Inline —
+        # learn() already runs on the writer thread. add_anchor is best-effort
+        # (it swallows ChromaDB errors); a missed doc is healed by the next
+        # reconcile. Reinforced anti-patterns (the merge branch above) keep
+        # their original anchor unchanged — single-anchor design.
+        if new_anti_id is not None:
+            self._em.add_anchor("anti", new_anti_id, record.user_query)
 
     def get_hints(self, user_query: str, url: str,
                   agent_role: str) -> Optional[List[str]]:
@@ -138,11 +157,13 @@ class AntiPatternEngine(LearningEngine):
         Targets:
         - Planner: "Don't generate linear code for iteration queries"
         - Assembler: "Don't use single Get Text for 'all rows'"
-        - Validator/Identifier: None (not relevant for these roles)
+        - Identifier: None (not relevant for this role)
 
         Only returns anti-patterns with score >= 0.4 AND evidence_count >= 3.
         """
-        if agent_role not in ("planner", "assembler", "validator"):
+        if agent_role not in ("planner", "assembler"):
+            return None
+        if not self._em:
             return None
 
         domain = extract_domain(url) if url else None
@@ -176,20 +197,24 @@ class AntiPatternEngine(LearningEngine):
 
     def get_stats(self) -> Dict:
         """Return engine statistics."""
-        total = self.db_conn.execute(
-            "SELECT COUNT(*) FROM anti_patterns"
-        ).fetchone()[0]
+        if not self._em:
+            return {"total_anti_patterns": 0, "active_anti_patterns": 0,
+                    "by_category": {}, "engine": "anti_pattern"}
+        with self._em.read_conn() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM anti_patterns"
+            ).fetchone()[0]
 
-        active = self.db_conn.execute(
-            "SELECT COUNT(*) FROM anti_patterns WHERE score >= ? AND evidence_count >= ?",
-            (self._INJECTION_THRESHOLD, self._MIN_OBSERVATIONS)
-        ).fetchone()[0]
+            active = conn.execute(
+                "SELECT COUNT(*) FROM anti_patterns WHERE score >= ? AND evidence_count >= ?",
+                (self._INJECTION_THRESHOLD, self._MIN_OBSERVATIONS)
+            ).fetchone()[0]
 
-        # Category breakdown
-        categories = self.db_conn.execute(
-            "SELECT failure_category, COUNT(*) as cnt "
-            "FROM anti_patterns GROUP BY failure_category"
-        ).fetchall()
+            # Category breakdown
+            categories = conn.execute(
+                "SELECT failure_category, COUNT(*) as cnt "
+                "FROM anti_patterns GROUP BY failure_category"
+            ).fetchall()
 
         return {
             "total_anti_patterns": total,
@@ -211,9 +236,12 @@ class AntiPatternEngine(LearningEngine):
         anti-pattern or create a new one. Conservative threshold (>= 3 words)
         to avoid accidentally merging different anti-patterns.
 
+        Called from learn() which already runs on the writer thread, so we
+        read from _writer_conn to stay within the same transaction context.
+
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        rows = self.db_conn.execute(
+        rows = self._em._writer_conn.execute(
             "SELECT * FROM anti_patterns WHERE failure_category = ? "
             "ORDER BY score DESC",
             (category,)
@@ -232,13 +260,24 @@ class AntiPatternEngine(LearningEngine):
         """
         Find anti-patterns that might apply to this query.
 
-        Used by get_hints() and _check_for_correct_alternative().
-        Permissive threshold (>= 2 words) to cast a wider net for warnings.
-        Gated by score >= 0.4 AND evidence_count >= 3.
-        """
-        query_lower = user_query.lower()
+        Used by get_hints() and _check_for_correct_alternative(). Gated by
+        score >= 0.4 AND evidence_count >= 3, then narrowed to anti-patterns
+        whose query_pattern anchor is semantically similar to user_query via
+        the query-similarity filter. This replaces the former word-overlap
+        heuristic, which missed paraphrases ("verify all rows" vs "check
+        every record") and fired on coincidental shared words.
 
-        # Get high-scoring anti-patterns above injection threshold
+        Reads via read_conn(), so it is safe on any thread. The similarity
+        filter never raises — on any ChromaDB problem it fails open (returns
+        all gated rows), degrading to score/evidence gating only.
+        """
+        # C5: an empty user_query carries no relevance signal and cannot be
+        # embedded. The old word-overlap path was harmlessly empty for "";
+        # guard explicitly so the semantic path is never asked to embed "".
+        if not user_query or not user_query.strip():
+            return []
+
+        # Get high-scoring anti-patterns above the injection threshold.
         sql = (
             "SELECT * FROM anti_patterns "
             "WHERE score >= ? AND evidence_count >= ?"
@@ -251,19 +290,18 @@ class AntiPatternEngine(LearningEngine):
 
         sql += " ORDER BY score DESC LIMIT 10"
 
-        rows = self.db_conn.execute(sql, params).fetchall()
+        with self._em.read_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
 
-        # Filter by relevance to query using word overlap
-        relevant = []
-        query_words = set(query_lower.split())
-        for row in rows:
-            pattern = (row["query_pattern"] or "").lower()
-            pattern_words = set(pattern.split())
-            overlap = len(query_words & pattern_words)
-            if overlap >= self._HINTS_OVERLAP_THRESHOLD:
-                relevant.append(dict(row))
+        if not rows:
+            return []
 
-        return relevant
+        # Narrow to anti-patterns whose anchor query is semantically close to
+        # user_query (kind="anti").
+        survivors = self._em.filter_by_query_similarity(
+            user_query, [row["id"] for row in rows], kind="anti",
+        )
+        return [dict(row) for row in rows if row["id"] in survivors]
 
     # -------------------------------------------------------------------
     # Private: Correct Alternative Resolution
@@ -310,14 +348,14 @@ class AntiPatternEngine(LearningEngine):
                 )
                 continue
 
-            self.db_conn.execute(
+            self._em._writer_conn.execute(
                 "UPDATE anti_patterns SET correct_alternative = ? WHERE id = ?",
                 (record.robot_code[:500], ap["id"])
             )
             updated = True
 
         if updated:
-            self.db_conn.commit()
+            self._em._writer_conn.commit()
 
     # -------------------------------------------------------------------
     # Private: Bad Snippet Detection

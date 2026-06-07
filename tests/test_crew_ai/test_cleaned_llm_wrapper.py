@@ -9,6 +9,7 @@ import os
 import pytest
 from unittest.mock import patch
 
+
 class TestGetLlm:
     """Tests for get_llm factory function."""
 
@@ -91,6 +92,22 @@ class TestGetLlm:
                 num_retries=3,
                 is_litellm=True,
             )
+
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_get_llm_vertex_does_not_pass_safety_settings_while_parked(self, MockCleanedLLMWrapper):
+        """safety_settings is parked (commented out in cleaned_llm_wrapper.py).
+
+        If this test fails it means safety_settings has been re-enabled — update the
+        test along with the change and document why in the PR.
+        """
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict(os.environ, {"VERTEXAI_CREDENTIALS": "creds.json",
+                                      "VERTEXAI_PROJECT": "test-project",
+                                      "VERTEXAI_LOCATION": "us-central1"}):
+            get_llm(model_provider="vertex", model_name="gemini-2.5-flash")
+
+        assert "safety_settings" not in MockCleanedLLMWrapper.call_args.kwargs
 
     @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
     def test_get_llm_vertex_does_not_pass_api_key(self, MockCleanedLLMWrapper):
