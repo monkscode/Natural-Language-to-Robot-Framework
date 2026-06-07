@@ -768,7 +768,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
             _safe_delete_temp_metrics(workflow_id)
 
-            logging.info(f"✅ Unified metrics recorded successfully")
+            logging.info("✅ Unified metrics recorded successfully")
             logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
             logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
 

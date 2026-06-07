@@ -760,8 +760,8 @@ def list_triggers(
             if since.endswith("d"):
                 try:
                     days = int(since[:-1])
-                    conditions.append("created_at >= datetime('now', ?)")
-                    params.append(f"-{days} days")
+                    conditions.append("created_at >= ?")
+                    params.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
                 except ValueError:
                     raise HTTPException(status_code=400, detail=f"Invalid since value: {since!r}")
             else:
@@ -957,6 +957,7 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
     if not hint_ids:
         return {}
     from src.backend.crew_ai.optimization.nl_feedback_engine import RELATED_CATEGORIES
+    cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     placeholders = ",".join("?" * len(hint_ids))
     rows = conn.execute(
         f"""
@@ -969,7 +970,7 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
             FROM execution_records
             WHERE test_status = 'failed'
               AND json_valid(injected_hint_ids)
-              AND timestamp >= datetime('now', '-30 days')
+              AND timestamp >= ?
             ORDER BY timestamp DESC
             LIMIT 2000
         ) er
@@ -977,7 +978,7 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
           ON CAST(j.value AS INTEGER) = hint.id
         WHERE hint.id IN ({placeholders})
         """,
-        list(hint_ids),
+        [cutoff_30d] + list(hint_ids),
     ).fetchall()
     counts: dict = {}
     for r in rows:
@@ -999,6 +1000,10 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
 def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
     conn = fb.execution_memory.get_read_connection()
     try:
+        cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        cutoff_90d = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        cutoff_never_attr = (datetime.now(timezone.utc) - timedelta(days=NEVER_ATTRIBUTED_REVIEW_MIN_AGE_DAYS)).isoformat()
+
         # Hint inventory — point-in-time counts (locked SQL from plan)
         inv = conn.execute("""
             SELECT
@@ -1040,12 +1045,12 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                                           flagged_hint_ids) != '[]'
                             THEN 1 ELSE 0 END) AS flagged_events
             FROM trigger_events
-            WHERE created_at >= datetime('now','-30 days')
+            WHERE created_at >= ?
               -- Cleanliness (Part 2): usage_attribution gets its own M1 panel;
               -- keep this flag/engagement breakdown to the flagging triggers.
               AND trigger_type IN ('trigger_1', 'trigger_2')
             GROUP BY trigger_type
-        """).fetchall()
+        """, (cutoff_30d,)).fetchall()
 
         # LLM accuracy KPI — engagement + reversal rates.
         # Denominator measures enforcement (actually flagged), not LLM
@@ -1055,14 +1060,14 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
         # reading flagged_hint_ids — it wants the LLM-judgment view.
         flagged_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events
-            WHERE created_at >= datetime('now','-30 days')
+            WHERE created_at >= ?
               AND status = 'succeeded'
               AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) != '[]'
-        """).fetchone()["n"]
+        """, (cutoff_30d,)).fetchone()["n"]
 
         reviewed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
-            WHERE te.created_at >= datetime('now','-30 days')
+            WHERE te.created_at >= ?
               AND te.status = 'succeeded'
               AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
               AND EXISTS (
@@ -1073,11 +1078,11 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                   WHERE ha.hint_id = CAST(flag.value AS INTEGER)
                     AND ha.created_at > te.created_at
               )
-        """).fetchone()["n"]
+        """, (cutoff_30d,)).fetchone()["n"]
 
         reversed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
-            WHERE te.created_at >= datetime('now','-30 days')
+            WHERE te.created_at >= ?
               AND te.status = 'succeeded'
               AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
               AND EXISTS (
@@ -1089,7 +1094,7 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                     AND ha.action = 'unflag'
                     AND ha.created_at > te.created_at
               )
-        """).fetchone()["n"]
+        """, (cutoff_30d,)).fetchone()["n"]
 
         engagement_rate = reviewed_events / flagged_events if flagged_events > 0 else None
         reversal_rate = reversed_events / reviewed_events if reviewed_events > 0 else None
@@ -1097,11 +1102,13 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
         # Manual recoveries (30d) (locked SQL from plan)
         unflags_30d = conn.execute(
             "SELECT COUNT(*) AS n FROM hint_audit "
-            "WHERE action='unflag' AND created_at >= datetime('now','-30 days')"
+            "WHERE action='unflag' AND created_at >= ?",
+            (cutoff_30d,),
         ).fetchone()["n"]
         retracts_30d = conn.execute(
             "SELECT COUNT(*) AS n FROM hint_audit "
-            "WHERE action='retract' AND created_at >= datetime('now','-30 days')"
+            "WHERE action='retract' AND created_at >= ?",
+            (cutoff_30d,),
         ).fetchone()["n"]
 
         # LLM cost (30d) (locked SQL from plan) + estimated cost from rate table
@@ -1111,10 +1118,10 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                    AVG(llm_latency_ms) AS avg_latency_ms,
                    llm_model
             FROM trigger_events
-            WHERE created_at >= datetime('now','-30 days')
+            WHERE created_at >= ?
               AND llm_model IS NOT NULL
             GROUP BY llm_model
-        """).fetchall()
+        """, (cutoff_30d,)).fetchall()
 
         cost_by_model = []
         total_cost_usd = 0.0
@@ -1137,18 +1144,18 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
         attr_status_counts = {
             r["status"]: r["n"] for r in conn.execute("""
                 SELECT status, COUNT(*) AS n FROM trigger_events
-                WHERE created_at >= datetime('now','-30 days')
+                WHERE created_at >= ?
                   AND trigger_type = 'usage_attribution'
                 GROUP BY status
-            """).fetchall()
+            """, (cutoff_30d,)).fetchall()
         }
         attr_credited = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events
-            WHERE created_at >= datetime('now','-30 days')
+            WHERE created_at >= ?
               AND trigger_type = 'usage_attribution' AND status = 'succeeded'
               AND (COALESCE(used_hint_ids,'[]') != '[]'
                    OR COALESCE(unused_hint_ids,'[]') != '[]')
-        """).fetchone()["n"]
+        """, (cutoff_30d,)).fetchone()["n"]
 
         # F6 — state-based retirement-reversal rate. Of hints auto-disabled with
         # reason 'never_used', how many are CURRENTLY active again. Read STATE
@@ -1204,7 +1211,7 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
         # reset (normal hints earn applied>0 within a few passes). Inform-only.
         never_attributed = [
             _row_to_dict(r) for r in conn.execute(
-                f"""
+                """
                 SELECT hint.id, hint.feedback_text, hint.scope, hint.domain,
                        COUNT(DISTINCT er.workflow_id) AS injections
                 FROM nl_feedback_corrections hint
@@ -1212,7 +1219,7 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                     SELECT workflow_id, injected_hint_ids
                     FROM execution_records
                     WHERE json_valid(injected_hint_ids)
-                      AND timestamp >= datetime('now','-90 days')
+                      AND timestamp >= ?
                     ORDER BY timestamp DESC
                     LIMIT 5000
                 ) er
@@ -1220,14 +1227,13 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                   ON CAST(j.value AS INTEGER) = hint.id
                 WHERE hint.is_active=1 AND hint.conflict_flagged=0
                   AND hint.applied_count=0
-                  AND hint.created_at <= datetime('now', ?)
+                  AND hint.created_at <= ?
                 GROUP BY hint.id
                 HAVING injections >= ?
                 ORDER BY injections DESC
                 LIMIT 50
                 """,
-                (f"-{NEVER_ATTRIBUTED_REVIEW_MIN_AGE_DAYS} days",
-                 NEVER_ATTRIBUTED_REVIEW_MIN_INJECTIONS),
+                (cutoff_90d, cutoff_never_attr, NEVER_ATTRIBUTED_REVIEW_MIN_INJECTIONS),
             ).fetchall()
         ]
 

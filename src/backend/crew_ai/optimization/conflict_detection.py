@@ -22,7 +22,6 @@ Depends on: learning_config (_get_conflict_detection_model,
 import json
 import logging
 import time
-from collections import Counter
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -550,8 +549,14 @@ def fire_usage_attribution(
 
     # Disjointness — an id in >1 bucket is a contradiction → no-signal (drop from
     # all). apply_hint_attribution has the same guard (G4) as a backstop.
-    seen = Counter(used_ids + failure_ids + unused_ids)
-    overlap = {i for i, c in seen.items() if c > 1}
+    used_set = set(used_ids)
+    failure_set = set(failure_ids)
+    unused_set = set(unused_ids)
+    overlap = (
+        (used_set & failure_set)
+        | (used_set & unused_set)
+        | (failure_set & unused_set)
+    )
     if overlap:
         logger.warning(
             "%s id(s) classified into >1 bucket — no-signal: %s",

@@ -27,7 +27,6 @@ import json
 import re
 import logging
 import threading
-from collections import Counter
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -735,9 +734,9 @@ class NLFeedbackEngine(LearningEngine):
            learn_from_feedback resets the flag. Treated as an explicit override.
         2. Admin clicks "Unflag" in the /learning dashboard.
         """
-        _assert_writer_thread("NLFeedbackEngine.conflict_flag_hints")
         if not self._em or not per_hint_reasons:
             return []
+        _assert_writer_thread("NLFeedbackEngine.conflict_flag_hints")
         try:
             now = datetime.now(timezone.utc).isoformat()
             actually_flagged = self._flag_hints_no_commit(
@@ -934,8 +933,14 @@ class NLFeedbackEngine(LearningEngine):
         unused_ids = list(unused_ids or [])
 
         # G4 — drop any id present in more than one bucket (no-signal).
-        seen = Counter(used_ids + failure_ids + unused_ids)
-        overlap = {i for i, c in seen.items() if c > 1}
+        used_set = set(used_ids)
+        failure_set = set(failure_ids)
+        unused_set = set(unused_ids)
+        overlap = (
+            (used_set & failure_set)
+            | (used_set & unused_set)
+            | (failure_set & unused_set)
+        )
         if overlap:
             logger.warning(
                 "[LEARNING:NL] apply_hint_attribution: %d id(s) in >1 bucket "

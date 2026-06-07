@@ -321,6 +321,9 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
         "detach": True,
         "auto_remove": False,
         "name": container_name,
+        "network_mode": "none",
+        "mem_limit": "512m",
+        "pids_limit": 128,
     }
 
     _force_remove_stale_container(client, container_name)

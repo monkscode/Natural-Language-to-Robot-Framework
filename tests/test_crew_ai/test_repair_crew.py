@@ -16,6 +16,8 @@ Covered (§5 / §8.5):
 import types
 from unittest.mock import patch, MagicMock
 
+from crewai import LLM as _CrewAILLM
+
 import src.backend.services.dryrun_service as ds
 
 
@@ -49,6 +51,7 @@ def _mock_crew_cls():
 def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browser.Click"):
     mock_cls, crew, task = _mock_crew_cls()
     with patch("crewai.Crew", mock_cls), \
+         patch("src.backend.crew_ai.agents.get_llm", return_value=MagicMock(name="llm", spec=_CrewAILLM)), \
          patch("src.backend.crew_ai.library_context.get_library_context",
                return_value=_fake_library_context()):
         out, usage = ds.repair_robot_code(
