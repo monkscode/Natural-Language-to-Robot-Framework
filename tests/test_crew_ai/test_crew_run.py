@@ -28,7 +28,6 @@ def _make_agents_mock():
     agents.step_planner_agent.return_value = MagicMock()
     agents.element_identifier_agent.return_value = MagicMock()
     agents.code_assembler_agent.return_value = MagicMock()
-    agents.code_validator_agent.return_value = MagicMock()
     agents.llm._monitor.get_stats.return_value = {"calls": 5, "errors": 0}
     agents.llm._monitor.log_formatting_error = MagicMock()
     return agents
@@ -269,7 +268,6 @@ class TestRunCrewProgressQueue:
             "agents": {
                 "planner":   {"count": 2, "available": 5, "sources": ("nl",)},
                 "assembler": {"count": 1, "available": 3, "sources": ("nl",)},
-                "validator": {"count": 0, "available": 0, "sources": ()},
             },
             "nl_injected_ids": [5, 12],
         }
@@ -332,11 +330,13 @@ class TestRunCrewProgressQueue:
             out = run_crew("search on example.com", "gemini", "gemini-2.5-flash")
 
         hint_metadata = out[3]
-        # nl_injected_ids is the sorted union across all 3 agents: {5,12}|{5,12}|{5,12}
+        # nl_injected_ids is the sorted union across both agents: {5,12}|{5,12}
         assert hint_metadata["nl_injected_ids"] == [5, 12]
-        # Agent dicts live under hint_metadata["agents"] — no isinstance guard needed
+        # Agent dicts live under hint_metadata["agents"] — no isinstance guard needed.
+        # Crew is now a 2-agent context pipeline (planner + assembler); the
+        # validator agent was removed in favour of the dryrun gate.
         total = sum(r["count"] for r in hint_metadata["agents"].values())
-        assert total == 6  # 3 agents × hints_count=2
+        assert total == 4  # 2 agents × hints_count=2
 
     def test_unregister_called_even_when_kickoff_raises(self):
         """unregister_workflow() is in the finally block — fires on exception too."""

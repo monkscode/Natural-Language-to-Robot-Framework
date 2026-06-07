@@ -95,8 +95,8 @@ _ACTIVE_HINTS = [
 
 
 def _prompt():
-    from src.backend.services.workflow_service import _build_conflict_prompt
-    return _build_conflict_prompt(_FAILED_CODE, _WORKING_CODE, _ACTIVE_HINTS)
+    from src.backend.services.workflow_service import _build_merged_attribution_prompt
+    return _build_merged_attribution_prompt(_FAILED_CODE, _WORKING_CODE, _ACTIVE_HINTS)
 
 
 @pytest.mark.integration
@@ -223,10 +223,13 @@ def test_conflict_detection_llm_returns_valid_json():
             f"raw content={content!r}"
         )
 
-    assert "flag" in result, f"JSON missing 'flag' key: {result}"
-    assert isinstance(result["flag"], list), f"'flag' is not a list: {result}"
-    for entry in result["flag"]:
-        assert isinstance(entry, dict), f"Flag entry not a dict: {entry}"
-        assert "id" in entry, f"Flag entry missing 'id': {entry}"
+    # Merged usage-attribution response: used / harmful / unused buckets.
+    assert "used" in result, f"JSON missing 'used' key: {result}"
+    assert isinstance(result["used"], list), f"'used' is not a list: {result}"
+    assert isinstance(result.get("unused", []), list), f"'unused' is not a list: {result}"
+    for entry in result.get("harmful", []):
+        assert isinstance(entry, dict), f"harmful entry not a dict: {entry}"
+        assert "id" in entry, f"harmful entry missing 'id': {entry}"
 
-    print(f"\n  PASS — response: flag={result['flag']}")
+    print(f"\n  PASS — used={result.get('used')} "
+          f"harmful={result.get('harmful')} unused={result.get('unused')}")

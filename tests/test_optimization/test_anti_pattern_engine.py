@@ -575,8 +575,8 @@ class TestGetHints:
 
         conn.close()
 
-    def test_role_filtering_validator_returns_none(self):
-        """Verify get_hints() returns None for validator."""
+    def test_role_filtering_identifier_returns_none(self):
+        """Verify get_hints() returns None for identifier."""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
         _seed_anti_pattern(conn,
@@ -586,9 +586,9 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "validator")
+                                 "https://demoqa.com", "identifier")
         assert hints is None, \
-            "get_hints() returns None for validator"
+            "get_hints() returns None for identifier"
 
         conn.close()
 

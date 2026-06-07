@@ -27,7 +27,6 @@ class TestGetAgentContext:
         agents.library_context = library_context or MagicMock()
         agents.planner_context = None
         agents.assembler_context = None
-        agents.validator_context = None
         return agents
 
     def test_library_context_used(self):

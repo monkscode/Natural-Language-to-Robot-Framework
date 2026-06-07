@@ -12,6 +12,7 @@ from src.backend.core.config import settings
 from src.backend.services.workflow_service import stream_generate_and_run, stream_generate_only, stream_execute_only
 from src.backend.services.docker_service import get_docker_client, rebuild_image, get_docker_status, cleanup_test_containers
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 
 router = APIRouter()
@@ -177,10 +178,10 @@ async def submit_feedback(request: FeedbackRequest):
                    f"Must be 'close_enough' or 'completely_wrong'.",
         )
 
-    if request.feedback_text and len(request.feedback_text) > 500:
+    if request.feedback_text and len(request.feedback_text) > MAX_FEEDBACK_TEXT_CHARS:
         raise HTTPException(
             status_code=400,
-            detail="Feedback must be 500 characters or fewer",
+            detail=f"Feedback must be {MAX_FEEDBACK_TEXT_CHARS} characters or fewer",
         )
     text = request.feedback_text or ""
 

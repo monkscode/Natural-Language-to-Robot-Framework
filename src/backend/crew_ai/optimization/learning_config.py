@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 WRITER_THREAD_NAME = "learning-writer"
 
 
+# Max characters accepted for a user feedback_text, server-enforced at the two
+# feedback endpoints (POST /feedback, POST /hints). Single source of truth so
+# the hint-injection guard test can derive _HINT_CHAR_CAP from it: raising this
+# without raising _HINT_CHAR_CAP would let injected NL hints truncate again and
+# stop matching the stored text the usage-attribution LLM judges.
+MAX_FEEDBACK_TEXT_CHARS = 500
+
+
 # ---------------------------------------------------------------------------
 # 1. Central Configuration
 # ---------------------------------------------------------------------------
@@ -45,9 +53,9 @@ LEARNING_CONFIG = {
 
     # Complexity tiers (for hint injection budget)
     "COMPLEXITY_TIERS": {
-        "simple":  {"max_steps": 3,  "max_hints": 5,  "tokens_per_hint": 80},
-        "medium":  {"max_steps": 5,  "max_hints": 8,  "tokens_per_hint": 100},
-        "complex": {"max_steps": 99, "max_hints": 10, "tokens_per_hint": 120},
+        "simple":  {"max_steps": 3,  "max_hints": 5},
+        "medium":  {"max_steps": 5,  "max_hints": 8},
+        "complex": {"max_steps": 99, "max_hints": 10},
     },
     "HARD_CAP_HINTS": 10,               # Never exceed
 
@@ -401,7 +409,7 @@ class LearningEngine(ABC):
         Args:
             user_query: The natural language test query
             url: Target website URL
-            agent_role: "planner" | "identifier" | "assembler" | "validator"
+            agent_role: "planner" | "identifier" | "assembler"
 
         Returns:
             List of hint strings, or None if no relevant hints
@@ -494,8 +502,8 @@ from src.backend.core.url_utils import extract_domain  # noqa: F401, E402
 # 8. LLM Conflict Detection — provider routing helpers
 # ---------------------------------------------------------------------------
 #
-# Used by Trigger 1 (workflow_service._fire_llm_conflict_detection) and
-# Trigger 2 (feedback_loop.process_user_feedback). Defined here — NOT in
+# Used by Trigger 2 (feedback_loop.process_user_feedback) and Part-2 usage
+# attribution (conflict_detection.fire_usage_attribution). Defined here — NOT in
 # workflow_service.py or feedback_loop.py — because both files already
 # depend on learning_config; placing the helpers in either would force a
 # circular import.

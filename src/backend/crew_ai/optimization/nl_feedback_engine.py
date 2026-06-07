@@ -8,8 +8,9 @@ Feedback Pipeline:
     1. Triage (process_feedback) — classify feedback category via seed patterns
     2. Storage (learn_from_feedback) — store correction in nl_feedback_corrections
     3. Retrieval (get_hints) — query corrections by scope, return deduplicated hints
-    4. Tracking (update_hint_effectiveness) — track success/failure with smart
-       category cross-referencing to avoid false-positive penalization
+    4. Attribution (apply_hint_attribution) — on a passing run, credit only the
+       hints actually used in the code (one LLM judgment per workflow) and retire
+       over-surfaced dead weight; sole writer of the usage counters
 
 Taxonomy codes:
     A1 — Structural issue (missing loop, wrong flow)
@@ -26,6 +27,7 @@ import json
 import re
 import logging
 import threading
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -64,9 +66,25 @@ AUTO_DISABLE_MIN_APPLICATIONS = 3
 AUTO_DISABLE_RATIO_MIN_APPLICATIONS = 10
 AUTO_DISABLE_FAILURE_RATIO = 0.6
 
-# Trigger-flag protection (mirror of auto-disable thresholds, applied to the "good" side)
+# Trigger-flag protection. Strong-history hints are shielded from single-shot
+# flagging. Evaluated on USED outcomes (success + failure), NOT applied
+# (injections) — so over-surfacing / unused can't strip a good hint's protection
+# (S1). The MIN_APPLIED name is kept for continuity but now means "minimum used
+# outcomes" (success + failure).
 TRIGGER_FLAG_PROTECTION_MIN_APPLIED = 5
 TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE = 0.70
+
+# Over-surfaced dead-weight retirement (Part 2 / G1). A hint injected repeatedly
+# but never used (unused_count >= threshold) with zero successes is retired — but
+# only past an age floor, so a brand-new mis-surfaced hint isn't killed before
+# its right context appears. created_at is already on the row (no schema change).
+UNUSED_RETIRE_THRESHOLD = 5
+UNUSED_RETIRE_MIN_AGE_DAYS = 30
+
+# Audit reason for the unused-retirement auto-disable. Shared constant so the F6
+# retirement-reversal metric (learning_endpoints) joins on the same string — a
+# literal mismatch would silently make that metric read 0.
+AUTO_DISABLE_REASON_NEVER_USED = "never_used"
 
 # Failure-attribution widening (P5A). Maps a hint's original_failure_category to
 # the set of new failure categories that should still count as "this hint failed
@@ -236,7 +254,7 @@ class NLFeedbackEngine(LearningEngine):
     _CROSS_REF_BOOST = 0.20
     _MAX_CONFIDENCE = 1.0
 
-    # Scope WHERE clause shared by get_hints and update_hint_effectiveness.
+    # Scope WHERE clause shared by get_hints_with_ids and get_active_hints_raw.
     # Parameter order is (domain, url).
     _SCOPE_WHERE = (
         "scope = 'global' "
@@ -422,7 +440,11 @@ class NLFeedbackEngine(LearningEngine):
                     "    is_active = 1, "
                     "    conflict_flagged = 0, "
                     "    conflict_flagged_at = NULL, "
-                    "    conflict_flag_reason = NULL "
+                    "    conflict_flag_reason = NULL, "
+                    # Step 4b: a re-submission is a fresh chance — clear the
+                    # over-surfaced dead-weight counter so the hint is not
+                    # immediately re-retired. success/failure are preserved.
+                    "    unused_count = 0 "
                     "WHERE id = ?",
                     (now, existing["id"]),
                 )
@@ -492,11 +514,21 @@ class NLFeedbackEngine(LearningEngine):
 
     def get_hints_with_ids(
         self, user_query: str, url: str, agent_role: str,
+        selection_trace: dict | None = None,
     ) -> tuple[list[str], list[int]]:
         """Like get_hints() but also returns the DB ids of the selected hints.
 
         Returns (hints, ids) — parallel lists, same order.
         Returns ([], []) when there are no applicable hints or DB is unavailable.
+
+        selection_trace: opt-in N3 observability out-param (F2b). When a dict is
+            passed, it is filled {hint_id: {scope, source, priority,
+            similarity_score, available, injected, drop_reason}} recording each
+            candidate's STAGE 2-4 fate (similarity → dedup → internal [:5] cap).
+            `available`/`injected` start 0 and `drop_reason` None for survivors;
+            stage 5 (holdout / outer cap / injected) is overlaid later by the
+            SmartKeywordProvider. PURELY OBSERVABILITY — the returned (hints,
+            ids) are byte-identical with or without it. Default None = zero cost.
         """
         if not self._em:
             return [], []
@@ -536,20 +568,76 @@ class NLFeedbackEngine(LearningEngine):
         # of 5 is applied after. filter_by_query_similarity never raises — on
         # any ChromaDB problem it fails open (returns all candidates),
         # degrading gracefully to the old scope-only behaviour.
+        # score_sink (local, only when tracing) captures per-candidate sim +
+        # outcome from the similarity stage for the N3 trace (F2b). It stays
+        # encapsulated here; the filter's return is byte-identical with/without.
+        score_sink = {} if selection_trace is not None else None
         survivors = self._em.filter_by_query_similarity(
-            user_query, [r["id"] for r in rows], kind="nl",
+            user_query, [r["id"] for r in rows], kind="nl", score_sink=score_sink,
         )
-        rows = [r for r in rows if r["id"] in survivors]
-        if not rows:
+        survivor_rows = [r for r in rows if r["id"] in survivors]
+        if not survivor_rows:
+            # Every candidate was dropped at similarity — still record them so
+            # the dashboard can show why (similarity_below / no_anchor).
+            self._record_selection_trace(
+                selection_trace, rows, score_sink, survivors,
+                deduped_ids=set(), returned_ids=set(),
+            )
             return [], []
 
         deduped = self._deduplicate_hints(
-            [{"feedback_text": r["feedback_text"], "id": r["id"]} for r in rows]
+            [{"feedback_text": r["feedback_text"], "id": r["id"]}
+             for r in survivor_rows]
         )
         selected = deduped[:5]
         hints = [self._format_feedback_hint(h["feedback_text"]) for h in selected]
         ids = [h["id"] for h in selected]
+        self._record_selection_trace(
+            selection_trace, rows, score_sink, survivors,
+            deduped_ids={h["id"] for h in deduped},
+            returned_ids=set(ids),
+        )
         return hints, ids
+
+    @staticmethod
+    def _record_selection_trace(selection_trace, rows, score_sink, survivors,
+                                deduped_ids, returned_ids):
+        """Populate the opt-in N3 selection trace (F2b) with each NL
+        candidate's STAGE 2-4 fate. Best-effort: any failure is swallowed so
+        the hint path is never affected (FR4). Caps (internal [:5]) and the
+        outer per-agent cap both read as `cap`; `dedup` stays distinct.
+        """
+        if selection_trace is None:
+            return
+        try:
+            sink = score_sink or {}
+            for r in rows:
+                rid = r["id"]
+                info = sink.get(rid, {})
+                entry = {
+                    "scope": r["scope"],
+                    "source": "nl",
+                    "priority": "high",
+                    "similarity_score": info.get("sim"),
+                    "available": 0,
+                    "injected": 0,
+                    "drop_reason": None,
+                }
+                if rid not in survivors:
+                    # similarity-stage drop: similarity_below / no_anchor.
+                    entry["drop_reason"] = info.get("outcome")
+                elif rid not in deduped_ids:
+                    entry["drop_reason"] = "dedup"
+                elif rid not in returned_ids:
+                    entry["drop_reason"] = "cap"          # internal [:5] cut
+                else:
+                    entry["available"] = 1                # reached the pool
+                selection_trace[rid] = entry
+        except Exception as e:
+            logger.warning(
+                "[LEARNING:NL] selection_trace capture failed (non-blocking): %s",
+                e,
+            )
 
     def _select_hints(self, where_clause: str, params) -> list[dict]:
         """SELECT id, feedback_text, applied_count, success_count, failure_count, created_at
@@ -617,17 +705,18 @@ class NLFeedbackEngine(LearningEngine):
         """Suspend hints from injection without permanently deactivating them.
 
         Strong-history guard: hints with a proven track record
-        (applied >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED AND
-        success_rate >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE) are NOT
-        flagged by a single trigger call. The trigger_events row is still
-        written by the caller, so batch hint review can act on accumulated
+        (success+failure >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED AND
+        success/(success+failure) >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE)
+        are NOT flagged by a single trigger call. The trigger_events row is
+        still written by the caller, so batch hint review can act on accumulated
         evidence if multiple triggers fire against the same hint.
 
-        Symmetric with auto-disable: auto-disable requires applied>=10 AND
-        failure_rate>0.6 to deactivate. This protective floor (applied>=5
-        AND success_rate>=0.7) is the inverse — a hint proven good is
-        protected from single-shot flagging. Low-history hints (applied<5)
-        still flag immediately — LLM judgment is the best evidence available.
+        The guard reads USED outcomes (success+failure), not applied
+        (injections) — over-surfacing/unused can't strip a good hint's
+        protection (S1). Hints with few used outcomes still flag immediately —
+        LLM judgment is the best evidence available. The flagging loop itself
+        lives in _flag_hints_no_commit, shared with apply_hint_attribution so a
+        Case-B credit + harm-flag commit atomically.
 
         Args:
             per_hint_reasons: {hint_id: reason_string} — per-hint LLM reason.
@@ -649,69 +738,11 @@ class NLFeedbackEngine(LearningEngine):
         _assert_writer_thread("NLFeedbackEngine.conflict_flag_hints")
         if not self._em or not per_hint_reasons:
             return []
-        actually_flagged: list[int] = []
         try:
             now = datetime.now(timezone.utc).isoformat()
-            audit_action = f"{trigger_type}_flag"
-            for hint_id, reason in per_hint_reasons.items():
-                hint = self._em._writer_conn.execute(
-                    "SELECT applied_count, success_count "
-                    "FROM nl_feedback_corrections WHERE id = ?",
-                    (hint_id,),
-                ).fetchone()
-
-                if hint is None:
-                    logger.warning(
-                        "[LEARNING:NL] conflict_flag_hints: hint id=%d not found, skipping",
-                        hint_id,
-                    )
-                    continue
-
-                applied = hint["applied_count"] or 0
-                success = hint["success_count"] or 0
-
-                if applied >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED:
-                    success_rate = success / applied
-                    if success_rate >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE:
-                        logger.info(
-                            "[LEARNING:NL] Trigger flag suppressed for hint %d — "
-                            "strong history (applied=%d, success_rate=%.0f%%). "
-                            "Evidence recorded in trigger_events; batch hint review "
-                            "will reconsider if multiple triggers accumulate.",
-                            hint_id, applied, success_rate * 100,
-                        )
-                        continue
-
-                self._em._writer_conn.execute(
-                    "UPDATE nl_feedback_corrections "
-                    "SET conflict_flagged = 1, "
-                    "    conflict_flagged_at = ?, "
-                    "    conflict_flag_reason = ? "
-                    "WHERE id = ?",
-                    (now, reason, hint_id),
-                )
-                try:
-                    self._em._writer_conn.execute(
-                        "INSERT INTO hint_audit "
-                        "(hint_id, action, actor, reason, "
-                        " before_value, after_value, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            hint_id, audit_action, trigger_type, reason,
-                            json.dumps({"conflict_flagged": 0}),
-                            json.dumps({
-                                "conflict_flagged": 1,
-                                "conflict_flag_reason": reason,
-                            }),
-                            now,
-                        ),
-                    )
-                except Exception as audit_err:
-                    logger.warning(
-                        "[LEARNING:NL] hint_audit write failed for id=%d "
-                        "(non-blocking): %s", hint_id, audit_err,
-                    )
-                actually_flagged.append(hint_id)
+            actually_flagged = self._flag_hints_no_commit(
+                per_hint_reasons, trigger_type, now,
+            )
             self._em._writer_conn.commit()
             logger.info(
                 "[LEARNING:NL] Trigger %s flagged %d/%d hint(s); rest "
@@ -736,6 +767,93 @@ class NLFeedbackEngine(LearningEngine):
             # actually_flagged_hint_ids to trigger_events.
             return []
 
+    def _flag_hints_no_commit(
+        self,
+        per_hint_reasons: dict[int, str],
+        trigger_type: str,
+        now: str,
+    ) -> list[int]:
+        """Flagging core shared by conflict_flag_hints (Trigger 2) and
+        apply_hint_attribution (Case-B harmful-removed set).
+
+        Runs the SELECT -> strong-history-guard -> UPDATE conflict_flagged ->
+        audit loop WITHOUT commit or rollback: the CALLER owns the transaction,
+        so the flag commits atomically with whatever else the caller wrote (the
+        usage-attribution counters, for apply_hint_attribution). The caller
+        asserts the writer thread.
+
+        Strong-history guard (S1): a hint with >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED
+        USED outcomes (success + failure) and success/(success+failure)
+        >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE is shielded from single-shot
+        flagging — evaluated on used outcomes, not applied, so over-surfacing /
+        unused can't strip protection. Reads PRE-increment counts
+        (apply_hint_attribution calls this BEFORE applying its increments).
+
+        Returns the ids actually flagged (protected hints excluded).
+        """
+        actually_flagged: list[int] = []
+        audit_action = f"{trigger_type}_flag"
+        for hint_id, reason in per_hint_reasons.items():
+            hint = self._em._writer_conn.execute(
+                "SELECT success_count, failure_count "
+                "FROM nl_feedback_corrections WHERE id = ?",
+                (hint_id,),
+            ).fetchone()
+
+            if hint is None:
+                logger.warning(
+                    "[LEARNING:NL] flag core: hint id=%d not found, skipping",
+                    hint_id,
+                )
+                continue
+
+            success = hint["success_count"] or 0
+            failure = hint["failure_count"] or 0
+            used = success + failure
+
+            if used >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED:
+                success_rate = success / used
+                if success_rate >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE:
+                    logger.info(
+                        "[LEARNING:NL] Flag suppressed for hint %d — strong "
+                        "history (used=%d, success_rate=%.0f%%). Evidence "
+                        "recorded; batch review reconsiders if triggers accumulate.",
+                        hint_id, used, success_rate * 100,
+                    )
+                    continue
+
+            self._em._writer_conn.execute(
+                "UPDATE nl_feedback_corrections "
+                "SET conflict_flagged = 1, "
+                "    conflict_flagged_at = ?, "
+                "    conflict_flag_reason = ? "
+                "WHERE id = ?",
+                (now, reason, hint_id),
+            )
+            try:
+                self._em._writer_conn.execute(
+                    "INSERT INTO hint_audit "
+                    "(hint_id, action, actor, reason, "
+                    " before_value, after_value, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        hint_id, audit_action, trigger_type, reason,
+                        json.dumps({"conflict_flagged": 0}),
+                        json.dumps({
+                            "conflict_flagged": 1,
+                            "conflict_flag_reason": reason,
+                        }),
+                        now,
+                    ),
+                )
+            except Exception as audit_err:
+                logger.warning(
+                    "[LEARNING:NL] hint_audit write failed for id=%d "
+                    "(non-blocking): %s", hint_id, audit_err,
+                )
+            actually_flagged.append(hint_id)
+        return actually_flagged
+
     def _format_feedback_hint(self, feedback_text: str) -> str:
         # Pass feedback through verbatim with a universal warning header.
         # The header travels with every hint to every agent (Planner, Assembler,
@@ -748,213 +866,322 @@ class NLFeedbackEngine(LearningEngine):
             f"{feedback_text.strip()}"
         )
 
-    def update_hint_effectiveness(
+    def apply_hint_attribution(
         self,
-        domain: Optional[str],
-        url: Optional[str],
-        test_passed: bool,
-        new_failure_category: Optional[str] = None,
-        injected_hint_ids: Optional[str] = None,
-    ) -> None:
-        """
-        Track effectiveness of active hints after test execution.
+        workflow_id: str,
+        used_ids: list[int],
+        failure_ids: list[int],
+        unused_ids: list[int],
+        *,
+        reasons: Optional[dict[int, str]] = None,
+    ) -> Optional[list[int]]:
+        """Sole writer of NL-hint usage counters (Part 2). Runs on the writer
+        thread inside ONE atomic transaction (P2/P3).
 
-        Uses smart failure attribution via category cross-referencing:
-        - When test passed: increment applied_count + success_count for
-          injected hints only (or all active in-scope for legacy NULL rows).
-        - When test failed: compare original_failure_category with
-          new failure. Same category → hint didn't fix its issue →
-          increment failure_count. Different category → unrelated → skip.
-        - Auto-disable (never-succeeded): if failure_count > 0 AND
-          success_count == 0 AND applied_count >= 3 → is_active = 0.
-        - Auto-disable (ratio): if applied_count >= 10 AND
-          failure_count / applied_count > 0.6 → is_active = 0. Catches
-          hints that used to work but are now consistently failing.
+        Once-guard (B2/P5): atomically CLAIM the workflow first —
+            UPDATE execution_records SET hint_attribution_done = 1
+            WHERE workflow_id = ? AND hint_attribution_done = 0
+        If it affects 0 rows (already credited, or no row — dedup/holdout/
+        missing), the method credits nothing. The single write queue serialises
+        writes, so concurrent duplicate runs of one workflow_id credit once.
 
-        Args:
-            injected_hint_ids: JSON string of hint IDs that were actually
-                injected (e.g. '[5, 12]'). '[]' = known-empty (no NL hints
-                injected, skip counters). None = legacy row (all-in-scope
-                fallback for backward compatibility).
+        Buckets (membership-guarded upstream against the resolved active set by
+        fire_usage_attribution; this method touches ONLY the explicit ids passed
+        in — P4, there is no scope-wide path):
+            used    -> applied_count += 1, success_count += 1
+            failure -> applied_count += 1, failure_count += 1, then conflict-flag
+            unused  -> applied_count += 1, unused_count  += 1
 
-        Called by FeedbackLoop.process_execution() after every test run.
+        G4 — any id present in more than one bucket is dropped from all three
+        (no-signal) and logged. fire_usage_attribution already guarantees
+        disjoint sets, but apply must never SILENTLY double-count if that ever
+        regresses.
+
+        N2 ordering inside the transaction: claim -> flag (strong-history guard
+        reads PRE-increment counts, so the triggering verdict isn't in its own
+        denominator) -> apply increments -> auto-disable / retire on
+        POST-increment counts -> commit.
+
+        Disable/retire rules, evaluated for EVERY touched hint (S1-R3) on the
+        (success+failure) used-outcome basis:
+          - never-succeeded (FR2, AUTOMATIC): failure>0 AND success==0 AND
+            (success+failure) >= AUTO_DISABLE_MIN_APPLICATIONS -> disable
+            (reason 'never_succeeded').
+          - over-surfaced dead weight (G1): unused >= UNUSED_RETIRE_THRESHOLD AND
+            success==0 AND age >= UNUSED_RETIRE_MIN_AGE_DAYS -> disable
+            (reason 'never_used').
+        The high-harm-RATIO rule is INFORM-ONLY this phase (FR2) — surfaced on
+        the review panel, not auto-disabled here.
+
+        Replaces the former all-injected per-execution crediting (Part 1).
+        Called only from fire_usage_attribution via the learning write queue.
+
+        Returns the list of hint ids actually flagged as harmful (possibly empty)
+        when the claim is won and the transaction commits; None when the claim is
+        lost (already attributed / no row — dedup/holdout) or the no-em guard /
+        rollback path fires. fire_usage_attribution writes that list to
+        trigger_events.actually_flagged_hint_ids (distinct from the recommended
+        failure set, so strong-history-suppressed harmful hints are not counted
+        as enforced).
         """
         if not self._em:
-            return
-        _assert_writer_thread("NLFeedbackEngine.update_hint_effectiveness")
+            return None
+        _assert_writer_thread("NLFeedbackEngine.apply_hint_attribution")
 
-        _processed_count = 0
-        _total_hints = 0
+        reasons = reasons or {}
+        used_ids = list(used_ids or [])
+        failure_ids = list(failure_ids or [])
+        unused_ids = list(unused_ids or [])
+
+        # G4 — drop any id present in more than one bucket (no-signal).
+        seen = Counter(used_ids + failure_ids + unused_ids)
+        overlap = {i for i, c in seen.items() if c > 1}
+        if overlap:
+            logger.warning(
+                "[LEARNING:NL] apply_hint_attribution: %d id(s) in >1 bucket "
+                "(used/failure/unused) — dropping from all as no-signal: %s",
+                len(overlap), sorted(overlap),
+            )
+            used_ids = [i for i in used_ids if i not in overlap]
+            failure_ids = [i for i in failure_ids if i not in overlap]
+            unused_ids = [i for i in unused_ids if i not in overlap]
+
+        conn = self._em._writer_conn
         try:
-            ids: list | None = None
-            if injected_hint_ids is not None:
-                try:
-                    parsed = json.loads(injected_hint_ids)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "[LEARNING:NL] malformed injected_hint_ids, falling back "
-                        "to scope-wide path: %r",
-                        injected_hint_ids,
-                    )
-                    parsed = None
-                ids = parsed if isinstance(parsed, list) else None
+            # Atomic once-guard claim (B2/P5).
+            claimed = conn.execute(
+                "UPDATE execution_records SET hint_attribution_done = 1 "
+                "WHERE workflow_id = ? AND hint_attribution_done = 0",
+                (workflow_id,),
+            ).rowcount
+            if claimed != 1:
+                # Already attributed, or no row (dedup/holdout/missing): the
+                # UPDATE changed nothing. Release the transaction and skip.
+                conn.commit()
+                return None
 
-            if ids is not None:
-                # New path: credit only the hints that were actually injected.
-                if not ids:
-                    # '[]' = known-empty — no NL hints shaped this test, no-op.
-                    return
-                placeholders = ",".join("?" * len(ids))
-                active_hints = self._em._writer_conn.execute(
-                    "SELECT id, original_failure_category, "
-                    "       applied_count, success_count, failure_count "
-                    "FROM nl_feedback_corrections "
-                    f"WHERE id IN ({placeholders}) "
-                    "AND is_active = 1 AND conflict_flagged = 0",
-                    ids,
-                ).fetchall()
-            else:
-                # Legacy path (NULL injected_hint_ids or malformed JSON): fall
-                # back to all active in-scope hints. Preserves behaviour for
-                # rows written before schema v10. Excludes conflict_flagged=1
-                # hints — already suspended; crediting them is noise.
-                active_hints = self._em._writer_conn.execute(
-                    "SELECT id, original_failure_category, "
-                    "       applied_count, success_count, failure_count "
-                    "FROM nl_feedback_corrections "
-                    "WHERE is_active = 1 AND conflict_flagged = 0 "
-                    f"AND ({self._SCOPE_WHERE})",
-                    (domain, url),
-                ).fetchall()
+            bucket: dict[int, str] = {}
+            for i in used_ids:
+                bucket[i] = "used"
+            for i in failure_ids:
+                bucket[i] = "failure"
+            for i in unused_ids:
+                bucket[i] = "unused"
 
-            if not active_hints:
-                return
-            _total_hints = len(active_hints)
+            if not bucket:
+                # Claim won but nothing to apply (all dropped by G4, or empty
+                # buckets). The done flag is set (no-op); don't retry.
+                conn.commit()
+                return []
 
-            for hint in active_hints:
-                hint_id = hint["id"]
-                new_applied = hint["applied_count"] + 1
-                new_success = hint["success_count"]
-                new_failure = hint["failure_count"]
+            now = datetime.now(timezone.utc).isoformat()
 
-                if test_passed:
-                    new_success += 1
+            # Read each touched hint's PRE-increment counts ONCE (N2). Only
+            # active, unflagged hints — a hint disabled/flagged since injection
+            # is excluded here and silently skipped.
+            placeholders = ",".join("?" * len(bucket))
+            rows = conn.execute(
+                "SELECT id, applied_count, success_count, failure_count, "
+                "       unused_count, created_at "
+                "FROM nl_feedback_corrections "
+                f"WHERE id IN ({placeholders}) "
+                "AND is_active = 1 AND conflict_flagged = 0",
+                list(bucket.keys()),
+            ).fetchall()
+            pre = {r["id"]: r for r in rows}
+
+            # N2 step 1: flag the harmful set FIRST (guard reads pre-increment
+            # counts). Only ids still active/unflagged are eligible. The
+            # no-commit core commits with this transaction; the increments below
+            # target hints by explicit id, so a hint flagged here still has its
+            # failure_count incremented (the record must degrade — N2).
+            actually_flagged: list[int] = []
+            harmful = {
+                i: reasons.get(i, "usage-attribution: removed and judged harmful")
+                for i in failure_ids if i in pre
+            }
+            if harmful:
+                # Case-B harmful-removed flag — audited as a Trigger-1 flag (the
+                # merged attribution path extends Trigger 1). The returned set is
+                # what was enforced (strong-history-protected hints excluded).
+                actually_flagged = self._flag_hints_no_commit(harmful, "trigger_1", now)
+
+            # N2 step 2: apply increments by explicit id, then evaluate the
+            # disable/retire rules on POST-increment counts (S1-R3).
+            for hint_id, row in pre.items():
+                kind = bucket[hint_id]
+                applied = (row["applied_count"] or 0) + 1
+                success = row["success_count"] or 0
+                failure = row["failure_count"] or 0
+                unused = row["unused_count"] or 0
+                if kind == "used":
+                    success += 1
+                elif kind == "failure":
+                    failure += 1
                 else:
-                    # Smart attribution: penalize if new failure category is
-                    # in the hint's related set (P5A widening). Defaults to
-                    # strict same-category match for codes not in
-                    # RELATED_CATEGORIES.
-                    orig_cat = hint["original_failure_category"]
-                    if orig_cat and new_failure_category:
-                        related = RELATED_CATEGORIES.get(orig_cat, {orig_cat})
-                        if new_failure_category in related:
-                            new_failure += 1
-                    # No category on either side → no penalty
+                    unused += 1
 
-                # Update counts
-                self._em._writer_conn.execute(
+                conn.execute(
                     "UPDATE nl_feedback_corrections "
-                    "SET applied_count = ?, "
-                    "    success_count = ?, "
-                    "    failure_count = ? "
+                    "SET applied_count = ?, success_count = ?, "
+                    "    failure_count = ?, unused_count = ? "
                     "WHERE id = ?",
-                    (new_applied, new_success, new_failure, hint_id),
+                    (applied, success, failure, unused, hint_id),
+                )
+                self._maybe_auto_disable_or_retire(
+                    hint_id, row, applied, success, failure, unused, now,
                 )
 
-                # Auto-disable check
-                if (
-                    new_failure > 0
-                    and new_success == 0
-                    and new_applied >= AUTO_DISABLE_MIN_APPLICATIONS
-                ):
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    self._em._writer_conn.execute(
-                        "UPDATE nl_feedback_corrections "
-                        "SET is_active = 0, disabled_at = ? WHERE id = ?",
-                        (now_iso, hint_id),
-                    )
-                    try:
-                        self._em._writer_conn.execute(
-                            "INSERT INTO hint_audit "
-                            "(hint_id, action, actor, reason, before_value, after_value, created_at) "
-                            "VALUES (?, 'auto_disable', 'system', 'never_succeeded', ?, ?, ?)",
-                            (
-                                hint_id,
-                                json.dumps({"applied_count": hint["applied_count"],
-                                            "success_count": hint["success_count"],
-                                            "failure_count": hint["failure_count"]}),
-                                json.dumps({"is_active": 0, "applied_count": new_applied,
-                                            "success_count": new_success,
-                                            "failure_count": new_failure}),
-                                now_iso,
-                            ),
-                        )
-                    except Exception as audit_err:
-                        logger.warning(
-                            "[LEARNING:NL] Auto-disable audit write failed (non-blocking): %s",
-                            audit_err,
-                        )
-                    logger.info(
-                        "[LEARNING:NL] Auto-disabled hint id=%d "
-                        "(applied=%d, success=0, failure=%d)",
-                        hint_id, new_applied, new_failure,
-                    )
-                elif (
-                    new_applied >= AUTO_DISABLE_RATIO_MIN_APPLICATIONS
-                    and new_failure / new_applied > AUTO_DISABLE_FAILURE_RATIO
-                ):
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    self._em._writer_conn.execute(
-                        "UPDATE nl_feedback_corrections "
-                        "SET is_active = 0, disabled_at = ? WHERE id = ?",
-                        (now_iso, hint_id),
-                    )
-                    try:
-                        self._em._writer_conn.execute(
-                            "INSERT INTO hint_audit "
-                            "(hint_id, action, actor, reason, before_value, after_value, created_at) "
-                            "VALUES (?, 'auto_disable', 'system', 'failure_rate_exceeded', ?, ?, ?)",
-                            (
-                                hint_id,
-                                json.dumps({"applied_count": hint["applied_count"],
-                                            "success_count": hint["success_count"],
-                                            "failure_count": hint["failure_count"]}),
-                                json.dumps({"is_active": 0, "applied_count": new_applied,
-                                            "success_count": new_success,
-                                            "failure_count": new_failure}),
-                                now_iso,
-                            ),
-                        )
-                    except Exception as audit_err:
-                        logger.warning(
-                            "[LEARNING:NL] Auto-disable audit write failed (non-blocking): %s",
-                            audit_err,
-                        )
-                    logger.info(
-                        "[LEARNING:NL] Auto-disabled hint id=%d "
-                        "(applied=%d, success=%d, failure=%d, ratio=%.2f)",
-                        hint_id, new_applied, new_success, new_failure,
-                        new_failure / new_applied,
-                    )
-
-                _processed_count += 1
-
-            self._em._writer_conn.commit()
-
+            conn.commit()
+            # F2e: stamp the N3 trace as a SEPARATE commit AFTER the counter
+            # transaction above. Fully isolated (FR4 guard #3) — a trace-UPDATE
+            # failure can never roll back the now-durable counters, nor change
+            # the return value. Uses the full bucket (incl. ids excluded from
+            # `pre` since flagged/disabled) so the trace reflects the LLM verdict.
+            self._update_trace_attribution(workflow_id, bucket, reasons)
+            logger.info(
+                "[LEARNING:NL] apply_hint_attribution %s: used=%d failure=%d "
+                "unused=%d (touched %d active hint(s))",
+                workflow_id, len(used_ids), len(failure_ids),
+                len(unused_ids), len(pre),
+            )
+            return actually_flagged
         except Exception as e:
             try:
-                self._em._writer_conn.rollback()
+                conn.rollback()
             except Exception as rb_err:
                 logger.warning(
-                    "[LEARNING:NL] update_hint_effectiveness rollback failed: %s",
+                    "[LEARNING:NL] apply_hint_attribution rollback failed: %s",
                     rb_err,
                 )
             logger.warning(
-                "[LEARNING:NL] update_hint_effectiveness failed after %d/%d "
-                "hint(s) — all changes rolled back "
-                "(domain=%s, url=%s, passed=%s): %s",
-                _processed_count, _total_hints, domain, url, test_passed, e,
+                "[LEARNING:NL] apply_hint_attribution failed for %s — all "
+                "changes rolled back: %s", workflow_id, e,
             )
+            return None
+
+    def _update_trace_attribution(self, workflow_id, bucket, reasons):
+        """F2e: stamp attribution_bucket / attribution_reason onto the N3 trace
+        rows ((workflow_id, hint_id)) as a SEPARATE commit AFTER the counter
+        transaction. Best-effort and fully isolated — if it fails, the already-
+        committed counters are unaffected (FR4 guard #3) and the caller's return
+        value is preserved. The internal 'failure' bucket maps to the trace's
+        'harmful'. Rows for non-injected/ pruned hints simply match nothing.
+        """
+        if not bucket:
+            return
+        trace_bucket = {"used": "used", "failure": "harmful", "unused": "unused"}
+        conn = self._em._writer_conn
+        try:
+            for hint_id, kind in bucket.items():
+                conn.execute(
+                    "UPDATE hint_workflow_trace "
+                    "SET attribution_bucket = ?, attribution_reason = ? "
+                    "WHERE workflow_id = ? AND hint_id = ?",
+                    (trace_bucket.get(kind, kind), reasons.get(hint_id),
+                     workflow_id, hint_id),
+                )
+            conn.commit()
+        except Exception as e:
+            logger.warning(
+                "[LEARNING:NL] trace attribution UPDATE failed (non-blocking, "
+                "workflow_id=%s): %s", workflow_id, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+    def _maybe_auto_disable_or_retire(
+        self, hint_id, before_row, applied, success, failure, unused, now_iso,
+    ) -> None:
+        """Evaluate the two AUTOMATIC disable/retire rules on POST-increment
+        counts (the high-harm-ratio rule is inform-only this phase — FR2). Both
+        require success == 0, so a hint that has ever genuinely helped is never
+        auto-killed here.
+        """
+        used = success + failure
+        # never-succeeded (FR2 automatic), on the used-outcome basis.
+        if failure > 0 and success == 0 and used >= AUTO_DISABLE_MIN_APPLICATIONS:
+            self._auto_disable_hint(
+                hint_id, before_row, applied, success, failure, unused,
+                "never_succeeded", now_iso,
+            )
+            return
+        # over-surfaced dead weight (G1): retire only past the age floor.
+        if (
+            unused >= UNUSED_RETIRE_THRESHOLD
+            and success == 0
+            and self._hint_age_days(before_row["created_at"], now_iso)
+            >= UNUSED_RETIRE_MIN_AGE_DAYS
+        ):
+            self._auto_disable_hint(
+                hint_id, before_row, applied, success, failure, unused,
+                AUTO_DISABLE_REASON_NEVER_USED, now_iso,
+            )
+
+    def _auto_disable_hint(
+        self, hint_id, before_row, applied, success, failure, unused,
+        reason, now_iso,
+    ) -> None:
+        """Deactivate a hint and write a best-effort auto_disable audit row (its
+        own try/except — an audit failure must not roll back the disable).
+        """
+        self._em._writer_conn.execute(
+            "UPDATE nl_feedback_corrections "
+            "SET is_active = 0, disabled_at = ? WHERE id = ?",
+            (now_iso, hint_id),
+        )
+        try:
+            self._em._writer_conn.execute(
+                "INSERT INTO hint_audit "
+                "(hint_id, action, actor, reason, before_value, after_value, created_at) "
+                "VALUES (?, 'auto_disable', 'system', ?, ?, ?, ?)",
+                (
+                    hint_id, reason,
+                    json.dumps({
+                        "applied_count": before_row["applied_count"],
+                        "success_count": before_row["success_count"],
+                        "failure_count": before_row["failure_count"],
+                        "unused_count": before_row["unused_count"],
+                    }),
+                    json.dumps({
+                        "is_active": 0, "applied_count": applied,
+                        "success_count": success, "failure_count": failure,
+                        "unused_count": unused,
+                    }),
+                    now_iso,
+                ),
+            )
+        except Exception as audit_err:
+            logger.warning(
+                "[LEARNING:NL] Auto-disable audit write failed (non-blocking): %s",
+                audit_err,
+            )
+        logger.info(
+            "[LEARNING:NL] Auto-disabled hint id=%d reason=%s "
+            "(success=%d, failure=%d, unused=%d)",
+            hint_id, reason, success, failure, unused,
+        )
+
+    @staticmethod
+    def _hint_age_days(created_at: Optional[str], now_iso: str) -> float:
+        """Age of a hint in days from created_at to now (both ISO strings).
+        Returns 0.0 if created_at is missing or unparseable — conservative, a
+        hint whose age can't be established is NOT retired.
+        """
+        if not created_at:
+            return 0.0
+        try:
+            created = datetime.fromisoformat(created_at)
+            now = datetime.fromisoformat(now_iso)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            return (now - created).total_seconds() / 86400.0
+        except Exception:
+            return 0.0
 
     def get_stats(self) -> Dict:
         """Return engine statistics for monitoring/debugging."""

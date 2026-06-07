@@ -429,179 +429,12 @@ class TestDeduplication:
 
 
 # ===================================================================
-# Category 5: update_hint_effectiveness -- Attribution
+# Category 5: usage attribution — see test_apply_hint_attribution.py
 # ===================================================================
-
-
-class TestAttribution:
-    """update_hint_effectiveness: tracking hint success/failure."""
-
-    def test_effectiveness_success_increments(self, in_memory_db):
-        _insert_hint(in_memory_db, "Test hint", scope="global",
-                     applied_count=0, success_count=0, failure_count=0)
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-        row = in_memory_db.execute(
-            "SELECT applied_count, success_count, failure_count "
-            "FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["applied_count"] == 1, f"Expected 1, got {row['applied_count']}"
-        assert row["success_count"] == 1
-        assert row["failure_count"] == 0
-
-    def test_effectiveness_same_category_penalized(self, in_memory_db):
-        """Failure with same category -> failure_count incremented."""
-        _insert_hint(in_memory_db, "Fix hint", scope="global",
-                     original_failure_category="A1",
-                     applied_count=0, success_count=0, failure_count=0)
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=False, new_failure_category="A1",
-        )
-        row = in_memory_db.execute(
-            "SELECT applied_count, success_count, failure_count "
-            "FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["applied_count"] == 1
-        assert row["success_count"] == 0
-        assert row["failure_count"] == 1
-
-    def test_effectiveness_different_category_not_penalized(self, in_memory_db):
-        """Failure with DIFFERENT category -> failure_count NOT incremented."""
-        _insert_hint(in_memory_db, "Hint for A1", scope="global",
-                     original_failure_category="A1",
-                     applied_count=0, success_count=0, failure_count=0)
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=False, new_failure_category="B2",
-        )
-        row = in_memory_db.execute(
-            "SELECT applied_count, success_count, failure_count "
-            "FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["applied_count"] == 1
-        assert row["success_count"] == 0
-        assert row["failure_count"] == 0, (
-            f"Expected 0 (different category), got {row['failure_count']}"
-        )
-
-    def test_effectiveness_auto_disable(self, in_memory_db):
-        """Hint with failures and no successes after enough applications -> disabled."""
-        # Pre-set hint with (AUTO_DISABLE_MIN_APPLICATIONS - 1) applications and failures
-        min_apps = AUTO_DISABLE_MIN_APPLICATIONS
-        _insert_hint(in_memory_db, "Bad hint", scope="global",
-                     original_failure_category="A1",
-                     applied_count=min_apps - 1,
-                     success_count=0, failure_count=min_apps - 1)
-        engine = NLFeedbackEngine(in_memory_db)
-
-        # One more failure with same category -> should trigger auto-disable
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=False, new_failure_category="A1",
-        )
-        row = in_memory_db.execute(
-            "SELECT is_active FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["is_active"] == 0, "Hint should be auto-disabled"
-
-    def test_effectiveness_no_auto_disable_with_success(self, in_memory_db):
-        """Hint with at least one success should NOT be auto-disabled."""
-        min_apps = AUTO_DISABLE_MIN_APPLICATIONS
-        _insert_hint(in_memory_db, "Mixed hint", scope="global",
-                     original_failure_category="A1",
-                     applied_count=min_apps - 1,
-                     success_count=1, failure_count=min_apps - 2)
-        engine = NLFeedbackEngine(in_memory_db)
-
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=False, new_failure_category="A1",
-        )
-        row = in_memory_db.execute(
-            "SELECT is_active FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["is_active"] == 1, "Hint with successes should not be disabled"
-
-    def test_effectiveness_domain_scoped(self, in_memory_db):
-        """Only domain-matching hints should be updated."""
-        _insert_hint(in_memory_db, "Domain hint", scope="domain", domain="example.com")
-        _insert_hint(in_memory_db, "Other domain hint", scope="domain", domain="other.com")
-        engine = NLFeedbackEngine(in_memory_db)
-
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-
-        rows = in_memory_db.execute(
-            "SELECT feedback_text, applied_count FROM nl_feedback_corrections "
-            "ORDER BY feedback_text"
-        ).fetchall()
-        # Domain hint should be updated, Other domain should not
-        example_row = [r for r in rows if "Domain hint" == r["feedback_text"]][0]
-        other_row = [r for r in rows if "Other domain hint" == r["feedback_text"]][0]
-        assert example_row["applied_count"] == 1
-        assert other_row["applied_count"] == 0
-
-    def test_effectiveness_no_db(self):
-        """No DB -> should not crash."""
-        engine = NLFeedbackEngine(None)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-
-    def test_effectiveness_no_active_hints(self, in_memory_db):
-        engine = NLFeedbackEngine(in_memory_db)
-        # No hints in DB -> should not crash
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-
-    def test_conflict_flagged_hint_skipped(self, in_memory_db):
-        """conflict_flagged=1 hints must NOT receive applied_count or success_count increments."""
-        _insert_hint(in_memory_db, "Bad hint", scope="global",
-                     applied_count=5, success_count=2, failure_count=3,
-                     conflict_flagged=1)
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-        row = in_memory_db.execute(
-            "SELECT applied_count, success_count, failure_count "
-            "FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["applied_count"] == 5, (
-            f"conflict_flagged hint applied_count must not change; got {row['applied_count']}"
-        )
-        assert row["success_count"] == 2, (
-            f"conflict_flagged hint success_count must not change; got {row['success_count']}"
-        )
-        assert row["failure_count"] == 3
-
-    def test_conflict_flagged_filter_regression(self, in_memory_db):
-        """Regression: conflict_flagged=0 hint must still be credited normally."""
-        _insert_hint(in_memory_db, "Good hint", scope="global",
-                     applied_count=0, success_count=0, failure_count=0,
-                     conflict_flagged=0)
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
-        )
-        row = in_memory_db.execute(
-            "SELECT applied_count, success_count FROM nl_feedback_corrections"
-        ).fetchone()
-        assert row["applied_count"] == 1
-        assert row["success_count"] == 1
+#
+# The all-injected update_hint_effectiveness was replaced by
+# apply_hint_attribution (used/failure/unused buckets, atomic once-guard,
+# FR2/G1 disable-retire). Its tests live in test_apply_hint_attribution.py.
 
 
 # ===================================================================
@@ -684,21 +517,18 @@ class TestIntegration:
         fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
         # Insert a hint that would match
         _insert_hint(conn, "Test hint", scope="global")
-        # Run execution -- should trigger Step 7 (effectiveness tracking)
         fl.process_execution(
             workflow_id="wf-int3", user_query="click button",
             url="https://example.com", robot_code="code",
             test_status="passed",
         )
-        # Verify hint applied_count was updated
-        row = conn.execute(
-            "SELECT applied_count, success_count "
-            "FROM nl_feedback_corrections"
+        # process_execution no longer credits NL hints — usage attribution moved
+        # to workflow_service._process_learning / apply_hint_attribution. It must
+        # still complete and store the execution record without crashing.
+        rec = conn.execute(
+            "SELECT workflow_id FROM execution_records WHERE workflow_id = 'wf-int3'"
         ).fetchone()
-        assert row["applied_count"] == 1, (
-            f"Expected applied_count=1, got {row['applied_count']}"
-        )
-        assert row["success_count"] == 1
+        assert rec is not None
 
 
 # ===================================================================
@@ -729,17 +559,22 @@ class TestEndToEnd:
         )
 
     def test_e2e_success_tracking(self, in_memory_db):
-        """Full flow: store hint -> track success -> verify counts."""
+        """Full flow: store hint -> attribute a used pass -> verify counts."""
         engine = NLFeedbackEngine(in_memory_db)
         record = FakeRecord(domain="example.com")
         triage = {"feedback_text": "Use Sleep 2s", "category": "keyword"}
         engine.learn_from_feedback(record, triage)
-
-        # Simulate successful execution
-        engine.update_hint_effectiveness(
-            domain="example.com", url="https://example.com",
-            test_passed=True,
+        hint_id = in_memory_db.execute(
+            "SELECT id FROM nl_feedback_corrections"
+        ).fetchone()["id"]
+        in_memory_db.execute(
+            "INSERT INTO execution_records (workflow_id, timestamp, user_query, "
+            "test_status, hint_attribution_done) "
+            "VALUES ('wf-e2e-ok', '2026-01-01T00:00:00+00:00', 'q', 'passed', 0)"
         )
+        in_memory_db.commit()
+
+        engine.apply_hint_attribution("wf-e2e-ok", [hint_id], [], [])
 
         row = in_memory_db.execute(
             "SELECT success_count, applied_count FROM nl_feedback_corrections"
@@ -748,28 +583,73 @@ class TestEndToEnd:
         assert row["applied_count"] == 1
 
     def test_e2e_auto_disable_flow(self, in_memory_db):
-        """Full flow: store -> repeated failures -> auto-disable -> no longer in hints."""
+        """Full flow: store -> an attributed harmful verdict crosses the
+        never-succeeded floor -> auto-disable -> hint no longer returned."""
         engine = NLFeedbackEngine(in_memory_db)
         record = FakeRecord(domain="example.com", failure_category="A1")
         triage = {"feedback_text": "Bad advice that keeps failing", "category": "keyword"}
         engine.learn_from_feedback(record, triage)
+        hint_id = in_memory_db.execute(
+            "SELECT id FROM nl_feedback_corrections"
+        ).fetchone()["id"]
+        # Pre-seed failures just below the floor; one harmful verdict crosses it.
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections SET failure_count = ? WHERE id = ?",
+            (AUTO_DISABLE_MIN_APPLICATIONS - 1, hint_id),
+        )
+        in_memory_db.execute(
+            "INSERT INTO execution_records (workflow_id, timestamp, user_query, "
+            "test_status, hint_attribution_done) "
+            "VALUES ('wf-e2e-bad', '2026-01-01T00:00:00+00:00', 'q', 'passed', 0)"
+        )
+        in_memory_db.commit()
 
-        # Simulate repeated failures
-        min_apps = AUTO_DISABLE_MIN_APPLICATIONS
-        for _ in range(min_apps):
-            engine.update_hint_effectiveness(
-                domain="example.com", url="https://example.com",
-                test_passed=False, new_failure_category="A1",
-            )
+        engine.apply_hint_attribution(
+            "wf-e2e-bad", [], [hint_id], [], reasons={hint_id: "harmful"},
+        )
 
-        # Verify hint is disabled
         row = in_memory_db.execute(
             "SELECT is_active FROM nl_feedback_corrections"
         ).fetchone()
-        assert row["is_active"] == 0, "Hint should be auto-disabled after repeated failures"
+        assert row["is_active"] == 0, "Hint should be auto-disabled"
 
-        # Verify disabled hint does NOT appear in get_hints
-        hints = engine.get_hints(
-            "some query", "https://example.com", "assembler"
-        )
+        # Disabled hint must NOT appear in get_hints.
+        hints = engine.get_hints("some query", "https://example.com", "assembler")
         assert hints is None, "Disabled hint should not appear in hints"
+
+
+class TestReactivationResetsUnusedCount:
+    """Step 4b: re-submitting identical feedback (the UPSERT branch) resets
+    unused_count to 0 — a fresh chance — while preserving the earned
+    success/failure track record (otherwise an unused-retired hint would be
+    re-retired on the next unused verdict)."""
+
+    def test_resubmission_resets_unused_preserving_track_record(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        record = FakeRecord(domain="x.com", url="https://x.com")
+        triage = {"feedback_text": "always wait for the element to be visible",
+                  "category": "keyword"}
+        engine.learn_from_feedback(record, triage)  # create the hint
+        hid = in_memory_db.execute(
+            "SELECT id FROM nl_feedback_corrections"
+        ).fetchone()["id"]
+        # Accrue an earned record + over-surfaced dead weight.
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections "
+            "SET success_count=3, failure_count=1, unused_count=7 WHERE id=?",
+            (hid,),
+        )
+        in_memory_db.commit()
+
+        # Re-submit identical feedback -> UPSERT branch (the fresh chance).
+        engine.learn_from_feedback(record, triage)
+
+        row = in_memory_db.execute(
+            "SELECT unused_count, success_count, failure_count, is_active "
+            "FROM nl_feedback_corrections WHERE id=?",
+            (hid,),
+        ).fetchone()
+        assert row["unused_count"] == 0    # reset
+        assert row["success_count"] == 3   # preserved
+        assert row["failure_count"] == 1   # preserved
+        assert row["is_active"] == 1

@@ -90,6 +90,47 @@ class TestExecutionRecord:
         )
 
 
+class TestHintAttributionDone:
+    """C1: hint_attribution_done is mapped onto the dataclass, written 0 by
+    _store_sqlite's INSERT, and resolves to an int (never AttributeError) on
+    read — including Case-B / re-run records. The DB column DEFAULT is 1
+    (pre-v13 rows read already-attributed, N4); the dataclass default and the
+    INSERT are 0, and must NOT be unified with the DB default."""
+
+    def test_dataclass_default_is_zero(self):
+        record = ExecutionRecord(
+            workflow_id="t", timestamp=datetime.now(), user_query="q"
+        )
+        assert record.hint_attribution_done == 0
+
+    def test_store_inserts_zero_and_get_resolves_int(self, tmp_dir):
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "attr.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma_attr"),
+        )
+        em._store_sqlite(make_record(workflow_id="wf-attr-1"))
+        fetched = em.get("wf-attr-1")
+        assert fetched.hint_attribution_done == 0  # INSERT writes 0, not the DB DEFAULT 1
+        em.close()
+
+    def test_case_b_rerun_leaves_attribution_done_resolvable(self, tmp_dir):
+        """A v1 fail then v2 pass (Case B -> _update_to_passing_state) leaves
+        hint_attribution_done untouched at 0, and the read resolves to an int
+        with no AttributeError — the gate the Step-4 attribution block needs."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "attr_b.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma_attr_b"),
+        )
+        wid = "wf-attr-caseb"
+        em._store_sqlite(make_record(workflow_id=wid, test_status="failed"))
+        # Re-run with the same workflow_id that now passes -> Case B recovery.
+        em._store_sqlite(make_record(workflow_id=wid, test_status="passed"))
+        fetched = em.get(wid)
+        assert fetched.test_status == "passed"       # Case B applied
+        assert fetched.hint_attribution_done == 0    # untouched -> v2-pass can claim
+        em.close()
+
+
 class TestExtractDomain:
     """Verify extract_domain() parses various URL formats."""
 

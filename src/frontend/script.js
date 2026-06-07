@@ -1131,8 +1131,23 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.workflow_id) {
                 currentWorkflowId = data.workflow_id;
             }
-            updateStatus('success', 'Generation complete', false);
-            hideStatus();
+            // Deterministic robot --dryrun gate result (optional fields on the
+            // SAME 'complete' event — no new top-level status). 'failed' = dryrun
+            // flagged issues repair could not fix; 'unverified' = dryrun could not
+            // run (e.g. Docker down). Either way the code is still delivered.
+            if (data.dryrun_status === 'failed' || data.dryrun_status === 'unverified') {
+                const warnMsg = data.dryrun_status === 'failed'
+                    ? 'Delivered — dryrun found issues'
+                    : 'Delivered — dryrun could not run';
+                updateStatus('warning', warnMsg, true);
+                if (data.dryrun_errors) {
+                    const errEntry = createLogEntry({ message: data.dryrun_errors, status: 'error' }, 'generation');
+                    routeLogToContainer(errEntry, 'generation');
+                }
+            } else {
+                updateStatus('success', 'Generation complete', false);
+                hideStatus();
+            }
             // Reset state to allow button update, then update UI
             currentState = UIState.IDLE;
             updateUI();

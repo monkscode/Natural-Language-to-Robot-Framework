@@ -276,7 +276,8 @@ SCHEMA_MIGRATIONS = {
         #   and Trigger 2 LLM conflict detection (Step 5) suspend hints from
         #   injection without permanently deactivating them. is_active=0
         #   stays the sole automated path to permanent deactivation,
-        #   reachable only via update_hint_effectiveness.
+        #   reachable only via apply_hint_attribution (never-succeeded /
+        #   never-used auto-disable).
         #
         # ALTER TABLE ADD COLUMN does not support IF NOT EXISTS in SQLite;
         # the schema-version gate guarantees each ALTER runs once per DB.
@@ -516,6 +517,98 @@ SCHEMA_MIGRATIONS = {
         "description": "Split trigger_events.flagged_hint_ids into recommendation vs enforcement",
         "sql": [
             "ALTER TABLE trigger_events ADD COLUMN actually_flagged_hint_ids TEXT",
+        ],
+    },
+    13: {
+        # Usage-aware hint attribution (Part 2). Three additive columns plus a
+        # one-time counter reset (FR1):
+        #  - nl_feedback_corrections.unused_count: the "injected but not used
+        #    here" axis (applied = success + failure + unused). DEFAULT 0.
+        #  - execution_records.hint_attribution_done: the per-workflow once-guard
+        #    for pass-time attribution. DEFAULT 1 (NOT 0) with NO backfill —
+        #    SQLite materialises the constant for existing rows in O(1), so every
+        #    pre-v13 row reads 1 ("already attributed under the old Step-7
+        #    credit"), preventing a cross-deploy re-run from double-crediting.
+        #    New rows are inserted with an explicit 0 by _store_sqlite so they
+        #    attribute normally; apply_hint_attribution's atomic claim flips the
+        #    winner to 1. DEFAULT 1 is the safe fail-direction (a forgotten write
+        #    reads "done" → at worst a missed credit, never a double-credit).
+        #  - trigger_events.used_hint_ids / unused_hint_ids: attribution
+        #    telemetry alongside the existing flagged_hint_ids columns.
+        #
+        # FR1 — reset every NL hint's applied/success/failure to 0. The legacy
+        # counters credited ALL injected hints (the exact bug Part 2 fixes), so
+        # they are untrustworthy; resetting starts each hint on clean, used-only
+        # data so the new success/(success+failure) rules judge accurate numbers
+        # from day one. unused_count already defaults 0. evidence_count,
+        # anchor_query, conflict_flagged/_at/_reason, is_active, created_at, and
+        # last_seen are deliberately left untouched. The UPDATE MUST follow the
+        # ADD COLUMNs (statements run in list order); the whole migration is
+        # atomic via the schema-version gate's transaction.
+        "description": "Usage attribution — unused_count/hint_attribution_done/trigger_events telemetry + reset NL counters (FR1)",
+        "sql": [
+            "ALTER TABLE nl_feedback_corrections ADD COLUMN unused_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE execution_records ADD COLUMN hint_attribution_done INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE trigger_events ADD COLUMN used_hint_ids TEXT",
+            "ALTER TABLE trigger_events ADD COLUMN unused_hint_ids TEXT",
+            """
+            UPDATE nl_feedback_corrections
+            SET applied_count = 0,
+                success_count = 0,
+                failure_count = 0
+            """,
+        ],
+    },
+    14: {
+        # N3 observability — per-(workflow, hint) selection→attribution trace.
+        # ONE table `hint_workflow_trace` keyed (workflow_id, hint_id) with NO
+        # foreign key (R-N3): a deduped run has no execution_records row, so the
+        # trace must stand alone; the per-workflow dashboard view LEFT JOINs
+        # execution_records for run-context. Trace scope is NL-centric — only NL
+        # hints carry ids, so per-hint rows are NL (source='nl'); the `source`
+        # column is kept generic for future per-engine extension.
+        #
+        # Columns:
+        #  - scope/source/priority: hint identity carried from selection.
+        #  - similarity_score: cosine sim from filter_by_query_similarity; NULL
+        #    for fail_open/no_anchor and for non-similarity-filtered sources.
+        #  - available: passed similarity + dedup + the NL internal cap (reached
+        #    the candidate pool). injected: survived the per-agent budget cap
+        #    (in nl_injected_ids). Both default 0; written explicitly per row.
+        #  - drop_reason: free TEXT (enum documented, NOT a CHECK, so new values
+        #    need no migration) ∈ {similarity_below, no_anchor, dedup, cap,
+        #    holdout}; NULL when injected.
+        #  - attribution_bucket ∈ {used, harmful, unused, unsure} /
+        #    attribution_reason: filled later by apply_hint_attribution as a
+        #    SEPARATE commit after the counter transaction (NULL until then;
+        #    stays NULL on a deduped/holdout run where attribution is skipped).
+        #  - created_at: ISO string, indexed for the G3 90-day opportunistic
+        #    prune on the writer thread (observability-only — pruning never
+        #    touches the learning counters, which live on the hint row).
+        #
+        # CREATE TABLE/INDEX IF NOT EXISTS (matches the v5 pattern); the
+        # schema-version gate already guarantees a single application.
+        "description": "Hint workflow trace — per-(workflow,hint) selection/attribution observability (N3)",
+        "sql": [
+            """
+            CREATE TABLE IF NOT EXISTS hint_workflow_trace (
+                workflow_id TEXT NOT NULL,
+                hint_id INTEGER NOT NULL,
+                scope TEXT,
+                source TEXT,
+                priority TEXT,
+                similarity_score REAL,
+                available INTEGER NOT NULL DEFAULT 0,
+                injected INTEGER NOT NULL DEFAULT 0,
+                drop_reason TEXT,
+                attribution_bucket TEXT,
+                attribution_reason TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (workflow_id, hint_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_hint_trace_created_at "
+            "ON hint_workflow_trace(created_at)",
         ],
     },
 }

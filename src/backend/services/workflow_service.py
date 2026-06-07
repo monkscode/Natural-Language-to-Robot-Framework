@@ -2,7 +2,6 @@ import os
 import uuid
 import logging
 import json
-import re
 import asyncio
 from queue import Queue, Empty
 from threading import Thread
@@ -11,8 +10,8 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
 from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
+from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
 from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
@@ -178,7 +177,80 @@ def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
         logging.debug("Hint metadata store failed for %s (non-blocking): %s", workflow_id, e)
 
 
-def _build_conflict_prompt(
+def _build_standalone_attribution_prompt(
+    working_code: str,
+    active_hints: list,
+    domain: str | None = None,
+    url: str | None = None,
+    user_query: str | None = None,
+) -> str:
+    """Standalone (first-pass) usage-attribution prompt — Part 2.
+
+    Used when a test PASSES on its first attempt (no prior failing version). The
+    LLM decides, per injected hint, whether its advice is reflected in the
+    passing code (`used`) or not (`unused`). No `harmful` bucket — that needs a
+    v1->v2 diff (see _build_merged_attribution_prompt).
+
+    Hints are rendered id+text only (no historical counters): usage is a
+    code-presence judgment, and showing a hint's own success history would bias
+    the model toward crediting it — a self-reinforcing loop this system exists to
+    avoid. Strong-history protection lives in code (the flag-core guard), not here.
+
+    Response shape consumed by fire_usage_attribution:
+        {"used": [<id>, ...], "unused": [<id>, ...]}
+    """
+    from src.backend.crew_ai.optimization.conflict_detection import _build_context_prefix
+
+    hint_lines = "\n".join(
+        f"  [{h['id']}] {h['feedback_text']}" for h in active_hints
+    )
+    context_prefix = _build_context_prefix(domain, url, user_query)
+
+    return (
+        "You are the usage-attribution component of an adaptive test automation "
+        "learning system.\n\n"
+        "This system auto-generates Robot Framework test code. To guide it, we inject "
+        "HINTS — short pieces of free-form English feedback that past users left "
+        "(e.g. \"on this site, wait for elements to be visible before clicking\" or "
+        "\"prefer data-testid locators\"). They are guidance, not code to copy. The "
+        "hints below were given to the agents that produced the PASSING code shown.\n\n"
+        "Your job: for EACH hint, decide whether that hint's GUIDANCE actually shaped "
+        "the passing code.\n\n"
+        f"{context_prefix}\n"
+        "PASSING CODE (auto-generated, passed against the real system):\n"
+        "```\n"
+        f"{working_code.strip()}\n"
+        "```\n\n"
+        "INJECTED HINTS — the number in brackets is the hint's unique ID; echo it exactly:\n"
+        f"{hint_lines}\n\n"
+        "Classify each hint as exactly one of:\n"
+        "  - \"used\"   — the hint's specific advice is clearly reflected in the passing "
+        "code: a locator strategy, keyword, wait, value, assertion, or structure it "
+        "recommended is present because of it.\n"
+        "  - \"unused\" — the hint was injected but its advice is NOT reflected (the code "
+        "passed without needing it, e.g. the advice did not apply to this test).\n\n"
+        "Rules:\n"
+        "  - Judge whether the ADVICE is present in spirit — not whether the hint's exact "
+        "words appear. \"wait for visibility\" is used if the code waits for visibility, "
+        "in any wording.\n"
+        "  - Do not credit a hint for something the code would have done anyway, "
+        "unconnected to the advice.\n"
+        "  - If you genuinely cannot tell for a hint, OMIT it from both lists. Omitting is "
+        "the safe choice — it records no signal for that hint.\n"
+        "  - Put each hint id in at most one list.\n\n"
+        "EXAMPLES (format only — do not answer these):\n"
+        "  Hint [7] \"page loads slowly — wait for the element to be visible before clicking.\"\n"
+        "    Code: Wait For Elements State  css=#go  visible  /  Click  css=#go\n"
+        "    -> used.\n"
+        "  Hint [12] \"prefer data-testid attributes for locators.\"\n"
+        "    Code: Click  id=submit   (an id locator, no data-testid anywhere)\n"
+        "    -> unused.\n\n"
+        "Respond with ONLY valid JSON, nothing else:\n"
+        '{"used": [<int>, ...], "unused": [<int>, ...]}'
+    )
+
+
+def _build_merged_attribution_prompt(
     failed_code: str,
     working_code: str,
     active_hints: list,
@@ -186,162 +258,88 @@ def _build_conflict_prompt(
     url: str | None = None,
     user_query: str | None = None,
 ) -> str:
-    """Build the LLM prompt for Trigger 1 conflict detection.
+    """Merged Case-B usage-attribution prompt — Part 2 (replaces the former
+    Trigger-1 conflict prompt; one LLM call now yields credit AND harm-flag).
 
-    Trigger 1 fires when a previously-failed workflow re-runs with a
-    user-edited robot code and passes. The two code blobs are presented
-    to the LLM side by side, plus the list of NL feedback hints that were
-    injected at v1 generation time. The LLM identifies which of those hints
-    (if any) gave advice that the corrected code disproved.
+    Used when a previously-FAILED workflow re-runs with developer-edited code and
+    PASSES. The LLM sees v1 (failed, hint-influenced) and v2 (passed) and sorts
+    each injected hint into used / harmful / unused. Because credit and flagging
+    come from the SAME judgment over the SAME v1/v2 pair, they cannot contradict.
 
-    Design principle — context-rich, non-prescriptive: state the system's
-    purpose and the evidence; let the LLM derive its analysis method.
-    Prescriptive step-by-step instructions age poorly as models improve.
+    Hints are rendered id+text only (no counters) — same anti-bias rationale as
+    the standalone prompt; strong-history protection is enforced in code.
 
-    Args:
-        failed_code: robot_code v1 from the DB (the auto-generated failing code).
-        working_code: robot_code v2 — the developer's manual fix that passed.
-        active_hints: [{"id": int, "feedback_text": str, ...}, ...]. Hint ids
-            are the only handle the LLM has on individual hints — they MUST be
-            preserved into the response. Metadata fields applied_count,
-            success_count, failure_count, created_at are always present for
-            live hint rows (populated by _select_hints).
-        domain: domain string for the workflow URL (e.g. "example.com").
-        url: full URL of the page under test.
-        user_query: original NL query, truncated to 200 chars in the prompt.
-
-    Returns:
-        Prompt string ready for litellm.completion().
+    Response shape consumed by fire_usage_attribution:
+        {"used": [<id>, ...],
+         "harmful": [{"id": <int>, "reason": "<hint-specific>"}, ...],
+         "unused": [<id>, ...]}
     """
-    from src.backend.crew_ai.optimization.conflict_detection import (
-        _hint_line,
-        _build_context_prefix,
-    )
+    from src.backend.crew_ai.optimization.conflict_detection import _build_context_prefix
 
-    hint_lines = "\n".join(_hint_line(h) for h in active_hints)
+    hint_lines = "\n".join(
+        f"  [{h['id']}] {h['feedback_text']}" for h in active_hints
+    )
     context_prefix = _build_context_prefix(domain, url, user_query)
 
     return (
-        "You are the conflict detection component of an adaptive test automation "
+        "You are the usage-attribution component of an adaptive test automation "
         "learning system.\n\n"
-        "This system auto-generates Robot Framework test code guided by learned hints "
-        "from past human corrections. The hints listed below were injected into the "
-        "agents when v1 was generated — the failed code reflects their influence. "
-        "When a developer manually corrects the generated output and it passes, the "
-        "system identifies which hints are now proven harmful by that correction.\n\n"
+        "This system auto-generates Robot Framework test code, guided by HINTS — short "
+        "pieces of free-form English feedback from past users (guidance, not code to "
+        "copy). The hints below were injected when v1 (the FAILED code) was generated. A "
+        "developer then manually corrected it into v2, which PASSED. By comparing v1 and "
+        "v2 you can see which hints helped, which were irrelevant, and which actively "
+        "caused the failure.\n\n"
+        "Your job: sort EACH hint into exactly one of used / harmful / unused.\n\n"
         f"{context_prefix}\n"
-        "EXAMPLES — for reference only, do not respond to these:\n\n"
-        "Example 1 — DO flag (hint advice was the failing approach, v2 explicitly replaced it):\n"
-        "  Active hint:\n"
-        "    [17] On this domain, use `Wait For Elements State` with state=visible\n"
-        "         before clicking dynamic elements.\n"
-        "  v1 (failed):\n"
-        "    Wait For Elements State    css=#submit-btn    visible\n"
-        "    Click    css=#submit-btn\n"
-        "  v2 (passed):\n"
-        "    Wait For Elements State    css=#submit-btn    stable\n"
-        "    Click    css=#submit-btn\n"
-        '  Verdict: {"flag":[{"id":17,"reason":"v1 followed the visible-state approach;'
-        " v2 explicitly replaced it with state=stable. The visible-state wait was the"
-        ' failing approach."}]}\n\n'
-        "Example 2 — DO NOT flag (hint advice present in BOTH versions; fix was elsewhere):\n"
-        "  Active hint:\n"
-        '    [22] Use data-testid attributes for locators on this domain.\n'
-        "  v1 (failed):\n"
-        '    Click       css=[data-testid="login"]\n'
-        '    Fill Text   css=[data-testid="username"]    alice\n'
-        "  v2 (passed):\n"
-        '    Click       css=[data-testid="login"]\n'
-        "    Sleep       1s\n"
-        '    Fill Text   css=[data-testid="username"]    alice\n'
-        '  Verdict: {"flag":[]}\n\n'
-        "Example 3 — DO NOT flag (hint advice not present in v1 at all):\n"
-        "  Active hint:\n"
-        "    [44] Use `Select Options By` for native <select> dropdowns.\n"
-        "  v1 (failed):\n"
-        "    Click    css=button.menu-trigger\n"
-        "    Click    css=li.menu-item-3\n"
-        "  v2 (passed):\n"
-        "    Hover    css=button.menu-trigger\n"
-        "    Click    css=li.menu-item-3\n"
-        '  Verdict: {"flag":[]}\n\n'
-        "FAILED CODE (auto-generated using injected hints — did not pass):\n"
+        "FAILED CODE (v1 — auto-generated using the injected hints, did not pass):\n"
         "```\n"
         f"{failed_code.strip()}\n"
         "```\n\n"
-        "CORRECTED CODE (developer's manual fix — passed against the real system):\n"
+        "CORRECTED CODE (v2 — developer's manual fix, passed against the real system):\n"
         "```\n"
         f"{working_code.strip()}\n"
         "```\n\n"
-        "INJECTED HINTS (used at v1 generation time — numbers in brackets are unique hint IDs):\n"
+        "INJECTED HINTS — the number in brackets is the hint's unique ID; echo it exactly:\n"
         f"{hint_lines}\n\n"
-        "Based on this evidence, identify which hints are now proven harmful — "
-        "meaning their advice, if applied in future test generation for this domain, "
-        "would likely reproduce this class of failure.\n\n"
-        "Only a hint whose advice is actually reflected in the failing code and "
-        "absent from the corrected code is a candidate for flagging. "
-        "When multiple things changed between the two versions, use your knowledge "
-        "of Robot Framework and test automation to determine which hint's advice was "
-        "causally responsible for the failure — not merely present in the failing code.\n\n"
-        "Only flag a hint when you are confident its specific advice is causally "
-        "responsible for the failure shown. If the evidence is ambiguous, the connection "
-        "is indirect, or the hint's advice is not clearly reflected in the failing code, "
-        "do not flag. Preservation is always the safer choice: a hint that survives "
-        "incorrectly will be gradually downscored by future executions and auto-disabled; "
-        "a hint wrongly flagged loses accumulated learning with no automatic recovery.\n\n"
-        "Each reason must specifically address THIS hint's advice and how v2 disproved it. "
-        "Do NOT write generic reasons that could apply to multiple hints. "
-        "If you cannot articulate a hint-specific reason, do not flag that hint.\n\n"
-        "Respond with ONLY valid JSON:\n"
-        '{"flag": [{"id": <int>, "reason": "<explanation specific to this hint>"}, ...]}\n'
-        'If no hints should be flagged: {"flag": []}'
-    )
-
-
-def _fire_llm_conflict_detection(
-    feedback_loop,
-    workflow_id: str,
-    failed_code: str,
-    working_code: str,
-    url: str | None,
-    injected_hint_ids: str | None = None,
-    user_query: str | None = None,
-) -> None:
-    """Trigger 1 — synchronous LLM conflict detection on a re-run pass.
-
-    Called inline from _process_learning when Case B is detected
-    (previously-failed workflow now passes with edited code). Already
-    runs inside an asyncio.to_thread worker — must NOT be wrapped in
-    another to_thread (no event loop in this thread → RuntimeError,
-    silently swallowed by the outer try/except).
-
-    Failure modes are all non-blocking:
-    - No active hints in scope → telemetry row written (status='no_active_hints'),
-      no LLM call, return.
-    - litellm.completion timeout/error → logged warning + telemetry row.
-    - JSON parse failure → logged warning + telemetry row.
-    - LLM returns non-list `flag` value → guarded by isinstance check.
-
-    Telemetry: one row written to trigger_events per call (including the
-    early-return no_active_hints case). Submitted via the write queue
-    fire-and-forget; failure to write telemetry never propagates.
-    """
-    from src.backend.crew_ai.optimization.learning_config import extract_domain
-    from src.backend.crew_ai.optimization.conflict_detection import fire_conflict_detection
-
-    domain = extract_domain(url) if url else None
-    fire_conflict_detection(
-        feedback_loop=feedback_loop,
-        trigger_type="trigger_1",
-        workflow_id=workflow_id,
-        domain=domain,
-        url=url,
-        feedback_text=None,
-        injected_hint_ids=injected_hint_ids,
-        prompt_builder=lambda active_hints: _build_conflict_prompt(
-            failed_code, working_code, active_hints,
-            domain=domain, url=url, user_query=user_query,
-        ),
+        "Classify each hint as exactly one of:\n"
+        "  - \"used\"    — the hint's advice is reflected in the PASSING v2 code (it helped).\n"
+        "  - \"harmful\" — the hint's advice is reflected in v1, the developer REMOVED or "
+        "REPLACED it in v2, AND you are confident that advice was causally responsible for "
+        "the failure. Give a short reason specific to THIS hint. (Marking a hint harmful "
+        "suspends it from future tests.)\n"
+        "  - \"unused\"  — injected but its advice is not reflected in v2 and it is not "
+        "harmful (e.g. the advice did not apply to this test).\n\n"
+        "Rules:\n"
+        "  - Judge the ADVICE in spirit, not literal wording.\n"
+        "  - \"harmful\" requires ALL of: the advice was actually followed in v1; v2 "
+        "deliberately did it differently; and that change is what fixed the failure. Advice "
+        "present in BOTH v1 and v2 is NOT harmful (the fix was elsewhere). Advice not "
+        "present in v1 is NOT harmful.\n"
+        "  - Be conservative with \"harmful\": preservation is safer. A hint wrongly kept is "
+        "gradually downscored by future runs; a hint wrongly marked harmful loses its "
+        "learning with no automatic recovery. Only mark harmful when confident and able to "
+        "give a hint-specific reason. Generic reasons that could apply to many hints are "
+        "not acceptable — omit instead.\n"
+        "  - If you genuinely cannot tell for a hint, OMIT it entirely (no signal).\n"
+        "  - Put each hint id in at most one list.\n\n"
+        "EXAMPLES (format only — do not answer these):\n"
+        "  Hint [17] \"wait for elements to be visible before clicking dynamic elements.\"\n"
+        "    v1 (failed): Wait For Elements State  css=#submit  visible  /  Click  css=#submit\n"
+        "    v2 (passed): Wait For Elements State  css=#submit  stable   /  Click  css=#submit\n"
+        "    -> harmful. reason: \"advised waiting for 'visible', but the element was visible "
+        "yet not ready; v2 fixed it by waiting for 'stable'.\"\n"
+        "  Hint [22] \"use data-testid attributes for locators.\"\n"
+        "    v1: Click  css=[data-testid=\"login\"]   (failed for an unrelated reason)\n"
+        "    v2: Click  css=[data-testid=\"login\"]    (same locator; fix was a wait added elsewhere)\n"
+        "    -> used (advice is in the passing v2 code; the failure was unrelated).\n"
+        "  Hint [44] \"use Select Options By for native <select> dropdowns.\"\n"
+        "    v1 and v2: neither touches a dropdown (this test has none).\n"
+        "    -> unused.\n\n"
+        "Respond with ONLY valid JSON, nothing else:\n"
+        '{"used": [<int>, ...], '
+        '"harmful": [{"id": <int>, "reason": "<specific to this hint>"}, ...], '
+        '"unused": [<int>, ...]}'
     )
 
 
@@ -408,10 +406,24 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         is_first_attempt = (pre_run_record is None)
 
-        # Trigger 1 gate: expose the pre-run record ONLY when the current run
-        # passed. Preserves exact Trigger 1 behaviour — original_record is not
-        # None only on passed outcomes, same as the previous guard.
-        original_record = pre_run_record if test_status == "passed" else None
+        # Re-run after edit: _hint_metadata_cache was consumed by the v1
+        # _process_learning call (.pop is destructive), so nl_injected_ids
+        # defaulted to []. Recover the original generation-time hint IDs from
+        # the DB — Schema v10 preserves execution_records.injected_hint_ids
+        # across _update_to_passing_state. Without this, the re-run pass would
+        # see injected_hint_ids='[]', the attribution gate below would skip, and
+        # the hints actually injected at v1 would never be credited on the pass.
+        if (
+            not nl_injected_ids
+            and pre_run_record is not None
+            and pre_run_record.injected_hint_ids
+        ):
+            injected_hint_ids_json = pre_run_record.injected_hint_ids
+            logging.info(
+                "[LEARNING] %s: recovered injected_hint_ids=%s from DB "
+                "(hint metadata cache consumed by prior run)",
+                run_id, injected_hint_ids_json,
+            )
 
         feedback_loop.process_execution(
             workflow_id=run_id,
@@ -429,37 +441,81 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
             was_holdout=was_holdout,
         )
 
-        # Trigger 1 Step C: Case B detection — previously failed workflow
-        # now passes with edited code. Synchronous LLM check on the same
-        # worker thread. Each condition matters:
-        #   - original_record exists → this is a re-run (else first run, no DB row yet)
-        #   - test_status was 'failed' → this is the Case B branch (passed/error excluded)
-        #   - both code blobs present → diff is well-defined
-        #   - .strip() comparison → whitespace-only edits do not trigger
-        #   - nl_engine available → guards the .get_hints_by_id / .get_active_hints_raw + .conflict_flag_hints calls
-        #   - circuit_breaker enabled → mirrors process_execution's own gate;
-        #     prevents Trigger 1 leaking LLM calls / DB writes when learning
-        #     has been disabled by repeated errors. Note: is_enabled() has a
-        #     legitimate OPEN→HALF_OPEN side-effect on the breaker; that's
-        #     consistent with how process_execution polls it earlier in this
-        #     function.
+        # N3 (F2d): persist the reconciled selection trace on the writer thread.
+        # Queued AFTER store(record) and BEFORE attribution so the later
+        # apply_hint_attribution UPDATE (F2e) finds the rows (one FIFO queue).
+        # Best-effort observability, gated by HINT_TRACE_ENABLED; runs on every
+        # outcome (selection happens regardless of pass/fail).
+        selection_trace = hint_meta.get("selection_trace")
+        if selection_trace and settings.HINT_TRACE_ENABLED:
+            feedback_loop.write_queue.submit(
+                feedback_loop.execution_memory.store_hint_workflow_trace,
+                run_id, selection_trace,
+            )
+
+        # NL-hint usage attribution (Part 2): on a passing run with NL hints
+        # injected, credit only the hints actually used in the code via one LLM
+        # judgment per workflow. Replaces the old all-injected crediting AND
+        # merges the former Trigger-1 conflict check in as the Case-B branch.
+        #
+        # F3 gate: injected_hint_ids_json is a JSON STRING — parse it. Evaluate
+        # `pre_run_record is None` FIRST in the once-guard disjunct (on a first
+        # pass pre_run_record is None, so pre_run_record.hint_attribution_done
+        # would AttributeError). The atomic claim inside apply_hint_attribution
+        # is the authoritative once-guard; this gate is only a cost early-out
+        # (skip the LLM on an already-credited passing re-run). NO circuit-breaker
+        # check — attribution must never touch the shared breaker (R-M1).
+        try:
+            _ids = json.loads(injected_hint_ids_json)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logging.warning(
+                "[LEARNING] %s: malformed injected_hint_ids %r — skipping attribution",
+                run_id, injected_hint_ids_json,
+            )
+            _ids = None
         if (
-            original_record is not None
-            and original_record.test_status == "failed"
-            and original_record.robot_code
-            and robot_code
-            and original_record.robot_code.strip() != robot_code.strip()
+            test_status == "passed"
+            and isinstance(_ids, list) and len(_ids) > 0
+            and (pre_run_record is None or not pre_run_record.hint_attribution_done)
             and feedback_loop.nl_engine is not None
-            and feedback_loop.circuit_breaker.is_enabled()
         ):
-            _fire_llm_conflict_detection(
+            from src.backend.crew_ai.optimization.learning_config import extract_domain
+            from src.backend.crew_ai.optimization.conflict_detection import (
+                fire_usage_attribution,
+            )
+
+            # Case B (merged): a previously-FAILED workflow now passes with
+            # developer-edited code → one judgment sorts each hint into used /
+            # harmful / unused over the v1->v2 diff. Otherwise standalone
+            # (used / unused; no v1 to diff against).
+            is_case_b = (
+                pre_run_record is not None
+                and pre_run_record.test_status == "failed"
+                and pre_run_record.robot_code
+                and robot_code
+                and pre_run_record.robot_code.strip() != robot_code.strip()
+            )
+            domain = extract_domain(url) if url else None
+            if is_case_b:
+                _failed_code = pre_run_record.robot_code
+                prompt_builder = lambda active_hints: _build_merged_attribution_prompt(
+                    _failed_code, robot_code, active_hints,
+                    domain=domain, url=url, user_query=user_query,
+                )
+            else:
+                prompt_builder = lambda active_hints: _build_standalone_attribution_prompt(
+                    robot_code, active_hints,
+                    domain=domain, url=url, user_query=user_query,
+                )
+            fire_usage_attribution(
                 feedback_loop=feedback_loop,
                 workflow_id=run_id,
-                failed_code=original_record.robot_code,
-                working_code=robot_code,
+                domain=domain,
                 url=url,
-                injected_hint_ids=original_record.injected_hint_ids,
-                user_query=user_query,
+                feedback_text=None,
+                injected_hint_ids=injected_hint_ids_json,
+                case_b=is_case_b,
+                prompt_builder=prompt_builder,
             )
 
         logging.info(f"✅ Learning system processed execution {run_id}")
@@ -536,10 +592,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
         # Real-time progress events are pushed directly to progress_queue by the
         # CrewAI event bus handlers in progress_events.py during crew.kickoff().
-        # The OTel span wraps only run_crew() — all 4 LiteLLM calls inside are
-        # auto-captured as child spans by OpenLLMetry.
+        # The OTel span wraps only run_crew() — the LiteLLM calls inside are
+        # auto-captured as child spans by OpenLLMetry. The dryrun gate + repair run
+        # AFTER this span closes (R5); their calls are still captured by the
+        # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
-            _validation_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+            # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
+            # task is now the Assembler — there is no validator verdict). Unused here;
+            # delivered code is read from crew_with_results.tasks[2] below.
+            _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
                 natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
                 progress_queue=progress_queue)
 
@@ -547,364 +608,204 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         if hint_metadata:
             _store_hint_metadata(workflow_id, hint_metadata)
 
-        # Extract robot code from task[2] (code_assembler)
-        # With output_pydantic=AssemblyOutput, code is in output.pydantic.code
-        # Fall back to output.raw for backward compatibility
-        task_output = crew_with_results.tasks[2].output
-        
-        # Strategy 1: Try Pydantic output (new format with output_pydantic)
-        if hasattr(task_output, 'pydantic') and task_output.pydantic:
-            robot_code = task_output.pydantic.code
-            logging.info("✅ Extracted robot code from output.pydantic.code (AssemblyOutput)")
-        # Strategy 2: Try json_dict output
-        elif hasattr(task_output, 'json_dict') and task_output.json_dict and 'code' in task_output.json_dict:
-            robot_code = task_output.json_dict['code']
-            logging.info("✅ Extracted robot code from output.json_dict['code']")
-        # Strategy 3: Try parsing raw output as JSON ({"code": "..."})
-        else:
-            raw_output = getattr(task_output, "raw", "") or ""
-            # Guard: Normalize non-string raw outputs (e.g., dict/list) to JSON string
-            if not isinstance(raw_output, str):
-                raw_output = json.dumps(raw_output)
-            try:
-                parsed_json = json.loads(raw_output)
-                if isinstance(parsed_json, dict) and 'code' in parsed_json:
-                    robot_code = parsed_json['code']
-                    logging.info("✅ Extracted robot code from parsed JSON in raw output")
-                else:
-                    # Fallback: use raw output directly (legacy format)
-                    robot_code = raw_output
-                    logging.info("✅ Using raw output as robot code (legacy format)")
-            except (json.JSONDecodeError, TypeError):
-                # Raw output is not JSON, use as-is (legacy format)
-                robot_code = raw_output
-                logging.info("✅ Using raw output as robot code (not JSON)")
+        # Extract robot code from task[2] (Code Assembler — the terminal crew task)
+        # and apply the shared normalization pipeline (also used by the dryrun repair
+        # path) so both normalize identically.
+        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[2].output)
 
-        # CRITICAL: Normalize escaped newlines/tabs to actual characters
-        # LLM often outputs literal \n instead of actual newlines in JSON
-        if '\\n' in robot_code or '\\t' in robot_code or '\\r' in robot_code:
-            robot_code = robot_code.replace('\\r\\n', '\n')  # Windows line endings
-            robot_code = robot_code.replace('\\n', '\n')
-            robot_code = robot_code.replace('\\t', '\t')
-            robot_code = robot_code.replace('\\r', '\r')
-            logging.info("✅ Normalized escaped newlines/tabs to actual characters")
+        # Deterministic robot --dryrun gate + bounded Assembler repair loop.
+        # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
+        # and still delivers; it never raises here. Repair LLM cost is folded into
+        # crewai_* below. Runs in this worker thread (blocking Docker I/O is fine —
+        # not the asyncio loop) and AFTER create_workflow_span has closed (R5).
+        gate = validate_and_repair(
+            workflow_id, robot_code, model_provider, model_name,
+            progress_queue=progress_queue,
+        )
+        robot_code = gate["code"]
 
-        # Prefix bare CSS selectors (#id, .class) with `css=` so Robot Framework does
-        # not parse them as comments. See robot_code_normalizer for full rationale.
-        robot_code = normalize_robot_code(robot_code)
+        logging.info(
+            "Generated Robot Framework code is here:\n%s", robot_code)
+        logging.info(
+            "CrewAI workflow complete. Dryrun gate status: %s", gate["dryrun_status"])
 
-        # Simplified cleaning logic - prompt now handles most cases
-        # Keep only essential defensive measures
-        
-        # Step 1: Handle multiple Settings blocks (LLM might output code multiple times)
-        # Find ALL occurrences of *** Settings ***
-        settings_matches = list(re.finditer(
-            r'\*\*\*\s+Settings\s+\*\*\*', robot_code, re.IGNORECASE))
-        
-        if len(settings_matches) > 1:
-            # Multiple Settings blocks found - take the LAST one (usually the cleanest)
-            logging.info(
-                f"✅ Found {len(settings_matches)} Settings blocks, using the last one")
-            robot_code = robot_code[settings_matches[-1].start():]
-        elif len(settings_matches) == 1:
-            # Single Settings block - remove everything before it
-            robot_code = robot_code[settings_matches[0].start():]
-            logging.info("✅ Found Settings block, extracted code from there")
-        else:
-            # No Settings block found - try fallback to Variables or Test Cases
-            logging.warning("⚠️ No *** Settings *** block found in code!")
-            
-            variables_match = re.search(
-                r'\*\*\*\s+Variables\s+\*\*\*', robot_code, re.IGNORECASE)
-            test_cases_match = re.search(
-                r'\*\*\*\s+Test\s+Cases\s+\*\*\*', robot_code, re.IGNORECASE)
-            
-            if variables_match:
-                robot_code = robot_code[variables_match.start():]
-                logging.warning(
-                    "⚠️ Starting from *** Variables *** instead (Settings missing!)")
-            elif test_cases_match:
-                robot_code = robot_code[test_cases_match.start():]
-                logging.warning(
-                    "⚠️ Starting from *** Test Cases *** instead (Settings and Variables missing!)")
-            else:
-                logging.error("❌ No Robot Framework sections found in output!")
-        
-        # Step 2: Final cleanup - remove any trailing non-Robot content
-        # Split into lines and keep only content that's part of Robot Framework
-        lines = robot_code.split('\n')
-        cleaned_lines = []
-        
-        for line in lines:
-            # Keep all lines - prompt should ensure clean output
-            # Only skip completely empty trailing lines
-            cleaned_lines.append(line)
-        
-        # Remove trailing empty lines
-        while cleaned_lines and not cleaned_lines[-1].strip():
-            cleaned_lines.pop()
-        
-        robot_code = '\n'.join(cleaned_lines).strip()
-        
-        # Step 3: Strip trailing JSON artifacts that may leak from LLM output
-        # LLM sometimes outputs {"code": "...robot code..."} and the closing "} leaks through
-        json_trailing_patterns = [
-            '"}',  # JSON closing brace with quote
-        ]
-        for pattern in json_trailing_patterns:
-            if robot_code.endswith(pattern):
-                robot_code = robot_code[:-len(pattern)].strip()
-                logging.info(f"✅ Stripped trailing JSON artifact: {pattern}")
-
-        # Extract validation output from task[3] (code_validator)
-        raw_validation_output = crew_with_results.tasks[3].output.raw
-
-        # Try multiple strategies to extract JSON
-        validation_data = None
-
-        # Strategy 1: Try to use output.pydantic or output.json_dict (CrewAI structured output)
+        # ============================================
+        # NEW: Collect and merge metrics
+        # ============================================
         try:
-            # First try pydantic attribute (when output_json is a Pydantic model)
-            if hasattr(crew_with_results.tasks[3].output, 'pydantic') and crew_with_results.tasks[3].output.pydantic:
-                validation_data = crew_with_results.tasks[3].output.pydantic.model_dump(
-                )
-                logging.info(
-                    "✅ Parsed validation output from output.pydantic (Pydantic model)")
-            # Fallback to json_dict
-            elif hasattr(crew_with_results.tasks[3].output, 'json_dict') and crew_with_results.tasks[3].output.json_dict:
-                validation_data = crew_with_results.tasks[3].output.json_dict
-                logging.info(
-                    "✅ Parsed validation output from output.json_dict")
-        except (AttributeError, TypeError) as e:
-            logging.debug(f"Could not access structured output: {e}")
-            pass
-
-        if not validation_data:
-            # Strategy 2: Remove markdown code blocks and parse
-            cleaned_output = re.sub(r'```json\s*', '', raw_validation_output)
-            cleaned_output = re.sub(r'```\s*', '', cleaned_output)
-            cleaned_output = cleaned_output.strip()
-
-            # Strategy 3: Try to parse the cleaned output directly
+            # 1. Extract CrewAI metrics
+            # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
             try:
-                validation_data = json.loads(cleaned_output)
-                logging.info("✅ Parsed validation output directly")
-            except json.JSONDecodeError:
-                # Strategy 4: Extract JSON object with regex (look for complete JSON)
-                json_match = re.search(
-                    r'\{[^{}]*"valid"[^{}]*"reason"[^{}]*\}', cleaned_output, re.DOTALL)
-                if json_match:
-                    try:
-                        validation_data = json.loads(json_match.group(0))
-                        logging.info("✅ Parsed validation output with regex")
-                    except json.JSONDecodeError:
-                        pass
+                usage_metrics_obj = crew_with_results.calculate_usage_metrics()
 
-        if not validation_data:
-            # Strategy 5: Look for valid/reason separately in JSON format
-            valid_match = re.search(
-                r'"valid"\s*:\s*(true|false)', raw_validation_output, re.IGNORECASE)
-            reason_match = re.search(
-                r'"reason"\s*:\s*"([^"]*)"', raw_validation_output)
-
-            if valid_match:
-                validation_data = {
-                    "valid": valid_match.group(1).lower() == 'true',
-                    "reason": reason_match.group(1) if reason_match else "Validation completed"
+                # Convert UsageMetrics object to dict
+                usage_metrics_dict = {
+                    'total_tokens': usage_metrics_obj.total_tokens,
+                    'prompt_tokens': usage_metrics_obj.prompt_tokens,
+                    'completion_tokens': usage_metrics_obj.completion_tokens,
+                    'successful_requests': usage_metrics_obj.successful_requests
                 }
-                logging.info(
-                    "✅ Parsed validation output with fallback extraction")
 
-        if not validation_data:
-            # Strategy 6: Fallback to plain text "VALID" or "INVALID" format
-            # This handles legacy format or cases where JSON output fails
-            if 'VALID' in raw_validation_output.upper():
-                # Check if it's explicitly INVALID
-                if 'INVALID' in raw_validation_output.upper():
-                    validation_data = {
-                        "valid": False,
-                        "reason": "Code validation found errors (parsed from text format)"
-                    }
-                    logging.info(
-                        "✅ Parsed validation output from text format (INVALID)")
-                else:
-                    # It's VALID
-                    validation_data = {
-                        "valid": True,
-                        "reason": "Code validation passed (parsed from text format)"
-                    }
-                    logging.info(
-                        "✅ Parsed validation output from text format (VALID)")
+                logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
+                # NOTE: successful_requests above is inflated — CrewAI's
+                # calculate_usage_metrics() adds the shared LLM's _token_usage once per
+                # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
+                # which reads llm_monitor (agents.llm._monitor) — incremented exactly once
+                # per CleanedLLMWrapper.call() invocation, scoped to this workflow only.
 
-        if not validation_data:
-            logging.error(
-                f"❌ Could not parse validation output. Raw output:\n{raw_validation_output[:500]}")
-            raise ValueError(
-                "No valid JSON object found in the validation output.")
+            except Exception as e:
+                logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
+                # Fallback to empty metrics
+                usage_metrics_dict = {
+                    'total_tokens': 0,
+                    'prompt_tokens': 0,
+                    'completion_tokens': 0,
+                    'successful_requests': 0
+                }
 
-        if validation_data.get("valid"):
-            logging.info(
-                "Generated Robot Framework code is here:\n%s", robot_code)
-            logging.info(
-                "CrewAI workflow complete. Code validation successful.")
+            crewai_metrics = calculate_crewai_cost(
+                usage_metrics_dict,
+                model_name=model_name
+            )
+            logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
+            # Fold the dryrun repair crew's LLM cost into the CrewAI bucket. The repair
+            # mini-crew replaced the removed validator agent (whose cost used to live
+            # here), and it is a FRESH RobotAgents — the main crew's
+            # calculate_usage_metrics() never saw these calls, so there is no double
+            # count. total_llm_calls/total_cost derive from crewai_metrics below, so the
+            # totals update automatically (decision 5 / §5).
+            _repair_usage = gate.get("repair_usage") or {}
+            if _repair_usage:
+                crewai_metrics['llm_calls'] += _repair_usage.get('llm_calls', 0)
+                crewai_metrics['cost'] = round(crewai_metrics['cost'] + _repair_usage.get('cost', 0.0), 6)
+                crewai_metrics['tokens'] += _repair_usage.get('tokens', 0)
+                crewai_metrics['prompt_tokens'] += _repair_usage.get('prompt_tokens', 0)
+                crewai_metrics['completion_tokens'] += _repair_usage.get('completion_tokens', 0)
+                logging.info(f"📊 Folded dryrun repair usage into CrewAI metrics: {_repair_usage}")
 
-            # ============================================
-            # NEW: Collect and merge metrics
-            # ============================================
-            try:
-                # 1. Extract CrewAI metrics
-                # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
-                try:
-                    usage_metrics_obj = crew_with_results.calculate_usage_metrics()
-                    
-                    # Convert UsageMetrics object to dict
-                    usage_metrics_dict = {
-                        'total_tokens': usage_metrics_obj.total_tokens,
-                        'prompt_tokens': usage_metrics_obj.prompt_tokens,
-                        'completion_tokens': usage_metrics_obj.completion_tokens,
-                        'successful_requests': usage_metrics_obj.successful_requests
-                    }
-                    
-                    logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                    # NOTE: successful_requests above is inflated — CrewAI's
-                    # calculate_usage_metrics() adds the shared LLM's _token_usage once per
-                    # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
-                    # which reads llm_monitor (agents.llm._monitor) — incremented exactly once
-                    # per CleanedLLMWrapper.call() invocation, scoped to this workflow only.
+            # 2. Read browser-use metrics from temp file
+            temp_storage = get_temp_metrics_storage()
+            browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
+            logging.info(f"📊 Browser-use metrics: {browser_metrics}")
+            logging.info(f"📊 DEBUG: browser_metrics tokens = {browser_metrics.get('tokens', 'NOT_FOUND')}")
+            logging.info(f"📊 DEBUG: browser_metrics input_tokens = {browser_metrics.get('input_tokens', 'NOT_FOUND')}")
+            logging.info(f"📊 DEBUG: browser_metrics output_tokens = {browser_metrics.get('output_tokens', 'NOT_FOUND')}")
 
-                except Exception as e:
-                    logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
-                    # Fallback to empty metrics
-                    usage_metrics_dict = {
-                        'total_tokens': 0,
-                        'prompt_tokens': 0,
-                        'completion_tokens': 0,
-                        'successful_requests': 0
-                    }
-                
-                crewai_metrics = calculate_crewai_cost(
-                    usage_metrics_dict,
-                    model_name=model_name
-                )
-                logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
-                
-                # 2. Read browser-use metrics from temp file
-                temp_storage = get_temp_metrics_storage()
-                browser_metrics = temp_storage.read_browser_metrics(workflow_id) or {}
-                logging.info(f"📊 Browser-use metrics: {browser_metrics}")
-                logging.info(f"📊 DEBUG: browser_metrics tokens = {browser_metrics.get('tokens', 'NOT_FOUND')}")
-                logging.info(f"📊 DEBUG: browser_metrics input_tokens = {browser_metrics.get('input_tokens', 'NOT_FOUND')}")
-                logging.info(f"📊 DEBUG: browser_metrics output_tokens = {browser_metrics.get('output_tokens', 'NOT_FOUND')}")
-                
-                # 3. Create unified metrics
-                # Calculate averages
-                total_elements = browser_metrics.get('elements_processed', 0)
-                browser_llm_calls = browser_metrics.get('llm_calls', 0)
-                browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
-                
-                avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
-                avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
-                
-                unified_metrics = WorkflowMetrics(
-                    workflow_id=workflow_id,
-                    timestamp=datetime.now(),
-                    url=extract_url_from_query(natural_language_query),
-                    
-                    # Totals
-                    total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
-                    total_cost=crewai_metrics['cost'] + browser_actual_cost,
-                    execution_time=browser_metrics.get('execution_time', 0),
-                    
-                    # CrewAI breakdown
-                    crewai_llm_calls=crewai_metrics['llm_calls'],
-                    crewai_cost=crewai_metrics['cost'],
-                    crewai_tokens=crewai_metrics['tokens'],
-                    crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
-                    crewai_completion_tokens=crewai_metrics['completion_tokens'],
-                    
-                    # Browser-use breakdown (with granular token tracking)
-                    browser_use_llm_calls=browser_llm_calls,
-                    browser_use_cost=browser_actual_cost,
-                    browser_use_tokens=browser_metrics.get('tokens', 0),
-                    browser_use_prompt_tokens=browser_metrics.get('input_tokens', 0),
-                    browser_use_completion_tokens=browser_metrics.get('output_tokens', 0),
-                    browser_use_cached_tokens=browser_metrics.get('cached_tokens', 0),
-                    
-                    # Browser-use specific
-                    total_elements=total_elements,
-                    successful_elements=browser_metrics.get('successful_elements', 0),
-                    failed_elements=browser_metrics.get('failed_elements', 0),
-                    success_rate=browser_metrics.get('success_rate', 0.0),
-                    avg_llm_calls_per_element=avg_llm_calls,
-                    avg_cost_per_element=avg_cost,
-                    custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
-                    custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
-                    session_id=browser_metrics.get('session_id'),
-                    
-                    # Per-element approach metrics for pattern analysis
-                    element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
-                )
-                
-                # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
-                # search stats, pattern predictions) — these are tracked inside crew.py
-                # but stored in a separate object that was previously dropped here.
-                if optimization_metrics is not None:
-                    if optimization_metrics.context_reduction:
-                        unified_metrics.context_reduction = optimization_metrics.context_reduction
-                    if optimization_metrics.keyword_search_stats:
-                        unified_metrics.keyword_search_stats = optimization_metrics.keyword_search_stats
-                    if optimization_metrics.pattern_learning_stats:
-                        unified_metrics.pattern_learning_stats = optimization_metrics.pattern_learning_stats
-                elif settings.OPTIMIZATION_ENABLED:
-                    unified_metrics.optimization_fallback_used = True
+            # 3. Create unified metrics
+            # Calculate averages
+            total_elements = browser_metrics.get('elements_processed', 0)
+            browser_llm_calls = browser_metrics.get('llm_calls', 0)
+            browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
 
-                # Populate LLM cleaning stats — each workflow has its own monitor instance
-                # so concurrent workflows never share counts.
-                if llm_monitor is not None:
-                    unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
+            avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
+            avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
 
-                collector = get_workflow_metrics_collector()
-                collector.record_workflow(unified_metrics)
+            unified_metrics = WorkflowMetrics(
+                workflow_id=workflow_id,
+                timestamp=datetime.now(),
+                url=extract_url_from_query(natural_language_query),
 
-                _safe_delete_temp_metrics(workflow_id)
-                
-                logging.info(f"✅ Unified metrics recorded successfully")
-                logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
-                logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
-                
-            except Exception as metrics_error:
-                logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)
-                _safe_delete_temp_metrics(workflow_id)
+                # Totals
+                total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
+                total_cost=crewai_metrics['cost'] + browser_actual_cost,
+                execution_time=browser_metrics.get('execution_time', 0),
 
-            # Calculate stats for success message
-            lines = len(robot_code.split('\n'))
-            
-            # Show finalizing step before completion
-            yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code..."}
+                # CrewAI breakdown
+                crewai_llm_calls=crewai_metrics['llm_calls'],
+                crewai_cost=crewai_metrics['cost'],
+                crewai_tokens=crewai_metrics['tokens'],
+                crewai_prompt_tokens=crewai_metrics['prompt_tokens'],
+                crewai_completion_tokens=crewai_metrics['completion_tokens'],
 
-            # Confirm success with line count (progress already at 100% from event bus)
-            yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
-            
-            # Final completion message (without progress, as it's already at 100%)
-            yield {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
-        else:
-            logging.error(
-                f"CrewAI workflow finished, but code validation failed. Reason: {validation_data.get('reason')}")
+                # Browser-use breakdown (with granular token tracking)
+                browser_use_llm_calls=browser_llm_calls,
+                browser_use_cost=browser_actual_cost,
+                browser_use_tokens=browser_metrics.get('tokens', 0),
+                browser_use_prompt_tokens=browser_metrics.get('input_tokens', 0),
+                browser_use_completion_tokens=browser_metrics.get('output_tokens', 0),
+                browser_use_cached_tokens=browser_metrics.get('cached_tokens', 0),
+
+                # Browser-use specific
+                total_elements=total_elements,
+                successful_elements=browser_metrics.get('successful_elements', 0),
+                failed_elements=browser_metrics.get('failed_elements', 0),
+                success_rate=browser_metrics.get('success_rate', 0.0),
+                avg_llm_calls_per_element=avg_llm_calls,
+                avg_cost_per_element=avg_cost,
+                custom_actions_enabled=browser_metrics.get('custom_actions_enabled', False),
+                custom_action_usage_count=browser_metrics.get('custom_action_usage_count', 0),
+                session_id=browser_metrics.get('session_id'),
+
+                # Per-element approach metrics for pattern analysis
+                element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
+            )
+
+            # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
+            # search stats, pattern predictions) — these are tracked inside crew.py
+            # but stored in a separate object that was previously dropped here.
+            if optimization_metrics is not None:
+                if optimization_metrics.context_reduction:
+                    unified_metrics.context_reduction = optimization_metrics.context_reduction
+                if optimization_metrics.keyword_search_stats:
+                    unified_metrics.keyword_search_stats = optimization_metrics.keyword_search_stats
+                if optimization_metrics.pattern_learning_stats:
+                    unified_metrics.pattern_learning_stats = optimization_metrics.pattern_learning_stats
+            elif settings.OPTIMIZATION_ENABLED:
+                unified_metrics.optimization_fallback_used = True
+
+            # Populate LLM cleaning stats — each workflow has its own monitor instance
+            # so concurrent workflows never share counts. MAIN-crew counters only:
+            # the dryrun repair mini-crew (dryrun_service.repair_robot_code) builds a
+            # fresh monitor whose cleaning/empty-response counts are deliberately NOT
+            # folded here. Its COST is folded into crewai_metrics above; repair is rare
+            # and few-call on the SAME model, so the main crew's counts already surface
+            # any flakiness. Only cost needs to be exact — these counters do not.
+            if llm_monitor is not None:
+                unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
+
+            collector = get_workflow_metrics_collector()
+            collector.record_workflow(unified_metrics)
+
             _safe_delete_temp_metrics(workflow_id)
-            _safe_evict_hint_metadata(workflow_id)
-            yield {"status": "error", "message": f"Code validation failed: {validation_data.get('reason')}"}
+
+            logging.info(f"✅ Unified metrics recorded successfully")
+            logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
+            logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
+
+        except Exception as metrics_error:
+            logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)
+            _safe_delete_temp_metrics(workflow_id)
+
+        # Calculate stats for success message
+        lines = len(robot_code.split('\n'))
+
+        # Show finalizing step before completion
+        yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code..."}
+
+        # Confirm success with line count
+        yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
+
+        # Terminal 100% — pushed here (the event bus now caps at 80 and crew.py no
+        # longer pushes 100) so the bar reaches 100 only AFTER the dryrun gate has
+        # finished verifying/repairing (prog-2/prog-6). Guarded for progress_queue=None.
+        if progress_queue is not None:
+            progress_queue.put({"status": "running", "progress": 100, "message": f"{EMOJI['success']} Test generation complete"})
+
+        # Final completion. Reuse status:'complete' (NO new top-level status — a new
+        # value would fall through the frontend switch and hang the button). When the
+        # gate did not pass, attach dryrun_status + dryrun_errors so the frontend can
+        # surface a warning without a new status.
+        complete_event = {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
+        if gate["dryrun_status"] != "passed":
+            complete_event["dryrun_status"] = gate["dryrun_status"]
+            complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
+        yield complete_event
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
-        logging.error(
-            "Failed to generate valid Robot Framework code." + str(e))
+        logging.error("Failed to generate valid Robot Framework code: %s", e)
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
-        try:
-            logging.error(
-                f"Failed to parse validation output from crew: {e}\nRaw output was:\n{raw_validation_output}")
-            yield {"status": "error", "message": "Failed to parse validation output from the crew.", "robot_code": robot_code}
-        except:
-            yield {"status": "error", "message": f"Failed to parse validation output: {e}"}
+        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}"}
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)

@@ -1040,32 +1040,11 @@ class FeedbackLoop:
                 safe_wid, test_status, hints_injected,
             )
 
-            # Step 7: Update NL feedback hint effectiveness (non-blocking)
-            if self.nl_engine is not None:
-                try:
-                    domain = extract_domain(url) if url else None
-                    failure_cat = (
-                        failure_analysis.category
-                        if failure_analysis else None
-                    )
-                    test_passed = (test_status == "passed")
-                    # Guard: skip re-run failures — hints had no influence on
-                    # re-run outcomes (no generation phase ran). Only update when
-                    # the test passed OR this is the first attempt with hints injected.
-                    should_update = test_passed or (is_first_attempt and hints_injected > 0)
-                    if should_update:
-                        self.write_queue.submit(
-                            self.nl_engine.update_hint_effectiveness,
-                            domain=domain,
-                            url=url,
-                            test_passed=test_passed,
-                            new_failure_category=failure_cat,
-                            injected_hint_ids=injected_hint_ids,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "[LEARNING] NL hint effectiveness update failed: %s", e,
-                    )
+            # NL-hint usage attribution (Part 2) runs from
+            # workflow_service._process_learning AFTER process_execution, not
+            # here: it credits only the hints actually used in passing code via
+            # one LLM judgment per workflow. The old Step-7 all-injected
+            # per-execution crediting was removed with that change.
 
             # Health check — its own try/except so a monitoring failure can
             # never reach the outer except and trip the circuit breaker
@@ -1164,8 +1143,8 @@ class FeedbackLoop:
             # user wins over LLM judgment on direct overrides.
             #
             # `self.nl_engine is not None` is the first condition: if absent,
-            # zero work is performed, no LLM call, no cost, no crash. Mirrors
-            # the guard used in Trigger 1 (workflow_service._fire_llm_conflict_detection).
+            # zero work is performed, no LLM call, no cost, no crash. Same
+            # nl_engine guard the usage-attribution path applies.
             #
             # No regex negation gate — natural language is unbounded; the
             # `if active_hints:` DB check is the gate. Cost per call is small
@@ -1275,6 +1254,8 @@ class FeedbackLoop:
         llm_latency_ms: int,
         status: str,
         error_message: Optional[str],
+        used_hint_ids: Optional[list] = None,
+        unused_hint_ids: Optional[list] = None,
     ) -> None:
         """Insert one row into the trigger_events audit log.
 
@@ -1304,6 +1285,12 @@ class FeedbackLoop:
                 KPIs so suppressed-only triggers do not inflate denominators)
         Pass [] (not None) for both on early-return / failure paths so the
         column is queryable as a JSON array on every row.
+
+        used_hint_ids / unused_hint_ids (usage-attribution telemetry, Part 2):
+            the hints the attribution LLM judged used / unused. Keyword-only with
+            a None default so the trigger_1 / trigger_2 callers stay unchanged.
+            None is written as SQL NULL (NOT the string "null" — json.dumps(None)
+            == "null"), so a row from a non-attribution trigger is NULL here.
         """
         from datetime import datetime, timezone
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
@@ -1315,8 +1302,8 @@ class FeedbackLoop:
                 active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
                 reason, llm_model,
                 input_tokens, output_tokens, llm_latency_ms,
-                status, error_message, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, error_message, used_hint_ids, unused_hint_ids, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trigger_type, workflow_id, domain, url, feedback_text,
@@ -1326,6 +1313,8 @@ class FeedbackLoop:
                 reason, llm_model,
                 input_tokens, output_tokens, llm_latency_ms,
                 status, error_message,
+                json.dumps(used_hint_ids) if used_hint_ids is not None else None,
+                json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )

@@ -36,6 +36,69 @@ function esc(s) {
         .replace(/"/g, '&quot;');
 }
 
+// ---- Reusable "more / less" line-clamp, used across the learning page ----
+// Clamps text to `lines`; a toggle reveals the rest. The toggle renders hidden
+// and is un-hidden only when the text genuinely overflows N lines — measured
+// after render (rAF-batched) by a MutationObserver, so it works as content is
+// added anywhere, including the detail drawer (which is made visible before its
+// content is set). The toggle stops click propagation, so it is safe inside
+// clickable rows/cards.
+let _clampSeq = 0;
+function _clampWrap(innerHtml, lines) {
+    const id = 'cl' + (++_clampSeq);
+    return `<span class="lrn-clamp-wrap"><span class="lrn-clamp" id="${id}" style="-webkit-line-clamp:${lines}">${innerHtml}</span><button type="button" class="lrn-clamp-toggle" onclick="_toggleClamp(event,'${id}',this)" hidden>more</button></span>`;
+}
+// Plain text -> escaped + clamped.
+function clampText(text, lines = 2) {
+    const t = text == null ? '' : String(text);
+    if (!t.trim()) return '';
+    return _clampWrap(esc(t), lines);
+}
+// Pre-built HTML (e.g. a linkified reason) -> clamped. (rawText param retained
+// for call-site compatibility; overflow is now measured, not estimated.)
+function clampRaw(innerHtml, rawText, lines = 2) {
+    if (!innerHtml) return '';
+    return _clampWrap(innerHtml, lines);
+}
+function _toggleClamp(event, id, btn) {
+    if (event) { event.stopPropagation(); event.preventDefault(); }
+    const el = document.getElementById(id);
+    if (!el) return;
+    const expanded = el.classList.toggle('lrn-clamp--expanded');
+    btn.textContent = expanded ? 'less' : 'more';
+}
+// Reveal a clamp's toggle only when its text actually overflows. Reads then
+// writes to avoid layout thrash.
+function _measureClamps(els) {
+    const list = Array.from(els).filter(el => el && el.isConnected);
+    if (!list.length) return;
+    const overflow = list.map(el => el.scrollHeight - el.clientHeight > 1);
+    list.forEach((el, i) => {
+        const btn = el.nextElementSibling;
+        if (btn && btn.classList && btn.classList.contains('lrn-clamp-toggle')) btn.hidden = !overflow[i];
+    });
+}
+let _clampRaf = 0;
+const _clampQueue = new Set();
+function _queueClamp(el) {
+    _clampQueue.add(el);
+    if (_clampRaf) return;
+    _clampRaf = requestAnimationFrame(() => {
+        _clampRaf = 0;
+        const els = Array.from(_clampQueue);
+        _clampQueue.clear();
+        _measureClamps(els);
+    });
+}
+const _clampObserver = new MutationObserver(muts => {
+    for (const m of muts) for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.classList && node.classList.contains('lrn-clamp')) _queueClamp(node);
+        if (node.querySelectorAll) node.querySelectorAll('.lrn-clamp').forEach(_queueClamp);
+    }
+});
+if (document.body) _clampObserver.observe(document.body, { childList: true, subtree: true });
+
 function reltime(isoStr) {
     if (!isoStr) return '—';
     const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
@@ -49,11 +112,6 @@ function reltime(isoStr) {
 function fmtNum(n) {
     if (n == null) return '—';
     return Number(n).toLocaleString();
-}
-
-function truncate(s, n = 120) {
-    if (!s) return '';
-    return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
 function getActor() {
@@ -133,13 +191,13 @@ function navigate(hash) {
 
 function setActiveTab(view) {
     document.querySelectorAll('.lrn-tab').forEach(t => t.classList.remove('active'));
-    const tabMap = { hints: 'tab-hints', triggers: 'tab-triggers', 'trigger-detail': 'tab-triggers', stats: 'tab-stats', review: 'tab-review' };
+    const tabMap = { hints: 'tab-hints', triggers: 'tab-triggers', 'trigger-detail': 'tab-triggers', runs: 'tab-runs', 'run-detail': 'tab-runs', stats: 'tab-stats', review: 'tab-review' };
     const el = document.getElementById(tabMap[view]);
     if (el) el.classList.add('active');
 }
 
 function showView(name) {
-    ['hints', 'triggers', 'trigger-detail', 'stats', 'review'].forEach(v => {
+    ['hints', 'triggers', 'trigger-detail', 'runs', 'run-detail', 'stats', 'review'].forEach(v => {
         const el = document.getElementById('view-' + v);
         if (el) el.style.display = (v === name) ? '' : 'none';
     });
@@ -185,6 +243,21 @@ function route() {
         showView('triggers');
         document.getElementById('lrn-breadcrumb').textContent = 'Learning ▸ Triggers';
         renderTriggers(true);
+        return;
+    }
+
+    const runMatch = hash.match(/^runs\/(.+)$/);
+    if (runMatch) {
+        showView('run-detail');
+        document.getElementById('lrn-breadcrumb').textContent = 'Learning ▸ Runs ▸ Detail';
+        renderRunDetail(decodeURIComponent(runMatch[1]));
+        return;
+    }
+
+    if (hash === 'runs') {
+        showView('runs');
+        document.getElementById('lrn-breadcrumb').textContent = 'Learning ▸ Runs';
+        renderRuns();
         return;
     }
 
@@ -343,7 +416,7 @@ function buildHintCard(hint) {
     if (hint.domain) metaParts.push(hint.domain);
 
     const flagNote = hint.conflict_flag_reason
-        ? `<div class="lrn-hint-flag-reason">⚠ flagged ${reltime(hint.conflict_flagged_at)}: "${esc(truncate(hint.conflict_flag_reason, 100))}"</div>`
+        ? `<div class="lrn-hint-flag-reason">⚠ flagged ${reltime(hint.conflict_flagged_at)}: ${clampText(hint.conflict_flag_reason, 2)}</div>`
         : '';
 
     let actions = `<button class="lrn-btn" onclick="openHintDrawer(${hint.id});event.stopPropagation()">View detail</button>`;
@@ -359,7 +432,7 @@ function buildHintCard(hint) {
     return `
         <div class="lrn-hint-card-top">
             ${badge}
-            <span class="lrn-hint-text">${esc(truncate(hint.feedback_text, 160))}</span>
+            <span class="lrn-hint-text">${clampText(hint.feedback_text, 3)}</span>
         </div>
         <div class="lrn-hint-meta">
             <span>${esc(metaParts.join(' · '))}</span>
@@ -471,13 +544,13 @@ async function openHintDrawer(id, updateHash = true) {
                 <div class="lrn-drawer-section-title">Status</div>
                 ${badgeHtml(hint)}
                 ${hint.conflict_flag_reason
-                    ? `<div class="lrn-hint-flag-reason" style="margin-top:0.4rem">⚠ ${esc(hint.conflict_flag_reason)}</div>`
+                    ? `<div class="lrn-hint-flag-reason" style="margin-top:0.4rem">${clampRaw('⚠ ' + esc(hint.conflict_flag_reason), hint.conflict_flag_reason, 3)}</div>`
                     : ''}
             </div>
 
             <div class="lrn-drawer-section">
                 <div class="lrn-drawer-section-title">Hint text</div>
-                <div class="lrn-drawer-hint-text">${esc(hint.feedback_text)}</div>
+                <div class="lrn-drawer-hint-text">${clampText(hint.feedback_text, 6)}</div>
             </div>
 
             <div class="lrn-drawer-section">
@@ -603,7 +676,7 @@ function buildTimelineItem(item) {
         }
         body = `<span class="lrn-timeline-actor">${esc(actor)}</span> ${esc(verb)}${detail}`;
         if (item.reason) {
-            body += `<div class="lrn-timeline-reason">${esc(truncate(item.reason, 120))}</div>`;
+            body += `<div class="lrn-timeline-reason">${clampText(item.reason, 3)}</div>`;
         }
     } else {
         // trigger_events
@@ -612,7 +685,7 @@ function buildTimelineItem(item) {
             : 'flagged this hint';
         body = `<span class="lrn-timeline-actor">${esc(item.trigger_type || 'trigger')}</span> ${triggerVerb}`;
         if (item.reason) {
-            body += `<div class="lrn-timeline-reason">${esc(truncate(item.reason, 120))}</div>`;
+            body += `<div class="lrn-timeline-reason">${clampText(item.reason, 3)}</div>`;
         }
         if (item.workflow_id) {
             body += `<div class="lrn-timeline-reason" style="font-style:normal">workflow: <code style="font-size:0.75rem">${esc(item.workflow_id)}</code></div>`;
@@ -795,8 +868,9 @@ async function renderTriggers(reset = false) {
                     <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
                         <select class="lrn-filter-select" id="filter-ttype" onchange="applyTriggerFilters()">
                             <option value="">All types</option>
-                            <option value="trigger_1">Trigger 1 (fix-after-fail)</option>
-                            <option value="trigger_2">Trigger 2 (user feedback)</option>
+                            <option value="trigger_1">Fix-after-fail (Case B)</option>
+                            <option value="trigger_2">Feedback conflict</option>
+                            <option value="usage_attribution">Usage attribution (first pass)</option>
                         </select>
                         <select class="lrn-filter-select" id="filter-tsince" onchange="applyTriggerFilters()">
                             <option value="">All time</option>
@@ -805,6 +879,9 @@ async function renderTriggers(reset = false) {
                             <option value="1d">Today</option>
                         </select>
                     </div>
+                </div>
+                <div style="padding:0.4rem 1rem;font-size:0.8rem;color:var(--text-secondary)">
+                    Click a row to open its detail (code, hints, attribution).
                 </div>
                 <div style="overflow-x:auto">
                     <table class="lrn-table">
@@ -818,10 +895,11 @@ async function renderTriggers(reset = false) {
                                 <th>LLM status</th>
                                 <th>Tokens (in→out)</th>
                                 <th>Latency</th>
+                                <th></th>
                             </tr>
                         </thead>
                         <tbody id="triggers-tbody">
-                            <tr><td colspan="8" style="text-align:center;padding:2rem">Loading…</td></tr>
+                            <tr><td colspan="9" style="text-align:center;padding:2rem">Loading…</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -836,7 +914,7 @@ async function renderTriggers(reset = false) {
 async function applyTriggerFilters() {
     triggersOffset = 0; triggersTotal = 0;
     const tbody = document.getElementById('triggers-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:2rem">Loading…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:2rem">Loading…</td></tr>';
     await loadTriggerRows();
 }
 
@@ -863,7 +941,7 @@ async function loadTriggerRows() {
         }
 
         if (data.triggers.length === 0 && triggersOffset === 0) {
-            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:2rem;color:var(--text-secondary)">No trigger events found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:2rem;color:var(--text-secondary)">No trigger events found</td></tr>';
             if (footer) footer.textContent = '';
             return;
         }
@@ -894,13 +972,14 @@ async function loadTriggerRows() {
 
             tr.innerHTML = `
                 <td>${reltime(t.created_at)}</td>
-                <td><code style="font-size:0.78rem">${esc(t.trigger_type)}</code></td>
-                <td><code style="font-size:0.75rem">${esc((t.workflow_id||'').slice(0,8))}…</code></td>
+                <td>${esc(friendlyTriggerType(t.trigger_type))}</td>
+                <td><code style="font-size:0.75rem">${esc(t.workflow_id || '')}</code></td>
                 <td>${esc(t.domain || '—')}</td>
                 <td>${flagCell}</td>
                 <td>${esc(t.status || '—')}</td>
                 <td style="font-family:var(--font-mono);font-size:0.8rem">${tokStr}</td>
                 <td style="font-family:var(--font-mono);font-size:0.8rem">${latStr}</td>
+                <td style="color:var(--text-secondary)">›</td>
             `;
             tbody.appendChild(tr);
         });
@@ -911,7 +990,7 @@ async function loadTriggerRows() {
             footer.innerHTML = `Showing ${showing} of ${triggersTotal} events${canMore ? ' &nbsp;·&nbsp; <button class="lrn-btn" onclick="loadMoreTriggers()">Load more</button>' : ''}`;
         }
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:2rem;color:var(--error)">${esc(e.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:2rem;color:var(--error)">${esc(e.message)}</td></tr>`;
     }
 }
 
@@ -952,7 +1031,7 @@ async function renderTriggerDetail(id) {
 
         const activeHintsHtml = activeIds.length > 0
             ? `<ul class="lrn-hint-list" style="list-style:none">${activeIds.map(hid => {
-                const text = hintTexts[hid] ? ` — <span style="color:var(--text-secondary)">${esc(truncate(hintTexts[hid], 120))}</span>` : '';
+                const text = hintTexts[hid] ? ` — <span style="color:var(--text-secondary)">${esc(hintTexts[hid])}</span>` : '';
                 const k = String(hid);
                 let badge = '';
                 if (enforcedSet.has(k)) {
@@ -966,20 +1045,40 @@ async function renderTriggerDetail(id) {
             }).join('')}</ul>`
             : '<div class="lrn-empty" style="padding:0.5rem 0">None recorded</div>';
 
+        // The two-column comparison is the Case-B evidence view: working_code is
+        // only set when a FAILED run was edited into a PASSING one (failed v1 →
+        // corrected v2), and that diff is what the harm-attribution judges. On a
+        // first-attempt pass robot_code IS the passing code and working_code is
+        // NULL — so there is nothing to compare; show one block labeled by the
+        // run's real status instead of mislabeling it "Failed code".
+        const hasWorking = ex && ex.working_code;
+        const singleLabel = (ex && ex.test_status === 'passed')
+            ? 'Passing code (robot_code)'
+            : 'Failed code (robot_code)';
+        const queryLine = (ex && ex.user_query)
+            ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:0.75rem">Query: ${clampText(ex.user_query, 3)}</div>`
+            : '';
         const codeSection = ex ? `
             <div class="lrn-stats-section">
-                <div class="lrn-stats-section-title">Code comparison</div>
-                ${ex.user_query ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:0.75rem">Query: ${esc(ex.user_query)}</div>` : ''}
+                <div class="lrn-stats-section-title">${hasWorking ? 'Code comparison (failed v1 → working v2)' : 'Generated code'}</div>
+                ${queryLine}
+                ${hasWorking ? `
                 <div class="lrn-code-pair">
                     <div>
-                        <div class="lrn-label" style="margin-bottom:4px">Failed code (robot_code)</div>
+                        <div class="lrn-label" style="margin-bottom:4px">Failed code (v1, robot_code)</div>
                         <pre class="lrn-code-block">${esc(ex.robot_code || '—')}</pre>
                     </div>
                     <div>
-                        <div class="lrn-label" style="margin-bottom:4px">Working code (working_code)</div>
-                        <pre class="lrn-code-block">${esc(ex.working_code || '—')}</pre>
+                        <div class="lrn-label" style="margin-bottom:4px">Working code (v2, working_code)</div>
+                        <pre class="lrn-code-block">${esc(ex.working_code)}</pre>
                     </div>
                 </div>
+                ` : `
+                <div>
+                    <div class="lrn-label" style="margin-bottom:4px">${singleLabel} — status: ${esc(ex.test_status || 'unknown')}</div>
+                    <pre class="lrn-code-block">${esc(ex.robot_code || '—')}</pre>
+                </div>
+                `}
             </div>
         ` : '';
 
@@ -1063,9 +1162,203 @@ const TOOLTIPS = {
     cat_c:        'R7 holdout: workflows where hints WERE available but deliberately suppressed (a ~5% sample). The unbiased control group.',
     biased_lift:  'Cat B pass rate minus Cat A. Biased — Cat B queries resemble past successes, so this flatters the system. Kept for continuity, not trusted.',
     honest_lift:  'Cat B pass rate minus Cat C — the trustworthy lift. Both groups had hints available, so selection bias is removed. Shows "insufficient data" until enough holdout (Cat C) samples accrue.',
+    attr_events:  'Pass-time usage-attribution runs (30 days). On a passing run with NL hints, one LLM judgment sorts each injected hint into used / harmful / unused. "credited" = the run credited at least one hint.',
+    attr_reversal: 'Of hints auto-retired for being never-used, the fraction an admin has since reactivated (read from current state, so all reactivation paths count). High → the auto-retire rule may be too aggressive. "n/a" until some hints have been retired.',
+    review_candidates: 'Active hints that have never once succeeded but are statistically associated with failures via related categories. Inform-only — a human decides whether to disable them. Not auto-actioned.',
+    never_attributed:  'Hints injected into many distinct workflows but never once scored on a passing run (applied_count = 0) — usually because the tests they appear in never pass. The fail-heavy blind spot. Inform-only.',
 };
 
 function ii(key) { return infoIcon(TOOLTIPS[key] || ''); }
+
+
+// ============================================================
+// Runs — per-testcase learning journey (N3 observability)
+// ============================================================
+
+function friendlyTriggerType(t) {
+    return {
+        trigger_1: 'Fix-after-fail (Case B)',
+        trigger_2: 'Feedback conflict',
+        usage_attribution: 'Usage attribution (first pass)',
+    }[t] || (t || '—');
+}
+
+let _runsDebounce = null;
+function debouncedLoadRuns() {
+    clearTimeout(_runsDebounce);
+    _runsDebounce = setTimeout(loadRuns, 300);
+}
+
+async function renderRuns() {
+    const view = document.getElementById('view-runs');
+    view.innerHTML = `
+        <div class="lrn-table-card">
+            <div class="lrn-table-header">
+                <span class="lrn-table-header-title">Test-case runs</span>
+                <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+                    <input class="lrn-filter-select" id="runs-q" placeholder="Search query…"
+                           oninput="debouncedLoadRuns()" style="min-width:180px">
+                    <select class="lrn-filter-select" id="runs-status" onchange="loadRuns()">
+                        <option value="">All statuses</option>
+                        <option value="passed">Passed</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                </div>
+            </div>
+            <div style="padding:0.4rem 1rem;font-size:0.8rem;color:var(--text-secondary)">
+                Click a run to see its full learning journey (hint funnel, attribution, code).
+            </div>
+            <div style="overflow-x:auto">
+                <table class="lrn-table">
+                    <thead><tr>
+                        <th>When</th><th>Query</th><th>Status</th><th>NL hints</th><th>Workflow</th><th></th>
+                    </tr></thead>
+                    <tbody id="runs-tbody">
+                        <tr><td colspan="6" style="text-align:center;padding:2rem">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="runs-footer" class="lrn-list-footer" style="padding:0.75rem 1rem"></div>
+        </div>`;
+    await loadRuns();
+}
+
+async function loadRuns() {
+    const tbody = document.getElementById('runs-tbody');
+    if (!tbody) return;
+    const status = document.getElementById('runs-status')?.value || '';
+    const q = (document.getElementById('runs-q')?.value || '').trim();
+    const params = new URLSearchParams({ limit: 50, offset: 0 });
+    if (status) params.set('status', status);
+    if (q) params.set('q', q);
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem">Loading…</td></tr>';
+    try {
+        const data = await apiFetch('/runs?' + params);
+        const footer = document.getElementById('runs-footer');
+        if (!data.runs.length) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-secondary)">No runs found</td></tr>';
+            if (footer) footer.textContent = '';
+            return;
+        }
+        tbody.innerHTML = '';
+        data.runs.forEach(r => {
+            const tr = document.createElement('tr');
+            tr.style.cursor = 'pointer';
+            tr.onclick = () => navigate('#/runs/' + encodeURIComponent(r.workflow_id));
+            const passed = r.test_status === 'passed';
+            const failNote = r.failure_category
+                ? ` <span style="color:var(--text-secondary);font-size:0.78rem">(${esc(r.failure_category)})</span>` : '';
+            tr.innerHTML = `
+                <td>${esc(reltime(r.timestamp))}</td>
+                <td style="max-width:340px">${clampText(r.user_query || '—', 2)}</td>
+                <td><span style="color:var(--${passed ? 'success' : 'error'});font-weight:600">${esc(r.test_status || '—')}</span>${failNote}</td>
+                <td>${r.nl_injected_count}</td>
+                <td><code style="font-size:0.75rem">${esc(r.workflow_id || '')}</code></td>
+                <td style="color:var(--text-secondary)">›</td>`;
+            tbody.appendChild(tr);
+        });
+        if (footer) footer.textContent = `Showing ${data.runs.length} of ${data.total} runs`;
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--error)">${esc(e.message)}</td></tr>`;
+    }
+}
+
+async function renderRunDetail(workflowId) {
+    const view = document.getElementById('view-run-detail');
+    view.innerHTML = `<button class="lrn-back-link" onclick="navigate('#/runs')">← Runs</button>
+                      <div class="lrn-loading">Loading…</div>`;
+    try {
+        const data     = await apiFetch('/runs/' + encodeURIComponent(workflowId));
+        const run      = data.run;
+        const metrics  = data.metrics || {};
+        const trace    = data.trace || [];
+        const triggers = data.triggers || [];
+        const passed   = run && run.test_status === 'passed';
+
+        const summary = run ? `
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Run summary</div>
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Query</span><span class="lrn-kpi-val" style="font-weight:400">${clampText(run.user_query || '—', 3)}</span></div>
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Status</span><span class="lrn-kpi-val" style="color:var(--${passed ? 'success' : 'error'})">${esc(run.test_status || '—')}</span></div>
+                ${(run.failure_category || run.failed_keyword || run.error_message) ? `
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Failure</span><span class="lrn-kpi-val" style="font-weight:400">${esc(run.failure_category || '')}${run.failed_keyword ? ' · ' + esc(run.failed_keyword) : ''}${run.error_message ? ' — ' + clampText(run.error_message, 3) : ''}</span></div>` : ''}
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Domain</span><span class="lrn-kpi-val" style="font-weight:400">${esc(run.domain || '—')}</span></div>
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Holdout</span><span class="lrn-kpi-val">${metrics.was_holdout ? 'yes — hints suppressed (Cat C control)' : 'no'}</span></div>
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">Model</span><span class="lrn-kpi-val" style="font-weight:400">${esc(run.model_version || '—')}</span></div>
+                <div class="lrn-kpi-row"><span class="lrn-kpi-label">When</span><span class="lrn-kpi-val" style="font-weight:400">${esc(reltime(run.timestamp))}</span></div>
+            </div>` : `<div class="lrn-empty">No execution record for this workflow — it likely deduplicated into another run. The selection trace below still stands.</div>`;
+
+        const funnel = trace.length ? `
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Hint funnel — selection → attribution (${trace.length})</div>
+                <div style="overflow-x:auto"><table class="lrn-table">
+                    <thead><tr><th>#</th><th>Hint</th><th>Sim</th><th>Injected</th><th>Drop reason</th><th>Attribution</th><th>Why</th><th>State</th></tr></thead>
+                    <tbody>${trace.map(h => {
+                        const sim = h.similarity_score != null ? Number(h.similarity_score).toFixed(2) : '—';
+                        const stateBits = [];
+                        if (h.is_active === 0) stateBits.push('disabled');
+                        if (h.conflict_flagged === 1) stateBits.push('flagged');
+                        return `<tr>
+                            <td>${h.hint_id}</td>
+                            <td style="max-width:300px">${clampText(h.feedback_text || '(hint deleted)', 2)}</td>
+                            <td>${sim}</td>
+                            <td>${h.injected ? '✓' : '—'}</td>
+                            <td>${esc(h.drop_reason || '—')}</td>
+                            <td>${h.attribution_bucket ? `<strong>${esc(h.attribution_bucket)}</strong>` : '—'}</td>
+                            <td style="max-width:260px;word-break:break-word;color:var(--text-secondary)">${esc(h.attribution_reason || '—')}</td>
+                            <td>${esc(stateBits.length ? stateBits.join(', ') : 'active')}</td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table></div>
+            </div>` : `
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Hint funnel</div>
+                <div class="lrn-empty">No selection trace for this run — it predates trace capture, or no NL hints were considered.</div>
+            </div>`;
+
+        const hasWorking = run && run.working_code;
+        const singleLabel = passed ? 'Passing code (robot_code)' : 'Failed code (robot_code)';
+        const codeSection = run ? `
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">${hasWorking ? 'Code comparison (failed v1 → working v2)' : 'Generated code'}</div>
+                ${hasWorking ? `
+                <div class="lrn-code-pair">
+                    <div><div class="lrn-label" style="margin-bottom:4px">Failed code (v1)</div><pre class="lrn-code-block">${esc(run.robot_code || '—')}</pre></div>
+                    <div><div class="lrn-label" style="margin-bottom:4px">Working code (v2)</div><pre class="lrn-code-block">${esc(run.working_code)}</pre></div>
+                </div>` : `
+                <div><div class="lrn-label" style="margin-bottom:4px">${singleLabel} — status: ${esc(run.test_status || 'unknown')}</div><pre class="lrn-code-block">${esc(run.robot_code || '—')}</pre></div>`}
+            </div>` : '';
+
+        const trigSection = triggers.length ? `
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Trigger events (${triggers.length})</div>
+                ${triggers.map(t => `<div class="lrn-kpi-row">
+                    <span class="lrn-kpi-label">${esc(friendlyTriggerType(t.trigger_type))}</span>
+                    <span class="lrn-kpi-val" style="font-weight:400">status: ${esc(t.status)} · used: ${esc(t.used_hint_ids || '[]')} · unused: ${esc(t.unused_hint_ids || '[]')} · flagged: ${esc(t.actually_flagged_hint_ids || t.flagged_hint_ids || '[]')}</span>
+                </div>`).join('')}
+            </div>` : '';
+
+        const raw = `
+            <div class="lrn-stats-section">
+                <details>
+                    <summary style="cursor:pointer;font-weight:600">Raw debug data (run · metrics · trace · triggers)</summary>
+                    <pre class="lrn-code-block" style="margin-top:0.5rem;max-height:400px;overflow:auto">${esc(JSON.stringify(data, null, 2))}</pre>
+                </details>
+            </div>`;
+
+        view.innerHTML = `
+            <button class="lrn-back-link" onclick="navigate('#/runs')">← Runs</button>
+            <div style="font-size:0.78rem;color:var(--text-secondary);margin:0.25rem 0 0.75rem"><code>${esc(workflowId)}</code></div>
+            ${summary}
+            ${funnel}
+            ${codeSection}
+            ${trigSection}
+            ${raw}`;
+    } catch (e) {
+        view.innerHTML = `<button class="lrn-back-link" onclick="navigate('#/runs')">← Runs</button>
+                          <div class="lrn-empty" style="color:var(--error)">${esc(e.message)}</div>`;
+    }
+}
 
 async function renderStats() {
     const view = document.getElementById('view-stats');
@@ -1120,6 +1413,32 @@ async function renderStats() {
         const catA = eff.no_hints_available || {};
         const catB = eff.hints_injected     || {};
         const catC = eff.holdout_suppressed || {};
+
+        // Usage attribution (Part 2 / N3) — attribution health + review signals.
+        const attr        = s.attribution_health || {};
+        const reviewCands = s.review_candidates  || [];
+        const neverAttr   = s.never_attributed   || [];
+
+        const reviewRows = reviewCands.length
+            ? reviewCands.map(c => `
+                <div class="lrn-kpi-row">
+                    <span class="lrn-kpi-label">Hint #${c.hint_id}</span>
+                    <span class="lrn-kpi-val">${c.failure_associations} failure-association${c.failure_associations === 1 ? '' : 's'}</span>
+                </div>`).join('')
+            : '<div class="lrn-kpi-note">None — no never-succeeded hint crosses the review threshold.</div>';
+
+        const neverAttrRows = neverAttr.length
+            ? neverAttr.map(h => {
+                const txt = h.feedback_text || '';
+                const short = txt.length > 60 ? txt.slice(0, 60) + '…' : txt;
+                const scopeNote = h.scope ? ` · ${esc(h.scope)}${h.domain ? ' (' + esc(h.domain) + ')' : ''}` : '';
+                return `
+                <div class="lrn-kpi-row">
+                    <span class="lrn-kpi-label" title="${esc(txt)}">#${h.id} ${esc(short)}</span>
+                    <span class="lrn-kpi-val">${h.injections} injection${h.injections === 1 ? '' : 's'}${scopeNote}</span>
+                </div>`;
+              }).join('')
+            : '<div class="lrn-kpi-note">None — every injected hint has been scored at least once.</div>';
 
         view.innerHTML = `
             <div class="lrn-stats-legend">
@@ -1200,6 +1519,43 @@ async function renderStats() {
                         <span class="lrn-kpi-val">${eff.sufficient_data ? 'yes' : 'no'}</span>
                     </div>
                 </div>
+            </div>
+
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Usage attribution — is crediting trustworthy?</div>
+                <div class="lrn-stats-grid">
+                    <div class="lrn-stat-item">
+                        <div class="lrn-stat-label">Attribution events ${ii('attr_events')}</div>
+                        <div class="lrn-stat-value">${attr.events_total ?? 0}</div>
+                        <div class="lrn-kpi-note">${attr.credited_events ?? 0} credited ≥1 hint</div>
+                    </div>
+                    <div class="lrn-stat-item">
+                        <div class="lrn-stat-label">Retirement reversal ${ii('attr_reversal')}</div>
+                        <div class="lrn-stat-value">${attr.retirement_reversal_rate == null
+                            ? '<span style="color:var(--text-muted);font-weight:400">n/a</span>'
+                            : fmtPctRate(attr.retirement_reversal_rate)}</div>
+                        <div class="lrn-kpi-note">${attr.retired_never_used_total ?? 0} retired (never-used)</div>
+                    </div>
+                    <div class="lrn-stat-item">
+                        <div class="lrn-stat-label">Holdout lift (B − C) ${ii('honest_lift')}</div>
+                        <div class="lrn-stat-value">${attr.holdout_lift == null
+                            ? '<span style="color:var(--text-muted);font-weight:400">n/a</span>'
+                            : fmtLift(attr.holdout_lift)}</div>
+                    </div>
+                </div>
+                ${attr.credited_nothing_recently ? `<div style="margin-top:0.75rem;font-size:0.82rem;color:var(--warning)">
+                    ⚠ Attribution ran but credited nothing recently — check that passing runs have NL hints injected.
+                </div>` : ''}
+            </div>
+
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Review candidates — never-succeeded, failure-associated ${ii('review_candidates')}</div>
+                ${reviewRows}
+            </div>
+
+            <div class="lrn-stats-section">
+                <div class="lrn-stats-section-title">Never-attributed hints ${ii('never_attributed')}</div>
+                ${neverAttrRows}
             </div>
 
             <div class="lrn-stats-section">
@@ -1404,10 +1760,15 @@ async function _selectReviewSession(sessionId) {
     await _loadReviewPanel(sessionId);
 }
 
-async function _loadReviewPanel(sessionId) {
+async function _loadReviewPanel(sessionId, opts = {}) {
     const panel = document.getElementById('review-panel');
     if (!panel) return;
-    panel.innerHTML = '<div class="lrn-empty" style="margin-top:1rem">Loading recommendations…</div>';
+    // On a refresh after a decision (keepContent) leave the existing rows in
+    // place during the fetch, so the page height — and the user's scroll
+    // position — don't collapse to the top.
+    if (!opts.keepContent) {
+        panel.innerHTML = '<div class="lrn-empty" style="margin-top:1rem">Loading recommendations…</div>';
+    }
     try {
         const data = await apiFetch(`/review-hints/sessions/${sessionId}`);
         _renderReviewPanel(data);
@@ -1439,12 +1800,39 @@ function _chunkProgressHtml(pages, sessionStatus) {
     return `<div style="margin:0.5rem 0 0.75rem;padding:0.6rem 0.9rem;background:var(--bg-hover,#f3f4f6);border-radius:6px;font-size:0.88rem">${rows}</div>`;
 }
 
+// Turn "ID <n>" mentions in an LLM reason into chips: hover shows the referenced
+// hint's text, click scrolls to its row. hintTextById maps hint_id -> text for
+// this session; an id not in the map renders as a plain (non-link) marker.
+function _linkifyHintIds(reason, hintTextById) {
+    return esc(reason || '').replace(/\bID\s+(\d+)/g, (m, id) => {
+        const txt = hintTextById[id];
+        if (!txt) return `<span title="not shown in this review" style="font-weight:600">ID ${id}</span>`;
+        return `<span onclick="_gotoHint(${id})" title="${esc(txt)}" `
+            + `style="cursor:pointer;color:var(--accent,#2563eb);font-weight:600;text-decoration:underline dotted">ID ${id}</span>`;
+    });
+}
+
+// Scroll to a hint's row in the review table and briefly outline it.
+function _gotoHint(hintId) {
+    const row = document.querySelector(`#review-panel tr[data-hint-id="${hintId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const prev = row.style.boxShadow;
+    row.style.transition = 'box-shadow 0.2s';
+    row.style.boxShadow = 'inset 0 0 0 2px var(--accent,#2563eb)';
+    setTimeout(() => { row.style.boxShadow = prev; }, 1300);
+}
+
 function _renderReviewPanel(data) {
     const panel = document.getElementById('review-panel');
     if (!panel) return;
     const session = data.session;
     const recs = data.recommendations || [];
     const canDecide = session.status === 'pending_review';
+    // hint_id -> text for THIS session: lets "ID n" mentions in a reason show the
+    // referenced hint's text on hover and scroll to its row on click.
+    const hintTextById = {};
+    recs.forEach(r => { hintTextById[r.hint_id] = r.feedback_text; });
     const hasApproved = recs.some(r => r.admin_decision === 'approved' && !r.applied);
 
     const chunkProgress = _chunkProgressHtml(data.pages || [], session.status);
@@ -1455,21 +1843,31 @@ function _renderReviewPanel(data) {
     const recRows = recs.map(r => {
         const applied = r.applied ? 1 : 0;
         const rate = r.applied_count > 0 ? Math.round((r.failure_count / r.applied_count) * 100) + '%' : 'n/a';
+        const dec = r.admin_decision;                       // null | 'approved' | 'rejected'
+        const apprOn = dec === 'approved', rejOn = dec === 'rejected';
+        const apprStyle = apprOn
+            ? 'background:var(--success,#16a34a);color:#fff;font-weight:700'
+            : `background:transparent;color:var(--success,#16a34a);border:1px solid var(--success,#16a34a);opacity:${dec ? '0.45' : '1'}`;
+        const rejStyle = rejOn
+            ? 'background:var(--error,#dc2626);color:#fff;font-weight:700'
+            : `background:transparent;color:var(--error,#dc2626);border:1px solid var(--error,#dc2626);opacity:${dec ? '0.45' : '1'}`;
         const decBtns = canDecide && !applied ? `
             <div class="rec-decision-btns">
-                <button class="btn btn-sm" onclick="_decideRec(${session.id}, ${r.id}, 'approved')" style="background:var(--success,#16a34a);color:#fff;padding:3px 10px;font-size:0.75rem">Approve</button>
-                <button class="btn btn-sm" onclick="_decideRec(${session.id}, ${r.id}, 'rejected')" style="background:var(--bg-hover);padding:3px 10px;font-size:0.75rem">Reject</button>
+                <button class="btn btn-sm" onclick="_decideRec(${session.id}, ${r.id}, 'approved')" style="${apprStyle};padding:3px 10px;font-size:0.75rem">${apprOn ? '✓ ' : ''}Approve</button>
+                <button class="btn btn-sm" onclick="_decideRec(${session.id}, ${r.id}, 'rejected')" style="${rejStyle};padding:3px 10px;font-size:0.75rem">${rejOn ? '✓ ' : ''}Reject</button>
             </div>
         ` : '';
+        const rowTint = rejOn ? 'background:rgba(220,38,38,0.06)' : apprOn ? 'background:rgba(22,163,74,0.06)' : '';
         return `
-            <tr id="rec-row-${r.id}">
-                <td style="max-width:220px;word-break:break-word">${esc(truncate(r.feedback_text, 80))}</td>
+            <tr id="rec-row-${r.id}" data-hint-id="${r.hint_id}" style="${rowTint}">
+                <td style="white-space:nowrap;font-family:var(--font-mono);font-size:0.8rem;color:var(--text-secondary)">#${r.hint_id}</td>
+                <td style="max-width:360px">${clampText(r.feedback_text, 2)}</td>
                 <td>${esc(r.scope)}${r.domain ? ' / ' + esc(r.domain) : ''}</td>
                 <td style="white-space:nowrap">${r.applied_count} / ${r.success_count} / ${r.failure_count} (${rate})</td>
                 <td>${r.exoneration_count}</td>
                 <td>${_recBadge(r.recommendation)}</td>
-                <td style="max-width:200px;word-break:break-word;font-size:0.78rem;color:var(--text-secondary)">${esc(r.reason)}</td>
-                <td>${_decisionBadge(r.admin_decision)}${applied ? ' <span style="font-size:0.7rem;color:var(--text-secondary)">(applied)</span>' : ''}</td>
+                <td style="max-width:200px;font-size:0.78rem;color:var(--text-secondary)">${clampRaw(_linkifyHintIds(r.reason, hintTextById), r.reason, 2)}</td>
+                <td>${_decisionBadge(r.admin_decision)}${applied ? ' <span style="font-size:0.7rem;color:var(--text-secondary)">(applied)</span>' : ''}${r.admin_notes && r.admin_notes.trim() ? `<div style="font-size:0.72rem;color:var(--text-secondary);margin-top:3px;max-width:210px">${clampRaw('📝 ' + esc(r.admin_notes), r.admin_notes, 2)}</div>` : ''}</td>
                 <td>${decBtns}</td>
             </tr>
         `;
@@ -1488,7 +1886,7 @@ function _renderReviewPanel(data) {
             <div style="overflow-x:auto">
             <table class="rec-table">
                 <thead><tr>
-                    <th>Hint text</th><th>Scope</th><th>App/Suc/Fail</th><th>Exon.</th>
+                    <th>ID</th><th>Hint text</th><th>Scope</th><th>App/Suc/Fail</th><th>Exon.</th>
                     <th>Recommendation</th><th>Reason</th><th>Decision</th><th></th>
                 </tr></thead>
                 <tbody>${recRows}</tbody>
@@ -1502,8 +1900,11 @@ function _renderReviewPanel(data) {
 
 async function _decideRec(sessionId, recId, decision) {
     let notes = null;
-    if (decision === 'approved') {
-        notes = prompt('Optional notes for approval (leave blank to skip):') || null;
+    if (decision === 'approved' || decision === 'rejected') {
+        const why = decision === 'approved'
+            ? 'why you agree with this recommendation'
+            : 'why you are overriding this recommendation';
+        notes = prompt(`Optional note — ${why} (leave blank to skip):`) || null;
     }
     try {
         await apiFetch(`/review-hints/sessions/${sessionId}/recommendations/${recId}`, {
@@ -1511,7 +1912,13 @@ async function _decideRec(sessionId, recId, decision) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ admin_decision: decision, admin_notes: notes }),
         });
-        await _loadReviewPanel(sessionId);
+        // Keep the admin at the hint they just acted on: a decision doesn't
+        // change the row count, so restoring the page scroll after the in-place
+        // re-render lands them exactly where they were, not back at the top.
+        const scroller = document.scrollingElement || document.documentElement;
+        const y = scroller.scrollTop;
+        await _loadReviewPanel(sessionId, { keepContent: true });
+        scroller.scrollTop = y;
     } catch (e) {
         alert('Failed to save decision: ' + e.message);
     }

@@ -181,58 +181,15 @@ class TestConflictFlagHintsRollbackOnException:
 
 
 # ---------------------------------------------------------------------------
-# update_hint_effectiveness — malformed injected_hint_ids
+# update_hint_effectiveness was replaced by apply_hint_attribution (Part 2):
+# malformed/empty injected_hint_ids is now rejected by the F3 gate in
+# workflow_service._process_learning (no scope-wide fallback), and the no-em /
+# atomic-claim behaviour is covered by test_apply_hint_attribution.py.
 # ---------------------------------------------------------------------------
-
-class TestUpdateHintEffectivenessMalformedJson:
-    def test_malformed_injected_hint_ids_falls_back_to_scope_wide(
-        self, engine, in_memory_em
-    ):
-        """A malformed JSON string in injected_hint_ids falls back to the
-        scope-wide legacy path instead of raising an exception."""
-        # Insert an active hint in scope
-        in_memory_em._writer_conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, category, scope, domain, url, evidence_count, "
-            " anchor_query, created_at, last_seen) "
-            "VALUES ('use xpath', 'locator', 'global', NULL, NULL, 3, "
-            " 'test', datetime('now'), datetime('now'))",
-        )
-        in_memory_em._writer_conn.commit()
-
-        # Should not raise — malformed JSON is handled with a warning + fallback
-        engine.update_hint_effectiveness(
-            domain=None,
-            url=None,
-            test_passed=True,
-            new_failure_category=None,
-            injected_hint_ids="{bad json",  # malformed → falls back to scope-wide
-        )
-
-        # Verify the fallback ran (applied_count was incremented on the global hint)
-        row = in_memory_em._writer_conn.execute(
-            "SELECT applied_count FROM nl_feedback_corrections LIMIT 1"
-        ).fetchone()
-        assert row["applied_count"] == 1
 
 
 # ---------------------------------------------------------------------------
-# update_hint_effectiveness — no execution_memory
-# ---------------------------------------------------------------------------
-
-class TestUpdateHintEffectivenessNoEm:
-    def test_no_em_returns_early_without_error(self, no_em_engine):
-        """When execution_memory is None, the method should return silently."""
-        # Should not raise
-        no_em_engine.update_hint_effectiveness(
-            domain="example.com",
-            url="https://example.com",
-            test_passed=True,
-        )
-
-
-# ---------------------------------------------------------------------------
-# conflict_flag_hints — strong-history guard (applied < threshold)
+# conflict_flag_hints — strong-history guard (success+failure < threshold)
 # ---------------------------------------------------------------------------
 
 class TestConflictFlagHintsStrongHistoryGuard:

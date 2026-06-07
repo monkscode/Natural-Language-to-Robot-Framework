@@ -110,3 +110,51 @@ class TestFormattingMonitor:
         monitor.log_formatting_error()
         stats = monitor.get_stats()
         assert "detected" in stats
+
+    def test_empty_response_counters_initialised_to_zero(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        nums = monitor.get_numeric_stats()
+        assert nums["empty_response_retries"] == 0
+        assert nums["empty_response_recoveries"] == 0
+        assert nums["empty_response_failures"] == 0
+
+    def test_log_empty_retry_increments_counter(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_empty_retry()
+        monitor.log_empty_retry()
+        assert monitor.empty_response_retries == 2
+
+    def test_log_empty_recovery_increments_counter(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_empty_recovery()
+        assert monitor.empty_response_recoveries == 1
+
+    def test_log_empty_failure_increments_counter(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_empty_failure()
+        assert monitor.empty_response_failures == 1
+
+    def test_stats_string_omits_empty_metrics_when_zero(self):
+        """Clean runs (no empties) must not bloat the stats line."""
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_response()
+        stats = monitor.get_stats()
+        assert "Empty-Response" not in stats
+
+    def test_stats_string_includes_empty_metrics_when_present(self):
+        """Stats line surfaces empty-response counts when any are non-zero."""
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_response()
+        monitor.log_empty_retry()
+        monitor.log_empty_recovery()
+        stats = monitor.get_stats()
+        assert "Empty-Response" in stats
+        assert "1 retry attempts" in stats
+        assert "1 recovered" in stats
+        assert "0 failed" in stats

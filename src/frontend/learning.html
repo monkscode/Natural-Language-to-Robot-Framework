@@ -375,7 +375,13 @@
         .lrn-timeline-when { color: var(--text-muted); white-space: nowrap; min-width: 72px; }
         .lrn-timeline-body { flex: 1; }
         .lrn-timeline-actor { font-weight: 600; color: var(--text-main); }
-        .lrn-timeline-reason { color: var(--text-secondary); font-style: italic; margin-top: 2px; font-size: 0.78rem; }
+        .lrn-timeline-reason { color: var(--text-secondary); font-style: italic; margin-top: 2px; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
+        .lrn-clamp-wrap { display: block; }
+        .lrn-clamp { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; word-break: break-word; }
+        .lrn-clamp--expanded { display: block; overflow: visible; }
+        .lrn-clamp-toggle { display: inline-block; margin-top: 3px; background: none; border: none; padding: 0; cursor: pointer; color: var(--accent, #2563eb); font-size: 0.72rem; font-weight: 600; }
+        .lrn-clamp-toggle:hover { text-decoration: underline; }
+        .lrn-clamp-toggle[hidden] { display: none; }   /* author display must not defeat the hidden attr */
 
         /* ── Trigger events table ── */
         .lrn-table-card {
@@ -675,6 +681,7 @@
                 <button class="btn btn-primary" style="padding:6px 14px;font-size:0.85rem" onclick="openAddModal()">+ Add feedback</button>
                 <a href="#" class="lrn-tab" id="tab-hints">Hints</a>
                 <a href="#/triggers" class="lrn-tab" id="tab-triggers">Triggers</a>
+                <a href="#/runs" class="lrn-tab" id="tab-runs">Runs</a>
                 <a href="#/stats" class="lrn-tab" id="tab-stats">Stats</a>
                 <a href="#/review" class="lrn-tab" id="tab-review">LLM Review</a>
             </div>
@@ -685,6 +692,8 @@
         <div id="view-hints" class="lrn-view"></div>
         <div id="view-triggers" class="lrn-view" style="display:none"></div>
         <div id="view-trigger-detail" class="lrn-view" style="display:none"></div>
+        <div id="view-runs" class="lrn-view" style="display:none"></div>
+        <div id="view-run-detail" class="lrn-view" style="display:none"></div>
         <div id="view-stats" class="lrn-view" style="display:none"></div>
         <div id="view-review" class="lrn-view" style="display:none"></div>
     </div>

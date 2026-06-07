@@ -27,7 +27,7 @@ Tests grouped by function/endpoint:
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -618,6 +618,31 @@ class TestReactivateHint:
         assert data["hint"]["is_active"] == 1
         assert data["hint"]["conflict_flagged"] == 0
 
+    def test_reactivate_resets_unused_count(self, learning_client):
+        """Step 4b: manual reactivation is a fresh chance — unused_count resets
+        to 0 while the earned success_count is preserved."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, is_active=0)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute(
+            "UPDATE nl_feedback_corrections SET unused_count=7, success_count=2 WHERE id=?",
+            (hint_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        resp = client.post(f"/hints/{hint_id}/reactivate", json={"actor": "alice"})
+        assert resp.status_code == 200
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        row = conn.execute(
+            "SELECT unused_count, success_count FROM nl_feedback_corrections WHERE id=?",
+            (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row[0] == 0   # reset
+        assert row[1] == 2   # earned record preserved
+
 
 # ---------------------------------------------------------------------------
 # GET /triggers
@@ -774,6 +799,109 @@ class TestGetDashboardStats:
         accuracy = resp.json()["llm_accuracy"]
         assert accuracy["engagement_rate"] is None
         assert accuracy["reversal_rate"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /stats — Part 2 usage-attribution panels
+# ---------------------------------------------------------------------------
+
+class TestPart2DashboardPanels:
+    """Exoneration/breakdown filters, M1 attribution-health, FR5 never-attributed,
+    and the Step-5b failure-association signal."""
+
+    @staticmethod
+    def _conn(db_path):
+        c = sqlite3.connect(db_path, check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _insert_attr_event(self, db_path, *, status="succeeded", used="[1]", unused="[]"):
+        c = self._conn(db_path)
+        c.execute(
+            "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
+            "flagged_hint_ids, active_hint_ids, used_hint_ids, unused_hint_ids, created_at) "
+            "VALUES ('usage_attribution', ?, ?, '[]', '[1]', ?, ?, datetime('now'))",
+            (f"wf-attr-{used}-{unused}-{status}", status, used, unused),
+        )
+        c.commit()
+        c.close()
+
+    def _insert_exec(self, db_path, workflow_id, injected, *, status="failed",
+                     failure_category=None, days_ago=0):
+        c = self._conn(db_path)
+        ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+        c.execute(
+            "INSERT INTO execution_records (workflow_id, timestamp, user_query, "
+            "test_status, injected_hint_ids, failure_category) VALUES (?, ?, 'q', ?, ?, ?)",
+            (workflow_id, ts, status, injected, failure_category),
+        )
+        c.commit()
+        c.close()
+
+    def test_breakdown_excludes_usage_attribution(self, learning_client):
+        client, _, _, db_path = learning_client
+        self._insert_attr_event(db_path)
+        data = client.get("/stats").json()
+        types = {r["trigger_type"] for r in data["trigger_activity"]}
+        assert "usage_attribution" not in types
+
+    def test_attribution_health_panel(self, learning_client):
+        client, _, _, db_path = learning_client
+        self._insert_attr_event(db_path, status="succeeded", used="[1]", unused="[2]")
+        self._insert_attr_event(db_path, status="llm_timeout", used="[]", unused="[]")
+        ah = client.get("/stats").json()["attribution_health"]
+        assert ah["events_total"] == 2
+        assert ah["events_by_status"].get("succeeded") == 1
+        assert ah["events_by_status"].get("llm_timeout") == 1
+        assert ah["credited_events"] == 1            # only the succeeded+non-empty row
+        assert ah["credited_nothing_recently"] is False
+        assert "holdout_lift" in ah                  # None → frontend renders "n/a"
+
+    def test_failure_association_helper_counts_related_only(self, learning_client):
+        client, _, _, db_path = learning_client
+        hid = _insert_hint(db_path, success_count=0, original_failure_category="C1")
+        # C1 relates to {C1, D1}; B1 is unrelated.
+        self._insert_exec(db_path, "wf-fa-1", json.dumps([hid]), failure_category="D1")
+        self._insert_exec(db_path, "wf-fa-2", json.dumps([hid]), failure_category="C1")
+        self._insert_exec(db_path, "wf-fa-3", json.dumps([hid]), failure_category="B1")
+
+        from src.backend.api.learning_endpoints import _compute_failure_associations
+        conn = self._conn(db_path)
+        counts = _compute_failure_associations(conn, [hid])
+        conn.close()
+        assert counts.get(hid) == 2  # D1 + C1 related; B1 excluded
+
+    def test_never_attributed_signal(self, learning_client):
+        client, _, _, db_path = learning_client
+        c = self._conn(db_path)
+        old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        c.execute(
+            "INSERT INTO nl_feedback_corrections (feedback_text, category, scope, "
+            "evidence_count, anchor_query, applied_count, is_active, conflict_flagged, "
+            "created_at, last_seen) "
+            "VALUES ('never scored hint', 'locator', 'global', 1, 'q', 0, 1, 0, ?, ?)",
+            (old, old),
+        )
+        c.commit()
+        hid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        c.close()
+        # Injected into 5 distinct workflows but never attributed (applied=0).
+        for i in range(5):
+            self._insert_exec(db_path, f"wf-na-{i}", json.dumps([hid]),
+                              status="passed", days_ago=1)
+
+        ids = {r["id"] for r in client.get("/stats").json()["never_attributed"]}
+        assert hid in ids
+
+    def test_never_attributed_excludes_recently_created(self, learning_client):
+        client, _, _, db_path = learning_client
+        # Same shape but created today → below the age floor → excluded.
+        hid = _insert_hint(db_path, applied_count=0)  # created_at = now
+        for i in range(5):
+            self._insert_exec(db_path, f"wf-new-{i}", json.dumps([hid]),
+                              status="passed", days_ago=1)
+        ids = {r["id"] for r in client.get("/stats").json()["never_attributed"]}
+        assert hid not in ids
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1271,31 @@ class TestApplyReviewSession:
         conn.close()
         assert row[0] == 1
 
+    def test_apply_reactivate_resets_unused_count(self, learning_client):
+        """Step 4b: LLM-review reactivation also resets unused_count to 0."""
+        client, _, _, db_path = learning_client
+        sid, [(_, hint_id)] = self._build_session_with_recs(db_path, [
+            {"recommendation": "reactivate", "hint_kwargs": {"is_active": 0}},
+        ])
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute(
+            "UPDATE nl_feedback_corrections SET unused_count=6 WHERE id=?", (hint_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        resp = client.post(f"/review-hints/sessions/{sid}/apply")
+        assert resp.status_code == 200
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        row = conn.execute(
+            "SELECT is_active, unused_count FROM nl_feedback_corrections WHERE id=?",
+            (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row[0] == 1   # reactivated
+        assert row[1] == 0   # unused reset
+
     def test_apply_unflag_recommendation(self, learning_client):
         client, _, _, db_path = learning_client
         sid, [(_, hint_id)] = self._build_session_with_recs(db_path, [
@@ -1198,3 +1351,122 @@ class TestApplyReviewSession:
         ).fetchone()
         conn.close()
         assert row[0] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# GET /runs  +  GET /runs/{workflow_id}  (per-testcase observability)
+# ---------------------------------------------------------------------------
+
+class TestRunsEndpoints:
+    @staticmethod
+    def _seed_run(db_path, wf, *, status="passed", hint_id=None,
+                  query="click the button"):
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        now = datetime.now(timezone.utc).isoformat()
+        injected = json.dumps([hint_id] if hint_id else [])
+        conn.execute(
+            "INSERT INTO execution_records "
+            "(workflow_id, timestamp, user_query, url, domain, robot_code, "
+            " test_status, failure_category, injected_hint_ids, hint_attribution_done) "
+            "VALUES (?, ?, ?, 'http://x.com', 'x.com', '*** Test Cases ***', ?, ?, ?, 1)",
+            (wf, now, query, status,
+             "C1" if status == "failed" else None, injected),
+        )
+        conn.execute(
+            "INSERT INTO learning_metrics "
+            "(workflow_id, user_query, is_first_attempt, hints_available, "
+            " hints_injected, llm_calls, llm_cost, test_passed, was_holdout, timestamp) "
+            "VALUES (?, 'q', 1, ?, ?, 1, 0.0, ?, 0, ?)",
+            (wf, 1 if hint_id else 0, 1 if hint_id else 0,
+             1 if status == "passed" else 0, now),
+        )
+        if hint_id:
+            conn.execute(
+                "INSERT INTO hint_workflow_trace "
+                "(workflow_id, hint_id, scope, source, priority, similarity_score, "
+                " available, injected, drop_reason, attribution_bucket, "
+                " attribution_reason, created_at) "
+                "VALUES (?, ?, 'global', 'nl', 'high', 0.82, 1, 1, NULL, 'used', "
+                "        'clicked the button as advised', ?)",
+                (wf, hint_id, now),
+            )
+            conn.execute(
+                "INSERT INTO trigger_events "
+                "(trigger_type, workflow_id, domain, url, feedback_text, "
+                " active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids, "
+                " reason, llm_model, input_tokens, output_tokens, llm_latency_ms, "
+                " status, error_message, created_at, used_hint_ids, unused_hint_ids) "
+                "VALUES ('usage_attribution', ?, 'x.com', 'http://x.com', NULL, ?, "
+                "        '[]', '[]', NULL, 'm', 1, 1, 1, 'succeeded', NULL, ?, ?, '[]')",
+                (wf, injected, now, injected),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_run_detail_aggregates_everything(self, learning_client):
+        client, em, mock_fb, db_path = learning_client
+        hid = _insert_hint(db_path, feedback_text="click the button firmly")
+        self._seed_run(db_path, "wf-run-1", status="passed", hint_id=hid)
+
+        r = client.get("/runs/wf-run-1")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["run"]["test_status"] == "passed"
+        assert data["run"]["user_query"] == "click the button"
+        assert data["metrics"]["hints_injected"] == 1
+        assert len(data["trace"]) == 1
+        tr = data["trace"][0]
+        assert tr["hint_id"] == hid
+        assert tr["feedback_text"] == "click the button firmly"   # from the JOIN
+        assert tr["injected"] == 1 and tr["attribution_bucket"] == "used"
+        assert tr["attribution_reason"] == "clicked the button as advised"
+        assert len(data["triggers"]) == 1
+        assert data["triggers"][0]["trigger_type"] == "usage_attribution"
+
+    def test_run_detail_404_for_unknown_workflow(self, learning_client):
+        client, *_ = learning_client
+        r = client.get("/runs/does-not-exist")
+        assert r.status_code == 404
+        assert "No run data" in r.json()["detail"]    # the endpoint's own 404
+
+    def test_run_detail_dedup_run_has_trace_but_no_record(self, learning_client):
+        # A deduped run writes NO execution_records row but DOES write a trace
+        # (no FK). The endpoint must still return the trace with run=null.
+        client, em, mock_fb, db_path = learning_client
+        hid = _insert_hint(db_path)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute(
+            "INSERT INTO hint_workflow_trace "
+            "(workflow_id, hint_id, injected, available, created_at) "
+            "VALUES ('wf-dedup', ?, 1, 1, ?)",
+            (hid, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        r = client.get("/runs/wf-dedup")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["run"] is None
+        assert len(data["trace"]) == 1 and data["trace"][0]["hint_id"] == hid
+
+    def test_runs_list_newest_first_and_count(self, learning_client):
+        client, em, mock_fb, db_path = learning_client
+        for i in range(3):
+            self._seed_run(db_path, f"wf-list-{i}",
+                           status="passed" if i % 2 == 0 else "failed")
+        r = client.get("/runs")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] >= 3
+        wfs = {row["workflow_id"] for row in data["runs"]}
+        assert {"wf-list-0", "wf-list-1", "wf-list-2"} <= wfs
+
+    def test_runs_list_status_filter(self, learning_client):
+        client, em, mock_fb, db_path = learning_client
+        self._seed_run(db_path, "wf-pass", status="passed")
+        self._seed_run(db_path, "wf-fail", status="failed")
+        r = client.get("/runs?status=failed")
+        assert r.status_code == 200
+        statuses = {row["test_status"] for row in r.json()["runs"]}
+        assert statuses == {"failed"}

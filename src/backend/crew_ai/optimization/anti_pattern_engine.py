@@ -51,7 +51,7 @@ class AntiPatternEngine(LearningEngine):
     Key design:
     - Anti-patterns are generated from failures, NOT from passes
     - The "correct alternative" comes from subsequent successful executions
-      of similar queries, or from validator fixes
+      of similar queries
     - Score increases when the same anti-pattern is seen again; never decreases
     """
 
@@ -157,7 +157,7 @@ class AntiPatternEngine(LearningEngine):
         Targets:
         - Planner: "Don't generate linear code for iteration queries"
         - Assembler: "Don't use single Get Text for 'all rows'"
-        - Validator/Identifier: None (not relevant for these roles)
+        - Identifier: None (not relevant for this role)
 
         Only returns anti-patterns with score >= 0.4 AND evidence_count >= 3.
         """

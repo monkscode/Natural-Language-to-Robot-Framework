@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
+    MAX_FEEDBACK_TEXT_CHARS,
     _get_conflict_detection_model,
     _get_conflict_detection_completion_kwargs,
     _call_conflict_detection_llm,
@@ -354,8 +355,8 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
-    if len(text) > 500:
-        raise HTTPException(status_code=400, detail="feedback_text must be ≤500 characters")
+    if len(text) > MAX_FEEDBACK_TEXT_CHARS:
+        raise HTTPException(status_code=400, detail=f"feedback_text must be ≤{MAX_FEEDBACK_TEXT_CHARS} characters")
     # anchor_query — the example user request this hint applies to. It is the
     # text the query-similarity filter embeds and matches future queries
     # against, so an admin hint without one would never be retrieved.
@@ -709,7 +710,9 @@ def reactivate_hint(
         conn.execute(
             "UPDATE nl_feedback_corrections "
             "SET is_active=1, conflict_flagged=0, conflict_flagged_at=NULL, "
-            "    conflict_flag_reason=NULL, disabled_at=NULL WHERE id=?",
+            # Step 4b: admin reactivation is a fresh chance — reset unused_count
+            # so the hint is not immediately re-retired; success/failure kept.
+            "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 WHERE id=?",
             (hint_id,),
         )
         _write_hint_audit(
@@ -835,6 +838,160 @@ def get_trigger(trigger_id: int, fb=Depends(_require_feedback_loop)):
 
 
 # ---------------------------------------------------------------------------
+# 9b. GET /runs  +  GET /runs/{workflow_id}  (per-testcase observability, N3)
+# ---------------------------------------------------------------------------
+
+@router.get("/runs")
+def list_runs(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    fb=Depends(_require_feedback_loop),
+):
+    """Recent test-case runs (execution_records), newest first — the entry point
+    for the per-run learning journey. Optional status + user_query-substring
+    filters. A failed run has no trigger event, so this (not /triggers) is how a
+    failure is found.
+    """
+    conn = fb.execution_memory.get_read_connection()
+    try:
+        where, params = [], []
+        if status:
+            where.append("test_status = ?")
+            params.append(status)
+        if q:
+            where.append("user_query LIKE ?")
+            params.append(f"%{q}%")
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM execution_records {where_sql}", params
+        ).fetchone()["n"]
+        rows = conn.execute(
+            f"SELECT workflow_id, timestamp, user_query, url, domain, test_status, "
+            f"       failure_category, injected_hint_ids "
+            f"FROM execution_records {where_sql} "
+            f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        runs = []
+        for r in rows:
+            d = _row_to_dict(r)
+            try:
+                d["nl_injected_count"] = len(
+                    json.loads(d.get("injected_hint_ids") or "[]")
+                )
+            except (ValueError, TypeError):
+                d["nl_injected_count"] = 0
+            runs.append(d)
+        return {"total": total, "limit": limit, "offset": offset, "runs": runs}
+    finally:
+        conn.close()
+
+
+@router.get("/runs/{workflow_id}")
+def get_run(workflow_id: str, fb=Depends(_require_feedback_loop)):
+    """Everything the learning system recorded for one test-case run: the
+    execution record, its metrics, the per-hint selection->attribution funnel
+    (hint_workflow_trace LEFT JOIN the hint row for current text/state), and any
+    trigger events. The funnel populates only for runs executed under Part 2; a
+    deduped run keeps a standalone funnel with run=null (no FK). 404 only when
+    nothing at all exists for this workflow_id.
+    """
+    conn = fb.execution_memory.get_read_connection()
+    try:
+        run = _row_to_dict(conn.execute(
+            "SELECT * FROM execution_records WHERE workflow_id = ?", (workflow_id,)
+        ).fetchone())
+        metrics = _row_to_dict(conn.execute(
+            "SELECT * FROM learning_metrics WHERE workflow_id = ? "
+            "ORDER BY timestamp DESC LIMIT 1", (workflow_id,)
+        ).fetchone())
+        # Funnel: the captured selection trace + the hint's CURRENT text/state.
+        # LEFT JOIN so a since-deleted hint still shows its trace row (text NULL).
+        trace = [_row_to_dict(r) for r in conn.execute(
+            "SELECT t.hint_id, t.scope, t.source, t.priority, t.similarity_score, "
+            "       t.available, t.injected, t.drop_reason, t.attribution_bucket, "
+            "       t.attribution_reason, h.feedback_text, h.is_active, "
+            "       h.conflict_flagged "
+            "FROM hint_workflow_trace t "
+            "LEFT JOIN nl_feedback_corrections h ON h.id = t.hint_id "
+            "WHERE t.workflow_id = ? "
+            "ORDER BY t.injected DESC, t.similarity_score DESC", (workflow_id,)
+        ).fetchall()]
+        triggers = [_row_to_dict(r) for r in conn.execute(
+            "SELECT * FROM trigger_events WHERE workflow_id = ? "
+            "ORDER BY created_at DESC", (workflow_id,)
+        ).fetchall()]
+        if run is None and not trace and not triggers:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No run data for workflow {workflow_id}",
+            )
+        return {"run": run, "metrics": metrics, "trace": trace, "triggers": triggers}
+    finally:
+        conn.close()
+
+
+# Part-2 review/dashboard signal thresholds (inform-only, tunable from the
+# dashboard — NOT gates). FAILURE_ASSOCIATION_REVIEW_THRESHOLD doubles as a soft
+# fairness floor (a brand-new hint cannot reach it yet).
+FAILURE_ASSOCIATION_REVIEW_THRESHOLD = 3
+NEVER_ATTRIBUTED_REVIEW_MIN_INJECTIONS = 5
+NEVER_ATTRIBUTED_REVIEW_MIN_AGE_DAYS = 14
+
+
+def _compute_failure_associations(conn, hint_ids: list) -> dict:
+    """Step 5b: per hint id, count recent FAILING execution_records that injected
+    the hint AND whose failure_category relates to the hint's own
+    original_failure_category (via RELATED_CATEGORIES). Inform-only review signal
+    so a harmful never-passing hint is visible without a manual review trigger.
+
+    SQL json_each hybrid: a bounded (LIMIT 2000), 30-day, json_valid-guarded
+    subquery over failing runs, expanded with json_each(injected_hint_ids) and
+    joined to the candidate hints; Python then applies the 4-entry
+    RELATED_CATEGORIES relation so the dict stays the single source of truth.
+    Scale caveat: at high volume the row cap binds before 30d → a recent-window
+    estimate, not lifetime.
+    """
+    if not hint_ids:
+        return {}
+    from src.backend.crew_ai.optimization.nl_feedback_engine import RELATED_CATEGORIES
+    placeholders = ",".join("?" * len(hint_ids))
+    rows = conn.execute(
+        f"""
+        SELECT hint.id AS hint_id,
+               hint.original_failure_category AS orig_cat,
+               er.failure_category AS fail_cat
+        FROM nl_feedback_corrections hint
+        JOIN (
+            SELECT injected_hint_ids, failure_category
+            FROM execution_records
+            WHERE test_status = 'failed'
+              AND json_valid(injected_hint_ids)
+              AND timestamp >= datetime('now', '-30 days')
+            ORDER BY timestamp DESC
+            LIMIT 2000
+        ) er
+        JOIN json_each(er.injected_hint_ids) j
+          ON CAST(j.value AS INTEGER) = hint.id
+        WHERE hint.id IN ({placeholders})
+        """,
+        list(hint_ids),
+    ).fetchall()
+    counts: dict = {}
+    for r in rows:
+        fail = r["fail_cat"]
+        if not fail:
+            continue
+        orig = r["orig_cat"]
+        related = RELATED_CATEGORIES.get(orig, {orig} if orig else set())
+        if fail in related:
+            counts[r["hint_id"]] = counts.get(r["hint_id"], 0) + 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # 10. GET /stats
 # ---------------------------------------------------------------------------
 
@@ -884,6 +1041,9 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                             THEN 1 ELSE 0 END) AS flagged_events
             FROM trigger_events
             WHERE created_at >= datetime('now','-30 days')
+              -- Cleanliness (Part 2): usage_attribution gets its own M1 panel;
+              -- keep this flag/engagement breakdown to the flagging triggers.
+              AND trigger_type IN ('trigger_1', 'trigger_2')
             GROUP BY trigger_type
         """).fetchall()
 
@@ -968,6 +1128,109 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             cost_by_model.append(cd)
             total_cost_usd += est
 
+        # ===== Part 2 panels (usage attribution) =====
+        eff_report = fb.metrics_tracker.get_effectiveness_report()
+
+        # M1 — attribution health: status breakdown + a "credited nothing
+        # lately" warning + the F6 retirement-reversal accuracy proxy + the
+        # holdout-lift (None → frontend renders "n/a", never 0).
+        attr_status_counts = {
+            r["status"]: r["n"] for r in conn.execute("""
+                SELECT status, COUNT(*) AS n FROM trigger_events
+                WHERE created_at >= datetime('now','-30 days')
+                  AND trigger_type = 'usage_attribution'
+                GROUP BY status
+            """).fetchall()
+        }
+        attr_credited = conn.execute("""
+            SELECT COUNT(*) AS n FROM trigger_events
+            WHERE created_at >= datetime('now','-30 days')
+              AND trigger_type = 'usage_attribution' AND status = 'succeeded'
+              AND (COALESCE(used_hint_ids,'[]') != '[]'
+                   OR COALESCE(unused_hint_ids,'[]') != '[]')
+        """).fetchone()["n"]
+
+        # F6 — state-based retirement-reversal rate. Of hints auto-disabled with
+        # reason 'never_used', how many are CURRENTLY active again. Read STATE
+        # (not reactivate events) so all three reactivation paths are counted.
+        from src.backend.crew_ai.optimization.nl_feedback_engine import (
+            AUTO_DISABLE_REASON_NEVER_USED,
+        )
+        retired_ids = [
+            r["hint_id"] for r in conn.execute(
+                "SELECT DISTINCT hint_id FROM hint_audit "
+                "WHERE action='auto_disable' AND reason=?",
+                (AUTO_DISABLE_REASON_NEVER_USED,),
+            ).fetchall()
+        ]
+        retirement_reversal_rate = None
+        if retired_ids:
+            ph = ",".join("?" * len(retired_ids))
+            reversed_n = conn.execute(
+                f"SELECT COUNT(*) AS n FROM nl_feedback_corrections "
+                f"WHERE id IN ({ph}) AND is_active=1", retired_ids,
+            ).fetchone()["n"]
+            retirement_reversal_rate = round(reversed_n / len(retired_ids), 4)
+
+        attr_total = sum(attr_status_counts.values())
+        attribution_health = {
+            "events_by_status": attr_status_counts,
+            "events_total": attr_total,
+            "credited_events": attr_credited,
+            "credited_nothing_recently": attr_total > 0 and attr_credited == 0,
+            "retirement_reversal_rate": retirement_reversal_rate,
+            "retired_never_used_total": len(retired_ids),
+            "holdout_lift": (eff_report.get("natural_comparison") or {}).get("honest_lift"),
+        }
+
+        # M3 — review candidates: never-succeeded active hints with a high
+        # category-related failure-association count (Step 5b, inform-only).
+        candidate_ids = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM nl_feedback_corrections "
+                "WHERE is_active=1 AND conflict_flagged=0 AND success_count=0"
+            ).fetchall()
+        ]
+        fa_counts = _compute_failure_associations(conn, candidate_ids)
+        review_candidates = [
+            {"hint_id": hid, "failure_associations": n}
+            for hid, n in sorted(fa_counts.items(), key=lambda kv: kv[1], reverse=True)
+            if n >= FAILURE_ASSOCIATION_REVIEW_THRESHOLD
+        ][:50]
+
+        # FR5 — never-attributed: injected into >= N distinct workflows but never
+        # once scored on a pass (applied_count==0 ⟺ never attributed, since
+        # applied = success+failure+unused), aged past a floor. Survives the FR1
+        # reset (normal hints earn applied>0 within a few passes). Inform-only.
+        never_attributed = [
+            _row_to_dict(r) for r in conn.execute(
+                f"""
+                SELECT hint.id, hint.feedback_text, hint.scope, hint.domain,
+                       COUNT(DISTINCT er.workflow_id) AS injections
+                FROM nl_feedback_corrections hint
+                JOIN (
+                    SELECT workflow_id, injected_hint_ids
+                    FROM execution_records
+                    WHERE json_valid(injected_hint_ids)
+                      AND timestamp >= datetime('now','-90 days')
+                    ORDER BY timestamp DESC
+                    LIMIT 5000
+                ) er
+                JOIN json_each(er.injected_hint_ids) j
+                  ON CAST(j.value AS INTEGER) = hint.id
+                WHERE hint.is_active=1 AND hint.conflict_flagged=0
+                  AND hint.applied_count=0
+                  AND hint.created_at <= datetime('now', ?)
+                GROUP BY hint.id
+                HAVING injections >= ?
+                ORDER BY injections DESC
+                LIMIT 50
+                """,
+                (f"-{NEVER_ATTRIBUTED_REVIEW_MIN_AGE_DAYS} days",
+                 NEVER_ATTRIBUTED_REVIEW_MIN_INJECTIONS),
+            ).fetchall()
+        ]
+
         return {
             "hint_inventory": _row_to_dict(inv),
             "trigger_activity": [_row_to_dict(r) for r in trigger_rows],
@@ -988,7 +1251,10 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                 "by_model": cost_by_model,
                 "total_estimated_usd": round(total_cost_usd, 6),
             },
-            "learning_effectiveness": fb.metrics_tracker.get_effectiveness_report(),
+            "learning_effectiveness": eff_report,
+            "attribution_health": attribution_health,
+            "review_candidates": review_candidates,
+            "never_attributed": never_attributed,
         }
     finally:
         conn.close()
@@ -1059,6 +1325,7 @@ def _build_review_prompt(
     flag_counts: dict,
     disable_audit: dict | None = None,
     context_global_hints=None,
+    failure_associations: dict | None = None,
 ) -> str:
     """Build the LLM hint review prompt for one chunk.
 
@@ -1087,6 +1354,7 @@ def _build_review_prompt(
     hint_blocks = []
     for h in decision_hints:
         h = dict(h)
+        h["failure_associations"] = (failure_associations or {}).get(h["id"], 0)
         status_str = "Active"
         if h["is_active"] == 0 and h.get("disabled_at"):
             try:
@@ -1098,7 +1366,9 @@ def _build_review_prompt(
         applied = h["applied_count"] or 0
         success = h["success_count"] or 0
         failure = h["failure_count"] or 0
-        rate_str = f"{failure / applied:.0%}" if applied > 0 else "n/a"
+        unused = h.get("unused_count") or 0
+        used = success + failure  # used outcomes — the quality denominator (B1)
+        rate_str = f"{failure / used:.0%}" if used > 0 else "n/a"
 
         exon = exoneration_counts.get(h["id"], 0)
         flagged = flag_counts.get(h["id"], 0)
@@ -1108,13 +1378,23 @@ def _build_review_prompt(
             f"Status: {status_str}",
             f"Text: {h['feedback_text']}",
             f"Scope: {h['scope']} | Domain: {h.get('domain') or 'n/a'}",
-            f"Metrics: applied={applied}, success={success}, failure={failure}, failure_rate={rate_str}",
+            f"Metrics: applied={applied}, success={success}, failure={failure}, "
+            f"unused={unused}, failure_rate={rate_str} (of used outcomes)",
         ]
 
-        if applied == 0:
+        # Step 5b: surface the category-related failure-association count when
+        # present — a never-succeeded hint repeatedly injected into failing
+        # tests whose failure category relates to its own. Inform-only.
+        if h.get("failure_associations"):
             lines.append(
-                "ZERO APPLICATIONS — text and duplicate review only. "
-                "Valid recommendations: keep, disable, flag_review. "
+                "Failure associations (category-related failing runs, 30d): "
+                f"{h['failure_associations']}"
+            )
+
+        if used == 0:
+            lines.append(
+                "NO USED-OUTCOME DATA (success+failure=0) — text and duplicate "
+                "review only. Valid recommendations: keep, disable, flag_review. "
                 "Do NOT use reactivate or unflag."
             )
 
@@ -1202,21 +1482,24 @@ def _build_review_prompt(
         "    a specific locator while the global only describes the principle), it is a\n"
         "    SPECIALIZATION — not a duplicate. Recommend keep for both.\n"
         "2. Reactivate (from disabled): only recommend if the original disable looks wrong.\n"
-        "   For auto-rule disabled hints, this means applied_count >= 5 AND\n"
-        "   success_count/applied_count > 0.5 (track record was actually fine).\n"
+        "   For auto-rule disabled hints, this means (success+failure) >= 5 AND\n"
+        "   success/(success+failure) > 0.5 (the used-outcome track record was fine).\n"
         "   For admin_review or admin_manual_retract, require strong contrary evidence\n"
         "   and a stated reason that appears no longer applicable.\n"
         "3. Unflag (from suspended): only recommend if the Trigger flag itself looks wrong.\n"
         "   Read the Flag reason and judge whether that specific LLM judgment had strong\n"
         "   evidence. A high overall success rate is corroborating but not sufficient —\n"
         "   the primary question is whether the flag's stated reasoning holds up.\n"
-        "4. A hint with applied_count < 5 cannot be evaluated for effectiveness — only review\n"
-        "   the text for quality and duplicates.\n"
+        "4. A hint with (success+failure) < 5 used outcomes cannot be evaluated for\n"
+        "   effectiveness — only review the text for quality and duplicates.\n"
         "5. Do NOT recommend disabling a hint solely because it has a high failure rate if it\n"
         "   was also exonerated multiple times by Trigger 1+2 (execution context matters).\n"
-        "6. For hints with applied_count = 0, valid recommendations are: keep, disable, flag_review.\n"
-        "   Do not recommend reactivate or unflag for zero-application hints — there is no\n"
-        "   track record to judge whether the original disable or flag was wrong.\n\n"
+        "6. For hints with (success+failure) = 0 (no used-outcome data), valid recommendations\n"
+        "   are: keep, disable, flag_review. Do not recommend reactivate or unflag — there is no\n"
+        "   used-outcome track record to judge whether the original disable or flag was wrong.\n"
+        "7. unused counts injections where the hint's advice was NOT used in passing code. High\n"
+        "   unused with zero success = over-surfaced dead weight (distinct from harmful, which\n"
+        "   is used-and-failed); such a hint is a disable candidate on text/duplicate grounds.\n\n"
         "Respond with ONLY valid JSON — no markdown, no explanation outside the JSON:\n"
         '{\n'
         '  "decisions": [\n'
@@ -1309,12 +1592,25 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
                     disable_audit[hid] = dict(row)
 
         # Trigger-event data computed once over the full hint set.
+        # CRITICAL (Part 2): restrict to the FLAGGING triggers. A standalone
+        # usage_attribution row is all-active / none-flagged, so
+        # _compute_exonerations would count every injected hint as "exonerated"
+        # and bias the review against disabling bad hints. Filter by trigger_type
+        # — NOT by flag-presence, which would wrongly drop legitimate trigger_1
+        # rows where every hint was genuinely exonerated.
         trigger_events = conn.execute(
             "SELECT active_hint_ids, flagged_hint_ids FROM trigger_events "
-            "WHERE created_at >= ?",
+            "WHERE created_at >= ? "
+            "AND trigger_type IN ('trigger_1', 'trigger_2')",
             (thirty_days_ago,),
         ).fetchall()
         exoneration_counts, flag_counts = _compute_exonerations(trigger_events)
+        # Step 5b: category-related failure associations for never-succeeded
+        # hints — inform-only evidence in the review prompt (mirrors the M3
+        # dashboard panel).
+        failure_associations = _compute_failure_associations(
+            conn, [h["id"] for h in hints if (h["success_count"] or 0) == 0]
+        )
 
         # Build chunk plan: 1 globals chunk + 1 per distinct domain.
         global_hints = [h for h in hints if h["scope"] == "global"]
@@ -1366,8 +1662,14 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
 
             # Chunk-scoped parser arguments prevent cross-chunk ID bleed.
             chunk_known_ids = {h["id"] for h in decision_hints}
+            # S2 (Part 2): "no data to evaluate" is now NO USED OUTCOMES
+            # (success + failure == 0), not applied == 0 — a hint can have
+            # applied > 0 yet zero used outcomes (all-unused, or legacy
+            # uncategorized fails). This set drops reactivate/unflag for such
+            # hints in _parse_review_response.
             chunk_zero_app_ids = {
-                h["id"] for h in decision_hints if (h["applied_count"] or 0) == 0
+                h["id"] for h in decision_hints
+                if (h["success_count"] or 0) + (h["failure_count"] or 0) == 0
             }
             chunk_hint_states = {
                 h["id"]: {
@@ -1383,6 +1685,7 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
                 flag_counts,
                 disable_audit=disable_audit,
                 context_global_hints=chunk["context_global_hints"],
+                failure_associations=failure_associations,
             )
 
             chunk_error: str | None = None
@@ -1684,25 +1987,35 @@ def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
                 "failure_count": rec["failure_count"],
             }
 
+            # Surface the human's decision in the audit trail: their note (if
+            # any) leads the reason, the LLM's recommendation follows as context,
+            # and the actor reflects the person who reviewed — not the LLM run.
+            note = (rec.get("admin_notes") or "").strip()
+            llm_reason = rec.get("reason") or ""
+            audit_reason = f"{note}  —  [LLM: {llm_reason}]" if note else llm_reason
+            actor = "user1"
+
             if recommendation == "disable":
                 conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET is_active=0, disabled_at=? WHERE id=?",
                     (now, hint_id),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_disable", "llm_weekly_review",
-                                  rec.get("reason"), before,
+                _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
+                                  audit_reason, before,
                                   {**before, "is_active": 0, "disabled_at": now})
 
             elif recommendation == "reactivate":
                 conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET is_active=1, conflict_flagged=0, conflict_flagged_at=NULL, "
-                    "    conflict_flag_reason=NULL, disabled_at=NULL WHERE id=?",
+                    # Step 4b: LLM-review reactivation is a fresh chance — reset
+                    # unused_count so the hint is not immediately re-retired.
+                    "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 WHERE id=?",
                     (hint_id,),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_reactivate", "llm_weekly_review",
-                                  rec.get("reason"), before,
+                _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
+                                  audit_reason, before,
                                   {**before, "is_active": 1, "conflict_flagged": 0,
                                    "conflict_flagged_at": None, "conflict_flag_reason": None,
                                    "disabled_at": None})
@@ -1714,18 +2027,18 @@ def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
                     "    conflict_flag_reason=NULL WHERE id=?",
                     (hint_id,),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_unflag", "llm_weekly_review",
-                                  rec.get("reason"), before,
+                _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
+                                  audit_reason, before,
                                   {**before, "conflict_flagged": 0,
                                    "conflict_flagged_at": None, "conflict_flag_reason": None})
 
             elif recommendation == "keep":
-                _write_hint_audit(conn, hint_id, "llm_review_keep", "llm_weekly_review",
-                                  rec.get("reason"), before, before)
+                _write_hint_audit(conn, hint_id, "llm_review_keep", actor,
+                                  audit_reason, before, before)
 
             elif recommendation == "flag_review":
-                _write_hint_audit(conn, hint_id, "llm_review_flagged", "llm_weekly_review",
-                                  rec.get("reason"), before, before)
+                _write_hint_audit(conn, hint_id, "llm_review_flagged", actor,
+                                  audit_reason, before, before)
 
             conn.execute(
                 "UPDATE hint_review_recommendations SET applied=1 WHERE id=?",

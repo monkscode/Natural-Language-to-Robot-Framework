@@ -57,19 +57,6 @@ class LibraryContext(ABC):
 
     @property
     @abstractmethod
-    def validation_context(self) -> str:
-        """
-        Context for the Code Validator Agent.
-
-        Provides:
-        - Common syntax errors
-        - Validation rules
-        - Correct vs incorrect examples
-        """
-        pass
-
-    @property
-    @abstractmethod
     def browser_init_params(self) -> dict:
         """
         Return browser initialization parameters for this library.
@@ -182,7 +169,7 @@ class LibraryContext(ABC):
         Get complete context for a specific agent role.
 
         Args:
-            agent_role: One of "planner", "assembler", "validator"
+            agent_role: One of "planner", "assembler"
 
         Returns:
             Complete context string for that agent
@@ -191,7 +178,5 @@ class LibraryContext(ABC):
             return self.planning_context
         elif agent_role == "assembler":
             return self.code_assembly_context
-        elif agent_role == "validator":
-            return self.validation_context
         else:
             raise ValueError(f"Unknown agent role: {agent_role}")

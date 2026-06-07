@@ -33,7 +33,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict
 from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
@@ -57,6 +57,19 @@ def _assert_writer_thread(method_name: str) -> None:
             f"{method_name} must be called via LearningWriteQueue.submit(); "
             f"called from thread {current!r} instead."
         )
+
+
+def _mark(sink: dict | None, ids, outcome: str) -> None:
+    """Record a "no real score" outcome for a batch of candidate ids in the
+    opt-in score_sink (F1 / N3 observability). No-op when sink is None.
+
+    Used for the pre-seed (no_anchor) and the fail-open returns; the scoring
+    loop writes real sims inline. Outcome ∈ {no_anchor, fail_open}.
+    """
+    if sink is not None:
+        for rid in ids:
+            sink[rid] = {"sim": None, "outcome": outcome}
+
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +145,14 @@ class ExecutionRecord:
     # passing-state UPDATE leaves it untouched (that path preserves the
     # original failed run's context).
     model_version: Optional[str] = None
+
+    # Per-workflow once-guard for pass-time usage attribution (Part 2 / C1).
+    # The DB column DEFAULT is 1 (pre-v13 rows read already-attributed — N4);
+    # this dataclass default is intentionally 0 and must NOT be unified with the
+    # DB default. _store_sqlite's INSERT writes 0 for new rows so they attribute;
+    # apply_hint_attribution's atomic claim flips the winner to 1. Read-only here
+    # (the Step-4 attribution gate consumes it); no engine writes it via this field.
+    hint_attribution_done: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +260,9 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
         # Serializes lazy _init_chromadb() across the writer thread and the
         # crew/request threads so the 80MB model is loaded exactly once.
         self._chroma_init_lock = threading.Lock()
+        # G3: wall-clock of the last opportunistic hint_workflow_trace prune
+        # (daily-guarded). 0.0 → prune on the first trace write after start.
+        self._last_trace_prune_ts = 0.0
 
     def _init_sqlite(self):
         """Connect SQLite writer conn (owned by learning-writer thread).
@@ -490,8 +514,8 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
                         robot_code, code_structure, test_status, execution_exit_code,
                         execution_duration_ms, failure_category, failed_keyword,
                         error_message, total_llm_calls, total_cost, injected_hint_ids,
-                        model_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        model_version, hint_attribution_done
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         record.workflow_id, record.timestamp.isoformat(),
@@ -720,11 +744,19 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
         candidate_ids: List[int],
         kind: str,
         threshold: float = 0.55,
+        score_sink: dict | None = None,
     ) -> set[int]:
         """Return the subset of candidate_ids whose anchor query is cosine-
         similar (>= threshold) to user_query.
 
         kind: "nl" | "anti" — selects which engine's anchors to match.
+
+        score_sink: opt-in observability dict (F1 / N3). When provided, every
+            candidate is recorded as {record_id: {"sim": float|None, "outcome":
+            str}} with outcome ∈ {survived, similarity_below, no_anchor,
+            fail_open}. PURELY DIAGNOSTIC — the returned set is byte-identical
+            with or without it (both callers do `r["id"] in survivors`), so the
+            relevance gate is unaffected. Default None = zero cost.
 
         Failure modes:
             ChromaDB unavailable / query raises -> fail-OPEN: all candidates
@@ -734,7 +766,12 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
             Empty user_query / no candidates    -> empty set.
         """
         if not user_query or not user_query.strip() or not candidate_ids:
-            return set()
+            return set()                       # nothing evaluated — sink untouched
+
+        # Pre-seed AFTER the empty-guard (not at the top — an empty-query call
+        # evaluates nothing, so it must record nothing). Candidates with no
+        # anchor doc never get overwritten below and stay no_anchor.
+        _mark(score_sink, candidate_ids, "no_anchor")
 
         self._init_chromadb()                  # lazy ONNX load, idempotent
         coll = self._learning_anchors
@@ -743,6 +780,7 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
                 "[LEARNING] learning_anchors unavailable — "
                 "similarity filter fails open"
             )
+            _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
 
         try:
@@ -762,8 +800,10 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
                         "[LEARNING] learning_anchors empty but candidates "
                         "exist — reconcile likely failed; failing open"
                     )
+                    _mark(score_sink, candidate_ids, "fail_open")
                     return set(candidate_ids)        # whole store empty
                 return set()                         # un-reconciled -> drop
+                                                     # (sink keeps no_anchor)
             result = coll.query(
                 query_texts=[user_query],
                 n_results=n,                         # exact filtered count
@@ -775,21 +815,127 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
             logger.warning(
                 "[LEARNING] similarity filter query failed (fail-open): %s", e
             )
+            _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
 
         survivors: set[int] = set()
         metas = result["metadatas"][0] if result.get("metadatas") else []
         dists = result["distances"][0] if result.get("distances") else []
         for meta, dist in zip(metas, dists):
+            rid = meta.get("record_id")        # corrupt anchor row -> skip,
+            if rid is None:                    # don't KeyError (edge #3)
+                continue
             sim = 1.0 - dist                   # learning_anchors is cosine
             if sim >= threshold:
-                survivors.add(meta["record_id"])
+                survivors.add(rid)
+                if score_sink is not None:
+                    score_sink[rid] = {"sim": sim, "outcome": "survived"}
+            elif score_sink is not None:
+                score_sink[rid] = {"sim": sim, "outcome": "similarity_below"}
 
         logger.info(
             "[LEARNING] sim_filter kind=%s in=%d out=%d",
             kind, len(candidate_ids), len(survivors),
         )
         return survivors
+
+    def store_hint_workflow_trace(self, workflow_id: str, trace: dict) -> None:
+        """Persist the N3 selection trace (F2d): one row per (workflow_id,
+        hint_id). INSERT ... ON CONFLICT DO NOTHING — the trace is written once
+        per workflow; apply_hint_attribution later UPDATEs attribution_bucket /
+        attribution_reason as a SEPARATE commit (F2e), so they are left NULL
+        here. Observability-only and best-effort; must run on the writer thread.
+        NO FK (R-N3) — a deduped run with no execution_records row keeps a
+        standalone trace.
+        """
+        _assert_writer_thread("ExecutionMemory.store_hint_workflow_trace")
+        if not trace:
+            return
+        created_at = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (
+                workflow_id, hid,
+                e.get("scope"), e.get("source"), e.get("priority"),
+                e.get("similarity_score"),
+                1 if e.get("available") else 0,
+                1 if e.get("injected") else 0,
+                e.get("drop_reason"),
+                created_at,
+            )
+            for hid, e in trace.items()
+        ]
+        try:
+            self._writer_conn.executemany(
+                "INSERT INTO hint_workflow_trace "
+                "(workflow_id, hint_id, scope, source, priority, "
+                " similarity_score, available, injected, drop_reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(workflow_id, hint_id) DO NOTHING",
+                rows,
+            )
+            self._writer_conn.commit()
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] store_hint_workflow_trace failed (non-blocking, "
+                "workflow_id=%s): %s", workflow_id, e,
+            )
+            self._writer_conn.rollback()
+        # G3: opportunistic, daily-guarded retention prune (no scheduler).
+        self._maybe_prune_hint_workflow_trace()
+
+    def _maybe_prune_hint_workflow_trace(self) -> None:
+        """G3: at most once per 24h, prune trace rows past the retention window.
+        Opportunistic — runs on the writer thread right after a trace INSERT, so
+        the table self-bounds exactly while it is growing. Best-effort and fully
+        isolated (the daily guard advances even if the prune logs a failure).
+        """
+        try:
+            now = time.time()
+            if now - self._last_trace_prune_ts < 86400:
+                return
+            self._last_trace_prune_ts = now
+            from src.backend.core.config import settings
+            self.prune_hint_workflow_trace(settings.HINT_TRACE_RETENTION_DAYS)
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] trace prune guard failed (non-blocking): %s", e
+            )
+
+    def prune_hint_workflow_trace(self, retention_days: int) -> int:
+        """G3: DELETE hint_workflow_trace rows older than retention_days; returns
+        the count deleted. retention_days <= 0 keeps everything (0 = keep-all).
+        Writer thread. Safe — the trace is observability-only; the learning
+        counters live on the hint row and are never derived from the trace, so
+        pruning never changes a count. created_at is indexed.
+        """
+        _assert_writer_thread("ExecutionMemory.prune_hint_workflow_trace")
+        if not retention_days or retention_days <= 0:
+            return 0
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat()
+        try:
+            deleted = self._writer_conn.execute(
+                "DELETE FROM hint_workflow_trace WHERE created_at < ?",
+                (cutoff,),
+            ).rowcount
+            self._writer_conn.commit()
+            if deleted:
+                logger.info(
+                    "[LEARNING] pruned %d hint_workflow_trace row(s) older "
+                    "than %d days", deleted, retention_days,
+                )
+            return deleted
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] prune_hint_workflow_trace failed (non-blocking): %s",
+                e,
+            )
+            try:
+                self._writer_conn.rollback()
+            except Exception:
+                pass
+            return 0
 
     def add_anchor(self, kind: str, record_id: int, anchor_query: str) -> None:
         """Add (or replace) one anchor-query document in learning_anchors.
@@ -1007,8 +1153,10 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
         """
         Convert SQLite Row to ExecutionRecord dataclass.
 
-        Uses named columns via sqlite3.Row factory — adding new columns in
-        later phases requires no changes here.
+        Maps each column explicitly via sqlite3.Row named access, so a new
+        ExecutionRecord field backed by a new column must be added here too.
+        All three callers (get / get_recent_by_domain / query_failures) read
+        SELECT *, so every column is present on the row.
         """
         return ExecutionRecord(
             workflow_id=row["workflow_id"],
@@ -1031,6 +1179,7 @@ class ExecutionMemory(ExecutionStore, SemanticStore):
             working_code=row["working_code"],
             injected_hint_ids=row["injected_hint_ids"],
             model_version=row["model_version"],
+            hint_attribution_done=row["hint_attribution_done"],
         )
 
     def close(self):

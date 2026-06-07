@@ -31,9 +31,10 @@ class KeywordCorrectionEngine(LearningEngine):
     Tables:
     - keyword_corrections: wrong_keyword → correct_keyword
 
-    Key insight: The Validator already identifies many keyword errors in its
-    delegation loop. By capturing what the Validator flagged AND what the
-    Assembler changed in response, we get free correction data.
+    Key insight: real Docker executions surface keyword errors (failure
+    category B*). By extracting the wrong keyword from the execution error
+    message and inferring the correct one, we get free correction data to
+    steer the Assembler on future runs.
     """
 
     # Known Selenium → Browser Library keyword corrections.
@@ -122,7 +123,7 @@ class KeywordCorrectionEngine(LearningEngine):
     def get_hints(self, user_query: str, url: str,
                   agent_role: str) -> Optional[List[str]]:
         """Return keyword correction hints for the assembler only."""
-        if agent_role not in ("assembler", "validator"):
+        if agent_role != "assembler":
             return None
         if not self._em:
             return None

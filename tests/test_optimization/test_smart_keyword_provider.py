@@ -16,10 +16,12 @@ from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     EffectivenessScore,
+    MAX_FEEDBACK_TEXT_CHARS,
 )
 from src.backend.crew_ai.optimization.smart_keyword_provider import (
     SmartKeywordProvider,
     AgentContextResult,
+    _HINT_CHAR_CAP,
 )
 
 
@@ -56,7 +58,6 @@ class MockLibraryContext:
     core_rules = "CORE RULES: Use Browser library keywords."
     planning_context = "FULL PLANNING CONTEXT"
     code_assembly_context = "FULL CODE ASSEMBLY CONTEXT"
-    validation_context = "FULL VALIDATION CONTEXT"
 
 
 class MockEngine:
@@ -118,13 +119,14 @@ class TestAgentContextResult:
         r = AgentContextResult(
             context="ctx", hints_count=2, hints_available=3, hint_sources=["a", "b"]
         )
-        c, n, avail, s, h, nl_ids = r
+        c, n, avail, s, h, nl_ids, trace = r
         assert c == "ctx"
         assert n == 2
         assert avail == 3
         assert s == ["a", "b"]
         assert h == ""  # Default hint_text
         assert nl_ids == ()  # Default nl_injected_ids
+        assert trace is None  # Default selection_trace
 
     def test_context_is_string(self):
         r = AgentContextResult(context="some context string")
@@ -142,7 +144,6 @@ class TestComplexityTier:
         p = create_provider()
         tier = p._determine_complexity_tier("go to website")
         assert tier["max_hints"] == 5, f"Expected simple tier (5 hints), got {tier}"
-        assert tier["tokens_per_hint"] == 80
 
     def test_simple_one_action(self):
         p = create_provider()
@@ -158,7 +159,6 @@ class TestComplexityTier:
         p = create_provider()
         tier = p._determine_complexity_tier("click fill verify check something")
         assert tier["max_hints"] == 8, f"Expected medium tier (8 hints), got {tier}"
-        assert tier["tokens_per_hint"] == 100
 
     def test_medium_five_actions(self):
         p = create_provider()
@@ -176,7 +176,6 @@ class TestComplexityTier:
             "sort by name, close dialog, open new tab, enter search query"
         )
         assert tier["max_hints"] == 10
-        assert tier["tokens_per_hint"] == 120
 
     def test_reads_from_config(self):
         """Verify tiers come from LEARNING_CONFIG, not hardcoded."""
@@ -194,7 +193,7 @@ class TestFormatHints:
 
     def test_empty_list(self):
         p = create_provider()
-        result, selected = p._format_hints([], max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints([], max_hints=5)
         assert result is None
         assert selected == []
 
@@ -202,7 +201,7 @@ class TestFormatHints:
         p = create_provider()
         result, selected = p._format_hints(
             [{"text": "Use FOR loop", "priority": "high"}],
-            max_hints=5, tokens_per_hint=80
+            max_hints=5
         )
         assert "Use FOR loop" in result
         assert "LEARNING HINTS" in result
@@ -215,7 +214,7 @@ class TestFormatHints:
             {"text": "HIGH_HINT", "priority": "high"},
             {"text": "MED_HINT", "priority": "medium"},
         ]
-        result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=5)
         lines = result.split("\n")
         content_lines = [line for line in lines if "HINT" in line and "LEARNING" not in line]
         assert content_lines[0] == "HIGH_HINT", f"Expected HIGH first, got {content_lines}"
@@ -225,7 +224,7 @@ class TestFormatHints:
     def test_max_hints_cap(self):
         p = create_provider()
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(20)]
-        result, selected = p._format_hints(candidates, max_hints=3, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=3)
         lines = [line for line in result.split("\n") if line.startswith("hint_")]
         assert len(lines) == 3, f"Expected 3 hints, got {len(lines)}: {lines}"
         assert len(selected) == 3
@@ -241,38 +240,65 @@ class TestFormatHints:
         candidates = [{"text": f"hint_{i}", "priority": "medium"} for i in range(15)]
         # Simulate what _get_learning_hints does: compute effective_max before calling.
         effective_max = min(15, hard_cap)
-        result, selected = p._format_hints(candidates, max_hints=effective_max, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=effective_max)
         lines = [line for line in result.split("\n") if line.startswith("hint_")]
         assert len(lines) <= hard_cap, f"Expected <= {hard_cap}, got {len(lines)}"
 
-    def test_token_truncation(self):
+    def test_long_hint_truncated_at_char_cap(self):
+        """A hint over _HINT_CHAR_CAP is cut to the cap with an ellipsis; a hint
+        at/below the cap (e.g. a full 500-char feedback body) is shown whole."""
         p = create_provider()
-        long_text = "A" * 500
-        result, selected = p._format_hints(
-            [{"text": long_text, "priority": "medium"}],
-            max_hints=5, tokens_per_hint=20  # 20 tokens * 4 chars = 80 chars
-        )
+
+        # 500 chars (a full-length feedback body) — below the cap, untruncated.
+        body = "A" * 500
+        result, _ = p._format_hints([{"text": body, "priority": "medium"}], max_hints=5)
         lines = [line for line in result.split("\n") if line.startswith("A")]
-        assert len(lines) == 1
-        assert len(lines[0]) <= 80, f"Expected truncated to 80, got {len(lines[0])}"
+        assert lines[0] == body
+        assert not lines[0].endswith("...")
+
+        # 700 chars — above the cap, truncated to exactly _HINT_CHAR_CAP.
+        long_text = "A" * 700
+        result, _ = p._format_hints([{"text": long_text, "priority": "medium"}], max_hints=5)
+        lines = [line for line in result.split("\n") if line.startswith("A")]
+        assert len(lines[0]) == _HINT_CHAR_CAP, f"Expected cut to {_HINT_CHAR_CAP}, got {len(lines[0])}"
         assert lines[0].endswith("...")
 
-    def test_exact_token_boundary(self):
-        """Hint exactly at token limit should NOT be truncated."""
+    def test_exact_char_cap_boundary(self):
+        """A hint exactly at _HINT_CHAR_CAP is NOT truncated (boundary is > cap)."""
         p = create_provider()
-        exact_text = "A" * 80  # Exactly 20 tokens * 4
-        result, selected = p._format_hints(
-            [{"text": exact_text, "priority": "medium"}],
-            max_hints=5, tokens_per_hint=20
+        exact_text = "A" * _HINT_CHAR_CAP
+        result, _ = p._format_hints(
+            [{"text": exact_text, "priority": "medium"}], max_hints=5,
         )
         lines = [line for line in result.split("\n") if line.startswith("A")]
         assert lines[0] == exact_text  # No truncation
+
+    def test_hint_char_cap_fits_max_nl_feedback_hint(self):
+        """Guard: the longest possible NL feedback hint — the USER FEEDBACK
+        header plus a full MAX_FEEDBACK_TEXT_CHARS body — fits within
+        _HINT_CHAR_CAP, so injected NL text is never truncated. Fails CI if the
+        header grows or the feedback cap is raised without raising the cap."""
+        from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+        # _format_feedback_hint does not use self; call it unbound to avoid
+        # constructing an engine (no DB/ChromaDB needed for a pure format check).
+        hint = NLFeedbackEngine._format_feedback_hint(None, "A" * MAX_FEEDBACK_TEXT_CHARS)
+        assert len(hint) <= _HINT_CHAR_CAP
+
+    def test_max_nl_feedback_hint_injected_uncut(self):
+        """End-to-end: a maximal NL feedback hint passes through _format_hints in
+        full. The old per-tier token budget (320/400/480 chars) would have cut
+        it below the text the usage-attribution LLM later judges."""
+        from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+        hint = NLFeedbackEngine._format_feedback_hint(None, "A" * MAX_FEEDBACK_TEXT_CHARS)
+        p = create_provider()
+        result, _ = p._format_hints([{"text": hint, "priority": "high"}], max_hints=5)
+        assert hint in result
 
     def test_header_and_footer(self):
         p = create_provider()
         result, selected = p._format_hints(
             [{"text": "test hint", "priority": "medium"}],
-            max_hints=5, tokens_per_hint=80
+            max_hints=5
         )
         assert result.startswith("═══ LEARNING HINTS")
         assert result.endswith("═" * 48)
@@ -281,7 +307,7 @@ class TestFormatHints:
         p = create_provider()
         result, selected = p._format_hints(
             [{"text": "⚠️ AVOID: Don't use single Get Text", "priority": "high"}],
-            max_hints=5, tokens_per_hint=80
+            max_hints=5
         )
         assert "⚠️ AVOID" in result
 
@@ -294,7 +320,7 @@ class TestFormatHints:
             {"text": "high2", "priority": "high"},
             {"text": "low1", "priority": "low"},
         ]
-        result, selected = p._format_hints(candidates, max_hints=5, tokens_per_hint=80)
+        result, selected = p._format_hints(candidates, max_hints=5)
         lines = [line for line in result.split("\n")
                  if line and not line.startswith("═")]
         # Highs first, then meds, then lows
@@ -498,14 +524,14 @@ class TestGetAgentContext:
         assert result.hints_count == 0
         assert len(result.context) > 0  # Existing tiers still work
 
-    def test_all_four_roles(self, in_memory_db):
-        """All four agent roles should work."""
+    def test_all_agent_roles(self, in_memory_db):
+        """All agent roles should work."""
         p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
 
-        for role in ["planner", "identifier", "assembler", "validator"]:
+        for role in ["planner", "identifier", "assembler"]:
             result = p.get_agent_context("click button", role)
             assert isinstance(result, AgentContextResult), f"Failed for role: {role}"
             assert len(result.context) > 0, f"Empty context for role: {role}"
@@ -567,31 +593,16 @@ class TestLazyLoading:
 
 class TestEngineRoleFiltering:
 
-    def test_anti_pattern_includes_validator(self, in_memory_db):
-        """AntiPatternEngine should return hints for validator."""
+    def test_anti_pattern_excludes_identifier(self, in_memory_db):
+        """AntiPatternEngine should NOT return hints for identifier (role-filtered)."""
         from src.backend.crew_ai.optimization.anti_pattern_engine import AntiPatternEngine
         engine = AntiPatternEngine(in_memory_db)
-        # Insert a testable anti-pattern
-        now = datetime.now().isoformat()
-        in_memory_db.execute(
-            "INSERT INTO anti_patterns "
-            "(failure_category, query_pattern, bad_code_snippet, "
-            " correct_alternative, evidence_count, score, domain, "
-            " error_message, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("A1", "click%", "bad code", "good code", 5, 0.7, "*",
-             "Missing keyword", now),
-        )
-        in_memory_db.commit()
-        result = engine.get_hints("click button", "https://test.com", "validator")
-        # May or may not match the query, but should NOT return None due to role
-        # (it returns None only if no matching patterns found)
-        # Key point: it should NOT be blocked by role filter
+        # Identifier is rejected by the role gate before any pattern lookup.
         result_identifier = engine.get_hints("click button", "https://test.com", "identifier")
-        assert result_identifier is None, "Identifier should still be filtered out"
+        assert result_identifier is None, "Identifier should be filtered out by role"
 
-    def test_keyword_includes_validator(self, in_memory_db):
-        """KeywordCorrectionEngine should return hints for validator."""
+    def test_keyword_includes_assembler(self, in_memory_db):
+        """KeywordCorrectionEngine should return hints for assembler."""
         from src.backend.crew_ai.optimization.keyword_correction_engine import KeywordCorrectionEngine
         engine = KeywordCorrectionEngine(in_memory_db)
         # Insert testable correction
@@ -604,8 +615,8 @@ class TestEngineRoleFiltering:
              0.83, 5, datetime.now().isoformat()),
         )
         in_memory_db.commit()
-        result = engine.get_hints("type text", "", "validator")
-        assert result is not None, "Validator should receive keyword corrections"
+        result = engine.get_hints("type text", "", "assembler")
+        assert result is not None, "Assembler should receive keyword corrections"
         assert any("Fill Text" in h for h in result)
 
     def test_keyword_excludes_planner(self, in_memory_db):
@@ -624,13 +635,13 @@ class TestEngineRoleFiltering:
         result = engine.get_hints("type text", "", "planner")
         assert result is None, "Planner should NOT receive keyword corrections"
 
-    def test_structural_excludes_validator(self, in_memory_db):
-        """StructuralRuleEngine should NOT return hints for validator."""
+    def test_structural_excludes_identifier(self, in_memory_db):
+        """StructuralRuleEngine should NOT return hints for identifier."""
         from src.backend.crew_ai.optimization.structural_rule_engine import StructuralRuleEngine, IntentExtractor
         ie = IntentExtractor(in_memory_db)
         engine = StructuralRuleEngine(in_memory_db, ie)
-        result = engine.get_hints("get all rows", "", "validator")
-        assert result is None, "Validator should NOT receive structural hints"
+        result = engine.get_hints("get all rows", "", "identifier")
+        assert result is None, "Identifier should NOT receive structural hints"
 
 
 # ===================================================================
@@ -836,7 +847,7 @@ class TestEdgeCases:
         p = create_provider()
         result, selected = p._format_hints(
             [{"text": "Line1\nLine2\nLine3", "priority": "high"}],
-            max_hints=5, tokens_per_hint=80
+            max_hints=5
         )
         assert "Line1\nLine2\nLine3" in result
         assert len(selected) == 1

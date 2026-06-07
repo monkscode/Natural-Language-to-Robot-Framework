@@ -1,15 +1,19 @@
 """
-Shared LLM conflict-detection pipeline — Trigger 1 and Trigger 2.
+Shared LLM judgment pipeline — Trigger 2 conflict detection and Part-2 usage
+attribution.
 
-Both triggers execute the same sequence: resolve injected hint IDs →
-build prompt → call LLM → flag conflicting hints via write queue →
-write trigger_events telemetry. This module centralises that sequence.
-Also provides shared prompt-building helpers used by both trigger prompt builders.
+Each path resolves injected hint IDs → builds a prompt (via an injected
+prompt_builder) → calls the LLM → applies the result via the write queue →
+writes trigger_events telemetry. This module centralises that sequence and the
+shared prompt-building helpers (_hint_line, _build_context_prefix).
 
-Referenced by: workflow_service._fire_llm_conflict_detection (Trigger 1)
-               workflow_service._build_conflict_prompt (Trigger 1 prompt builder)
-               feedback_loop.FeedbackLoop.process_user_feedback (Trigger 2)
+Referenced by: feedback_loop.FeedbackLoop.process_user_feedback (Trigger 2, via
+                   fire_conflict_detection)
                feedback_loop._build_conflict_prompt_with_feedback (Trigger 2 prompt builder)
+               workflow_service._process_learning (usage attribution, via
+                   fire_usage_attribution)
+               workflow_service._build_standalone_attribution_prompt /
+                   _build_merged_attribution_prompt (attribution prompt builders)
 Depends on: learning_config (_get_conflict_detection_model,
             _get_conflict_detection_completion_kwargs, _call_conflict_detection_llm,
             _parse_conflict_json, _classify_llm_error)
@@ -18,6 +22,7 @@ Depends on: learning_config (_get_conflict_detection_model,
 import json
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -314,3 +319,276 @@ def fire_conflict_detection(
                 "%s combined flag+telemetry submit failed (non-blocking): %s",
                 tag, tel_err,
             )
+
+
+def _coerce_attribution_bucket(raw, tag: str) -> tuple[list[int], dict[int, str]]:
+    """Coerce one LLM attribution bucket into (ordered unique int ids, reasons).
+
+    Accepts a list of bare ids (int/str) or {"id", "reason"} dicts; anything
+    else yields ([], {}). Bad ids are logged and skipped. The reasons map is
+    populated only for entries that carried a non-empty reason.
+    """
+    ids: list[int] = []
+    reasons: dict[int, str] = {}
+    if not isinstance(raw, list):
+        return ids, reasons
+    for entry in raw:
+        hid = None
+        reason = ""
+        if isinstance(entry, dict):
+            hid = entry.get("id")
+            reason = entry.get("reason", "") or ""
+        elif isinstance(entry, (int, str)):
+            hid = entry
+        if hid is None:
+            continue
+        try:
+            hid_int = int(hid)
+        except (TypeError, ValueError):
+            logger.warning("%s bad hint id in attribution bucket: %r", tag, entry)
+            continue
+        if hid_int not in ids:
+            ids.append(hid_int)
+        if reason and str(reason).strip():
+            reasons[hid_int] = str(reason)
+    return ids, reasons
+
+
+def _submit_attribution_telemetry(
+    feedback_loop, *, trigger_type, workflow_id, domain, url, feedback_text,
+    injected_ids, status, error_message, llm_model, input_tokens, output_tokens,
+    latency_ms, tag,
+) -> None:
+    """Best-effort skip/error-path telemetry: a usage-attribution trigger_events
+    row with no flags and empty used/unused. The main (apply) path writes its own
+    row inside the combined task. Non-blocking."""
+    try:
+        feedback_loop.write_queue.submit(
+            feedback_loop.write_trigger_event,
+            trigger_type=trigger_type, workflow_id=workflow_id,
+            domain=domain, url=url, feedback_text=feedback_text,
+            active_hint_ids=injected_ids, flagged_hint_ids=[],
+            actually_flagged_hint_ids=[], reason=None, llm_model=llm_model,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            llm_latency_ms=latency_ms, status=status, error_message=error_message,
+            used_hint_ids=[], unused_hint_ids=[],
+        )
+    except Exception as tel_err:
+        logger.warning("%s telemetry submit failed (non-blocking): %s", tag, tel_err)
+
+
+def fire_usage_attribution(
+    *,
+    feedback_loop,
+    workflow_id: str,
+    domain: str | None,
+    url: str | None,
+    feedback_text: str | None,
+    injected_hint_ids: str | None,
+    case_b: bool,
+    prompt_builder,
+) -> tuple[list[int], list[int], list[int], dict[int, str]]:
+    """Usage-aware hint attribution (Part 2): resolve the injected hints →
+    classify each (used / harmful [Case B only] / unused / unsure) with ONE LLM
+    judgment → submit a combined apply_hint_attribution + telemetry task to the
+    write queue. Non-blocking; every error path logs at WARNING and returns the
+    empty result. NEVER calls circuit_breaker (a broken attribution feature must
+    not trip the global learning fuse).
+
+    Modeled on fire_conflict_detection, with three deliberate differences:
+      - P1: NO scope/domain-wide fallback. None / malformed / non-list / '[]'
+        injected_hint_ids → skip (crediting "all in-scope" would pollute counters
+        with hints never injected here).
+      - P4: each bucket is membership-guarded against the resolved active set S,
+        then the buckets are made disjoint (an id in >1 bucket → no-signal).
+      - B3: inline bounded retry (up to 2 attempts) on retryable LLM-call errors;
+        on exhaustion no apply runs, so the once-guard flag stays unset and a
+        later legitimate pass can retry.
+
+    case_b selects response interpretation: True = merged Case-B (the v1→v2 diff
+    is in the prompt, so a 'harmful' bucket is allowed and the telemetry row is a
+    'trigger_1' event); False = standalone first-pass (no 'harmful' bucket; the
+    telemetry row is a 'usage_attribution' event).
+
+    prompt_builder: callable(active_hints: list[dict]) -> str, built on the caller
+    side (services layer) and passed in, so optimization never imports services
+    (F4 / dependency inversion). It is called INSIDE the try/except so a build
+    failure records a status row instead of being silently swallowed.
+
+    Returns (used_ids, failure_ids, unused_ids, reasons) after membership-guard +
+    disjointness (the same lists handed to apply_hint_attribution). reasons maps
+    each harmful hint id to the LLM's justification (used for the conflict flag).
+    """
+    from src.backend.crew_ai.optimization.learning_config import (
+        _get_conflict_detection_model,
+        _get_conflict_detection_completion_kwargs,
+        _call_conflict_detection_llm,
+        _parse_conflict_json,
+        _classify_llm_error,
+    )
+
+    tag = "[LEARNING:ATTR]"
+    empty: tuple[list[int], list[int], list[int], dict[int, str]] = ([], [], [], {})
+    trigger_type = "trigger_1" if case_b else "usage_attribution"
+
+    # P1 — NO scope/domain-wide fallback. The F3 gate already filters these, but
+    # this is the independent second layer: skip (no LLM, no write) on any
+    # non-list-or-empty injected_hint_ids.
+    if injected_hint_ids is None:
+        logger.warning(
+            "%s injected_hint_ids is None — skipping (no scope-wide fallback)", tag,
+        )
+        return empty
+    try:
+        injected_ids = json.loads(injected_hint_ids)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning(
+            "%s malformed injected_hint_ids %r — skipping", tag, injected_hint_ids,
+        )
+        return empty
+    if not isinstance(injected_ids, list) or not injected_ids:
+        return empty
+
+    active_hints = feedback_loop.nl_engine.get_hints_by_id(injected_ids)
+    if not active_hints:
+        # All injected hints disabled/flagged since injection → nothing to judge.
+        _submit_attribution_telemetry(
+            feedback_loop, trigger_type=trigger_type, workflow_id=workflow_id,
+            domain=domain, url=url, feedback_text=feedback_text,
+            injected_ids=injected_ids, status="no_active_hints",
+            error_message=None, llm_model=None, input_tokens=0, output_tokens=0,
+            latency_ms=0, tag=tag,
+        )
+        return empty
+
+    valid_ids = {h["id"] for h in active_hints}
+    model_string = _get_conflict_detection_model()
+    extra_kwargs = _get_conflict_detection_completion_kwargs()
+
+    # B3 — inline bounded retry on retryable LLM-call errors. Never credit-all,
+    # never touch circuit_breaker.
+    max_attempts = 2
+    response = None
+    status = "succeeded"
+    error_message: str | None = None
+    input_tokens = output_tokens = 0
+    t_start = time.monotonic()
+    for attempt in range(max_attempts):
+        try:
+            # F4 — build the prompt INSIDE the try so a builder failure records a
+            # status row (here, classified like an LLM error) rather than being
+            # coarsely swallowed.
+            prompt = prompt_builder(active_hints)
+            response = _call_conflict_detection_llm(
+                model_string, [{"role": "user", "content": prompt}], extra_kwargs,
+            )
+            status = "succeeded"
+            error_message = None
+            break
+        except Exception as e:
+            status = _classify_llm_error(e)
+            error_message = f"{type(e).__name__}: {e}"
+            if attempt + 1 < max_attempts:
+                logger.warning(
+                    "%s attribution attempt %d failed (%s) — retrying",
+                    tag, attempt + 1, e,
+                )
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            logger.warning(
+                "%s attribution failed after %d attempts (non-blocking): %s",
+                tag, max_attempts, e,
+            )
+    latency_ms = int((time.monotonic() - t_start) * 1000)
+
+    if response is None:
+        # Exhausted retries — record telemetry but DO NOT apply, so the once-guard
+        # flag stays unset and a later legitimate pass can retry.
+        _submit_attribution_telemetry(
+            feedback_loop, trigger_type=trigger_type, workflow_id=workflow_id,
+            domain=domain, url=url, feedback_text=feedback_text,
+            injected_ids=injected_ids, status=status, error_message=error_message,
+            llm_model=model_string, input_tokens=0, output_tokens=0,
+            latency_ms=latency_ms, tag=tag,
+        )
+        return empty
+
+    usage = getattr(response, "usage", None)
+    if usage:
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+
+    try:
+        result = _parse_conflict_json(response.choices[0].message.content)
+    except (json.JSONDecodeError, ValueError) as parse_err:
+        # Unparseable — skip + leave the flag unset (B3: a later pass retries).
+        _submit_attribution_telemetry(
+            feedback_loop, trigger_type=trigger_type, workflow_id=workflow_id,
+            domain=domain, url=url, feedback_text=feedback_text,
+            injected_ids=injected_ids, status="json_parse_failed",
+            error_message=f"{type(parse_err).__name__}: {parse_err}",
+            llm_model=model_string, input_tokens=input_tokens,
+            output_tokens=output_tokens, latency_ms=latency_ms, tag=tag,
+        )
+        logger.warning(
+            "%s attribution JSON parse failed (non-blocking): %s", tag, parse_err,
+        )
+        return empty
+
+    used_ids, _ = _coerce_attribution_bucket(result.get("used"), tag)
+    unused_ids, _ = _coerce_attribution_bucket(result.get("unused"), tag)
+    if case_b:
+        failure_ids, reasons = _coerce_attribution_bucket(result.get("harmful"), tag)
+    else:
+        failure_ids, reasons = [], {}
+
+    # P4 — membership-guard each bucket against S (the resolved active set). An id
+    # valid in the DB but outside this judgment's injected set is dropped.
+    used_ids = [i for i in used_ids if i in valid_ids]
+    failure_ids = [i for i in failure_ids if i in valid_ids]
+    unused_ids = [i for i in unused_ids if i in valid_ids]
+
+    # Disjointness — an id in >1 bucket is a contradiction → no-signal (drop from
+    # all). apply_hint_attribution has the same guard (G4) as a backstop.
+    seen = Counter(used_ids + failure_ids + unused_ids)
+    overlap = {i for i, c in seen.items() if c > 1}
+    if overlap:
+        logger.warning(
+            "%s id(s) classified into >1 bucket — no-signal: %s",
+            tag, sorted(overlap),
+        )
+        used_ids = [i for i in used_ids if i not in overlap]
+        failure_ids = [i for i in failure_ids if i not in overlap]
+        unused_ids = [i for i in unused_ids if i not in overlap]
+    reasons = {i: r for i, r in reasons.items() if i in failure_ids}
+
+    # Submit the combined apply + telemetry task: apply on the writer thread, then
+    # telemetry with the ENFORCED flag set (matching _flag_and_record_telemetry).
+    # Even an all-empty-but-valid result submits apply so the once-guard flag is
+    # set (no-op; don't retry). apply returns the enforced flags, or None on a
+    # lost claim (dedup / already-attributed).
+    def _attribute_and_record_telemetry() -> None:
+        actually_flagged = feedback_loop.nl_engine.apply_hint_attribution(
+            workflow_id, used_ids, failure_ids, unused_ids, reasons=reasons,
+        )
+        feedback_loop.write_trigger_event(
+            trigger_type=trigger_type, workflow_id=workflow_id,
+            domain=domain, url=url, feedback_text=feedback_text,
+            active_hint_ids=injected_ids,
+            flagged_hint_ids=failure_ids,
+            actually_flagged_hint_ids=actually_flagged or [],
+            reason=None, llm_model=model_string,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            llm_latency_ms=latency_ms, status=status, error_message=error_message,
+            used_hint_ids=used_ids, unused_hint_ids=unused_ids,
+        )
+
+    try:
+        feedback_loop.write_queue.submit(_attribute_and_record_telemetry)
+    except Exception as tel_err:
+        logger.warning(
+            "%s combined apply+telemetry submit failed (non-blocking): %s",
+            tag, tel_err,
+        )
+
+    return (used_ids, failure_ids, unused_ids, reasons)

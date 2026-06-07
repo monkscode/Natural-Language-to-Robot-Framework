@@ -805,23 +805,6 @@ class TestSREGetHints:
         hints = engine.get_hints("loop through all items", "http://test.com", "identifier")
         assert hints is None, "Hints: identifier role -> None"
 
-    def test_validator_role_gets_none(self, in_memory_db):
-        """Verify validator role gets None."""
-        engine = self._make_engine(in_memory_db)
-
-        in_memory_db.execute("""
-            INSERT INTO structural_rules
-            (rule_name, query_pattern, required_structure, required_keywords_json,
-             score, evidence_count, counter_evidence,
-             last_updated, created_at)
-            VALUES ('iteration', 'all items|each row', 'for_loop', ?, 0.85, 10, 1,
-                    datetime('now'), datetime('now'))
-        """, (json.dumps(["Get Elements", "FOR", "END"]),))
-        in_memory_db.commit()
-
-        hints = engine.get_hints("loop through all items", "http://test.com", "validator")
-        assert hints is None, "Hints: validator role -> None"
-
     def test_below_threshold_returns_none(self, in_memory_db):
         """Verify get_hints returns None when rule below threshold."""
         engine = self._make_engine(in_memory_db)

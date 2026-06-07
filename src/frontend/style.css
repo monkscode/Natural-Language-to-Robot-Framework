@@ -1171,6 +1171,14 @@ body {
     color: var(--error);
 }
 
+/* Delivered, but the deterministic robot --dryrun gate flagged issues or could
+   not run (dryrun_status = failed | unverified). Not a hard error — the code is
+   still delivered for review. */
+.status-warning {
+    background: rgb(245 158 11 / 0.1);
+    color: var(--warning);
+}
+
 /* --- PROGRESS BARS --- */
 .progress-container {
     padding: 0 0 1rem 0;

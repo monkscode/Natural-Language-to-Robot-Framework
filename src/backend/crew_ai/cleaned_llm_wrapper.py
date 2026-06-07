@@ -49,6 +49,7 @@ RATE LIMITING:
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -99,6 +100,15 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 msg = getattr(choices[0], "message", None)
                 if msg:
                     response_text = getattr(msg, "content", None)
+                # Diagnostic: capture finish_reason so we can tell content-filter
+                # blocks (finish_reason="content_filter", content=None) apart from
+                # genuine empty completions and from MAX_TOKENS/RECITATION.
+                finish_reason = getattr(choices[0], "finish_reason", None)
+                if response_text is None or response_text == "":
+                    logger.warning(
+                        "[LLM_TRACE] Empty response: finish_reason=%s model=%s",
+                        finish_reason, model,
+                    )
         except Exception as _exc:
             logger.warning("[LLM_TRACE] Failed to extract response text: %s", _exc)
 
@@ -340,18 +350,96 @@ class CleanedLLMWrapper(LLM):
         )
         return result
 
+    # Backoff for empty-response retries: 0.5s * 2^retry_idx, capped at 5s.
+    # Worst-case extra latency at default max_retries=2: 0.5 + 1.0 = 1.5s.
+    _EMPTY_RETRY_BASE_SECONDS = 0.5
+    _EMPTY_RETRY_CAP_SECONDS = 5.0
+
     def call(self, messages, *args, **kwargs) -> str:
         """
-        Override call() for output cleaning.
+        CrewAI LLM.call wrapper. Applies Action/ActionInput cleaning and retries
+        on empty responses (None / "" / whitespace), which Vertex AI Gemini —
+        notably gemini-3.5-flash — emits intermittently with finish_reason=stop.
+        Tool results in `messages` are reused on retry (no tool re-invocation).
 
-        CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
-        _generate() is a LangChain concept and is never called by CrewAI, so all
-        cleaning must happen here.
+        Pass-through:
+          • Exceptions propagate — LiteLLM's num_retries handles transient API errors.
+          • Non-string non-None returns (structured tool calls) skip retry and cleaning.
+          • If every attempt empties, the empty result is returned so CrewAI raises
+            its existing "None or empty" error — failures are loud, never silent.
         """
-        result = super().call(messages, *args, **kwargs)
+        from src.backend.core.config import settings  # lazy import: avoids circular import
+        max_retries = settings.LLM_EMPTY_RESPONSE_MAX_RETRIES
+
+        result = None
+        saw_empty = False
+
+        for attempt in range(max_retries + 1):
+            result = super().call(messages, *args, **kwargs)
+
+            # Structured tool-call response (e.g. function-calling object) — pass through.
+            if result is not None and not isinstance(result, str):
+                if saw_empty:
+                    self._monitor.log_empty_recovery()
+                    logger.info(
+                        "[LLM_RETRY] Recovered (non-string result) on attempt %d/%d (model=%s).",
+                        attempt + 1, max_retries + 1, self.model,
+                    )
+                self._monitor.log_response(was_cleaned=False)
+                return result
+
+            # "0" / "{}" / "False" are valid content; only None/""/whitespace are empty.
+            is_empty = result is None or not result.strip()
+
+            if not is_empty:
+                if saw_empty:
+                    self._monitor.log_empty_recovery()
+                    logger.info(
+                        "[LLM_RETRY] Recovered on attempt %d/%d (model=%s, content length=%d).",
+                        attempt + 1, max_retries + 1, self.model, len(result),
+                    )
+                break
+
+            saw_empty = True
+
+            if attempt >= max_retries:
+                self._monitor.log_empty_failure()
+                logger.error(
+                    "[LLM_RETRY] Empty response from %s through all %d attempt(s); giving up. "
+                    "Workflow totals — retries: %d, recoveries: %d, failures: %d.",
+                    self.model, attempt + 1,
+                    self._monitor.empty_response_retries,
+                    self._monitor.empty_response_recoveries,
+                    self._monitor.empty_response_failures,
+                )
+                break
+
+            self._monitor.log_empty_retry()
+            backoff_seconds = min(
+                self._EMPTY_RETRY_BASE_SECONDS * (2 ** attempt),
+                self._EMPTY_RETRY_CAP_SECONDS,
+            )
+            logger.warning(
+                "[LLM_RETRY] Empty response from %s on attempt %d/%d; "
+                "retry %d/%d after %.0fms backoff.",
+                self.model,
+                attempt + 1, max_retries + 1,
+                attempt + 1, max_retries,
+                backoff_seconds * 1000,
+            )
+            time.sleep(backoff_seconds)
+
+        # Empty result after all retries → return as-is, CrewAI surfaces the error.
         if not isinstance(result, str):
             self._monitor.log_response(was_cleaned=False)
             return result
+
+        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI only
+        # raises its "None or empty" error on == "" (agent_utils.py). Normalise so a
+        # persistent whitespace-only response fails loudly instead of being formatted.
+        if not result.strip():
+            self._monitor.log_response(was_cleaned=False)
+            return ""
 
         cleaned = LLMOutputCleaner.clean_output(result)
         was_cleaned = cleaned != result

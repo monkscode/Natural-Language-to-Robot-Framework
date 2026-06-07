@@ -181,7 +181,6 @@ class TestHintMetadataCache:
             "agents": {
                 "planner":   {"count": 2, "available": 5, "sources": ["nl_feedback"]},
                 "assembler": {"count": 1, "available": 3, "sources": ["nl_feedback"]},
-                "validator": {"count": 0, "available": 0, "sources": []},
             },
             "nl_injected_ids": [5, 12],
         }

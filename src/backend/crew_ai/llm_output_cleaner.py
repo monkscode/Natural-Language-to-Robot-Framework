@@ -195,6 +195,14 @@ class LLMFormattingMonitor:
         self.cleaned_responses = 0
         self.formatting_errors_detected = 0
         self.formatting_errors_recovered = 0
+        # Empty-response retry tracking. CleanedLLMWrapper.call retries the same
+        # litellm.completion() when the LLM returns None/empty/whitespace content
+        # (a known gemini-3.5-flash flake mode where finish_reason=stop but no
+        # tokens are emitted). These counters surface the rate so end-of-workflow
+        # stats expose model flakiness instead of hiding it.
+        self.empty_response_retries = 0     # extra attempts triggered by an empty result
+        self.empty_response_recoveries = 0  # calls that emptied at least once but eventually returned content
+        self.empty_response_failures = 0    # calls that emptied through every attempt
 
     def log_response(self, was_cleaned: bool = False):
         """Log an LLM response."""
@@ -208,6 +216,18 @@ class LLMFormattingMonitor:
         if was_recovered:
             self.formatting_errors_recovered += 1
 
+    def log_empty_retry(self):
+        """Record one retry attempt triggered by an empty LLM response."""
+        self.empty_response_retries += 1
+
+    def log_empty_recovery(self):
+        """Record one call that returned empty initially but recovered via retry."""
+        self.empty_response_recoveries += 1
+
+    def log_empty_failure(self):
+        """Record one call that returned empty through every retry attempt."""
+        self.empty_response_failures += 1
+
     def get_numeric_stats(self) -> dict:
         """Return raw counters as a dict for structured storage."""
         total = self.total_responses
@@ -218,6 +238,9 @@ class LLMFormattingMonitor:
             "clean_rate": round((cleaned / total * 100), 1) if total > 0 else 0.0,
             "formatting_errors_detected": self.formatting_errors_detected,
             "formatting_errors_recovered": self.formatting_errors_recovered,
+            "empty_response_retries": self.empty_response_retries,
+            "empty_response_recoveries": self.empty_response_recoveries,
+            "empty_response_failures": self.empty_response_failures,
         }
 
     def get_stats(self) -> str:
@@ -227,19 +250,30 @@ class LLMFormattingMonitor:
 
         clean_rate = (self.cleaned_responses / self.total_responses) * 100
 
+        parts = [
+            f"LLM Responses: {self.total_responses} total, "
+            f"{self.cleaned_responses} cleaned ({clean_rate:.1f}%)"
+        ]
+
         if self.formatting_errors_detected > 0:
             recovery_rate = (self.formatting_errors_recovered /
                              self.formatting_errors_detected) * 100
-            return (
-                f"LLM Responses: {self.total_responses} total, "
-                f"{self.cleaned_responses} cleaned ({clean_rate:.1f}%), "
-                f"Errors: {self.formatting_errors_detected} detected, "
+            parts.append(
+                f"Format Errors: {self.formatting_errors_detected} detected, "
                 f"{self.formatting_errors_recovered} recovered ({recovery_rate:.1f}%)"
             )
         else:
-            return (
-                f"LLM Responses: {self.total_responses} total, "
-                f"{self.cleaned_responses} cleaned ({clean_rate:.1f}%), "
-                f"No formatting errors detected"
+            parts.append("No formatting errors detected")
+
+        # Only surface empty-response metrics when something actually happened —
+        # zero retries means a clean run, no need to bloat the log line.
+        if (self.empty_response_retries or self.empty_response_recoveries
+                or self.empty_response_failures):
+            parts.append(
+                f"Empty-Response: {self.empty_response_retries} retry attempts, "
+                f"{self.empty_response_recoveries} recovered, "
+                f"{self.empty_response_failures} failed"
             )
+
+        return ", ".join(parts)
 

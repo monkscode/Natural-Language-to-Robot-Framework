@@ -10,7 +10,6 @@ Tests cover:
   _extract_json_by_key: valid JSON, embedded in text, multiple candidates
   assembly_output_guardrail: valid JSON, RF code extraction, no code
   identification_output_guardrail: valid steps, missing steps
-  validation_output_guardrail: valid, missing valid key
 """
 
 import pytest
@@ -19,7 +18,6 @@ from src.backend.crew_ai.tasks import (
     _extract_json_by_key,
     assembly_output_guardrail,
     identification_output_guardrail,
-    validation_output_guardrail,
 )
 
 
@@ -108,24 +106,4 @@ class TestIdentificationOutputGuardrail:
         from unittest.mock import MagicMock
         task_out = MagicMock(raw=output)
         is_valid, result = identification_output_guardrail(task_out)
-        assert is_valid is False
-
-
-class TestValidationOutputGuardrail:
-    """Tests for validation_output_guardrail."""
-
-    def test_valid_output(self):
-        """Valid JSON with 'valid' key passes."""
-        output = json.dumps({"valid": True, "reason": "Code is correct"})
-        from unittest.mock import MagicMock
-        task_out = MagicMock(raw=output)
-        is_valid, result = validation_output_guardrail(task_out)
-        assert is_valid is True
-
-    def test_missing_valid_key(self):
-        """JSON without 'valid' key → fails with feedback."""
-        output = json.dumps({"reason": "looks good"})
-        from unittest.mock import MagicMock
-        task_out = MagicMock(raw=output)
-        is_valid, result = validation_output_guardrail(task_out)
         assert is_valid is False

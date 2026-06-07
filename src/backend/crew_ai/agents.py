@@ -20,10 +20,10 @@ batch_browser_use_tool = BatchBrowserUseTool()
 
 
 class RobotAgents:
-    def __init__(self, model_provider, model_name, library_context=None, 
+    def __init__(self, model_provider, model_name, library_context=None,
                  keyword_search_tool=None,
                  planner_context=None,
-                 assembler_context=None, validator_context=None):
+                 assembler_context=None):
         """
         Initialize Robot Framework agents.
 
@@ -34,16 +34,14 @@ class RobotAgents:
             keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
             planner_context: Optimized context for Test Automation Planner (optional)
             assembler_context: Optimized context for Code Assembler (optional)
-            validator_context: Optimized context for Code Validator (optional)
         """
         self.llm = get_llm(model_provider, model_name)
         self.library_context = library_context
         self.keyword_search_tool = keyword_search_tool
-        
+
         # Role-specific optimized contexts
         self.planner_context = planner_context
         self.assembler_context = assembler_context
-        self.validator_context = validator_context
 
     def _get_agent_context(self, agent_type: str) -> str:
         """
@@ -55,8 +53,8 @@ class RobotAgents:
         3. Empty string (graceful degradation)
         
         Args:
-            agent_type: "planner", "assembler", or "validator"
-        
+            agent_type: "planner" or "assembler"
+
         Returns:
             Context string with appropriate formatting
         """
@@ -64,14 +62,12 @@ class RobotAgents:
         optimized_context_map = {
             "planner": self.planner_context,
             "assembler": self.assembler_context,
-            "validator": self.validator_context
         }
-        
+
         # Map agent type to library context property
         library_context_map = {
             "planner": "planning_context",
             "assembler": "code_assembly_context",
-            "validator": "validation_context"
         }
         
         optimized_context = optimized_context_map.get(agent_type)
@@ -208,64 +204,14 @@ class RobotAgents:
                 "separate args <x> <y> or combined 'x=y'. Follow the tool's argument structure exactly.\n\n"
                 
                 "When you receive input, immediately output the code starting with *** Settings ***.\n"
-                "Do NOT explain what you're doing. Do NOT think out loud. Just output the code.\n\n"
-                "**DELEGATION HANDLING:**\n"
-                "You may receive delegation requests from Code Validator with error details. "
-                "When you receive a delegation request:\n"
-                "1. Carefully review the error details and validation feedback provided\n"
-                "2. Identify the specific issues in the previously generated code\n"
-                "3. Regenerate the code with all corrections applied\n"
-                "4. Focus on fixing the exact errors mentioned (syntax, keyword usage, variable assignments, etc.)\n"
-                "5. Preserve all correct parts of the code while fixing only the problematic sections\n"
-                "6. Ensure the regenerated code addresses every error point raised by the validator\n\n"
-                "When processing delegation requests, prioritize:\n"
-                "- Critical syntax errors that prevent code execution\n"
-                "- Incorrect keyword usage for the target library\n"
-                "- Missing variable assignments for keywords that return values\n"
-                "- Proper indentation and formatting\n\n"
-                "Your goal is to learn from validation feedback and produce corrected code that passes validation."
+                "Do NOT explain what you're doing. Do NOT think out loud. Just output the code."
                 f"{library_knowledge}"
             ),
             tools=[self.keyword_search_tool] if self.keyword_search_tool else [],
             llm=self.llm,
             verbose=True,
-            allow_delegation=True,
-        )
-
-    def code_validator_agent(self) -> Agent:
-        # Import settings to access MAX_AGENT_ITERATIONS
-        from ..core.config import settings
-
-        # Get context via unified method with consistent priority chain
-        library_knowledge = self._get_agent_context("validator")
-
-        # Build tools list - add keyword_search_tool if available
-        # This allows validator to look up keyword details for validation
-        tools = []
-        if self.keyword_search_tool:
-            tools.append(self.keyword_search_tool)
-            logger.info("🔧 Validator has keyword_search_tool access for keyword verification")
-
-        return Agent(
-            role="Robot Framework Linter and Quality Assurance Engineer",
-            goal=f"Validate Robot Framework code for {self.library_context.library_name if self.library_context else 'Robot Framework'} correctness. Delegate fixes if errors found.",
-            backstory=(
-                "Expert Robot Framework validator. Check: syntax, keyword usage, variable assignments, locator formats, test structure. "
-                "\n\n⛔ **MANDATORY KEYWORD VERIFICATION:**\n"
-                "You are FORBIDDEN from flagging ANY keyword as invalid UNLESS you have first:\n"
-                "1. Called keyword_search tool with the keyword name\n"
-                "2. Verified from tool response that keyword doesn't exist OR has wrong syntax\n"
-                "3. If keyword_search returns results, the keyword IS VALID - do NOT flag it!\n\n"
-                "⚠️ YOUR INTERNAL KNOWLEDGE MAY BE WRONG OR OUTDATED.\n"
-                "Browser Library has keywords you may not know (e.g., Click With Options).\n"
-                "ALWAYS search first, NEVER assume a keyword is invalid without tool verification.\n\n"
-                "If VALID: Return JSON {\"valid\": true, \"reason\": \"...\"}. "
-                "If INVALID: Document errors with line numbers, then delegate to Code Assembly Agent with fix instructions."
-                f"{library_knowledge}"
-            ),
-            tools=tools,
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=True,
-            max_iter=settings.MAX_AGENT_ITERATIONS,
+            # No in-crew delegation: the LLM validator agent was removed and replaced
+            # by the deterministic robot --dryrun gate (dryrun_service.py). The repair
+            # loop builds a fresh single-agent crew, so this agent never delegates.
+            allow_delegation=False,
         )
