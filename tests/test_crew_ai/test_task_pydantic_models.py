@@ -9,7 +9,6 @@ Tests:
   - PlannedStep: required fields, optional defaults
   - PlanOutput: steps is a list
   - IdentifiedElement: inherits PlannedStep, adds locator/found
-  - ValidationOutput: valid, reason, optional errors
   - AssemblyOutput: code field
 """
 
@@ -18,7 +17,6 @@ from src.backend.crew_ai.tasks import (
     PlannedStep,
     PlanOutput,
     IdentifiedElement,
-    ValidationOutput,
     AssemblyOutput,
 )
 
@@ -110,16 +108,6 @@ class TestIdentifiedElement:
         )
         assert elem.dropdown_framework == ""
         assert elem.select_id is None
-
-
-class TestValidationOutput:
-    """Tests for ValidationOutput model."""
-
-    def test_valid_with_reason(self):
-        """Validation output with valid=True and reason."""
-        v = ValidationOutput(valid=True, reason="Code is syntactically correct")
-        assert v.valid is True
-        assert "correct" in v.reason
 
 
 class TestAssemblyOutput:

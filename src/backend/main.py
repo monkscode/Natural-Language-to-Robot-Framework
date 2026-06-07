@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
@@ -56,6 +57,9 @@ app.include_router(workflow_metrics_router, prefix="/api")
 from src.backend.api.trace_endpoints import router as trace_router
 app.include_router(trace_router, prefix="/api")
 
+from src.backend.api.learning_endpoints import router as learning_router
+app.include_router(learning_router, prefix="/api/learning")
+
 # --- Health Check Endpoints ---
 from src.backend.api.health import health_check, api_health_check
 
@@ -68,6 +72,15 @@ ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 
 # Create robot_tests directory if it doesn't exist
 os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
+
+# /learning SPA catch-all — must be registered before the static mount so
+# clean URLs like /learning and /learning/hints/5 serve learning.html
+_learning_html = os.path.join(FRONTEND_DIR, "learning.html")
+
+@app.get("/learning")
+@app.get("/learning/{path:path}")
+async def learning_spa():
+    return FileResponse(_learning_html)
 
 # Mount static files
 app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
@@ -148,6 +161,8 @@ async def shutdown_event():
         if feedback_loop is not None:
             feedback_loop.write_queue.shutdown(timeout=5.0)
             logging.info("Learning write queue drained successfully.")
+            feedback_loop.execution_memory.close()
+            logging.info("Learning SQLite writer connection closed.")
     except Exception as e:
         logging.warning(f"Learning write queue shutdown error: {e}")
     logging.info("Application shutdown complete.")

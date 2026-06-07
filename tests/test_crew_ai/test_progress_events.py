@@ -62,13 +62,13 @@ class TestRegisterUnregister:
         )
 
         q = Queue()
-        task_id_map = {"task-a": 0, "task-b": 1, "task-c": 2, "task-d": 3}
+        task_id_map = {"task-a": 0, "task-b": 1, "task-c": 2}
         register_workflow("wf-1", q, task_id_map)
 
         assert _workflow_queues["wf-1"] is q
         assert _workflow_task_map["wf-1"] == task_id_map
         assert _task_to_workflow["task-a"] == "wf-1"
-        assert _task_to_workflow["task-d"] == "wf-1"
+        assert _task_to_workflow["task-c"] == "wf-1"
         assert _current_progress["wf-1"] == 0
         assert _llm_call_seen["wf-1"] == set()
         assert _tool_usage_seen["wf-1"] == set()
@@ -180,7 +180,7 @@ class TestProgressMonotonicity:
 
         q = Queue()
         register_workflow("wf-1", q, {
-            "task-0": 0, "task-1": 1, "task-2": 2, "task-3": 3,
+            "task-0": 0, "task-1": 1, "task-2": 2,
         })
 
         # Fire task 2 completed (80%) first

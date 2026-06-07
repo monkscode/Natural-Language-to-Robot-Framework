@@ -95,13 +95,21 @@ def create_test_db():
 
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection."""
+    """Create ExecutionMemory backed by existing connection.
+
+    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
+    real ExecutionMemory it wraps so read_conn() works correctly.
+    """
+    if hasattr(conn, '_em'):
+        return conn._em
     em = ExecutionMemory.__new__(ExecutionMemory)
     em.db_path = ":memory:"
     em._chroma_dir = None
-    em.conn = conn
+    em._writer_conn = conn
     em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
     em._execution_collection = None
+    em._chroma_failed_at = None
+    em._chroma_last_error = None
     return em
 
 
@@ -499,35 +507,13 @@ class TestContradictionDetector:
         summary = detector.get_summary()
         assert summary["total_flagged"] == 0
 
-    def test_cd_register_checker(self, in_memory_db):
-        detector = ContradictionDetector(in_memory_db)
-
-        def custom_checker():
-            return [{"rule_type": "custom", "rule_id": 1, "rule_name": "test",
-                     "evidence": 5, "counter_evidence": 5,
-                     "contradiction_ratio": 0.5, "current_score": 0.5}]
-
-        detector.register_checker("custom", custom_checker)
-        flagged = detector.detect_all()
-        custom = [f for f in flagged if f["rule_type"] == "custom"]
-        assert len(custom) == 1
-
-    def test_cd_duplicate_registration_ignored(self, in_memory_db):
-        detector = ContradictionDetector(in_memory_db)
-        initial_count = len(detector._checkers)
-        detector.register_checker("structural", lambda: [])
-        assert len(detector._checkers) == initial_count  # Not added again
-
     def test_cd_checker_error_handled(self, in_memory_db):
-        """A failing checker should not crash detect_all."""
+        """A failing checker should not crash detect_all; the other checker still runs."""
+        from unittest.mock import patch
         detector = ContradictionDetector(in_memory_db)
-
-        def bad_checker():
-            raise RuntimeError("DB error")
-
-        detector.register_checker("broken", bad_checker)
-        # Should not raise -- error is logged and skipped
-        flagged = detector.detect_all()
+        with patch.object(detector, "_check_structural_rules", side_effect=RuntimeError("DB error")):
+            flagged = detector.detect_all()
+        # _check_anti_patterns still ran — result is a list (not a raised exception)
         assert isinstance(flagged, list)
 
     def test_cd_build_flag_format(self):
@@ -858,3 +844,148 @@ class TestIntegration:
         assert FeedbackLoop is not None
         assert LearningMetricsTracker is not None
         assert ContradictionDetector is not None
+
+
+# ===================================================================
+# D3 — _get_with_retry unit tests
+# ===================================================================
+
+class TestGetWithRetry:
+    """Unit tests for the _get_with_retry write-queue drain helper (D3 fix)."""
+
+    def test_returns_record_on_first_attempt(self):
+        from unittest.mock import MagicMock
+        from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
+
+        record = MagicMock()
+        em = MagicMock()
+        em.get.return_value = record
+
+        result = _get_with_retry(em, "wf-001", max_attempts=3, base_ms=1)
+
+        assert result is record
+        assert em.get.call_count == 1
+
+    def test_retries_and_finds_record_on_second_attempt(self):
+        from unittest.mock import MagicMock, patch
+        from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
+
+        record = MagicMock()
+        em = MagicMock()
+        em.get.side_effect = [None, record]
+
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
+            result = _get_with_retry(em, "wf-002", max_attempts=3, base_ms=1)
+
+        assert result is record
+        assert em.get.call_count == 2
+
+    def test_retries_and_finds_record_on_third_attempt(self):
+        from unittest.mock import MagicMock, patch
+        from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
+
+        record = MagicMock()
+        em = MagicMock()
+        em.get.side_effect = [None, None, record]
+
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
+            result = _get_with_retry(em, "wf-003", max_attempts=3, base_ms=1)
+
+        assert result is record
+        assert em.get.call_count == 3
+
+    def test_returns_none_after_all_attempts_exhausted(self):
+        from unittest.mock import MagicMock, patch
+        from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
+
+        em = MagicMock()
+        em.get.return_value = None
+
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
+            result = _get_with_retry(em, "wf-004", max_attempts=3, base_ms=1)
+
+        assert result is None
+        assert em.get.call_count == 3
+
+    def test_sleep_called_only_between_attempts_not_after_last(self):
+        """sleep() must fire after attempt 0 and 1, never after the final attempt."""
+        from unittest.mock import MagicMock, patch, call
+        from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
+
+        em = MagicMock()
+        em.get.return_value = None
+
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep") as mock_sleep:
+            _get_with_retry(em, "wf-005", max_attempts=3, base_ms=100)
+
+        assert mock_sleep.call_count == 2
+        # Exponential back-off: 100ms then 200ms
+        mock_sleep.assert_has_calls([call(0.1), call(0.2)])
+
+
+# ===================================================================
+# C3 — ChromaDB status surfaced in get_learning_stats()
+# ===================================================================
+
+class TestChromaObservabilityInStats:
+    """C3: get_learning_stats() must expose ChromaDB health so operators can
+    detect a failed init without reading logs.
+
+    Concrete scenario: ChromaDB directory is missing on startup. The sentinel
+    is set. An operator calls GET /api/learning-stats to understand why semantic
+    search is returning empty results. The "execution_memory" key tells them
+    exactly what went wrong.
+    """
+
+    def test_learning_stats_includes_execution_memory_key(self, in_memory_db):
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        stats = fl.get_learning_stats()
+        assert "execution_memory" in stats, (
+            "get_learning_stats() must include 'execution_memory' key for C3 observability"
+        )
+
+    def test_chromadb_available_false_when_sentinel_set(self, in_memory_db):
+        """When ChromaDB failed to init (sentinel set), stats report unavailable."""
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        # create_execution_memory sets _chroma_client = _CHROMADB_INIT_FAILED
+        stats = fl.get_learning_stats()
+        assert stats["execution_memory"]["chromadb_available"] is False
+
+    def test_chromadb_last_error_none_when_no_failure_recorded(self, in_memory_db):
+        """_chroma_last_error is None when _chroma_failed_at is not set (sentinel set
+        without a real failure, as in tests)."""
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        stats = fl.get_learning_stats()
+        assert stats["execution_memory"]["chromadb_last_error"] is None
+
+
+# ===================================================================
+# C4 — optimization_init_failures counter in FeedbackLoop
+# ===================================================================
+
+class TestOptimizationInitFailuresCounter:
+    """C4: FeedbackLoop._optimization_init_failures lets operators detect how often
+    crew.py's outer optimization-init try/except caught an exception and fell back
+    to baseline (no hints injected).
+
+    Concrete scenario: On a multi-worker deployment, one worker has a stale ChromaDB
+    lock. Every workflow on that worker silently runs without optimization. With C4,
+    GET /api/learning-stats shows optimization_init_failures > 0, which is immediately
+    actionable (restart that worker / free the lock).
+    """
+
+    def test_counter_starts_at_zero(self, in_memory_db):
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        assert fl._optimization_init_failures == 0
+
+    def test_learning_stats_includes_counter(self, in_memory_db):
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        stats = fl.get_learning_stats()
+        assert "optimization_init_failures" in stats
+
+    def test_counter_value_exposed_in_stats(self, in_memory_db):
+        """Stats reports the current counter value — crew.py increments it on failure."""
+        fl, *_ = _build_feedback_loop(in_memory_db)
+        fl._optimization_init_failures = 3
+        stats = fl.get_learning_stats()
+        assert stats["optimization_init_failures"] == 3

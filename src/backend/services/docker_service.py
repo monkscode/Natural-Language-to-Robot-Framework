@@ -261,7 +261,9 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
-            "name": f"robot-test-{run_id}"  # Give container a unique name
+            "name": f"robot-test-{run_id}",  # Give container a unique name
+            "mem_limit": "2g",
+            "pids_limit": 256,
         }
         logging.info(
             f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {normalized_host_robot_tests_dir}:/app/robot_tests")

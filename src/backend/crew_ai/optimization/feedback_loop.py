@@ -29,9 +29,12 @@ import base64
 import json
 import logging
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Optional, List, Dict
 
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
@@ -48,6 +51,184 @@ from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
 from src.backend.crew_ai.optimization.pattern_learning import QueryPatternMatcher
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# D3 — Write-queue drain helper
+# ---------------------------------------------------------------------------
+
+def _get_with_retry(
+    em,
+    workflow_id: str,
+    max_attempts: int = 3,
+    base_ms: int = 100,
+):
+    """Retry em.get() to handle write-queue drain lag.
+
+    process_user_feedback is offloaded to an asyncio.to_thread worker by the
+    async /api/feedback handler, so this runs on a worker thread (never the
+    event loop) — the sleep below is safe.  The execution record is written by
+    the learning-writer thread via write_queue.submit() inside
+    _process_learning(), which starts only AFTER the execution result SSE is
+    already sent to the client.  A user (or automated caller) can therefore
+    submit feedback before the INSERT is committed.
+
+    Sleeping base_ms * 2^attempt between attempts gives the writer thread time
+    to drain.  Max wait: 100ms + 200ms = 300ms across 3 attempts — well within
+    the MAX_CONCURRENT_WORKFLOWS=10 worst-case queue depth of ~160ms.
+    Returns None after all attempts (same as the no-retry path), so the caller
+    degrades gracefully with an existing warning log.
+    """
+    for attempt in range(max_attempts):
+        record = em.get(workflow_id)
+        if record is not None:
+            return record
+        if attempt < max_attempts - 1:
+            time.sleep(base_ms / 1000 * (2 ** attempt))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Trigger 2 — LLM conflict-detection prompt builder
+# ---------------------------------------------------------------------------
+
+def _build_conflict_prompt_with_feedback(
+    robot_code: str,
+    feedback_text: str,
+    active_hints: list,
+    working_code: Optional[str] = None,
+    domain: str | None = None,
+    url: str | None = None,
+    user_query: str | None = None,
+) -> str:
+    """LLM prompt for Trigger 2 — conflict detection at feedback submission.
+
+    State A (working_code provided): shows both failed code and corrected
+    code. Code evidence (v1 vs v2 diff) is the primary signal; feedback
+    text is interpretation of that diff. Only flag when code corroborates.
+
+    State B (working_code is None): shows only the code that was in use
+    when the test failed. The corrected-code section is omitted entirely
+    — no empty block, no LLM confusion.
+
+    Design principles:
+    - State A: code diff is the strongest signal; feedback interprets it.
+    - State B: feedback is primary; code is corroborating context.
+    - Conservative: when uncertain, preserve. A hint wrongly flagged loses
+      accumulated learning with no automatic recovery.
+    - Non-prescriptive: state the system, the evidence, the stakes —
+      let the LLM derive its analysis method.
+    """
+    from src.backend.crew_ai.optimization.conflict_detection import (
+        _hint_line,
+        _build_context_prefix,
+    )
+
+    hint_lines = "\n".join(_hint_line(h) for h in active_hints)
+    context_prefix = _build_context_prefix(domain, url, user_query)
+
+    code_section = (
+        "ROBOT FRAMEWORK CODE (v1 — the auto-generated code that was in use when "
+        "the test failed):\n"
+        "```\n"
+        f"{robot_code.strip()}\n"
+        "```\n"
+    )
+    if working_code:
+        code_section += (
+            "\nCORRECTED CODE (v2 — developer's manual fix that passed against "
+            "the real system):\n"
+            "```\n"
+            f"{working_code.strip()}\n"
+            "```\n"
+        )
+
+    if working_code:
+        signal_instruction = (
+            "Signal priority for this judgment:\n"
+            "1. The v1 vs v2 code diff is the strongest evidence — v2 actually passed "
+            "against the real system.\n"
+            "2. The user's feedback interprets the diff and the user's intent. Use it to "
+            "disambiguate when multiple things changed. Do NOT flag a hint based on "
+            "feedback alone if the v1 vs v2 diff does not bear it out.\n"
+            "3. A hint whose advice agrees with the user's feedback is REINFORCEMENT, not "
+            "a conflict. If the feedback and an existing hint say the same thing in "
+            "different words, do NOT flag that hint — the feedback is confirming it, "
+            "not contradicting it.\n"
+        )
+    else:
+        signal_instruction = (
+            "The user's feedback text is the primary statement of what was wrong. "
+            "Use the code as corroborating context to verify the described problem — "
+            "not as an independent source of additional changes to act on.\n"
+            "A hint whose advice agrees with the user's feedback is REINFORCEMENT, not "
+            "a conflict. If the feedback and an existing hint say the same thing in "
+            "different words, do NOT flag that hint — the feedback is confirming it, "
+            "not contradicting it.\n"
+        )
+
+    return (
+        "You are the conflict detection component of an adaptive test automation "
+        "learning system.\n\n"
+        "This system auto-generates Robot Framework test code guided by learned hints "
+        "from past human corrections. The hints listed below were injected into the "
+        "agents when this test was generated. When a developer reports that something "
+        "in the generated output was wrong, the system identifies which injected hints "
+        "directly conflict with that feedback — those hints, if applied in future test "
+        "generation, would reproduce the same mistake.\n\n"
+        f"{context_prefix}\n"
+        "EXAMPLES — for reference only, do not respond to these:\n\n"
+        "Example 1 — DO flag (feedback explicitly contradicts hint; code corroborates):\n"
+        "  Active hint:\n"
+        "    [7] Use SeleniumLibrary's `Open Browser` keyword on this domain.\n"
+        "  v1 (failed):\n"
+        "    Open Browser    https://example.com    chrome\n"
+        "    Click           id=cta\n"
+        "  v2 (passed):\n"
+        "    New Browser    chromium\n"
+        "    New Page       https://example.com\n"
+        "    Click          id=cta\n"
+        '  User feedback: "This site needs Browser Library — SeleniumLibrary doesn\'t'
+        ' handle the SPA navigation reliably."\n'
+        '  Verdict: {"flag":[{"id":7,"reason":"Feedback explicitly states the switch'
+        " from SeleniumLibrary to Browser Library; v1 to v2 diff corroborates."
+        ' The Open Browser approach was the failing approach."}]}\n\n'
+        "Example 2 — DO NOT flag (hint agrees with feedback — reinforcement, not conflict):\n"
+        "  Active hint:\n"
+        "    [12] Wait for elements with state=stable before clicking dynamic content.\n"
+        "  v1 (failed):\n"
+        "    Click    css=#load-more\n"
+        "  v2 (passed):\n"
+        "    Wait For Elements State    css=#load-more    stable\n"
+        "    Click                      css=#load-more\n"
+        '  User feedback: "Need to wait for the element to settle before clicking."\n'
+        '  Verdict: {"flag":[]}\n\n'
+        "Example 3 — DO NOT flag (feedback too vague to link to any specific hint):\n"
+        "  Active hints:\n"
+        "    [3] Use Browser Library for this domain.\n"
+        "    [8] Use data-testid locators on this domain.\n"
+        '  User feedback: "Still doesn\'t work."\n'
+        '  Verdict: {"flag":[]}\n\n'
+        f"{code_section}\n"
+        "USER FEEDBACK (developer's statement about what was wrong or what they changed):\n"
+        f'"{feedback_text.strip()}"\n\n'
+        "INJECTED HINTS (used at generation time — numbers in brackets are unique hint IDs):\n"
+        f"{hint_lines}\n\n"
+        f"{signal_instruction}\n"
+        "Only flag a hint when you are confident its specific advice directly contradicts "
+        "the evidence. If the feedback is too vague to link confidently to a specific "
+        "hint, if the connection is indirect or ambiguous, or if the hint's advice is not "
+        "clearly reflected in the code shown, do not flag. Preservation is always the "
+        "safer choice: a hint that survives incorrectly will be gradually downscored by "
+        "future executions; a hint wrongly flagged loses accumulated learning with no "
+        "automatic recovery.\n\n"
+        "Each reason must specifically address THIS hint's advice and how the evidence "
+        "disproves it. Do NOT write generic reasons that could apply to multiple hints. "
+        "If you cannot articulate a hint-specific reason, do not flag that hint.\n\n"
+        "Respond with ONLY valid JSON:\n"
+        '{"flag": [{"id": <int>, "reason": "<explanation specific to this hint>"}, ...]}\n'
+        'If no hints should be flagged: {"flag": []}'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -76,15 +257,15 @@ class LearningMetricsTracker:
     - Novel domains/queries always start as Category A → perpetual baseline
     """
 
-    def __init__(self, db_conn):
+    def __init__(self, execution_memory=None):
         """
-        Initialize with a shared SQLite connection.
+        Initialize LearningMetricsTracker.
 
         Args:
-            db_conn: sqlite3.Connection with row_factory=sqlite3.Row.
-                     Typically execution_memory.conn.
+            execution_memory: ExecutionMemory instance. Write methods
+                              use _writer_conn; reads use read_conn().
         """
-        self.db_conn = db_conn
+        self._em = execution_memory
         self._min_sample_size = LEARNING_CONFIG[
             "NATURAL_COMPARISON_MIN_SAMPLE_SIZE"
         ]
@@ -103,15 +284,27 @@ class LearningMetricsTracker:
         is_retry_after_feedback: bool = False,
         attempt_number: int = 1,
         hint_tokens: int = 0,
+        was_holdout: bool = False,
     ) -> None:
-        """Record execution with full hint context and cost data."""
-        self.db_conn.execute(
+        """Record execution with full hint context and cost data.
+
+        was_holdout: True when the R7 random-holdout suppressed
+        otherwise-available hints for this run (Category C). hints_injected
+        is 0 for such a run, but hints_available still reflects the real
+        pre-suppression count — that is what distinguishes Cat C from Cat A.
+        """
+        if not self._em:
+            return
+        from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
+        _assert_writer_thread("LearningMetricsTracker.record_execution")
+        self._em._writer_conn.execute(
             "INSERT INTO learning_metrics "
             "(workflow_id, user_query, is_first_attempt, "
             " is_retry_after_feedback, attempt_number, "
             " hints_available, hints_injected, hint_sources, "
-            " llm_calls, llm_cost, hint_tokens, test_passed, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+            " llm_calls, llm_cost, hint_tokens, test_passed, was_holdout, "
+            " timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
             (
                 workflow_id,
                 user_query,
@@ -125,9 +318,10 @@ class LearningMetricsTracker:
                 llm_cost,
                 hint_tokens,
                 1 if test_passed else 0,
+                1 if was_holdout else 0,
             ),
         )
-        self.db_conn.commit()
+        self._em._writer_conn.commit()
         logger.debug(
             "[LEARNING:METRICS] Recorded execution %s: "
             "hints_injected=%d, test_passed=%s",
@@ -146,38 +340,92 @@ class LearningMetricsTracker:
         - total_executions: aggregate count
         - sufficient_data: bool — enough data per category?
         """
-        # Category A: No hints injected, first attempt (organic baseline)
-        cat_a = self.db_conn.execute(
-            "SELECT COUNT(*) as total, "
-            "       COALESCE(SUM(test_passed), 0) as passed "
-            "FROM learning_metrics "
-            "WHERE hints_injected = 0 AND is_first_attempt = 1"
-        ).fetchone()
+        if not self._em:
+            return {
+                "natural_comparison": {
+                    "no_hints_available": {"total": 0, "passed": 0, "pass_rate": 0.0},
+                    "hints_injected": {"total": 0, "passed": 0, "pass_rate": 0.0},
+                    "holdout_suppressed": {"total": 0, "passed": 0, "pass_rate": 0.0},
+                    "lift": 0.0, "lift_is_biased": True, "honest_lift": None,
+                    "sufficient_data": False,
+                },
+                "retry_after_feedback": {"total": 0, "passed": 0, "pass_rate": 0.0},
+                "hint_accuracy": 0.0, "cost_per_successful_test": 0.0,
+                "total_executions": 0,
+            }
 
-        # Category B: Hints were injected, first attempt
-        cat_b = self.db_conn.execute(
-            "SELECT COUNT(*) as total, "
-            "       COALESCE(SUM(test_passed), 0) as passed "
-            "FROM learning_metrics "
-            "WHERE hints_injected > 0 AND is_first_attempt = 1"
-        ).fetchone()
+        with self._em.read_conn() as conn:
+            # Category A: No hints injected, first attempt (organic baseline)
+            # Category A: organic baseline — no hints injected, first attempt,
+            # and NOT an R7 holdout run. A holdout run also has
+            # hints_injected = 0, but it is "hints existed, suppressed" — the
+            # opposite of "no hints existed" — so it must be excluded here or
+            # it corrupts the baseline.
+            cat_a = conn.execute(
+                "SELECT COUNT(*) as total, "
+                "       COALESCE(SUM(test_passed), 0) as passed "
+                "FROM learning_metrics "
+                "WHERE hints_injected = 0 AND is_first_attempt = 1 "
+                "AND was_holdout = 0"
+            ).fetchone()
+
+            # Category B: Hints were injected, first attempt
+            cat_b = conn.execute(
+                "SELECT COUNT(*) as total, "
+                "       COALESCE(SUM(test_passed), 0) as passed "
+                "FROM learning_metrics "
+                "WHERE hints_injected > 0 AND is_first_attempt = 1"
+            ).fetchone()
+
+            # Category C: R7 holdout — hints were available but suppressed.
+            # The unbiased control group for honest_lift (Cat B - Cat C).
+            cat_c = conn.execute(
+                "SELECT COUNT(*) as total, "
+                "       COALESCE(SUM(test_passed), 0) as passed "
+                "FROM learning_metrics "
+                "WHERE was_holdout = 1 AND is_first_attempt = 1"
+            ).fetchone()
+
+            # Retry-after-feedback success rate
+            retry = conn.execute(
+                "SELECT COUNT(*) as total, "
+                "       COALESCE(SUM(test_passed), 0) as passed "
+                "FROM learning_metrics "
+                "WHERE is_retry_after_feedback = 1"
+            ).fetchone()
+
+            # Cost Per Successful Test (CPST) — across ALL executions
+            cost_data = conn.execute(
+                "SELECT COALESCE(SUM(llm_cost), 0) as total_cost, "
+                "       COALESCE(SUM(CASE WHEN test_passed = 1 "
+                "                    THEN 1 ELSE 0 END), 0) as successes "
+                "FROM learning_metrics"
+            ).fetchone()
 
         cat_a_total = cat_a["total"] or 0
         cat_a_passed = cat_a["passed"] or 0
         cat_b_total = cat_b["total"] or 0
         cat_b_passed = cat_b["passed"] or 0
+        cat_c_total = cat_c["total"] or 0
+        cat_c_passed = cat_c["passed"] or 0
 
         cat_a_rate = cat_a_passed / cat_a_total if cat_a_total > 0 else 0.0
         cat_b_rate = cat_b_passed / cat_b_total if cat_b_total > 0 else 0.0
+        cat_c_rate = cat_c_passed / cat_c_total if cat_c_total > 0 else 0.0
+        # Biased lift (B - A): Cat B queries resemble past successes, so this
+        # flatters the learning system. Kept for continuity, labelled biased.
         lift = cat_b_rate - cat_a_rate
+        # Honest lift (B - C): Cat C is the unbiased control. Emitted as None
+        # until Cat C has enough samples — it accrues at only ~5% of
+        # hint-available runs, so cat_c_rate is noise until hundreds have run.
+        # Without the None guard, cat_b_rate - 0.0 would read as a large fake
+        # positive lift before any holdout data exists (C15).
+        honest_lift = (
+            round(cat_b_rate - cat_c_rate, 4)
+            if cat_c_total >= self._min_sample_size
+            else None
+        )
 
-        # Retry-after-feedback success rate
-        retry = self.db_conn.execute(
-            "SELECT COUNT(*) as total, "
-            "       COALESCE(SUM(test_passed), 0) as passed "
-            "FROM learning_metrics "
-            "WHERE is_retry_after_feedback = 1"
-        ).fetchone()
         retry_total = retry["total"] or 0
         retry_passed = retry["passed"] or 0
         retry_rate = retry_passed / retry_total if retry_total > 0 else 0.0
@@ -185,13 +433,6 @@ class LearningMetricsTracker:
         # Hint accuracy = Cat B pass rate (same metric, different name)
         hint_accuracy = cat_b_rate
 
-        # Cost Per Successful Test (CPST) — across ALL executions
-        cost_data = self.db_conn.execute(
-            "SELECT COALESCE(SUM(llm_cost), 0) as total_cost, "
-            "       COALESCE(SUM(CASE WHEN test_passed = 1 "
-            "                    THEN 1 ELSE 0 END), 0) as successes "
-            "FROM learning_metrics"
-        ).fetchone()
         total_cost = cost_data["total_cost"] or 0.0
         total_successes = cost_data["successes"] or 0
         cpst = total_cost / total_successes if total_successes > 0 else 0.0
@@ -214,7 +455,14 @@ class LearningMetricsTracker:
                     "passed": cat_b_passed,
                     "pass_rate": round(cat_b_rate, 4),
                 },
+                "holdout_suppressed": {
+                    "total": cat_c_total,
+                    "passed": cat_c_passed,
+                    "pass_rate": round(cat_c_rate, 4),
+                },
                 "lift": round(lift, 4),
+                "lift_is_biased": True,
+                "honest_lift": honest_lift,
                 "sufficient_data": sufficient_data,
             },
             "retry_after_feedback": {
@@ -224,7 +472,9 @@ class LearningMetricsTracker:
             },
             "hint_accuracy": round(hint_accuracy, 4),
             "cost_per_successful_test": round(cpst, 4),
-            "total_executions": cat_a_total + cat_b_total + retry_total,
+            "total_executions": (
+                cat_a_total + cat_b_total + cat_c_total + retry_total
+            ),
         }
 
 
@@ -233,25 +483,10 @@ class LearningMetricsTracker:
 # ---------------------------------------------------------------------------
 
 class ContradictionDetector:
-    """
-    Scans learned rules for contradiction signals.
+    """Scans learned rules for contradiction signals.
 
-    A rule is "contradicted" when its counter-evidence ratio exceeds the
-    configured threshold — meaning the rule is wrong more often than
-    expected.
-
-    Design principles:
-    - Read-only: never modifies rules, only reports
-    - Extensible: checker registry pattern — adding a new engine
-      requires only adding one method and one registry entry
-    - Configurable thresholds via constructor (no hardcoded magic numbers)
-    - Efficient: single SQL query per rule type (batch scan)
-    - Minimum observation gate: avoids flagging rules with too little data
-
-    Future extensibility:
-    - Phase 2 adds domain-specific rules → add _check_domain_rules()
-    - Phase 3 adds locator strategies → add _check_locator_rules()
-    - External callers can register custom checkers via register_checker()
+    A rule is "contradicted" when its counter-evidence ratio exceeds the configured
+    threshold.  Read-only — never modifies rules, only reports.
     """
 
     DEFAULT_CONTRADICTION_RATIO = 0.4
@@ -260,21 +495,11 @@ class ContradictionDetector:
 
     def __init__(
         self,
-        db_conn,
+        execution_memory=None,
         contradiction_threshold: float = None,
         min_observations: int = None,
     ):
-        """
-        Initialize ContradictionDetector.
-
-        Args:
-            db_conn: sqlite3.Connection with row_factory=sqlite3.Row
-            contradiction_threshold: Ratio above which a rule is flagged
-                                     (default 0.4 = 40% contradictions).
-            min_observations: Minimum total observations before checking a
-                              rule (default 5).
-        """
-        self.db_conn = db_conn
+        self._em = execution_memory
         self.contradiction_threshold = (
             contradiction_threshold
             if contradiction_threshold is not None
@@ -285,73 +510,29 @@ class ContradictionDetector:
             if min_observations is not None
             else self.DEFAULT_MIN_OBSERVATIONS
         )
-        # Registry of checker methods — extensible for future engines
-        self._checkers: List[tuple] = [
-            ("structural", self._check_structural_rules),
-            ("anti_pattern", self._check_anti_patterns),
-        ]
-
-    def register_checker(self, rule_type: str, checker_fn) -> None:
-        """
-        Register a custom contradiction checker.
-
-        Args:
-            rule_type: Unique name for the rule type (e.g., "domain")
-            checker_fn: Callable returning List[dict] of flagged rules
-        """
-        # Prevent duplicate registration
-        existing_types = {rt for rt, _ in self._checkers}
-        if rule_type in existing_types:
-            logger.warning(
-                "[LEARNING] Checker '%s' already registered — skipping",
-                rule_type,
-            )
-            return
-        self._checkers.append((rule_type, checker_fn))
 
     def detect_all(self) -> List[dict]:
-        """
-        Run all registered contradiction checks.
-
-        Returns:
-            List of flagged rule dicts, each containing:
-            - rule_type: str (e.g., "structural", "anti_pattern")
-            - rule_id: int
-            - rule_name: str
-            - evidence: int
-            - counter_evidence: int
-            - contradiction_ratio: float
-            - current_score: float
-        """
+        """Run both contradiction checks, returning flagged rule dicts."""
         flagged = []
-        for rule_type, checker in self._checkers:
+        for checker in (self._check_structural_rules, self._check_anti_patterns):
             try:
                 flagged.extend(checker())
             except Exception as e:
                 logger.warning(
                     "[LEARNING] Contradiction checker '%s' failed: %s",
-                    rule_type, e,
+                    getattr(checker, "__name__", repr(checker)), e,
                 )
         return flagged
 
     def get_summary(self) -> dict:
-        """
-        Return contradiction statistics for monitoring.
-
-        Returns dict with:
-        - total_flagged: int
-        - by_type: dict mapping rule_type → count
-        - flagged_rules: List[dict] with details
-        """
+        """Return contradiction statistics for monitoring."""
         flagged = self.detect_all()
-        by_type: Dict[str, int] = {}
-        for rule_type, _ in self._checkers:
-            by_type[rule_type] = len(
-                [f for f in flagged if f["rule_type"] == rule_type]
-            )
         return {
             "total_flagged": len(flagged),
-            "by_type": by_type,
+            "by_type": {
+                "structural": sum(1 for f in flagged if f["rule_type"] == "structural"),
+                "anti_pattern": sum(1 for f in flagged if f["rule_type"] == "anti_pattern"),
+            },
             "flagged_rules": flagged,
         }
 
@@ -369,12 +550,15 @@ class ContradictionDetector:
 
         Returns list of flagged rule dicts.
         """
-        rows = self.db_conn.execute(
-            "SELECT id, rule_name, evidence_count, counter_evidence, score "
-            "FROM structural_rules "
-            "WHERE (evidence_count + counter_evidence) >= ?",
-            (self.min_observations,),
-        ).fetchall()
+        if not self._em:
+            return []
+        with self._em.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, rule_name, evidence_count, counter_evidence, score "
+                "FROM structural_rules "
+                "WHERE (evidence_count + counter_evidence) >= ?",
+                (self.min_observations,),
+            ).fetchall()
 
         flagged = []
         for row in rows:
@@ -414,14 +598,17 @@ class ContradictionDetector:
 
         Returns list of flagged rule dicts.
         """
-        rows = self.db_conn.execute(
-            "SELECT id, failure_category, query_pattern, "
-            "       evidence_count, score, last_seen "
-            "FROM anti_patterns "
-            "WHERE evidence_count >= ? "
-            "AND last_seen < datetime('now', ? || ' days')",
-            (self.min_observations, f"-{self.STALENESS_WINDOW_DAYS}"),
-        ).fetchall()
+        if not self._em:
+            return []
+        with self._em.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, failure_category, query_pattern, "
+                "       evidence_count, score, last_seen "
+                "FROM anti_patterns "
+                "WHERE evidence_count >= ? "
+                "AND last_seen < datetime('now', ? || ' days')",
+                (self.min_observations, f"-{self.STALENESS_WINDOW_DAYS}"),
+            ).fetchall()
 
         flagged = []
         for row in rows:
@@ -522,8 +709,8 @@ class FeedbackLoop:
         self.write_queue = write_queue or LearningWriteQueue()
         self.circuit_breaker = circuit_breaker or LearningCircuitBreaker()
 
-        # Shared db_conn for all engine + tracker construction
-        db_conn = self.execution_memory.conn
+        # Shared ExecutionMemory for all engine + tracker construction
+        em = self.execution_memory
 
         # Learning engines (lazy import to avoid circular dependencies)
         if structural_engine is not None:
@@ -533,9 +720,9 @@ class FeedbackLoop:
                 StructuralRuleEngine,
                 IntentExtractor,
             )
-            intent_extractor = IntentExtractor(db_conn)
+            intent_extractor = IntentExtractor(em)
             self.structural_engine = StructuralRuleEngine(
-                db_conn, intent_extractor
+                em, intent_extractor
             )
 
         if keyword_engine is not None:
@@ -544,7 +731,7 @@ class FeedbackLoop:
             from src.backend.crew_ai.optimization.keyword_correction_engine import (
                 KeywordCorrectionEngine,
             )
-            self.keyword_engine = KeywordCorrectionEngine(db_conn)
+            self.keyword_engine = KeywordCorrectionEngine(em)
 
         if anti_pattern_engine is not None:
             self.anti_pattern_engine = anti_pattern_engine
@@ -552,7 +739,7 @@ class FeedbackLoop:
             from src.backend.crew_ai.optimization.anti_pattern_engine import (
                 AntiPatternEngine,
             )
-            self.anti_pattern_engine = AntiPatternEngine(db_conn)
+            self.anti_pattern_engine = AntiPatternEngine(em)
 
         # Pattern learner — keyword-to-query association (ChromaDB only)
         if pattern_learner is not None:
@@ -580,7 +767,7 @@ class FeedbackLoop:
             from src.backend.crew_ai.optimization.nl_feedback_engine import (
                 NLFeedbackEngine,
             )
-            self.nl_engine = NLFeedbackEngine(db_conn)
+            self.nl_engine = NLFeedbackEngine(em)
         except Exception as e:
             logger.warning(
                 "[LEARNING] NLFeedbackEngine unavailable (non-blocking): %s", e,
@@ -589,11 +776,88 @@ class FeedbackLoop:
 
         # Metrics & contradiction detection
         self.metrics_tracker = (
-            metrics_tracker or LearningMetricsTracker(db_conn)
+            metrics_tracker or LearningMetricsTracker(em)
         )
         self.contradiction_detector = (
-            contradiction_detector or ContradictionDetector(db_conn)
+            contradiction_detector or ContradictionDetector(em)
         )
+
+        # C4: count times crew.py caught an optimization-init failure and fell back.
+        # Exposed via get_learning_stats() so operators can detect silent degradation.
+        self._optimization_init_failures: int = 0
+
+        # Current-state flag (NOT a counter): True when crew.py's most recent
+        # optimization-init succeeded, False when it fell back. Drives the
+        # health roll-up; crew.py sets it. Default True — no init seen yet.
+        self._optimization_init_ok: bool = True
+
+        # Outcome of the last learning_anchors reconcile — {ran_at, checked,
+        # missing_count} — or None until it has run. Read by get_health_status().
+        self.last_reconcile: Optional[dict] = None
+
+        # Submit the one-time anchor reconcile to the writer thread. Lazy by
+        # construction: FeedbackLoop is built lazily and the reconcile runs on
+        # the writer thread, so ExecutionMemory's deferred ONNX load is
+        # respected (no eager 80 MB model load at process startup).
+        self.write_queue.submit(self._run_anchor_reconcile)
+
+        # Recover hint_review_sessions that were left in 'pending_llm' by a
+        # previous process that died mid-_run_hint_review (SIGKILL / OOM /
+        # container restart). Without this, start_hint_review's BEGIN IMMEDIATE
+        # COUNT would observe the stale row and reject all future reviews
+        # forever. Safe because deployment is single-worker uvicorn — a new
+        # process means no in-process daemon thread is still working on the
+        # row. Multi-worker would need a heartbeat instead.
+        self.write_queue.submit(self._recover_stale_review_sessions)
+
+    def _run_anchor_reconcile(self) -> None:
+        """Run the learning_anchors reconcile and record its outcome.
+
+        Submitted to LearningWriteQueue once on FeedbackLoop init, so it runs
+        on the writer thread. Best-effort — a failure is logged and swallowed
+        (learning must never block); the next process restart re-runs it.
+        """
+        try:
+            self.last_reconcile = self.execution_memory.reconcile_anchors()
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] anchor reconcile failed (non-blocking): %s", e
+            )
+
+    def _recover_stale_review_sessions(self) -> None:
+        """Mark any pending_llm hint_review_sessions as failed at startup.
+
+        Runs on the writer thread via LearningWriteQueue. If the previous
+        process died mid-_run_hint_review, its session row stays at
+        'pending_llm' forever — and start_hint_review's COUNT gate would
+        permanently reject all new reviews. This one-shot UPDATE clears
+        such rows so the system self-heals on the next start.
+        """
+        from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
+        _assert_writer_thread("FeedbackLoop._recover_stale_review_sessions")
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor = self.execution_memory._writer_conn.execute(
+                "UPDATE hint_review_sessions "
+                "SET status = 'failed', "
+                "    error_message = 'process died before completion "
+                "(auto-recovered at startup)', "
+                "    completed_at = ? "
+                "WHERE status = 'pending_llm'",
+                (now,),
+            )
+            self.execution_memory._writer_conn.commit()
+            if cursor.rowcount:
+                logger.warning(
+                    "[LEARNING] Recovered %d stale pending_llm review "
+                    "session(s) from a previous crashed process",
+                    cursor.rowcount,
+                )
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] stale-review-session recovery failed "
+                "(non-blocking): %s", e
+            )
 
     # ------------------------------------------------------------------
     # Main Entry Point — process_execution
@@ -615,6 +879,8 @@ class FeedbackLoop:
         is_retry_after_feedback: bool = False,
         attempt_number: int = 1,
         hint_tokens: int = 0,
+        injected_hint_ids: Optional[str] = None,
+        was_holdout: bool = False,
     ) -> None:
         """
         Main entry point — called from workflow_service.py after execution.
@@ -643,6 +909,21 @@ class FeedbackLoop:
         if not settings.OPTIMIZATION_ENABLED or not self.circuit_breaker.is_enabled():
             return
 
+        # Engine-boundary enforcement of the CLAUDE.md invariant: learning
+        # must be skipped when user_query is empty (paste-and-execute mode)
+        # to avoid polluting embeddings. Callers (workflow_service._process_learning
+        # today) are expected to guard this first; reaching here means a
+        # caller violated the invariant — surface it loudly so the violation
+        # is fixed at its source rather than silently swallowed.
+        if not user_query or not user_query.strip():
+            logger.warning(
+                "[LEARNING] process_execution called with empty user_query for "
+                "workflow_id=%s — skipping to protect embedding integrity. "
+                "Callers must guard empty queries before invoking this method.",
+                workflow_id,
+            )
+            return
+
         try:
             # Step 1: Analyze failure (if failed)
             failure_analysis = None
@@ -654,7 +935,19 @@ class FeedbackLoop:
                     exit_code=None,
                 )
 
-            # Step 2: Build execution record
+            # Step 2: Build execution record. model_version is a reporting
+            # dimension only — use resolve_model_string so the prefix matches
+            # what LiteLLM actually routes on (vertex_ai/..., ollama/...) and
+            # duplicate provider prefixes in the env var are stripped.
+            selected_model = (
+                settings.LOCAL_MODEL
+                if settings.MODEL_PROVIDER == "local"
+                else settings.ONLINE_MODEL
+            )
+            model_version = resolve_model_string(
+                settings.MODEL_PROVIDER,
+                selected_model,
+            )
             record = ExecutionRecord(
                 workflow_id=workflow_id,
                 timestamp=datetime.now(),
@@ -686,6 +979,8 @@ class FeedbackLoop:
                     getattr(metrics, "total_cost", 0.0)
                     if metrics else 0.0
                 ),
+                injected_hint_ids=injected_hint_ids,
+                model_version=model_version,
             )
 
             # Step 3: Store via write queue (non-blocking)
@@ -725,6 +1020,7 @@ class FeedbackLoop:
                 is_retry_after_feedback=is_retry_after_feedback,
                 attempt_number=attempt_number,
                 hint_tokens=hint_tokens,
+                was_holdout=was_holdout,
             )
 
             # Step 6: Update daily stats (non-blocking)
@@ -744,25 +1040,26 @@ class FeedbackLoop:
                 safe_wid, test_status, hints_injected,
             )
 
-            # Step 7: Update NL feedback hint effectiveness (non-blocking)
-            if self.nl_engine is not None:
-                try:
-                    domain = extract_domain(url) if url else None
-                    failure_cat = (
-                        failure_analysis.category
-                        if failure_analysis else None
+            # NL-hint usage attribution (Part 2) runs from
+            # workflow_service._process_learning AFTER process_execution, not
+            # here: it credits only the hints actually used in passing code via
+            # one LLM judgment per workflow. The old Step-7 all-injected
+            # per-execution crediting was removed with that change.
+
+            # Health check — its own try/except so a monitoring failure can
+            # never reach the outer except and trip the circuit breaker
+            # (disabling all learning because a status read threw).
+            try:
+                status = self.get_health_status()
+                if status in ("DEGRADED", "FAILED"):
+                    logger.error(
+                        "[LEARNING] Health degraded after execution: %s",
+                        status,
                     )
-                    self.write_queue.submit(
-                        self.nl_engine.update_hint_effectiveness,
-                        domain=domain,
-                        url=url,
-                        test_passed=(test_status == "passed"),
-                        new_failure_category=failure_cat,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[LEARNING] NL hint effectiveness update failed: %s", e,
-                    )
+            except Exception as hc_err:
+                logger.warning(
+                    "[LEARNING] Health check failed (non-blocking): %s", hc_err
+                )
 
         except Exception as e:
             self.circuit_breaker.record_error(e)
@@ -817,8 +1114,8 @@ class FeedbackLoop:
                 workflow_id, feedback_text, feedback_type,
             )
 
-            # Step 2: Get execution record for context
-            record = self.execution_memory.get(workflow_id)
+            # Step 2: Get execution record for context (retry handles write-queue lag)
+            record = _get_with_retry(self.execution_memory, workflow_id)
             error_message = (
                 record.error_message if record else None
             )
@@ -835,6 +1132,52 @@ class FeedbackLoop:
                     triage = _fallback_triage
             else:
                 triage = _fallback_triage
+
+            # Step 3b: Trigger 2 — LLM conflict detection at feedback submission.
+            #
+            # Fires BEFORE the engines routing loop (Step 4) so that if the
+            # user's feedback contradicts an active hint, that hint is
+            # conflict_flagged FIRST. If the user re-submitted identical text,
+            # the subsequent learn_from_feedback UPSERT path (Gap 7 / Step 6)
+            # will clear the flag for the exact hint matching the user's text —
+            # user wins over LLM judgment on direct overrides.
+            #
+            # `self.nl_engine is not None` is the first condition: if absent,
+            # zero work is performed, no LLM call, no cost, no crash. Same
+            # nl_engine guard the usage-attribution path applies.
+            #
+            # No regex negation gate — natural language is unbounded; the
+            # `if active_hints:` DB check is the gate. Cost per call is small
+            # (~$0.0001 at Gemini 2.5 Flash); the maintenance tax of regex
+            # heuristics is not worth the saving.
+            if (
+                self.nl_engine is not None
+                and record is not None
+                and record.robot_code
+            ):
+                from src.backend.crew_ai.optimization.conflict_detection import (
+                    fire_conflict_detection,
+                )
+
+                domain = extract_domain(record.url) if record.url else None
+                fire_conflict_detection(
+                    feedback_loop=self,
+                    trigger_type="trigger_2",
+                    workflow_id=record.workflow_id,
+                    domain=domain,
+                    url=record.url,
+                    feedback_text=feedback_text,
+                    injected_hint_ids=record.injected_hint_ids,
+                    prompt_builder=lambda active_hints: _build_conflict_prompt_with_feedback(
+                        robot_code=record.robot_code,
+                        feedback_text=feedback_text,
+                        active_hints=active_hints,
+                        working_code=record.working_code,
+                        domain=domain,
+                        url=record.url,
+                        user_query=record.user_query,
+                    ),
+                )
 
             # Step 4: Route to engines via learn_from_feedback
             if record:
@@ -890,6 +1233,94 @@ class FeedbackLoop:
             return _fallback_triage
 
     # ------------------------------------------------------------------
+    # Trigger Telemetry — write path used by Trigger 1 and Trigger 2
+    # ------------------------------------------------------------------
+
+    def write_trigger_event(
+        self,
+        *,
+        trigger_type: str,
+        workflow_id: Optional[str],
+        domain: Optional[str],
+        url: Optional[str],
+        feedback_text: Optional[str],
+        active_hint_ids: list,
+        flagged_hint_ids: list,
+        actually_flagged_hint_ids: list,
+        reason: Optional[str],
+        llm_model: Optional[str],
+        input_tokens: int,
+        output_tokens: int,
+        llm_latency_ms: int,
+        status: str,
+        error_message: Optional[str],
+        used_hint_ids: Optional[list] = None,
+        unused_hint_ids: Optional[list] = None,
+    ) -> None:
+        """Insert one row into the trigger_events audit log.
+
+        Runs inside the LearningWriteQueue worker thread — callers MUST
+        submit via `self.write_queue.submit(self.write_trigger_event, ...)`,
+        never call directly from the request path. The queue's per-item
+        try/except absorbs any failure here so telemetry never blocks the
+        pipeline (a missing row is acceptable; a stalled LLM trigger is not).
+        Keyword-only signature guards against positional-arg drift across
+        the two call sites.
+
+        Status taxonomy (matches Phase 2 stats SQL discriminators):
+            succeeded         — LLM responded with valid JSON
+            no_active_hints   — early return, no LLM call, zero tokens
+            llm_timeout       — litellm.completion raised on timeout
+            llm_error         — litellm.completion raised for any other reason
+            json_parse_failed — LLM responded but JSON decode failed
+
+        flagged_hint_ids vs actually_flagged_hint_ids (schema v12 split):
+            flagged_hint_ids         — what the LLM recommended flagging
+                (read by _compute_exonerations for weekly-review LLM-judgment
+                scoring; carries the full recommendation including strong-
+                history-suppressed hints)
+            actually_flagged_hint_ids — what was actually committed to
+                nl_feedback_corrections.conflict_flagged=1 by
+                conflict_flag_hints (read by engagement_rate / reversal_rate
+                KPIs so suppressed-only triggers do not inflate denominators)
+        Pass [] (not None) for both on early-return / failure paths so the
+        column is queryable as a JSON array on every row.
+
+        used_hint_ids / unused_hint_ids (usage-attribution telemetry, Part 2):
+            the hints the attribution LLM judged used / unused. Keyword-only with
+            a None default so the trigger_1 / trigger_2 callers stay unchanged.
+            None is written as SQL NULL (NOT the string "null" — json.dumps(None)
+            == "null"), so a row from a non-attribution trigger is NULL here.
+        """
+        from datetime import datetime, timezone
+        from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
+        _assert_writer_thread("FeedbackLoop.write_trigger_event")
+        self.execution_memory._writer_conn.execute(
+            """
+            INSERT INTO trigger_events (
+                trigger_type, workflow_id, domain, url, feedback_text,
+                active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
+                reason, llm_model,
+                input_tokens, output_tokens, llm_latency_ms,
+                status, error_message, used_hint_ids, unused_hint_ids, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trigger_type, workflow_id, domain, url, feedback_text,
+                json.dumps(active_hint_ids),
+                json.dumps(flagged_hint_ids),
+                json.dumps(actually_flagged_hint_ids),
+                reason, llm_model,
+                input_tokens, output_tokens, llm_latency_ms,
+                status, error_message,
+                json.dumps(used_hint_ids) if used_hint_ids is not None else None,
+                json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.execution_memory._writer_conn.commit()
+
+    # ------------------------------------------------------------------
     # Stats & Monitoring
     # ------------------------------------------------------------------
 
@@ -910,7 +1341,63 @@ class FeedbackLoop:
             "contradictions": self.contradiction_detector.get_summary(),
             "total_records": self.execution_memory.get_total_records(),
             "circuit_breaker": self.circuit_breaker.get_stats(),
+            "execution_memory": {
+                "chromadb_available": self.execution_memory._chromadb_available,
+                "chromadb_last_error": self.execution_memory._chroma_last_error,
+                "chromadb_failed_at": self.execution_memory._chroma_failed_at,
+            },
+            "optimization_init_failures": self._optimization_init_failures,
         }
         if self.nl_engine is not None:
             stats["nl_feedback"] = self.nl_engine.get_stats()
         return stats
+
+    def get_health_status(self) -> str:
+        """Roll the learning system's reliability signals into one status:
+        OK / DEGRADED / FAILED / DISABLED.
+
+        Recomputed on every call — never a stored flag — so it self-clears
+        once a developer fixes the root cause. Reads everything passively:
+        it never calls _init_chromadb (a health check must not trigger an
+        80 MB ONNX load).
+
+        FAILED   — ChromaDB init failed, or the circuit breaker has tripped.
+        DEGRADED — optimization-init fell back, an active hint has a NULL
+                   anchor_query, or the last reconcile left missing docs.
+        DISABLED — OPTIMIZATION_ENABLED is false (a config state, not a fault).
+        OK       — every check passes.
+        """
+        from src.backend.core.config import settings
+        if not settings.OPTIMIZATION_ENABLED:
+            return "DISABLED"
+
+        # FAILED — hard failures. The ChromaDB check is tri-state: ONLY the
+        # _CHROMADB_INIT_FAILED sentinel means "failed". `None` means "not yet
+        # lazily initialized" — transient, not a fault — so it must not raise
+        # a false FAILED in the seconds after a restart.
+        if (self.execution_memory._chroma_client
+                is ExecutionMemory._CHROMADB_INIT_FAILED):
+            return "FAILED"
+        if not self.circuit_breaker.is_enabled():
+            return "FAILED"
+
+        # DEGRADED — partial failures, each a current-state read.
+        if not self._optimization_init_ok:
+            return "DEGRADED"
+        if (self.last_reconcile
+                and self.last_reconcile.get("missing_count", 0) > 0):
+            return "DEGRADED"
+        try:
+            with self.execution_memory.read_conn() as conn:
+                null_anchors = conn.execute(
+                    "SELECT COUNT(*) FROM nl_feedback_corrections "
+                    "WHERE is_active = 1 AND anchor_query IS NULL"
+                ).fetchone()[0]
+            if null_anchors > 0:
+                return "DEGRADED"
+        except Exception as e:
+            logger.warning(
+                "[LEARNING] health anchor_query check failed: %s", e
+            )
+
+        return "OK"

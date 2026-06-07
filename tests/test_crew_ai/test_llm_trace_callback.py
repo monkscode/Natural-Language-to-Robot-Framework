@@ -115,6 +115,56 @@ class TestLitellmTraceCallback:
         with patch("src.backend.core.trace_store.get_trace_store", return_value=bad_store):
             _litellm_trace_callback({"model": "m"}, _make_completion_response(), _now(), _now())
 
+    def test_empty_response_logs_finish_reason_warning(self, caplog):
+        """Diagnostic: when content is None/empty, callback must log finish_reason.
+
+        This is the one signal that distinguishes a Vertex AI content-filter block
+        (finish_reason='content_filter') from MAX_TOKENS, RECITATION, or a genuine
+        empty completion.  Without this log the only visible symptom is CrewAI's
+        generic 'Invalid response from LLM call - None or empty.' which is the
+        bug we were chasing for hours.
+        """
+        import logging
+        resp = MagicMock()
+        choice = MagicMock()
+        choice.message.content = None
+        choice.finish_reason = "content_filter"
+        resp.choices = [choice]
+        resp.usage = MagicMock(prompt_tokens=10, completion_tokens=0, total_tokens=10)
+        resp._hidden_params = {}
+        with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+            self._call(completion_response=resp)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("Empty response" in m and "content_filter" in m for m in msgs), (
+            f"Expected warning with finish_reason=content_filter, got: {msgs}"
+        )
+
+    def test_non_empty_response_does_not_log_warning(self, caplog):
+        """Diagnostic warning must only fire when content is empty — not on every call."""
+        import logging
+        resp = _make_completion_response(content="real content here")
+        with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+            self._call(completion_response=resp)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any("Empty response" in m for m in msgs), (
+            f"Diagnostic should NOT fire on non-empty content, got: {msgs}"
+        )
+
+    def test_empty_string_content_also_triggers_warning(self, caplog):
+        """Empty-string content (not just None) must also trigger the diagnostic."""
+        import logging
+        resp = MagicMock()
+        choice = MagicMock()
+        choice.message.content = ""
+        choice.finish_reason = "stop"
+        resp.choices = [choice]
+        resp.usage = MagicMock(prompt_tokens=10, completion_tokens=0, total_tokens=10)
+        resp._hidden_params = {}
+        with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+            self._call(completion_response=resp)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("Empty response" in m and "stop" in m for m in msgs)
+
     def test_duration_is_positive(self):
         from src.backend.crew_ai.cleaned_llm_wrapper import _litellm_trace_callback
         store = MagicMock()
@@ -287,3 +337,262 @@ class TestCleanedLLMWrapperCall:
             ):
                 result = wrapper.call([])
                 assert result == "clean output"
+
+
+# ---------------------------------------------------------------------------
+# CleanedLLMWrapper.call — empty-response retry
+# ---------------------------------------------------------------------------
+
+class TestCleanedLLMWrapperEmptyRetry:
+    """Empty-response retry loop in CleanedLLMWrapper.call.
+
+    Retries trigger on None / empty / whitespace-only string returns.
+    Exceptions and non-string non-None returns are pass-through (no retry).
+    Reuses the same `messages` so tool results in the conversation aren't re-invoked.
+    """
+
+    def _make_wrapper(self):
+        """Live wrapper with real LLMFormattingMonitor so we can assert counters."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        with patch("crewai.llm.BaseLLM.__init__", return_value=None):
+            instance = object.__new__(CleanedLLMWrapper)
+            instance.model = "vertex_ai/gemini-3.5-flash"
+            instance.context_window_size = 0
+            instance._monitor = LLMFormattingMonitor()
+            instance.base_url = None
+            return instance
+
+    def _patch_settings(self, max_retries: int):
+        """Patch settings.LLM_EMPTY_RESPONSE_MAX_RETRIES for the wrapper's lazy import."""
+        mock_settings = MagicMock()
+        mock_settings.LLM_EMPTY_RESPONSE_MAX_RETRIES = max_retries
+        return patch("src.backend.core.config.settings", mock_settings)
+
+    # ── Happy path: no retry needed ───────────────────────────────────────
+
+    def test_non_empty_string_no_retry(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", return_value="real content") as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "real content"
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
+        assert wrapper._monitor.empty_response_retries == 0
+        assert wrapper._monitor.empty_response_recoveries == 0
+        assert wrapper._monitor.empty_response_failures == 0
+
+    def test_zero_string_is_valid_content_not_empty(self):
+        """A response of '0' is content, not empty — must not trigger retry."""
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", return_value="0") as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "0"
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_false_string_is_valid_content_not_empty(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", return_value="False") as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "False"
+        assert mock_call.call_count == 1
+
+    # ── Retry triggers ────────────────────────────────────────────────────
+
+    def test_none_triggers_retry_then_recovers(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=[None, "recovered"]) as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "recovered"
+        assert mock_call.call_count == 2
+        mock_sleep.assert_called_once_with(0.5)  # first backoff
+        assert wrapper._monitor.empty_response_retries == 1
+        assert wrapper._monitor.empty_response_recoveries == 1
+        assert wrapper._monitor.empty_response_failures == 0
+
+    def test_empty_string_triggers_retry_then_recovers(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", "recovered"]):
+            result = wrapper.call(["msg"])
+        assert result == "recovered"
+        assert wrapper._monitor.empty_response_retries == 1
+        assert wrapper._monitor.empty_response_recoveries == 1
+
+    def test_whitespace_only_triggers_retry(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["  \n\t", "recovered"]):
+            result = wrapper.call(["msg"])
+        assert result == "recovered"
+        assert wrapper._monitor.empty_response_retries == 1
+        assert wrapper._monitor.empty_response_recoveries == 1
+
+    def test_two_empties_then_recovery_within_budget(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=["", "", "recovered"]) as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "recovered"
+        assert mock_call.call_count == 3
+        # Exponential backoff: 0.5s, then 1.0s
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [0.5, 1.0]
+        assert wrapper._monitor.empty_response_retries == 2
+        assert wrapper._monitor.empty_response_recoveries == 1
+        assert wrapper._monitor.empty_response_failures == 0
+
+    # ── Retry exhaustion ──────────────────────────────────────────────────
+
+    def test_all_empties_returns_empty_and_records_failure(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", "", ""]) as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == ""  # caller (CrewAI) will raise on empty
+        assert mock_call.call_count == 3
+        assert wrapper._monitor.empty_response_retries == 2
+        assert wrapper._monitor.empty_response_recoveries == 0
+        assert wrapper._monitor.empty_response_failures == 1
+
+    def test_all_none_returns_none_and_records_failure(self):
+        """All-None case must return None unchanged so CrewAI's None check triggers."""
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=[None, None, None]):
+            result = wrapper.call(["msg"])
+        assert result is None
+        assert wrapper._monitor.empty_response_failures == 1
+
+    # ── max_retries=0 disables retry ──────────────────────────────────────
+
+    def test_max_retries_zero_disables_retry_on_empty(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(0), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=["", "would-recover"]) as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == ""
+        assert mock_call.call_count == 1  # no retry
+        mock_sleep.assert_not_called()
+        assert wrapper._monitor.empty_response_retries == 0
+        assert wrapper._monitor.empty_response_failures == 1
+
+    def test_max_retries_zero_happy_path_unchanged(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(0), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", return_value="content") as mock_call:
+            result = wrapper.call(["msg"])
+        assert result == "content"
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
+
+    # ── Non-string non-None pass-through ──────────────────────────────────
+
+    def test_dict_result_pass_through_no_retry(self):
+        wrapper = self._make_wrapper()
+        tool_call = {"tool": "x", "args": {}}
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", return_value=tool_call) as mock_call:
+            result = wrapper.call(["msg"])
+        assert result is tool_call
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_empty_then_dict_counts_as_recovery(self):
+        """Empty then tool-call object: retry happened, treated as recovered."""
+        wrapper = self._make_wrapper()
+        tool_call = {"tool": "x"}
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", tool_call]):
+            result = wrapper.call(["msg"])
+        assert result is tool_call
+        assert wrapper._monitor.empty_response_retries == 1
+        assert wrapper._monitor.empty_response_recoveries == 1
+        assert wrapper._monitor.empty_response_failures == 0
+
+    # ── Exceptions propagate ──────────────────────────────────────────────
+
+    def test_exception_propagates_no_retry(self):
+        """Exceptions are LiteLLM's job (num_retries); we must not catch them."""
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=RuntimeError("boom")) as mock_call:
+            with pytest.raises(RuntimeError, match="boom"):
+                wrapper.call(["msg"])
+        assert mock_call.call_count == 1
+        mock_sleep.assert_not_called()
+        assert wrapper._monitor.empty_response_retries == 0
+
+    # ── Backoff schedule ──────────────────────────────────────────────────
+
+    def test_backoff_is_exponential(self):
+        wrapper = self._make_wrapper()
+        with self._patch_settings(5), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=["", "", "", "", "", "ok"]):
+            wrapper.call(["msg"])
+        # 0.5, 1.0, 2.0, 4.0, 5.0 (capped at 5.0)
+        sleeps = [c.args[0] for c in mock_sleep.call_args_list]
+        assert sleeps == [0.5, 1.0, 2.0, 4.0, 5.0]
+
+    def test_backoff_capped_at_5_seconds(self):
+        """Even at the max retry index, backoff never exceeds 5s."""
+        wrapper = self._make_wrapper()
+        with self._patch_settings(5), patch("time.sleep") as mock_sleep, \
+             patch("crewai.llm.LLM.call", side_effect=["", "", "", "", "", ""]):
+            wrapper.call(["msg"])
+        sleeps = [c.args[0] for c in mock_sleep.call_args_list]
+        assert max(sleeps) <= 5.0
+
+    # ── Logging ───────────────────────────────────────────────────────────
+
+    def test_retry_emits_warning_log(self, caplog):
+        import logging
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", "ok"]):
+            with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+                wrapper.call(["msg"])
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("[LLM_RETRY]" in m and "Empty response" in m and "retry 1/2" in m for m in msgs)
+
+    def test_recovery_emits_info_log(self, caplog):
+        import logging
+        wrapper = self._make_wrapper()
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", "ok"]):
+            with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+                wrapper.call(["msg"])
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("[LLM_RETRY] Recovered" in m for m in msgs)
+
+    def test_exhaustion_emits_error_log(self, caplog):
+        import logging
+        wrapper = self._make_wrapper()
+        with self._patch_settings(1), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", ""]):
+            with caplog.at_level(logging.ERROR, logger="src.backend.crew_ai.cleaned_llm_wrapper"):
+                wrapper.call(["msg"])
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("[LLM_RETRY]" in m and "giving up" in m for m in msgs)
+
+    # ── Messages reused on retry (cost-saving invariant) ──────────────────
+
+    def test_retry_reuses_same_messages_no_tool_reinvoke(self):
+        """The same `messages` list (containing tool results) must be sent every retry.
+
+        This is the invariant that prevents browser-use from being re-invoked.
+        """
+        wrapper = self._make_wrapper()
+        messages = [{"role": "user", "content": "find element"},
+                    {"role": "assistant", "content": "[tool result with locator]"}]
+        with self._patch_settings(2), patch("time.sleep"), \
+             patch("crewai.llm.LLM.call", side_effect=["", "ok"]) as mock_call:
+            wrapper.call(messages)
+        # Both calls must receive the identical messages list (same tool results).
+        assert mock_call.call_count == 2
+        for call in mock_call.call_args_list:
+            assert call.args[0] is messages

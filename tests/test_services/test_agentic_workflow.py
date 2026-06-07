@@ -5,7 +5,8 @@ Scope:
   - _SlotReleaser countdown-latch (releases slot only when all participants finish)
   - _safe_delete_temp_metrics / _safe_evict_hint_metadata (exception-swallowing helpers)
   - run_workflow_in_thread (queue relay, exception handling, releaser.done())
-  - Robot Framework code extraction from task[2] output:
+  - Robot Framework code extraction from task[2] output (via the shared
+    dryrun_service.extract_and_normalize_robot_code helper):
       Strategy 1 — pydantic.code
       Strategy 2 — json_dict['code']
       Strategy 3a — raw JSON {"code": "..."}
@@ -15,16 +16,16 @@ Scope:
       Single *** Settings *** → prefix stripped
       No *** Settings *** → *** Test Cases *** fallback
       Trailing JSON artifact ("}) stripped
-  - Validation output parsing from task[3] output:
-      Pydantic model_dump()
-      json_dict passthrough
-      Plain JSON string
-      Markdown-fenced JSON
-      valid/reason regex fallback
-      Plain-text VALID / INVALID
-      ValueError when all strategies fail → error event
-  - Workflow completion: success → complete event, failure → error event
+  - Dryrun gate wiring (validate_and_repair is patched here; its internals are
+    covered in test_dryrun_service.py):
+      passed/skipped → clean complete event
+      failed/unverified → complete event carries dryrun_status + dryrun_errors
+      repair cost folded into crewai_*/total_* WorkflowMetrics
+  - Workflow completion: success → complete event
   - run_agentic_workflow gemini key missing → early error event
+
+The crew is now 3 tasks (planner, identifier, assembler); the LLM validator
+(old task[3]) was replaced by the deterministic robot --dryrun gate.
 """
 
 import os
@@ -48,7 +49,11 @@ VALID_ROBOT_CODE = (
     "    New Page    https://example.com\n"
 )
 
-VALID_VALIDATION_JSON = '{"valid": true, "reason": "Code is syntactically correct."}'
+# Default dryrun gate stub — passthrough that delivers the code unchanged.
+# The gate's real behaviour (Docker, repair loop, cost) is covered in
+# test_dryrun_service.py; here we only verify run_agentic_workflow's wiring.
+def _passthrough_gate(workflow_id, code, *args, **kwargs):
+    return {"code": code, "dryrun_status": "passed", "repair_usage": {}}
 
 
 def _make_run_crew_result(
@@ -56,11 +61,9 @@ def _make_run_crew_result(
     pydantic_code=None,
     json_dict_code=None,
     raw_code=None,
-    validation_pydantic=None,
-    validation_json_dict=None,
-    validation_raw=VALID_VALIDATION_JSON,
 ):
-    """Build the 5-tuple normally returned by run_crew()."""
+    """Build the 5-tuple returned by run_crew() — a 3-task crew (planner,
+    identifier, assembler). Delivered code comes from task[2] (the assembler)."""
     # ---- task[2]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
@@ -76,23 +79,9 @@ def _make_run_crew_result(
         task2.output.json_dict = None
         task2.output.raw = raw_code if raw_code is not None else VALID_ROBOT_CODE
 
-    # ---- task[3]: validation output ----
-    task3 = MagicMock()
-    task3.output.raw = validation_raw
-    if validation_pydantic is not None:
-        task3.output.pydantic = MagicMock()
-        task3.output.pydantic.model_dump.return_value = validation_pydantic
-        task3.output.json_dict = None
-    elif validation_json_dict is not None:
-        task3.output.pydantic = None
-        task3.output.json_dict = validation_json_dict
-    else:
-        task3.output.pydantic = None
-        task3.output.json_dict = None
-
-    # ---- crew ----
+    # ---- crew (3 tasks; validator removed) ----
     crew = MagicMock()
-    crew.tasks = [MagicMock(), MagicMock(), task2, task3]
+    crew.tasks = [MagicMock(), MagicMock(), task2]
     usage = MagicMock(
         total_tokens=200, prompt_tokens=160,
         completion_tokens=40, successful_requests=8
@@ -106,16 +95,21 @@ def _make_run_crew_result(
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
-                  crew_result=None, gemini_key="test-key"):
+                  crew_result=None, gemini_key="test-key", gate=None):
     """
     Run run_agentic_workflow with standard mocks and collect all events as a list.
+    The dryrun gate (validate_and_repair) is patched to a passthrough by default so
+    no real Docker call happens; pass `gate` to override its return/side_effect.
     Returns: list[dict]
     """
     if crew_result is None:
         crew_result = _make_run_crew_result()
+    gate = gate if gate is not None else _passthrough_gate
 
     with patch("src.backend.services.workflow_service.run_crew",
                return_value=crew_result), \
+         patch("src.backend.services.workflow_service.validate_and_repair",
+               side_effect=gate), \
          patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_storage, \
          patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
          patch.dict(os.environ, {"GEMINI_API_KEY": gemini_key}):
@@ -174,42 +168,6 @@ class TestSlotReleaser:
             releaser.done()
             assert get_active_workflow_count() == 0
 
-    def test_cancel_releases_slot_immediately(self):
-        """cancel() releases slot regardless of remaining participant count."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-            assert get_active_workflow_count() == 1
-
-            releaser = _SlotReleaser(participant_count=5)
-            releaser.cancel()
-            assert get_active_workflow_count() == 0
-
-    def test_cancel_is_idempotent(self):
-        """Calling cancel() twice does not double-release (count cannot go below 0)."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-
-            releaser = _SlotReleaser(participant_count=2)
-            releaser.cancel()
-            releaser.cancel()  # second call — must be no-op
-            assert get_active_workflow_count() == 0
-
-    def test_done_after_cancel_is_noop(self):
-        """done() after cancel() must not release a second time."""
-        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
-        with patch("src.backend.services.workflow_service.settings") as mock_s:
-            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
-            _acquire_workflow_slot()
-
-            releaser = _SlotReleaser(participant_count=2)
-            releaser.cancel()
-            releaser.done()  # should be a no-op (count already 0)
-            assert get_active_workflow_count() == 0
-
     def test_concurrent_done_releases_exactly_once(self):
         """20 threads each call done() once on a 20-participant latch — slot released once."""
         from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
@@ -236,6 +194,27 @@ class TestSlotReleaser:
 
             assert not errors
             assert get_active_workflow_count() == 0
+
+    def test_done_idempotent_when_over_called(self):
+        """done() releases the slot exactly once even when called more times
+        than participant_count — the early-release + finally-fallback pattern
+        used by _stream_docker_execution. Extra calls must not release another
+        workflow's slot, and the count must not underflow."""
+        from src.backend.services.workflow_service import _SlotReleaser, _acquire_workflow_slot, get_active_workflow_count
+        with patch("src.backend.services.workflow_service.settings") as mock_s:
+            mock_s.MAX_CONCURRENT_WORKFLOWS = 10
+            _acquire_workflow_slot()  # workflow A
+            _acquire_workflow_slot()  # workflow B — a different, concurrent workflow
+            assert get_active_workflow_count() == 2
+
+            releaser = _SlotReleaser(participant_count=1)
+            releaser.done()  # A's early release (from _stream_docker_execution) — 2→1
+            assert get_active_workflow_count() == 1
+
+            releaser.done()  # A's finally-block fallback — must be a no-op
+            releaser.done()  # extra over-call — still a no-op
+            assert get_active_workflow_count() == 1  # B's slot untouched
+            assert releaser._count == 0  # guard floored the count; no underflow
 
 
 # ---------------------------------------------------------------------------
@@ -449,83 +428,14 @@ class TestCodeExtractionStrategies:
 
 
 # ---------------------------------------------------------------------------
-# Validation output parsing strategies
-# ---------------------------------------------------------------------------
-
-class TestValidationOutputParsing:
-    """run_agentic_workflow parses validation JSON from task[3] via multiple strategies."""
-
-    def test_parses_pydantic_validation(self):
-        """Strategy 1: validation via output.pydantic.model_dump()."""
-        result = _make_run_crew_result(
-            validation_pydantic={"valid": True, "reason": "Pydantic path"}
-        )
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_json_dict_validation(self):
-        """Strategy 1b: validation via output.json_dict."""
-        result = _make_run_crew_result(
-            validation_json_dict={"valid": True, "reason": "json_dict path"}
-        )
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_plain_json_string(self):
-        """Strategy 2/3: validation output is a clean JSON string."""
-        result = _make_run_crew_result(
-            validation_raw='{"valid": true, "reason": "plain json"}'
-        )
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_markdown_fenced_json(self):
-        """Strategy 2: markdown fences are stripped before JSON parsing."""
-        result = _make_run_crew_result(
-            validation_raw='```json\n{"valid": true, "reason": "fenced"}\n```'
-        )
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_valid_reason_regex_fallback(self):
-        """Strategy 5: extract valid and reason via separate regexes when JSON parse fails."""
-        raw = 'Some prose. The result is "valid": true, "reason": "everything is fine" end.'
-        result = _make_run_crew_result(validation_raw=raw)
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_plain_text_valid(self):
-        """Strategy 6: plain VALID text (no JSON at all) → valid=True."""
-        result = _make_run_crew_result(
-            validation_raw="The Robot Framework code is VALID and well-formed."
-        )
-        events = _run_workflow(crew_result=result)
-        assert "complete" in _event_statuses(events)
-
-    def test_parses_plain_text_invalid(self):
-        """Strategy 6: INVALID text → valid=False → error event."""
-        result = _make_run_crew_result(
-            validation_raw="INVALID: the code has syntax errors on line 5."
-        )
-        events = _run_workflow(crew_result=result)
-        assert "error" in _event_statuses(events)
-
-    def test_raises_on_completely_unparseable_output(self):
-        """When all 6 strategies fail, an error event is yielded (no crash)."""
-        result = _make_run_crew_result(validation_raw="¯\\_(ツ)_/¯ no json here either")
-        events = _run_workflow(crew_result=result)
-        assert "error" in _event_statuses(events)
-
-
-# ---------------------------------------------------------------------------
 # Workflow completion paths
 # ---------------------------------------------------------------------------
 
 class TestWorkflowCompletionPaths:
-    """Success, validation failure, and unexpected exception paths."""
+    """Success, dryrun-gate soft delivery, repair-cost fold, and exception paths."""
 
     def test_success_yields_complete_event_with_robot_code(self):
-        """valid=True → final event has status=complete with robot_code key."""
+        """Passed gate → final event has status=complete with robot_code key."""
         events = _run_workflow()
         complete_events = [e for e in events if e.get("status") == "complete"]
         assert len(complete_events) == 1
@@ -539,15 +449,88 @@ class TestWorkflowCompletionPaths:
         assert "workflow_id" in complete
         assert complete["workflow_id"]
 
-    def test_validation_failure_yields_error_event(self):
-        """valid=False → error event with the failure reason."""
-        result = _make_run_crew_result(
-            validation_raw='{"valid": false, "reason": "Missing Library import"}'
+    def test_passed_gate_complete_event_has_no_dryrun_fields(self):
+        """On a passed gate, the complete event carries NO dryrun_status/errors
+        (clean happy path — the fields appear only when the gate did not pass)."""
+        events = _run_workflow()
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert "dryrun_status" not in complete
+        assert "dryrun_errors" not in complete
+
+    def test_dryrun_failed_still_delivers_with_dryrun_fields(self):
+        """SOFT gate: a failed dryrun STILL yields status:'complete' with robot_code
+        plus dryrun_status:'failed' + dryrun_errors (no new top-level status)."""
+        def failed_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "failed",
+                    "dryrun_errors": "No keyword with name 'Cilck' found. Did you mean: Browser.Click",
+                    "repair_usage": {}}
+        events = _run_workflow(gate=failed_gate)
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert complete is not None, "soft gate must still deliver a complete event"
+        assert complete["robot_code"]
+        assert complete["dryrun_status"] == "failed"
+        assert "Did you mean: Browser.Click" in complete["dryrun_errors"]
+        # It is NOT an error event — delivery succeeds.
+        assert "error" not in _event_statuses(events)
+
+    def test_docker_down_degrades_to_unverified_and_delivers(self):
+        """Graceful degrade: Docker-unavailable gate → complete with
+        dryrun_status:'unverified', code still delivered."""
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": "Docker unavailable", "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert complete is not None
+        assert complete["dryrun_status"] == "unverified"
+        assert complete["robot_code"]
+        assert "error" not in _event_statuses(events)
+
+    def test_repair_cost_folded_into_crewai_and_total_metrics(self):
+        """The gate's repair_usage is added into crewai_*/total_* WorkflowMetrics
+        and the main-crew calls are NOT double-counted (decision 5 / §5)."""
+        from src.backend.core.workflow_metrics import calculate_crewai_cost
+
+        # Baseline crewai metrics from the mocked crew usage (200 tokens, 8 calls).
+        base = calculate_crewai_cost(
+            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
+             'successful_requests': 8},
+            model_name="gemini-2.5-flash",
         )
-        events = _run_workflow(crew_result=result)
-        error_events = [e for e in events if e.get("status") == "error"]
-        assert error_events
-        assert "Missing Library import" in error_events[0].get("message", "")
+        repair_usage = {'llm_calls': 2, 'cost': 0.004, 'tokens': 50,
+                        'prompt_tokens': 40, 'completion_tokens': 10}
+
+        def repaired_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "passed", "repair_usage": repair_usage}
+
+        captured = {}
+
+        def _capture(metrics):
+            captured["m"] = metrics
+
+        crew_result = _make_run_crew_result()
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=crew_result), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=repaired_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = _capture
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        m = captured["m"]
+        # Repair calls/cost/tokens folded into the CrewAI bucket (no double count of
+        # the main crew — its usage is counted exactly once via the mocked metrics).
+        assert m.crewai_llm_calls == base['llm_calls'] + 2
+        assert abs(m.crewai_cost - round(base['cost'] + 0.004, 6)) < 1e-9
+        assert m.crewai_tokens == base['tokens'] + 50
+        # Totals derive from the CrewAI bucket, so they include the repair cost too.
+        assert m.total_llm_calls == base['llm_calls'] + 2
+        assert abs(m.total_cost - round(base['cost'] + 0.004, 6)) < 1e-9
 
     def test_run_crew_exception_yields_error_event(self):
         """If run_crew() raises, the generator yields an error event."""
@@ -596,6 +579,8 @@ class TestWorkflowCompletionPaths:
 
         with patch("src.backend.services.workflow_service.run_crew",
                    return_value=crew_result_with_hints), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
              patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
              patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
              patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):

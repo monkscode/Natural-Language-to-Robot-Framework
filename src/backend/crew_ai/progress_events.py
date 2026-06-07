@@ -57,7 +57,7 @@ _task_to_workflow: dict[str, str] = {}
 # workflow_id → SSE Queue
 _workflow_queues: dict[str, Queue] = {}
 
-# workflow_id → {str(task.id): task_index (0–3)}
+# workflow_id → {str(task.id): task_index (0–2)}
 _workflow_task_map: dict[str, dict[str, int]] = {}
 
 # workflow_id → last progress value pushed (progress only moves forward)
@@ -76,25 +76,25 @@ _tool_finished_seen: dict[str, set[int]] = {}
 # User-facing message tables — no internal names, no technical details
 # ---------------------------------------------------------------------------
 
+# Crew is a 3-task pipeline (planner=0, identifier=1, assembler=2). The old
+# validator (index 3) was replaced by the dryrun gate, which drives its own
+# verify/repair/100% progress via direct queue.put from workflow_service.
 _TASK_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("🧠 Analyzing your test requirements...", 5),
     1: ("🔍 Scanning webpage for interactive elements...", 22),
     2: ("⚡ Writing test automation code...", 62),
-    3: ("🔬 Performing quality checks on test code...", 82),
 }
 
 _LLM_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("📋 Breaking down test into steps...", 8),
     # task 1 (Element Identifier) uses a tool — LLM message skipped in favour of tool messages
     2: ("💻 Generating test script...", 65),
-    3: ("🔬 Validating syntax and structure...", 85),
 }
 
 _TASK_COMPLETED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("✅ Test steps planned successfully", 20),
     1: ("✅ All page elements identified", 60),
     2: ("✅ Test code assembled", 80),
-    3: ("🎉 Test generation complete", 100),
 }
 
 # Only this tool name produces user-facing messages
@@ -115,7 +115,7 @@ def register_workflow(
     Args:
         workflow_id: Unique workflow identifier.
         queue: The SSE queue to push progress events to.
-        task_id_map: Mapping of str(task.id) → task_index (0–3).
+        task_id_map: Mapping of str(task.id) → task_index (0–2).
     """
     with _lock:
         _workflow_queues[workflow_id] = queue

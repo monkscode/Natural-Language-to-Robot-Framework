@@ -49,6 +49,7 @@ RATE LIMITING:
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -89,7 +90,7 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 import json as _json
                 prompt_text = _json.dumps(messages, ensure_ascii=False)
             except Exception as _exc:
-                logger.debug("[LLM_TRACE] Failed to serialize prompt messages: %s", _exc)
+                logger.warning("[LLM_TRACE] Failed to serialize prompt messages: %s", _exc)
 
         # --- response text — first choice content ---
         response_text: str | None = None
@@ -99,8 +100,17 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 msg = getattr(choices[0], "message", None)
                 if msg:
                     response_text = getattr(msg, "content", None)
+                # Diagnostic: capture finish_reason so we can tell content-filter
+                # blocks (finish_reason="content_filter", content=None) apart from
+                # genuine empty completions and from MAX_TOKENS/RECITATION.
+                finish_reason = getattr(choices[0], "finish_reason", None)
+                if response_text is None or response_text == "":
+                    logger.warning(
+                        "[LLM_TRACE] Empty response: finish_reason=%s model=%s",
+                        finish_reason, model,
+                    )
         except Exception as _exc:
-            logger.debug("[LLM_TRACE] Failed to extract response text: %s", _exc)
+            logger.warning("[LLM_TRACE] Failed to extract response text: %s", _exc)
 
         # --- tokens ---
         usage = getattr(completion_response, "usage", None)
@@ -127,7 +137,7 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
                 parent_span_id_hex = format(span_ctx.span_id, "016x")
             workflow_id = baggage.get_baggage("workflow.id")
         except Exception as _exc:
-            logger.debug("[LLM_TRACE] OTel context unavailable: %s", _exc)
+            logger.warning("[LLM_TRACE] OTel context unavailable: %s", _exc)
 
         # Each LiteLLM call gets its own span_id so it appears as a distinct row.
         span_id_hex = uuid.uuid4().hex[:16]
@@ -153,7 +163,7 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
             workflow_id=workflow_id,
         )
     except Exception as e:
-        logger.debug("[LLM_TRACE] callback error (non-fatal): %s", e)
+        logger.warning("[LLM_TRACE] callback error (non-fatal): %s", e)
 
 
 def _register_litellm_callback() -> None:
@@ -271,9 +281,12 @@ class CleanedLLMWrapper(LLM):
                 )
                 return self.context_window_size
         except Exception as e:
+            # Intermediate step miss — not warning-worthy on its own. Ollama is
+            # only tried for ollama/ models; the final unresolved case is
+            # surfaced once, at WARNING, in Step 3 below.
             logger.debug(
-                f"LiteLLM DB has no entry for '{self.model}' "
-                f"(type={type(e).__name__}, detail={e}) — trying Ollama API next"
+                f"LiteLLM DB has no context-window entry for '{self.model}' "
+                f"(type={type(e).__name__}, detail={e})"
             )
 
         # Step 2: Ollama API — local models are not in LiteLLM's central database
@@ -325,6 +338,11 @@ class CleanedLLMWrapper(LLM):
 
         # Step 3: CrewAI's built-in lookup (last resort — likely returns tiny default)
         result = super().get_context_window_size()
+        # Cache the fallback like Steps 1 and 2 do: the context window cannot
+        # change during the process, and without caching this whole method —
+        # including a litellm lookup and a 5s Ollama HTTP call — re-runs on
+        # every get_context_window_size() call, spamming this WARNING each time.
+        self.context_window_size = result
         logger.warning(
             f"⚠️ Context window for '{self.model}' not resolved from LiteLLM DB "
             f"or Ollama API — using CrewAI fallback: {result} tokens. "
@@ -332,18 +350,96 @@ class CleanedLLMWrapper(LLM):
         )
         return result
 
+    # Backoff for empty-response retries: 0.5s * 2^retry_idx, capped at 5s.
+    # Worst-case extra latency at default max_retries=2: 0.5 + 1.0 = 1.5s.
+    _EMPTY_RETRY_BASE_SECONDS = 0.5
+    _EMPTY_RETRY_CAP_SECONDS = 5.0
+
     def call(self, messages, *args, **kwargs) -> str:
         """
-        Override call() for output cleaning.
+        CrewAI LLM.call wrapper. Applies Action/ActionInput cleaning and retries
+        on empty responses (None / "" / whitespace), which Vertex AI Gemini —
+        notably gemini-3.5-flash — emits intermittently with finish_reason=stop.
+        Tool results in `messages` are reused on retry (no tool re-invocation).
 
-        CrewAI uses call() -> _handle_non_streaming_response() -> litellm.completion().
-        _generate() is a LangChain concept and is never called by CrewAI, so all
-        cleaning must happen here.
+        Pass-through:
+          • Exceptions propagate — LiteLLM's num_retries handles transient API errors.
+          • Non-string non-None returns (structured tool calls) skip retry and cleaning.
+          • If every attempt empties, the empty result is returned so CrewAI raises
+            its existing "None or empty" error — failures are loud, never silent.
         """
-        result = super().call(messages, *args, **kwargs)
+        from src.backend.core.config import settings  # lazy import: avoids circular import
+        max_retries = settings.LLM_EMPTY_RESPONSE_MAX_RETRIES
+
+        result = None
+        saw_empty = False
+
+        for attempt in range(max_retries + 1):
+            result = super().call(messages, *args, **kwargs)
+
+            # Structured tool-call response (e.g. function-calling object) — pass through.
+            if result is not None and not isinstance(result, str):
+                if saw_empty:
+                    self._monitor.log_empty_recovery()
+                    logger.info(
+                        "[LLM_RETRY] Recovered (non-string result) on attempt %d/%d (model=%s).",
+                        attempt + 1, max_retries + 1, self.model,
+                    )
+                self._monitor.log_response(was_cleaned=False)
+                return result
+
+            # "0" / "{}" / "False" are valid content; only None/""/whitespace are empty.
+            is_empty = result is None or not result.strip()
+
+            if not is_empty:
+                if saw_empty:
+                    self._monitor.log_empty_recovery()
+                    logger.info(
+                        "[LLM_RETRY] Recovered on attempt %d/%d (model=%s, content length=%d).",
+                        attempt + 1, max_retries + 1, self.model, len(result),
+                    )
+                break
+
+            saw_empty = True
+
+            if attempt >= max_retries:
+                self._monitor.log_empty_failure()
+                logger.error(
+                    "[LLM_RETRY] Empty response from %s through all %d attempt(s); giving up. "
+                    "Workflow totals — retries: %d, recoveries: %d, failures: %d.",
+                    self.model, attempt + 1,
+                    self._monitor.empty_response_retries,
+                    self._monitor.empty_response_recoveries,
+                    self._monitor.empty_response_failures,
+                )
+                break
+
+            self._monitor.log_empty_retry()
+            backoff_seconds = min(
+                self._EMPTY_RETRY_BASE_SECONDS * (2 ** attempt),
+                self._EMPTY_RETRY_CAP_SECONDS,
+            )
+            logger.warning(
+                "[LLM_RETRY] Empty response from %s on attempt %d/%d; "
+                "retry %d/%d after %.0fms backoff.",
+                self.model,
+                attempt + 1, max_retries + 1,
+                attempt + 1, max_retries,
+                backoff_seconds * 1000,
+            )
+            time.sleep(backoff_seconds)
+
+        # Empty result after all retries → return as-is, CrewAI surfaces the error.
         if not isinstance(result, str):
             self._monitor.log_response(was_cleaned=False)
             return result
+
+        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI only
+        # raises its "None or empty" error on == "" (agent_utils.py). Normalise so a
+        # persistent whitespace-only response fails loudly instead of being formatted.
+        if not result.strip():
+            self._monitor.log_response(was_cleaned=False)
+            return ""
 
         cleaned = LLMOutputCleaner.clean_output(result)
         was_cleaned = cleaned != result
@@ -390,19 +486,39 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
     Raises:
         ValueError: If model_provider is not one of: "gemini", "vertex", "local".
     """
+    # Provider→prefix routing and Ollama api_base resolution live in
+    # llm_provider_routing.py so the same logic is reused by the learning
+    # system's conflict-detection triggers (which call litellm.completion()
+    # directly and cannot use CleanedLLMWrapper — it would apply CrewAI's
+    # Action/ActionInput cleaner to a JSON-only response).
+    from .llm_provider_routing import (
+        PROVIDER_PREFIXES,
+        resolve_model_string,
+        resolve_completion_kwargs,
+    )
+
+    if model_provider not in PROVIDER_PREFIXES:
+        raise ValueError(
+            f"Unsupported model_provider: '{model_provider}'. "
+            f"Must be one of: {sorted(PROVIDER_PREFIXES)}. "
+            f"Check your MODEL_PROVIDER environment variable."
+        )
+
+    routed_model = resolve_model_string(model_provider, model_name)
+
     if model_provider == "local":
         # LiteLLM routes "ollama/<model>" to the Ollama HTTP API.
         # OLLAMA_API_BASE env var controls the server URL:
         #   Local dev (no Docker): http://localhost:11434  (default)
         #   Docker Desktop Mac/Win: http://host.docker.internal:11434
         #   Docker on Linux:        http://172.17.0.1:11434
-        ollama_base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        ollama_base_url = resolve_completion_kwargs("local")["api_base"]
         logger.info(
-            f"🧹 Creating CleanedLLMWrapper for local model: ollama/{model_name} "
+            f"🧹 Creating CleanedLLMWrapper for local model: {routed_model} "
             f"at {ollama_base_url}"
         )
         return CleanedLLMWrapper(
-            model=f"ollama/{model_name}",
+            model=routed_model,
             base_url=ollama_base_url,
             is_litellm=True,  # No routing effect — __new__ override bypasses LLM.__new__
                               # entirely. Kept for documentation clarity only.
@@ -410,37 +526,22 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
         )
 
     if model_provider == "vertex":
-        # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend vertex_ai/.
-        # Strip any accidental provider prefix for backwards compatibility.
         # Auth is handled automatically: VERTEXAI_CREDENTIALS, VERTEXAI_PROJECT,
         # and VERTEXAI_LOCATION are read from os.environ by LiteLLM (loaded via python-dotenv).
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        vertex_model = f"vertex_ai/{model_bare}"
-        logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {vertex_model}")
+        logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {routed_model}")
         return CleanedLLMWrapper(
-            model=vertex_model,
+            model=routed_model,
             num_retries=3,
             is_litellm=True,
         )
 
-    if model_provider == "gemini":
-        # Gemini provider (Google AI Studio).
-        # model_name is a bare model name (e.g. "gemini-2.5-flash"); prepend gemini/.
-        # Strip any accidental provider prefix for backwards compatibility.
-        # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
-        # LLM.__new__ entirely. Kept for documentation clarity only.
-        model_bare = model_name.split("/", 1)[-1] if "/" in model_name else model_name
-        gemini_model = f"gemini/{model_bare}"
-        logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {gemini_model}")
-        return CleanedLLMWrapper(
-            api_key=api_key or os.getenv("GEMINI_API_KEY"),
-            model=gemini_model,
-            num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
-            is_litellm=True,
-        )
-
-    raise ValueError(
-        f"Unsupported model_provider: '{model_provider}'. "
-        f"Must be one of: 'gemini', 'vertex', 'local'. "
-        f"Check your MODEL_PROVIDER environment variable."
+    # model_provider == "gemini" — Google AI Studio.
+    # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
+    # LLM.__new__ entirely. Kept for documentation clarity only.
+    logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {routed_model}")
+    return CleanedLLMWrapper(
+        api_key=api_key or os.getenv("GEMINI_API_KEY"),
+        model=routed_model,
+        num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
+        is_litellm=True,
     )

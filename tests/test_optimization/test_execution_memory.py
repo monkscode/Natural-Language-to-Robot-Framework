@@ -7,8 +7,10 @@ Uses pytest fixtures from conftest.py for database and temporary directory manag
 
 import sqlite3
 import os
+import threading
 import uuid
 from datetime import datetime
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -86,6 +88,47 @@ class TestExecutionRecord:
         assert record.user_feedback is None, (
             "ExecutionRecord user_feedback defaults to None"
         )
+
+
+class TestHintAttributionDone:
+    """C1: hint_attribution_done is mapped onto the dataclass, written 0 by
+    _store_sqlite's INSERT, and resolves to an int (never AttributeError) on
+    read — including Case-B / re-run records. The DB column DEFAULT is 1
+    (pre-v13 rows read already-attributed, N4); the dataclass default and the
+    INSERT are 0, and must NOT be unified with the DB default."""
+
+    def test_dataclass_default_is_zero(self):
+        record = ExecutionRecord(
+            workflow_id="t", timestamp=datetime.now(), user_query="q"
+        )
+        assert record.hint_attribution_done == 0
+
+    def test_store_inserts_zero_and_get_resolves_int(self, tmp_dir):
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "attr.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma_attr"),
+        )
+        em._store_sqlite(make_record(workflow_id="wf-attr-1"))
+        fetched = em.get("wf-attr-1")
+        assert fetched.hint_attribution_done == 0  # INSERT writes 0, not the DB DEFAULT 1
+        em.close()
+
+    def test_case_b_rerun_leaves_attribution_done_resolvable(self, tmp_dir):
+        """A v1 fail then v2 pass (Case B -> _update_to_passing_state) leaves
+        hint_attribution_done untouched at 0, and the read resolves to an int
+        with no AttributeError — the gate the Step-4 attribution block needs."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "attr_b.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma_attr_b"),
+        )
+        wid = "wf-attr-caseb"
+        em._store_sqlite(make_record(workflow_id=wid, test_status="failed"))
+        # Re-run with the same workflow_id that now passes -> Case B recovery.
+        em._store_sqlite(make_record(workflow_id=wid, test_status="passed"))
+        fetched = em.get(wid)
+        assert fetched.test_status == "passed"       # Case B applied
+        assert fetched.hint_attribution_done == 0    # untouched -> v2-pass can claim
+        em.close()
 
 
 class TestExtractDomain:
@@ -175,7 +218,7 @@ class TestExecutionMemoryInit:
         em = ExecutionMemory(
             db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma")
         )
-        assert em.conn.row_factory == sqlite3.Row, (
+        assert em._writer_conn.row_factory == sqlite3.Row, (
             "conn.row_factory = sqlite3.Row"
         )
         em.close()
@@ -185,7 +228,7 @@ class TestExecutionMemoryInit:
         em = ExecutionMemory(
             db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma")
         )
-        journal = em.conn.execute("PRAGMA journal_mode").fetchone()
+        journal = em._writer_conn.execute("PRAGMA journal_mode").fetchone()
         assert journal[0] == "wal", f"WAL mode enabled: mode={journal[0]}"
         em.close()
 
@@ -196,7 +239,7 @@ class TestExecutionMemoryInit:
         )
         tables = [
             row[0]
-            for row in em.conn.execute(
+            for row in em._writer_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
@@ -474,7 +517,7 @@ class TestRowToRecord:
         )
         em._store_sqlite(record)
 
-        row = em.conn.execute(
+        row = em._writer_conn.execute(
             "SELECT * FROM execution_records WHERE workflow_id = ?",
             ("wf-row-001",),
         ).fetchone()
@@ -559,23 +602,290 @@ class TestErrorResilience:
         # If we reach here without exception, the store works
         em.close()
 
-    def test_duplicate_workflow_id_raises_error(self, tmp_dir):
+    def test_duplicate_workflow_id_raises_error_on_non_passing_rerun(self, tmp_dir):
+        """Schema v6 onwards: a duplicate workflow_id with test_status != 'passed'
+        still raises IntegrityError. Only the test_status='passed' branch
+        triggers the Case B recovery path (covered by the next test)."""
         db_path = os.path.join(tmp_dir, "test_resilience.db")
         em = ExecutionMemory(
             db_path=db_path,
             chroma_dir=os.path.join(tmp_dir, "chroma_res"),
         )
 
+        # First store with passing status (matches make_record default).
         record = make_record(workflow_id="wf-res-001")
         em._store_sqlite(record)
 
+        # Duplicate workflow_id with status='failed' must propagate IntegrityError.
         with pytest.raises(sqlite3.IntegrityError):
             dup = make_record(
-                workflow_id="wf-res-001", user_query="different query"
+                workflow_id="wf-res-001",
+                user_query="different query",
+                test_status="failed",
+                failure_category="B1",
             )
             em._store_sqlite(dup)
 
-        em.conn.rollback()
+        # _store_sqlite already rolled back inside its IntegrityError handler;
+        # the explicit rollback here is defensive (no-op if state is clean).
+        em._writer_conn.rollback()
+        em.close()
+
+    def test_duplicate_workflow_id_case_b_recovery(self, tmp_dir):
+        """Schema v6 Case B path: a previously-failed workflow that re-runs
+        and now passes must NOT raise — the row is recovered in place.
+
+        Verifies: original failure context (robot_code, failure_category,
+        error_message, failed_keyword) is preserved; test_status flips to
+        'passed'; working_code stores the corrected code."""
+        db_path = os.path.join(tmp_dir, "test_resilience.db")
+        em = ExecutionMemory(
+            db_path=db_path,
+            chroma_dir=os.path.join(tmp_dir, "chroma_res"),
+        )
+
+        # Run 1 — failed test, captures v1 robot_code and failure context.
+        run1 = make_record(
+            workflow_id="wf-caseb-001",
+            robot_code="*** Test Cases ***\nBroken\n    Click    id=does-not-exist",
+            test_status="failed",
+            failure_category="B1",
+            failed_keyword="Click",
+            error_message="No element with id=does-not-exist",
+        )
+        em._store_sqlite(run1)
+
+        # Run 2 — same workflow_id, edited code now passes.
+        # Must NOT raise; instead must call _update_to_passing_state.
+        run2 = make_record(
+            workflow_id="wf-caseb-001",
+            robot_code="*** Test Cases ***\nFixed\n    Click    id=submit",
+            test_status="passed",
+        )
+        em._store_sqlite(run2)  # no IntegrityError
+
+        row = em._writer_conn.execute(
+            "SELECT robot_code, working_code, test_status, "
+            "       failure_category, failed_keyword, error_message "
+            "FROM execution_records WHERE workflow_id = ?",
+            ("wf-caseb-001",),
+        ).fetchone()
+
+        # Failure context preserved from Run 1.
+        assert row["robot_code"] == run1.robot_code
+        assert row["failure_category"] == "B1"
+        assert row["failed_keyword"] == "Click"
+        assert row["error_message"] == "No element with id=does-not-exist"
+        # Recovery columns reflect Run 2's outcome.
+        assert row["working_code"] == run2.robot_code
+        assert row["test_status"] == "passed"
+        em.close()
+
+
+class TestInjectedHintIdsStorage:
+    """Schema v10 contract: injected_hint_ids is written on INSERT, preserved
+    across the dedup UPDATE, and preserved across the Case B passing-state
+    update. _row_to_record round-trips the column.
+
+    These invariants are load-bearing for Trigger 1 / Trigger 2: the trigger
+    paths read injected_hint_ids off the execution_records row to decide which
+    hints to judge. Overwriting it later would feed the LLM the wrong set."""
+
+    def test_insert_writes_injected_hint_ids(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        record = make_record(workflow_id="wf-inj-001")
+        record.injected_hint_ids = "[5, 12]"
+        em._store_sqlite(record)
+
+        row = em._writer_conn.execute(
+            "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+            ("wf-inj-001",),
+        ).fetchone()
+        assert row["injected_hint_ids"] == "[5, 12]"
+        em.close()
+
+    def test_insert_writes_known_empty_marker(self, tmp_dir):
+        """'[]' must persist as the known-empty marker, distinct from NULL."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        record = make_record(workflow_id="wf-inj-002")
+        record.injected_hint_ids = "[]"
+        em._store_sqlite(record)
+
+        row = em._writer_conn.execute(
+            "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+            ("wf-inj-002",),
+        ).fetchone()
+        assert row["injected_hint_ids"] == "[]"
+        em.close()
+
+    def test_insert_persists_null_when_unset(self, tmp_dir):
+        """Legacy / unset rows must store NULL (the dataclass default)."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        record = make_record(workflow_id="wf-inj-003")
+        # No injected_hint_ids set -> defaults to None.
+        em._store_sqlite(record)
+
+        row = em._writer_conn.execute(
+            "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+            ("wf-inj-003",),
+        ).fetchone()
+        assert row["injected_hint_ids"] is None
+        em.close()
+
+    def test_dedup_update_does_not_overwrite_injected_hint_ids(self, tmp_dir):
+        """After DEDUPLICATION_THRESHOLD identical runs, the dedup UPDATE
+        kicks in. It must preserve the original row's injected_hint_ids so
+        Trigger 1 sees the original (correct) set on the surviving workflow_id.
+
+        Note: setup uses (threshold - 1) fills, not (threshold), because the
+        threshold check is `>=` and we need exactly DEDUPLICATION_THRESHOLD
+        rows present before `triggering` to make `triggering` hit the dedup
+        UPDATE branch."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        threshold = em.DEDUPLICATION_THRESHOLD  # 5
+
+        # First store: original injected_hint_ids.
+        first = make_record(workflow_id="wf-dedup-001", user_query="same q",
+                             domain="example.com")
+        first.injected_hint_ids = "[7, 14]"
+        em._store_sqlite(first)
+
+        # Reach threshold with identical query+domain+status records.
+        # (threshold - 1) inserts so COUNT(existing) reaches DEDUPLICATION_THRESHOLD
+        # exactly when `triggering` is stored.
+        for i in range(threshold - 1):
+            r = make_record(workflow_id=f"wf-dedup-fill-{i}", user_query="same q",
+                             domain="example.com")
+            r.injected_hint_ids = "[]"   # different injected set in later runs
+            em._store_sqlite(r)
+
+        # Now a further identical record triggers the dedup UPDATE branch on
+        # the MOST RECENT matching row (fill-3).
+        triggering = make_record(workflow_id="wf-dedup-trig", user_query="same q",
+                                  domain="example.com")
+        triggering.injected_hint_ids = "[99]"   # would be wrong if it overwrote
+        em._store_sqlite(triggering)
+
+        # The first row's injected_hint_ids must be unchanged.
+        original_row = em._writer_conn.execute(
+            "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+            ("wf-dedup-001",),
+        ).fetchone()
+        assert original_row["injected_hint_ids"] == "[7, 14]"
+
+        # Each fill-row also has its original injected_hint_ids preserved,
+        # including the most-recent one (fill-3) that was the dedup-UPDATE target.
+        for i in range(threshold - 1):
+            r = em._writer_conn.execute(
+                "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+                (f"wf-dedup-fill-{i}",),
+            ).fetchone()
+            assert r is not None, f"wf-dedup-fill-{i} missing from DB"
+            assert r["injected_hint_ids"] == "[]"
+
+        # And the triggering row was NOT inserted (dedup UPDATEd fill-3 instead).
+        trig_row = em._writer_conn.execute(
+            "SELECT injected_hint_ids FROM execution_records WHERE workflow_id = ?",
+            ("wf-dedup-trig",),
+        ).fetchone()
+        assert trig_row is None, (
+            "triggering row should NOT exist as a separate record after dedup UPDATE"
+        )
+        em.close()
+
+    def test_update_to_passing_state_preserves_injected_hint_ids(self, tmp_dir):
+        """Case B recovery (failed -> re-run passes with edited code) must
+        preserve the original injected_hint_ids. Trigger 1 fires next and must
+        judge the hints that shaped the failing v1 code, not [] or any new
+        value."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        run1 = make_record(
+            workflow_id="wf-caseb-inj-001",
+            robot_code="*** Test Cases ***\nBroken\n    Click    id=missing",
+            test_status="failed",
+            failure_category="C1",
+        )
+        run1.injected_hint_ids = "[3, 8, 21]"
+        em._store_sqlite(run1)
+
+        run2 = make_record(
+            workflow_id="wf-caseb-inj-001",
+            robot_code="*** Test Cases ***\nFixed\n    Click    id=submit",
+            test_status="passed",
+        )
+        # Pretend the re-run had a different injected set (e.g., 0 hints
+        # because OPTIMIZATION_ENABLED was toggled off, or different agent
+        # state). The Case B branch must NOT overwrite.
+        run2.injected_hint_ids = "[]"
+        em._store_sqlite(run2)
+
+        row = em._writer_conn.execute(
+            "SELECT injected_hint_ids, test_status, working_code "
+            "FROM execution_records WHERE workflow_id = ?",
+            ("wf-caseb-inj-001",),
+        ).fetchone()
+        assert row["injected_hint_ids"] == "[3, 8, 21]"
+        assert row["test_status"] == "passed"
+        assert row["working_code"] == run2.robot_code
+        em.close()
+
+    def test_update_user_feedback_preserves_injected_hint_ids(self, tmp_dir):
+        """The fourth write path against execution_records is update_user_feedback.
+        Trigger 2 reads record.injected_hint_ids AFTER user feedback has been
+        attached -- a silent overwrite here would feed Trigger 2 the wrong
+        hint IDs to judge."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        record = make_record(workflow_id="wf-ufb-001")
+        record.injected_hint_ids = "[3, 8, 21]"
+        em._store_sqlite(record)
+
+        em.update_user_feedback(
+            workflow_id="wf-ufb-001",
+            feedback_text="this is wrong, click the other button",
+            feedback_type="correction",
+        )
+
+        row = em._writer_conn.execute(
+            "SELECT injected_hint_ids, user_feedback, user_feedback_type "
+            "FROM execution_records WHERE workflow_id = ?",
+            ("wf-ufb-001",),
+        ).fetchone()
+        assert row["injected_hint_ids"] == "[3, 8, 21]"
+        assert row["user_feedback"] == "this is wrong, click the other button"
+        assert row["user_feedback_type"] == "correction"
+        em.close()
+
+    def test_row_to_record_round_trips_injected_hint_ids(self, tmp_dir):
+        """The dataclass round-trip preserves the JSON string verbatim --
+        no parsing, no normalisation. Trigger 1/2 parse on read; storage is
+        opaque."""
+        db_path = os.path.join(tmp_dir, "test_inj.db")
+        em = ExecutionMemory(db_path=db_path, chroma_dir=os.path.join(tmp_dir, "chroma_inj"))
+
+        for wid, ids in [
+            ("wf-rt-001", "[1, 2, 3]"),
+            ("wf-rt-002", "[]"),
+            ("wf-rt-003", None),
+        ]:
+            r = make_record(workflow_id=wid)
+            r.injected_hint_ids = ids
+            em._store_sqlite(r)
+            fetched = em.get(wid)
+            assert fetched.injected_hint_ids == ids, (
+                f"Round-trip failed for {wid}: expected {ids!r}, got {fetched.injected_hint_ids!r}"
+            )
         em.close()
 
 
@@ -601,3 +911,152 @@ class TestConfigPath:
             f"LEARNING_CONFIG CHROMADB_DIR is 'data/learning_chromadb': "
             f"got '{LEARNING_CONFIG['CHROMADB_DIR']}'"
         )
+
+
+# ===================================================================
+# C3 — ChromaDB retry cooldown and error state observability
+# ===================================================================
+
+class TestChromaRetryAndObservability:
+    """C3: After ChromaDB init failure, error state is exposed and retried after cooldown.
+
+    Concrete scenario: ChromaDB directory is on a network mount that becomes
+    unavailable. Without C3, the sentinel is set forever and no health check
+    surfaces the problem. With C3:
+    - _chroma_failed_at and _chroma_last_error are set immediately
+    - Further calls within 300s are suppressed (no log spam)
+    - After 300s the next call retries automatically — operator can fix the
+      mount without restarting the process
+    - On successful retry both error fields are cleared
+    """
+
+    def test_failure_records_error_state(self, tmp_dir):
+        """After init failure, sentinel is set and error fields are populated."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "test.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma"),
+        )
+        with patch("chromadb.PersistentClient", side_effect=RuntimeError("disk full")):
+            em._init_chromadb()
+
+        assert em._chroma_client is em._CHROMADB_INIT_FAILED
+        assert em._chroma_failed_at is not None
+        assert em._chroma_last_error == "disk full"
+        em.close()
+
+    def test_within_cooldown_suppresses_retry(self, tmp_dir):
+        """Second call within cooldown does not retry ChromaDB init."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "test.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma"),
+        )
+        call_count = 0
+
+        def failing_client(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("still down")
+
+        with patch("chromadb.PersistentClient", side_effect=failing_client):
+            em._init_chromadb()  # first call — fails, sets sentinel + timestamp
+            em._init_chromadb()  # second call — within default 300s cooldown
+
+        assert call_count == 1, (
+            f"PersistentClient called once only (cooldown suppressed second call); "
+            f"got {call_count}"
+        )
+        em.close()
+
+    def test_expired_cooldown_triggers_retry(self, tmp_dir):
+        """After cooldown expires, the next call retries ChromaDB init."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "test.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma"),
+        )
+        call_count = 0
+
+        def failing_client(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("still broken")
+
+        with patch("chromadb.PersistentClient", side_effect=failing_client):
+            em._init_chromadb()  # first call — fails, records _chroma_failed_at
+
+        # Expire the cooldown by setting it to 0 on the instance
+        em._CHROMA_RETRY_COOLDOWN_S = 0
+
+        with patch("chromadb.PersistentClient", side_effect=failing_client):
+            em._init_chromadb()  # second call — cooldown expired, should retry
+
+        assert call_count == 2, (
+            f"PersistentClient called twice (retry after cooldown); got {call_count}"
+        )
+        em.close()
+
+    def test_successful_retry_clears_error_state(self, tmp_dir):
+        """After a successful retry, _chroma_failed_at and _chroma_last_error are None."""
+        em = ExecutionMemory(
+            db_path=os.path.join(tmp_dir, "test.db"),
+            chroma_dir=os.path.join(tmp_dir, "chroma"),
+        )
+        # First call fails — sets error state
+        with patch("chromadb.PersistentClient", side_effect=RuntimeError("transient")):
+            em._init_chromadb()
+
+        assert em._chroma_failed_at is not None
+
+        # Expire cooldown
+        em._CHROMA_RETRY_COOLDOWN_S = 0
+
+        # Second call succeeds — mock a working client. A real chromadb
+        # collection exposes .metadata as a dict; learning_anchors init
+        # asserts hnsw:space == cosine, so the mock must reflect that.
+        mock_collection = MagicMock()
+        mock_collection.metadata = {"hnsw:space": "cosine"}
+        mock_client = MagicMock()
+        mock_client.get_or_create_collection.return_value = mock_collection
+        with patch("chromadb.PersistentClient", return_value=mock_client):
+            em._init_chromadb()
+
+        assert em._chromadb_available
+        assert em._chroma_failed_at is None
+        assert em._chroma_last_error is None
+        em.close()
+
+
+class TestWriterThreadGuard:
+    """_assert_writer_thread fires when a guarded write runs off the writer thread.
+
+    The autouse `_rename_test_thread_to_writer` fixture in conftest.py renames
+    the main pytest thread to WRITER_THREAD_NAME, so every other optimization
+    test passes the guard implicitly and its failure branch is never exercised.
+    A freshly spawned thread keeps its own name, so calling a guarded write
+    method inside one reaches the AssertionError branch.
+    """
+
+    def test_guarded_write_from_non_writer_thread_raises(self, in_memory_em):
+        """update_daily_stats called off the writer thread raises AssertionError.
+
+        The guard is the method's first line, so it raises before any
+        _writer_conn use — no row is written and there is no cross-thread
+        sqlite access.
+        """
+        captured: dict = {}
+
+        def worker():
+            try:
+                in_memory_em.update_daily_stats("passed")
+            except Exception as e:  # record whatever was raised for assertion
+                captured["err"] = e
+
+        t = threading.Thread(target=worker, name="request-thread")
+        t.start()
+        t.join()
+
+        err = captured.get("err")
+        assert isinstance(err, AssertionError), (
+            f"expected AssertionError from the writer-thread guard, got {err!r}"
+        )
+        assert "update_daily_stats" in str(err)
+        assert "request-thread" in str(err)

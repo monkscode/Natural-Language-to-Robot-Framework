@@ -120,6 +120,28 @@ class TestFeedbackEndpoints:
         })
         assert resp.status_code == 200
 
+    def test_submit_feedback_text_over_500_returns_400(self, api_client):
+        """POST /api/feedback with feedback_text > 500 chars returns 400."""
+        client, _, _ = api_client
+        resp = client.post("/api/feedback", json={
+            "workflow_id": "wf-001",
+            "feedback_type": "completely_wrong",
+            "feedback_text": "x" * 501,
+        })
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Feedback must be 500 characters or fewer"
+
+    def test_submit_feedback_exactly_500_chars_succeeds(self, api_client):
+        """POST /api/feedback with feedback_text of exactly 500 chars is accepted."""
+        client, _, mock_fb = api_client
+        mock_fb.process_user_feedback.return_value = {"action": "learning_recorded"}
+        resp = client.post("/api/feedback", json={
+            "workflow_id": "wf-001",
+            "feedback_type": "completely_wrong",
+            "feedback_text": "x" * 500,
+        })
+        assert resp.status_code == 200
+
     def test_learning_stats(self, api_client):
         """GET /api/learning-stats returns stats."""
         client, _, mock_fb = api_client
