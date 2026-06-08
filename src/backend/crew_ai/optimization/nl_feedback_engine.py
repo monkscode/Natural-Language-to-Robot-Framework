@@ -405,14 +405,15 @@ class NLFeedbackEngine(LearningEngine):
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "
                     "FROM nl_feedback_corrections "
-                    "WHERE feedback_text = ? AND domain IS ? AND url IS ? AND scope = ?",
+                    "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
+                    "AND url IS NOT DISTINCT FROM ? AND scope = ?",
                     (feedback_text.strip(), domain, url, scope),
                 ).fetchone()
             else:
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "
                     "FROM nl_feedback_corrections "
-                    "WHERE feedback_text = ? AND domain IS ? AND scope = ?",
+                    "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ?",
                     (feedback_text.strip(), domain, scope),
                 ).fetchone()
 
@@ -473,14 +474,14 @@ class NLFeedbackEngine(LearningEngine):
                     "(feedback_text, category, scope, domain, url, "
                     " original_failure_category, evidence_count, anchor_query, "
                     " source_workflow_id, created_at, last_seen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) RETURNING id",
                     (
                         feedback_text.strip(), category, scope,
                         domain, url, failure_category,
                         anchor_query, workflow_id, now, now,
                     ),
                 )
-                new_hint_id = cursor.lastrowid
+                new_hint_id = cursor.fetchone()["id"]
                 logger.info(
                     "[LEARNING:NL] Stored new feedback correction: "
                     "'%s' scope=%s domain=%s",

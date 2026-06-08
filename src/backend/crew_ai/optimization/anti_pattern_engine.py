@@ -127,6 +127,7 @@ class AntiPatternEngine(LearningEngine):
                 (failure_category, query_pattern, bad_code_snippet, error_message,
                  domain, score, evidence_count, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
+                RETURNING id
             """, (
                 record.failure_category,
                 record.user_query,
@@ -136,7 +137,7 @@ class AntiPatternEngine(LearningEngine):
                 getattr(record, 'domain', None),
                 initial_score,
             ))
-            new_anti_id = cursor.lastrowid
+            new_anti_id = cursor.fetchone()["id"]
         self._em._writer_conn.commit()
 
         # After the SQL commit, embed a newly created anti-pattern's anchor
