@@ -5,15 +5,13 @@ This module implements a pattern learning system that learns which keywords
 are commonly used for specific query types and predicts relevant keywords
 for new queries based on similarity to past queries.
 
-Uses ChromaDB for semantic similarity search — stores (user_query → keywords) patterns
-from every successful execution and queries them at generation time.
+Uses pgvector (via KeywordVectorStore) for semantic similarity search — stores
+(user_query → keywords) patterns from every successful execution and queries
+them at generation time. Distance is L2; similarity = 1/(1+distance).
 """
 
 import re
-import json
-import uuid
 import logging
-from datetime import datetime
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -21,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class QueryPatternMatcher:
     """
-    Learn and predict keyword usage patterns using ChromaDB for semantic similarity.
+    Learn and predict keyword usage patterns using pgvector semantic similarity.
 
     Stores (user_query → keywords) patterns from successful executions and
     queries them at generation time to predict relevant keywords for new queries.
@@ -29,20 +27,15 @@ class QueryPatternMatcher:
 
     def __init__(self, chroma_store=None):
         """
-        Initialize with ChromaDB store for query pattern embeddings.
+        Initialize with the KeywordVectorStore for query-pattern embeddings.
 
         Args:
-            chroma_store: KeywordVectorStore instance (for query embeddings)
+            chroma_store: KeywordVectorStore instance (pgvector-backed). The
+                parameter name is kept for call-site compatibility.
         """
         self.chroma_store = chroma_store
-
-        # Get or create ChromaDB collection for query patterns
-        if self.chroma_store:
-            self.pattern_collection = self.chroma_store.get_or_create_pattern_collection()
-        else:
-            logger.warning("No ChromaDB store provided, pattern learning will be limited")
-            self.pattern_collection = None
-
+        if not self.chroma_store:
+            logger.warning("No vector store provided, pattern learning will be limited")
         logger.info("QueryPatternMatcher initialized")
 
     def _extract_keywords_from_code(self, code: str) -> List[str]:
@@ -127,20 +120,10 @@ class QueryPatternMatcher:
                 logger.warning("No keywords extracted from code, skipping pattern learning")
                 return
 
-            if self.pattern_collection:
-                pattern_id = f"pattern_{uuid.uuid4().hex}"
-                try:
-                    self.pattern_collection.add(
-                        documents=[user_query],
-                        ids=[pattern_id],
-                        metadatas=[{
-                            "keywords": json.dumps(used_keywords),
-                            "timestamp": datetime.now().isoformat()
-                        }]
-                    )
-                    logger.debug(f"Stored pattern in ChromaDB: {pattern_id}")
-                except Exception as chroma_e:
-                    logger.warning(f"Failed to store pattern in ChromaDB: {chroma_e}")
+            if self.chroma_store:
+                pattern_id = self.chroma_store.add_pattern(user_query, used_keywords)
+                if pattern_id:
+                    logger.debug(f"Stored query pattern: {pattern_id}")
 
             logger.info(f"Learned pattern: query='{user_query[:50]}...', keywords={used_keywords}")
 
@@ -159,53 +142,41 @@ class QueryPatternMatcher:
             List of predicted keyword names (empty if confidence too low)
         """
         try:
-            if not self.pattern_collection:
-                logger.debug("No ChromaDB pattern collection available")
+            if not self.chroma_store:
+                logger.debug("No vector store available")
                 return []
 
-            # Guard: ChromaDB raises if n_results > collection size
-            count = self.pattern_collection.count()
+            count = self.chroma_store.pattern_count()
             if count == 0:
-                logger.debug("No patterns in ChromaDB yet")
+                logger.debug("No query patterns yet")
                 return []
 
-            results = self.pattern_collection.query(
-                query_texts=[user_query],
-                n_results=min(5, count)
-            )
-
-            if not results['ids'][0]:
+            results = self.chroma_store.search_patterns(user_query, top_k=min(5, count))
+            if not results:
                 return []
 
-            # Check confidence (ChromaDB returns distances, lower is better)
-            # Convert distance to similarity: similarity = 1 / (1 + distance)
-            top_distance = results['distances'][0][0]
+            # Confidence from the nearest pattern (L2 distance, lower is better):
+            # similarity = 1 / (1 + distance).
+            top_distance = results[0]["distance"]
             similarity = 1 / (1 + top_distance)
 
             if similarity < confidence_threshold:
                 logger.debug(f"Top similarity {similarity:.3f} below threshold {confidence_threshold}")
                 return []
 
-            # Aggregate keywords from similar patterns
+            # Aggregate keywords from patterns above threshold.
             keyword_counts = {}
-            for i, metadata in enumerate(results['metadatas'][0]):
-                # Get distance for this result
-                distance = results['distances'][0][i]
-                result_similarity = 1 / (1 + distance)
-
-                # Only use results above threshold
+            for res in results:
+                result_similarity = 1 / (1 + res["distance"])
                 if result_similarity >= confidence_threshold:
-                    keywords = json.loads(metadata['keywords'])
-                    for keyword in keywords:
+                    for keyword in (res["keywords"] or []):
                         keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
 
-            # Return top 10 most common keywords
             sorted_keywords = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)
-            predicted_keywords = [kw for kw, count in sorted_keywords[:10]]
+            predicted_keywords = [kw for kw, _ in sorted_keywords[:10]]
 
             logger.info(f"Predicted {len(predicted_keywords)} keywords with confidence {similarity:.3f}")
             logger.debug(f"Predicted keywords: {predicted_keywords}")
-
             return predicted_keywords
 
         except Exception as e:

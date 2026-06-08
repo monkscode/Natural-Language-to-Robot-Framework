@@ -10,11 +10,26 @@ import sqlite3
 import shutil
 import tempfile
 import threading
+from unittest.mock import patch, MagicMock
 
 import pytest
 
 from src.backend.crew_ai.optimization.learning_config import WRITER_THREAD_NAME
 from src.backend.crew_ai.optimization.schema_manager import SchemaManager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_keyword_store():
+    """Prevent a real FeedbackLoop construction from building the Postgres-backed
+    KeywordVectorStore, which would write learned query patterns to the LIVE
+    public schema (test pollution / non-isolation). Tests that exercise the
+    keyword store inject their own mock store, so this never affects them.
+    """
+    with patch(
+        "src.backend.crew_ai.optimization.keyword_vector_store.KeywordVectorStore",
+        MagicMock(),
+    ):
+        yield
 
 
 class _EngineCompatConn:

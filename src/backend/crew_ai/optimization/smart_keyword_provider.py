@@ -15,7 +15,7 @@ import logging
 import random
 from typing import Optional, List, Dict, NamedTuple
 from .pattern_learning import QueryPatternMatcher
-from .chroma_store import KeywordVectorStore
+from .keyword_vector_store import KeywordVectorStore
 from .keyword_search_tool import KeywordSearchTool
 from .context_pruner import ContextPruner
 from .learning_config import LEARNING_CONFIG

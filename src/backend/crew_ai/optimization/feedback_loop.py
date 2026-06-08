@@ -751,7 +751,7 @@ class FeedbackLoop:
             self.pattern_learner = pattern_learner
         else:
             try:
-                from src.backend.crew_ai.optimization.chroma_store import (
+                from src.backend.crew_ai.optimization.keyword_vector_store import (
                     KeywordVectorStore,
                 )
                 from src.backend.core.config import settings as app_settings
