@@ -107,7 +107,7 @@ _PG_TABLES = (
     "execution_records", "intent_patterns", "structural_rules", "keyword_corrections",
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
     "trigger_events", "hint_audit", "hint_review_sessions", "hint_review_recommendations",
-    "hint_review_pages", "hint_workflow_trace",
+    "hint_review_pages", "hint_workflow_trace", "learning_anchors", "execution_embeddings",
 )
 
 
@@ -129,7 +129,8 @@ def _pg_test_em(_pg_admin):
 
     _pg_admin.execute(f"DROP SCHEMA IF EXISTS {_PG_TEST_SCHEMA} CASCADE")
     _pg_admin.execute(f"CREATE SCHEMA {_PG_TEST_SCHEMA}")
-    dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_PG_TEST_SCHEMA}"
+    # public is on the path so the pgvector `vector` type (installed in public) resolves.
+    dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_PG_TEST_SCHEMA},public"
     em = PostgresExecutionMemory(dsn=dsn)
     em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
     yield em

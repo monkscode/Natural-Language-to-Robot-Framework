@@ -55,6 +55,7 @@ class TestSchemaManager:
             "trigger_events", "hint_audit",
             "hint_review_sessions", "hint_review_recommendations",
             "hint_review_pages", "hint_workflow_trace",
+            "learning_anchors", "execution_embeddings",
         }
         tables = pg_introspect.table_names(in_memory_db)
         assert expected_tables == tables, (

@@ -90,9 +90,11 @@ services:
     networks:
       - nlrf-network
 
-  # --- Auth/users database (Phase 1). Learning stack still uses SQLite/ChromaDB. ---
+  # --- Postgres (auth/users + the learning stack as of Phase 4). The pgvector
+  # image (team-maintained, tracks PG releases) provides the `vector` extension
+  # for the learning embeddings (slice 6); same PG 16, so pgdata is compatible. ---
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: nlrf-postgres
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-nlrf}

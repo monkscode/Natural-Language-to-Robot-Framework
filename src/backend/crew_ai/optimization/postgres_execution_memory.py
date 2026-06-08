@@ -21,6 +21,7 @@ Referenced by: learning_registry.py (after cutover).
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -34,6 +35,7 @@ from src.backend.core.config import settings
 from src.backend.crew_ai.optimization import pg_compat, pg_schema
 from src.backend.crew_ai.optimization.pg_compat import CompatConnection, compat_row
 from src.backend.crew_ai.optimization.execution_memory import (
+    ExecutionMemory,
     ExecutionRecord,
     _assert_writer_thread,
     _mark,
@@ -46,18 +48,35 @@ from src.backend.crew_ai.optimization.learning_config import (
 
 logger = logging.getLogger(__name__)
 
+# Same model ChromaDB used by default (all-MiniLM-L6-v2, 384-dim), so the
+# similarity distribution — and the 0.55 retrieval threshold tuned against it —
+# carry over unchanged. fastembed runs it via standalone ONNX (no torch).
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
 
 class PostgresExecutionMemory(ExecutionStore, SemanticStore):
-    """PostgreSQL + ChromaDB store for execution records (relational on Postgres)."""
+    """PostgreSQL store for execution records + pgvector embeddings (Phase 4).
+
+    Relational data lives in Postgres; the learning vectors (anchors + execution
+    embeddings) live in pgvector, embedded with fastembed (standalone ONNX). The
+    `_chroma_*` attribute names are retained because the shared FeedbackLoop
+    observability (get_health_status / get_learning_stats) reads them — they now
+    track the fastembed embedder state, not ChromaDB.
+    """
 
     DEDUPLICATION_THRESHOLD = LEARNING_CONFIG["DEDUPLICATION_THRESHOLD"]
 
-    _CHROMADB_INIT_FAILED = object()
+    # Reuse ExecutionMemory's sentinel object so the shared FeedbackLoop health
+    # check (`_chroma_client is ExecutionMemory._CHROMADB_INIT_FAILED`) and the
+    # conftest disable both work against either backend.
+    _CHROMADB_INIT_FAILED = ExecutionMemory._CHROMADB_INIT_FAILED
     _CHROMA_RETRY_COOLDOWN_S: int = 300
 
     def __init__(self, dsn: str = None, chroma_dir: str = None):
         self.dsn = dsn or settings.DATABASE_URL
-        self._chroma_dir = chroma_dir or LEARNING_CONFIG["CHROMADB_DIR"]
+        # fastembed model cache (persisted under data/ so it isn't re-downloaded).
+        self._embed_cache_dir = os.path.join(
+            os.path.dirname(LEARNING_CONFIG["CHROMADB_DIR"]) or "data", "fastembed_cache")
 
         # Schema bootstrap on a throwaway raw connection (pg_schema uses native
         # %s SQL, so it must NOT go through the ?-translating compat adapter).
@@ -75,10 +94,10 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             kwargs={"row_factory": compat_row, "autocommit": True}, open=True,
         )
 
-        # ChromaDB: lazy (vectors stay on Chroma until the pgvector slice).
+        # fastembed embedder: lazy. `_chroma_client` holds None (not yet loaded),
+        # the TextEmbedding instance (ready), or _CHROMADB_INIT_FAILED (disabled
+        # in tests / init failed). `_chroma_failed_at` None + sentinel = disabled.
         self._chroma_client = None
-        self._execution_collection = None
-        self._learning_anchors = None
         self._chroma_failed_at = None
         self._chroma_last_error = None
         self._chroma_init_lock = threading.Lock()
@@ -105,7 +124,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     def store(self, record: ExecutionRecord) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store")
         self._store_relational(record)
-        self._store_chromadb(record)
+        self._store_execution_embedding(record)
 
     def store_execution(self, record: ExecutionRecord) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store_execution")
@@ -362,10 +381,17 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         )
 
     # -------------------------------------------------------------------
-    # ChromaDB (vector) methods — reused as-is; move to pgvector later.
+    # Vector methods — pgvector + fastembed (Phase 4 slice 6).
     # -------------------------------------------------------------------
 
     def _init_chromadb(self):
+        """Lazy-load the fastembed model into `_chroma_client` (idempotent).
+
+        Mirrors the old ChromaDB lazy-init tri-state: the _CHROMADB_INIT_FAILED
+        sentinel with `_chroma_failed_at is None` means "explicitly disabled"
+        (tests) and stays disabled; with a timestamp it is a genuine failure
+        retried after the cooldown.
+        """
         if self._chromadb_available:
             return
         with self._chroma_init_lock:
@@ -373,77 +399,110 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 return
             if self._chroma_client is self._CHROMADB_INIT_FAILED:
                 if self._chroma_failed_at is None:
-                    return
+                    return  # explicitly disabled
                 if time.monotonic() - self._chroma_failed_at < self._CHROMA_RETRY_COOLDOWN_S:
                     return
                 self._chroma_client = None
             try:
-                import chromadb
-                from chromadb.config import Settings as ChromaSettings
-                client = chromadb.PersistentClient(
-                    path=self._chroma_dir, settings=ChromaSettings(anonymized_telemetry=False))
-                self._execution_collection = client.get_or_create_collection(
-                    name="execution_embeddings", metadata={"hnsw:space": "cosine"})
-                self._learning_anchors = client.get_or_create_collection(
-                    name="learning_anchors", metadata={"hnsw:space": "cosine"})
-                self._chroma_client = client
+                from fastembed import TextEmbedding
+                self._chroma_client = TextEmbedding(
+                    model_name=EMBED_MODEL, cache_dir=self._embed_cache_dir)
                 self._chroma_failed_at = None
                 self._chroma_last_error = None
             except Exception as e:
-                logger.error("[LEARNING] ChromaDB init failed: %s", e)
+                logger.error("[LEARNING] fastembed init failed: %s", e)
                 self._chroma_client = self._CHROMADB_INIT_FAILED
-                self._execution_collection = None
-                self._learning_anchors = None
                 self._chroma_failed_at = time.monotonic()
                 self._chroma_last_error = str(e)
 
     @property
     def _chromadb_available(self) -> bool:
+        """Passive (no init) — the embedder is loaded and usable."""
         return (self._chroma_client is not None
-                and self._chroma_client is not self._CHROMADB_INIT_FAILED
-                and self._execution_collection is not None)
+                and self._chroma_client is not self._CHROMADB_INIT_FAILED)
 
-    def _store_chromadb(self, record: ExecutionRecord) -> None:
-        _assert_writer_thread("PostgresExecutionMemory._store_chromadb")
+    def _embed(self, text: str) -> str | None:
+        """Embed `text` to a pgvector literal '[v1,v2,...]', or None if disabled."""
         self._init_chromadb()
         if not self._chromadb_available:
-            return
-        metadata = {
-            "test_status": record.test_status,
-            "failure_category": record.failure_category or "",
-            "domain": record.domain or "",
-            "code_structure": record.code_structure or "",
-            "workflow_id": record.workflow_id,
-        }
+            return None
         try:
-            self._execution_collection.add(
-                documents=[record.user_query], ids=[record.workflow_id], metadatas=[metadata])
-        except Exception:
+            vec = next(iter(self._chroma_client.embed([text])))
+        except Exception as e:
+            logger.warning("[LEARNING] embedding failed (non-blocking): %s", e)
+            return None
+        return "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+
+    def _store_execution_embedding(self, record: ExecutionRecord) -> None:
+        _assert_writer_thread("PostgresExecutionMemory._store_execution_embedding")
+        if not record.user_query:
+            return
+        vec = self._embed(record.user_query)
+        if vec is None:
+            return
+        try:
+            self._writer_conn.execute(
+                "INSERT INTO execution_embeddings "
+                "(workflow_id, user_query, test_status, failure_category, domain, "
+                " code_structure, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                "ON CONFLICT (workflow_id) DO UPDATE SET "
+                "  user_query = EXCLUDED.user_query, test_status = EXCLUDED.test_status, "
+                "  failure_category = EXCLUDED.failure_category, domain = EXCLUDED.domain, "
+                "  code_structure = EXCLUDED.code_structure, embedding = EXCLUDED.embedding",
+                (record.workflow_id, record.user_query, record.test_status,
+                 record.failure_category or "", record.domain or "",
+                 record.code_structure or "", vec),
+            )
+            self._writer_conn.commit()
+        except Exception as e:
+            logger.warning("[LEARNING] execution embedding store failed (non-blocking): %s", e)
             try:
-                self._execution_collection.upsert(
-                    documents=[record.user_query], ids=[record.workflow_id], metadatas=[metadata])
-            except Exception as upsert_err:
-                logger.warning("[LEARNING] ChromaDB store failed (non-blocking): %s", upsert_err)
+                self._writer_conn.rollback()
+            except Exception:
+                pass
 
     def find_similar_executions(self, user_query: str, top_k: int = 5) -> list:
-        self._init_chromadb()
-        if not self._chromadb_available:
+        vec = self._embed(user_query)
+        if vec is None:
             return []
         try:
-            return self._execution_collection.query(query_texts=[user_query], n_results=top_k)
+            with self.read_conn() as conn:
+                rows = conn.execute(
+                    "SELECT workflow_id, test_status, failure_category, domain, "
+                    "       code_structure, 1 - (embedding <=> ?::vector) AS similarity "
+                    "FROM execution_embeddings "
+                    "ORDER BY embedding <=> ?::vector LIMIT ?",
+                    (vec, vec, top_k),
+                ).fetchall()
+            return [dict(r) for r in rows]
         except Exception as e:
-            logger.warning("[LEARNING] ChromaDB search failed: %s", e)
+            logger.warning("[LEARNING] similarity search failed: %s", e)
             return []
 
     def store_embedding(self, text: str, metadata: dict) -> None:
-        self._init_chromadb()
-        if not self._chromadb_available:
+        vec = self._embed(text)
+        if vec is None:
             return
+        wid = metadata.get("workflow_id") or str(id(text))
         try:
-            self._execution_collection.add(
-                documents=[text], ids=[metadata.get("workflow_id", str(id(text)))], metadatas=[metadata])
+            self._writer_conn.execute(
+                "INSERT INTO execution_embeddings "
+                "(workflow_id, user_query, test_status, failure_category, domain, "
+                " code_structure, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                "ON CONFLICT (workflow_id) DO UPDATE SET "
+                "  user_query = EXCLUDED.user_query, embedding = EXCLUDED.embedding",
+                (wid, text, metadata.get("test_status"), metadata.get("failure_category"),
+                 metadata.get("domain"), metadata.get("code_structure"), vec),
+            )
+            self._writer_conn.commit()
         except Exception as e:
-            logger.warning("[LEARNING] ChromaDB store_embedding failed: %s", e)
+            logger.warning("[LEARNING] store_embedding failed (non-blocking): %s", e)
+            try:
+                self._writer_conn.rollback()
+            except Exception:
+                pass
 
     def search_similar(self, query: str, top_k: int = 5) -> list:
         return self.find_similar_executions(query, top_k)
@@ -453,36 +512,35 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if not user_query or not user_query.strip() or not candidate_ids:
             return set()
         _mark(score_sink, candidate_ids, "no_anchor")
-        self._init_chromadb()
-        coll = self._learning_anchors
-        if coll is None:
+        qvec = self._embed(user_query)
+        if qvec is None:  # embedder disabled / failed → fail-open
             _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
         try:
-            expected_ids = [f"{kind}:{rid}" for rid in candidate_ids]
-            present = coll.get(ids=expected_ids, include=[])
-            n = len(present["ids"])
-            if n == 0:
-                if coll.count() == 0:
-                    _mark(score_sink, candidate_ids, "fail_open")
-                    return set(candidate_ids)
-                return set()
-            result = coll.query(
-                query_texts=[user_query], n_results=n,
-                where={"$and": [{"kind": kind}, {"record_id": {"$in": list(candidate_ids)}}]},
-                include=["metadatas", "distances"])
+            with self.read_conn() as conn:
+                total = conn.execute(
+                    "SELECT COUNT(*) AS n FROM learning_anchors"
+                ).fetchone()["n"]
+                rows = conn.execute(
+                    "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
+                    "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
+                    (qvec, kind, list(candidate_ids)),
+                ).fetchall()
         except Exception as e:
             logger.warning("[LEARNING] similarity filter query failed (fail-open): %s", e)
             _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
+        if not rows:
+            # No anchor exists for any candidate. Cold start (no anchors at all)
+            # fails open; otherwise these candidates are genuinely unanchored.
+            if total == 0:
+                _mark(score_sink, candidate_ids, "fail_open")
+                return set(candidate_ids)
+            return set()
         survivors: set = set()
-        metas = result["metadatas"][0] if result.get("metadatas") else []
-        dists = result["distances"][0] if result.get("distances") else []
-        for meta, dist in zip(metas, dists):
-            rid = meta.get("record_id")
-            if rid is None:
-                continue
-            sim = 1.0 - dist
+        for r in rows:
+            rid = r["record_id"]
+            sim = float(r["sim"])
             if sim >= threshold:
                 survivors.add(rid)
                 if score_sink is not None:
@@ -495,22 +553,32 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         _assert_writer_thread("PostgresExecutionMemory.add_anchor")
         if not anchor_query or not anchor_query.strip():
             return
-        self._init_chromadb()
-        coll = self._learning_anchors
-        if coll is None:
+        vec = self._embed(anchor_query)
+        if vec is None:
             return
         try:
-            coll.upsert(ids=[f"{kind}:{record_id}"], documents=[anchor_query],
-                        metadatas=[{"kind": kind, "record_id": record_id}])
+            self._writer_conn.execute(
+                "INSERT INTO learning_anchors "
+                "(anchor_key, kind, record_id, anchor_query, embedding) "
+                "VALUES (?, ?, ?, ?, ?::vector) "
+                "ON CONFLICT (anchor_key) DO UPDATE SET "
+                "  kind = EXCLUDED.kind, record_id = EXCLUDED.record_id, "
+                "  anchor_query = EXCLUDED.anchor_query, embedding = EXCLUDED.embedding",
+                (f"{kind}:{record_id}", kind, record_id, anchor_query, vec),
+            )
+            self._writer_conn.commit()
         except Exception as e:
             logger.warning("[LEARNING] add_anchor failed (non-blocking): %s", e)
+            try:
+                self._writer_conn.rollback()
+            except Exception:
+                pass
 
     def reconcile_anchors(self) -> dict:
         _assert_writer_thread("PostgresExecutionMemory.reconcile_anchors")
         ran_at = datetime.now(timezone.utc).isoformat()
         self._init_chromadb()
-        coll = self._learning_anchors
-        if coll is None:
+        if not self._chromadb_available:  # embedder disabled / failed
             return {"ran_at": ran_at, "checked": 0, "missing_count": 0}
         desired: list = []
         with self.read_conn() as conn:
@@ -528,20 +596,35 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if checked == 0:
             return {"ran_at": ran_at, "checked": 0, "missing_count": 0}
         try:
-            existing = set(coll.get(ids=[d[0] for d in desired], include=[])["ids"])
+            with self.read_conn() as conn:
+                existing = {
+                    row["anchor_key"] for row in conn.execute(
+                        "SELECT anchor_key FROM learning_anchors WHERE anchor_key = ANY(?)",
+                        ([d[0] for d in desired],),
+                    ).fetchall()
+                }
         except Exception as e:
             logger.error("[LEARNING] reconcile_anchors get() failed: %s", e)
             return {"ran_at": ran_at, "checked": checked, "missing_count": checked}
         missing = [d for d in desired if d[0] not in existing]
         if not missing:
             return {"ran_at": ran_at, "checked": checked, "missing_count": 0}
+        for _key, rid, kind, query in missing:
+            self.add_anchor(kind, rid, query)  # embeds + upserts; swallows errors
+        # Re-check which of the missing keys are now present for an honest count.
         try:
-            coll.upsert(ids=[d[0] for d in missing], documents=[d[3] for d in missing],
-                        metadatas=[{"kind": d[2], "record_id": d[1]} for d in missing])
-            return {"ran_at": ran_at, "checked": checked, "missing_count": 0}
+            with self.read_conn() as conn:
+                now_present = {
+                    row["anchor_key"] for row in conn.execute(
+                        "SELECT anchor_key FROM learning_anchors WHERE anchor_key = ANY(?)",
+                        ([d[0] for d in missing],),
+                    ).fetchall()
+                }
         except Exception as e:
-            logger.error("[LEARNING] reconcile_anchors upsert failed: %s", e)
+            logger.error("[LEARNING] reconcile_anchors recheck failed: %s", e)
             return {"ran_at": ran_at, "checked": checked, "missing_count": len(missing)}
+        still_missing = sum(1 for d in missing if d[0] not in now_present)
+        return {"ran_at": ran_at, "checked": checked, "missing_count": still_missing}
 
     def close(self):
         try:

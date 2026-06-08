@@ -35,6 +35,12 @@ dependencies = [
     "google-auth",
     # ChromaDB — uses default ONNX embeddings (no pytorch/sentence-transformers)
     "chromadb",
+    # fastembed — standalone ONNX embeddings for the learning vectors on pgvector
+    # (Phase 4 slice 6). Like ChromaDB it is onnxruntime-based; NO torch /
+    # sentence-transformers (same constraint). We pin all-MiniLM-L6-v2 (384-dim),
+    # the same model ChromaDB used, so similarity behaviour and the 0.55 threshold
+    # carry over unchanged.
+    "fastembed",
     "posthog>=2.4.0,<8.0.0",
     # LLM Observability — OTel-first (Enhancement #3)
     "traceloop-sdk>=0.30.0",

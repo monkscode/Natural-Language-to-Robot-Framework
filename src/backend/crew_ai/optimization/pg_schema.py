@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Each statement is executed once inside ensure_schema(). Ordered so referenced
 # tables (nl_feedback_corrections, hint_review_sessions) exist before FKs.
@@ -345,6 +345,39 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_hint_trace_created_at ON hint_workflow_trace(created_at)",
+
+    # --- pgvector embeddings (Phase 4 slice 6; replaces ChromaDB) ---
+    # The extension installs into whatever schema is first resolvable (public on
+    # the real DB); the vector TYPE is then visible to any search_path that
+    # includes public. 384 dims = fastembed BAAI/bge-small-en-v1.5.
+    "CREATE EXTENSION IF NOT EXISTS vector",
+    # learning_anchors — the hint-retrieval similarity gate (filter_by_query_similarity).
+    """
+    CREATE TABLE IF NOT EXISTS learning_anchors (
+        anchor_key   TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        record_id    BIGINT NOT NULL,
+        anchor_query TEXT NOT NULL,
+        embedding    vector(384) NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_anchors_kind_record ON learning_anchors(kind, record_id)",
+    "CREATE INDEX IF NOT EXISTS idx_anchors_embedding "
+    "ON learning_anchors USING hnsw (embedding vector_cosine_ops)",
+    # execution_embeddings — per-execution query embeddings (find_similar_executions).
+    """
+    CREATE TABLE IF NOT EXISTS execution_embeddings (
+        workflow_id      TEXT PRIMARY KEY,
+        user_query       TEXT,
+        test_status      TEXT,
+        failure_category TEXT,
+        domain           TEXT,
+        code_structure   TEXT,
+        embedding        vector(384) NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_exec_emb_embedding "
+    "ON execution_embeddings USING hnsw (embedding vector_cosine_ops)",
 
     # --- SQLite-compat SQL functions (so the engines' SQLite SQL runs as-is) ---
     # NOTE: json_each / json_valid were retired in slice 4.5 — the hint-id array
