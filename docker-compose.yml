@@ -25,11 +25,16 @@ services:
       - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-latest}
       # Disable ChromaDB telemetry (posthog API version mismatch causes noisy errors)
       - ANONYMIZED_TELEMETRY=False
+      # Auth/users Postgres DSN — in-container host is the 'postgres' service name
+      # (overrides the localhost value in src/backend/.env for the Docker network)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-nlrf}:${POSTGRES_PASSWORD:-nlrf}@postgres:5432/${POSTGRES_DB:-nlrf}
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env
     depends_on:
       browser-service:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     logging:
@@ -85,6 +90,64 @@ services:
     networks:
       - nlrf-network
 
+  # --- Auth/users database (Phase 1). Learning stack still uses SQLite/ChromaDB. ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: nlrf-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-nlrf}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nlrf}
+      - POSTGRES_DB=${POSTGRES_DB:-nlrf}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=postgres"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - nlrf-network
+
+  # --- React SPA microservice: nginx serves the build + reverse-proxies the API ---
+  frontend:
+    image: ${FRONTEND_IMAGE_TAG:-monkscode/nlrf:frontend-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: nlrf-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=frontend"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - nlrf-network
+
 networks:
   nlrf-network:
     driver: bridge
+
+volumes:
+  pgdata:

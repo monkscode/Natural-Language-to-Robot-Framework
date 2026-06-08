@@ -36,6 +36,9 @@ tmpclaude-*
 chroma_db/
 data/
 logs/temp_metrics
+# Postgres data volume (auth/users DB) + React build output
+pgdata/
+src/frontend-react/dist/
 
 # Ignore the local browser_service
 tools/browser_service/*

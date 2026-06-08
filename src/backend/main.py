@@ -33,12 +33,21 @@ init_observability()
 # Observability must be initialized before this line so OpenLLMetry patches apply.
 from src.backend.api.endpoints import router as api_router
 
+# Auth (Phase 1): JWT/role guards + /auth router + Postgres users store.
+from fastapi import Depends
+from src.backend.core.config import settings
+from src.backend.auth.jwt_utils import require_admin
+from src.backend.auth.endpoints import auth_router
+from src.backend.auth.db import init_auth_db, close_pool
+
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
 
+# CORS — restricted to the SPA origins (dev Vite :5173, nginx container :3000,
+# fastapi :5000). allow_credentials stays on for the Google OAuth state cookie.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,16 +58,22 @@ from src.backend.api.error_handlers import register_error_handlers
 register_error_handlers(app)
 
 # --- API Routers ---
+# Auth routes (public entry points): /auth/register, /auth/login, /auth/me, /auth/google/*
+app.include_router(auth_router)
+
+# Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
 
+# Admin-only dashboards. require_admin is permissive while settings.AUTH_ENFORCED
+# is False (coexistence with the legacy unauthenticated UI), strict at cutover.
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
-app.include_router(workflow_metrics_router, prefix="/api")
+app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
 
 from src.backend.api.trace_endpoints import router as trace_router
-app.include_router(trace_router, prefix="/api")
+app.include_router(trace_router, prefix="/api", dependencies=[Depends(require_admin)])
 
 from src.backend.api.learning_endpoints import router as learning_router
-app.include_router(learning_router, prefix="/api/learning")
+app.include_router(learning_router, prefix="/api/learning", dependencies=[Depends(require_admin)])
 
 # --- Health Check Endpoints ---
 from src.backend.api.health import health_check, api_health_check
@@ -90,6 +105,15 @@ app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 async def startup_event():
     logging.info("Application startup complete.")
     _check_learning_health()
+
+    # Initialize the auth/users Postgres store. Best-effort: a DB outage must not
+    # block the rest of the app from starting (auth fails until Postgres is up).
+    try:
+        init_auth_db()
+    except Exception as e:
+        logging.warning(
+            f"[AUTH] init_auth_db failed — auth unavailable until Postgres is reachable: {e}"
+        )
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:
@@ -165,4 +189,11 @@ async def shutdown_event():
             logging.info("Learning SQLite writer connection closed.")
     except Exception as e:
         logging.warning(f"Learning write queue shutdown error: {e}")
+
+    # Close the auth Postgres pool.
+    try:
+        close_pool()
+    except Exception as e:
+        logging.warning(f"[AUTH] close_pool error: {e}")
+
     logging.info("Application shutdown complete.")

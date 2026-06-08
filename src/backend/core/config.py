@@ -121,6 +121,71 @@ class Settings(BaseSettings):
         description="Maximum number of concurrent test generation/execution workflows"
     )
 
+    # ------------------------------------------------------------------
+    # Authentication & Database (Phase 1: login/signup, roles, Google SSO)
+    # ------------------------------------------------------------------
+    # PostgreSQL DSN for the auth/users store ONLY. The learning stack still
+    # uses SQLite/ChromaDB (migrated to Postgres/pgvector in a later phase).
+    DATABASE_URL: str = Field(
+        default="postgresql://nlrf:nlrf@localhost:5432/nlrf",
+        description="PostgreSQL connection string for the auth/users database",
+    )
+    JWT_SECRET_KEY: str = Field(
+        default="change-me-in-production",
+        description="HMAC secret for signing JWT access tokens — MUST be overridden via env in production",
+    )
+    JWT_EXPIRY_HOURS: int = Field(default=24, description="Access token lifetime in hours")
+    # Comma-separated emails granted the 'admin' role at signup; everyone else
+    # is 'user'. Stored as a string (not list) to avoid pydantic env JSON-parsing
+    # pitfalls — read via the admin_emails_list property.
+    ADMIN_EMAILS: str = Field(
+        default="",
+        description="Comma-separated emails granted the admin role at signup",
+    )
+    # Google SSO (server-side OAuth2/OIDC). Empty GOOGLE_CLIENT_ID disables the
+    # Google routes gracefully (they return 503) so the app runs without it.
+    GOOGLE_CLIENT_ID: str = Field(default="", description="Google OAuth client ID")
+    GOOGLE_CLIENT_SECRET: str = Field(default="", description="Google OAuth client secret")
+    GOOGLE_REDIRECT_URI: str = Field(
+        default="http://localhost:5000/auth/google/callback",
+        description="OAuth redirect URI registered with Google (must match exactly)",
+    )
+    # SPA origin the backend redirects to after Google login; and the CORS
+    # allow-list (dev Vite :5173, containerized nginx :3000, fastapi :5000).
+    FRONTEND_URL: str = Field(
+        default="http://localhost:5173",
+        description="Frontend origin for the post-OAuth redirect",
+    )
+    ALLOWED_ORIGINS: str = Field(
+        default="http://localhost:5173,http://localhost:3000,http://localhost:5000",
+        description="Comma-separated CORS allow-list for the SPA",
+    )
+    # When False (default, during the React migration coexistence window) the
+    # EXISTING endpoints accept requests with OR without a token, so the legacy
+    # src/frontend UI keeps working unchanged. Flip to True at cutover to
+    # hard-require a valid JWT (and admin role on admin routes). The /auth/*
+    # routes and the React frontend route guards are active regardless.
+    AUTH_ENFORCED: bool = Field(
+        default=False,
+        description="Hard-require JWT on existing endpoints (enable at React cutover)",
+    )
+    # Mark auth cookies (the Google OAuth state cookie) Secure so browsers only
+    # send them over HTTPS. Keep False for local http dev; set True in production.
+    COOKIE_SECURE: bool = Field(
+        default=False,
+        description="Set the Secure flag on auth cookies (enable behind HTTPS in production)",
+    )
+
+    @property
+    def admin_emails_list(self) -> list[str]:
+        """Normalized admin email allow-list (lowercased, de-blanked)."""
+        return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",") if e.strip()]
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        """CORS origins as a list for CORSMiddleware."""
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
     @validator('MODEL_PROVIDER')
     def validate_model_provider(cls, v):
         """Validate that MODEL_PROVIDER is one of the supported providers."""

@@ -44,6 +44,14 @@ dependencies = [
     "opentelemetry-instrumentation-requests>=0.41b0",
     # Structured Logging (Enhancement #4)
     "structlog>=24.1.0",
+    # Auth + Postgres (Phase 1: login/signup, JWT, Google SSO).
+    # psycopg[binary] ships prebuilt wheels (no local libpq/compiler needed);
+    # [pool] adds the ConnectionPool used by the auth store.
+    "psycopg[binary,pool]",
+    # Authlib drives the server-side Google OAuth2/OIDC flow (token exchange +
+    # id_token verification against Google's JWKS). Already present transitively;
+    # declared here so the built image is guaranteed to include it.
+    "authlib",
 ]
 
 [project.optional-dependencies]

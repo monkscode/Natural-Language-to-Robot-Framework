@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -14,6 +14,9 @@ from src.backend.services.docker_service import get_docker_client, rebuild_image
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
+# require_user/require_admin are coexistence-aware: permissive while
+# settings.AUTH_ENFORCED is False (legacy UI keeps working), strict at cutover.
+from src.backend.auth.jwt_utils import require_user, require_admin
 
 router = APIRouter()
 
@@ -25,7 +28,7 @@ class ExecuteRequest(BaseModel):
     user_query: Optional[str] = None  # Optional: original user query for pattern learning
     workflow_id: Optional[str] = None  # Optional: workflow ID from generation for unified tracking
 
-@router.post('/generate-test')
+@router.post('/generate-test', dependencies=[Depends(require_user)])
 async def generate_test_only(query: Query):
     """
     Generate Robot Framework test code without executing it.
@@ -45,7 +48,7 @@ async def generate_test_only(query: Query):
 
     return StreamingResponse(stream_generate_only(user_query, model_provider, model_name), media_type="text/event-stream")
 
-@router.post('/execute-test')
+@router.post('/execute-test', dependencies=[Depends(require_user)])
 async def execute_test_only(request: ExecuteRequest):
     """
     Execute provided Robot Framework test code in Docker container.
@@ -76,7 +79,7 @@ async def execute_test_only(request: ExecuteRequest):
 
     return StreamingResponse(stream_execute_only(robot_code, user_query, workflow_id), media_type="text/event-stream")
 
-@router.post('/generate-and-run')
+@router.post('/generate-and-run', dependencies=[Depends(require_user)])
 async def generate_and_run_streaming(query: Query):
     """
     Legacy endpoint: Generate and execute test in one flow.
@@ -96,7 +99,7 @@ async def generate_and_run_streaming(query: Query):
 
     return StreamingResponse(stream_generate_and_run(user_query, model_provider, model_name), media_type="text/event-stream")
 
-@router.post('/rebuild-docker-image')
+@router.post('/rebuild-docker-image', dependencies=[Depends(require_admin)])
 async def rebuild_docker_image_endpoint():
     try:
         client = get_docker_client()
@@ -108,7 +111,7 @@ async def rebuild_docker_image_endpoint():
         logging.error(f"Unexpected error during Docker image rebuild: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
-@router.get('/docker-status')
+@router.get('/docker-status', dependencies=[Depends(require_user)])
 async def docker_status_endpoint():
     try:
         client = get_docker_client()
@@ -121,7 +124,7 @@ async def docker_status_endpoint():
         logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
         return {"status": "error", "docker_available": False, "error": "An unexpected error occurred."}
 
-@router.delete('/test/containers/cleanup')
+@router.delete('/test/containers/cleanup', dependencies=[Depends(require_admin)])
 async def cleanup_test_containers_endpoint():
     """
     Clean up all test-related containers.
@@ -153,7 +156,7 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "close_enough" | "completely_wrong"
 
 
-@router.post('/api/feedback')
+@router.post('/api/feedback', dependencies=[Depends(require_user)])
 async def submit_feedback(request: FeedbackRequest):
     """
     Submit user feedback on test execution results.
@@ -202,7 +205,7 @@ async def submit_feedback(request: FeedbackRequest):
         }
 
 
-@router.get('/api/learning-stats')
+@router.get('/api/learning-stats', dependencies=[Depends(require_admin)])
 async def get_learning_stats():
     """
     Return comprehensive learning system statistics.

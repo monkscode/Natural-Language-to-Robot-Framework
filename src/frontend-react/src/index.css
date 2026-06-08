@@ -1,0 +1,175 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..800;1,14..32,300..800&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@300;400;500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── shadcn CSS variables ── */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  /* ── Neobrutalism theme ── */
+  .neo {
+    --background: 0 0% 94%;
+    --foreground: 0 0% 0%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 0%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 0%;
+    --primary: 77 100% 50%;       /* #ccff00 acid green */
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 100%;
+    --secondary-foreground: 0 0% 0%;
+    --muted: 0 0% 90%;
+    --muted-foreground: 0 0% 33%;
+    --accent: 0 0% 90%;
+    --accent-foreground: 0 0% 0%;
+    --destructive: 14 100% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 0%;
+    --input: 0 0% 0%;
+    --ring: 0 0% 0%;
+    --radius: 0rem;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 0 0% 0%;
+    --sidebar-primary: 77 100% 50%;
+    --sidebar-primary-foreground: 0 0% 0%;
+    --sidebar-accent: 0 0% 91%;
+    --sidebar-accent-foreground: 0 0% 0%;
+    --sidebar-border: 0 0% 0%;
+    --sidebar-ring: 0 0% 0%;
+  }
+
+  .neo.dark {
+    --background: 0 0% 10%;
+    --foreground: 0 0% 100%;
+    --card: 0 0% 18%;
+    --card-foreground: 0 0% 100%;
+    --muted: 0 0% 20%;
+    --muted-foreground: 0 0% 67%;
+    --border: 0 0% 100%;
+    --input: 0 0% 100%;
+    --sidebar-background: 0 0% 18%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-border: 0 0% 100%;
+    --sidebar-accent: 0 0% 22%;
+    --sidebar-accent-foreground: 0 0% 100%;
+  }
+}
+
+/* ── Base HTML ── */
+@layer base {
+  * { @apply border-border; }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  .neo body { font-family: 'Space Grotesk', system-ui, sans-serif; }
+}
+
+/* ── Neobrutalism component overrides ── */
+.neo [data-sidebar="sidebar"] {
+  border-right-width: 2px !important;
+}
+.neo .btn-neo,
+.neo [role="button"],
+.neo button[class*="bg-primary"] {
+  border: 2px solid black !important;
+  box-shadow: 3px 3px 0 0 black !important;
+  border-radius: 0 !important;
+  transition: transform 0.1s, box-shadow 0.1s !important;
+}
+.neo button[class*="bg-primary"]:hover {
+  transform: translate(-1px, -1px) !important;
+  box-shadow: 4px 4px 0 0 black !important;
+}
+.neo .card { border-width: 2px !important; box-shadow: 4px 4px 0 0 black !important; border-radius: 0 !important; }
+.neo input, .neo textarea, .neo select { border-width: 2px !important; border-radius: 0 !important; }
+.neo.dark .card { box-shadow: 4px 4px 0 0 white !important; }
+.neo.dark button[class*="bg-primary"] { border-color: white !important; box-shadow: 3px 3px 0 0 white !important; }
+
+/* Dot grid background for neo */
+.neo main {
+  background-image: radial-gradient(hsl(var(--foreground) / 0.15) 0.5px, transparent 0.5px);
+  background-size: 20px 20px;
+}
+
+/* ── Code / Robot Framework syntax ── */
+.rf-section  { color: #ff79c6; font-weight: 700; }
+.rf-keyword  { color: #79c0ff; }
+.rf-builtin  { color: #7ee787; }
+.rf-variable { color: #ffa657; }
+.rf-comment  { color: #6e7681; font-style: italic; }
+.rf-testname { color: #d2a8ff; font-weight: 600; }
+.neo .rf-section  { color: #ccff00; text-decoration: underline; }
+.neo .rf-keyword  { color: #00d4ff; }
+.neo .rf-variable { color: #ffff00; }
+.neo .rf-testname { color: #ff00ff; }
+
+/* ── Progress shimmer ── */
+.progress-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  animation: shimmer 1.5s infinite;
+}
