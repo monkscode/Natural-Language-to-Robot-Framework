@@ -102,21 +102,79 @@ def _rename_test_thread_to_writer():
     threading.current_thread().name = old_name
 
 
-@pytest.fixture
-def in_memory_em(tmp_path):
-    """File-backed ExecutionMemory for tests.
+_PG_TEST_SCHEMA = "learning_test"
+_PG_TABLES = (
+    "execution_records", "intent_patterns", "structural_rules", "keyword_corrections",
+    "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
+    "trigger_events", "hint_audit", "hint_review_sessions", "hint_review_recommendations",
+    "hint_review_pages", "hint_workflow_trace",
+)
 
-    Uses a real temp file (not :memory:) so read_conn() — which opens a
-    separate connection — sees the same data that _writer_conn wrote.
-    ChromaDB is disabled (sentinel set) to keep tests fast.
-    """
-    from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
 
-    db_path = str(tmp_path / "test_execution_memory.db")
-    em = ExecutionMemory(db_path=db_path)
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
+@pytest.fixture(scope="session")
+def _pg_admin():
+    import psycopg
+    from src.backend.core.config import settings
+    conn = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture(scope="session")
+def _pg_test_em(_pg_admin):
+    """One PostgresExecutionMemory bound to an isolated test schema for the
+    whole session; each test truncates it for a clean slate (Phase 4 slice 4)."""
+    from src.backend.core.config import settings
+    from src.backend.crew_ai.optimization.postgres_execution_memory import PostgresExecutionMemory
+
+    _pg_admin.execute(f"DROP SCHEMA IF EXISTS {_PG_TEST_SCHEMA} CASCADE")
+    _pg_admin.execute(f"CREATE SCHEMA {_PG_TEST_SCHEMA}")
+    dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_PG_TEST_SCHEMA}"
+    em = PostgresExecutionMemory(dsn=dsn)
+    em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
     yield em
     em.close()
+    _pg_admin.execute(f"DROP SCHEMA IF EXISTS {_PG_TEST_SCHEMA} CASCADE")
+
+
+@pytest.fixture
+def in_memory_em(_pg_test_em, _pg_admin):
+    """PostgresExecutionMemory with a clean schema per test (ChromaDB disabled).
+
+    The store is session-scoped (one connection/pool for the whole suite), so a
+    test that monkeypatches an instance attribute (e.g. ``em.store = boom``) would
+    leak into every later test. We snapshot the instance ``__dict__`` here and
+    restore it on teardown, giving each test the per-test isolation the old
+    fresh-SQLite-ExecutionMemory fixture provided.
+    """
+    try:
+        _pg_test_em._writer_conn.rollback()  # clear any aborted txn from a prior test
+    except Exception:
+        pass
+    _truncate = (
+        "TRUNCATE "
+        + ", ".join(f"{_PG_TEST_SCHEMA}.{t}" for t in _PG_TABLES)
+        + " RESTART IDENTITY CASCADE"
+    )
+    import psycopg
+    try:
+        _pg_admin.execute(_truncate)
+    except psycopg.errors.UndefinedTable:
+        # A prior test dropped a table from the shared session schema (e.g. the
+        # trace-failure test DROPs hint_workflow_trace). Rebuild and retry.
+        from src.backend.crew_ai.optimization import pg_schema
+        raw = psycopg.connect(_pg_test_em.dsn, autocommit=True)
+        try:
+            pg_schema.ensure_schema(raw)
+        finally:
+            raw.close()
+        _pg_admin.execute(_truncate)
+    from src.backend.crew_ai.optimization.postgres_execution_memory import PostgresExecutionMemory
+    _pg_test_em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
+    saved_attrs = dict(_pg_test_em.__dict__)
+    yield _pg_test_em
+    _pg_test_em.__dict__.clear()
+    _pg_test_em.__dict__.update(saved_attrs)
 
 
 @pytest.fixture

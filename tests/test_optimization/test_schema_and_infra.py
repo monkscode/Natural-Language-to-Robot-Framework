@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from tests.test_optimization import pg_introspect
 from src.backend.crew_ai.optimization.schema_manager import (
     SchemaManager,
     SCHEMA_MIGRATIONS,
@@ -55,7 +56,7 @@ class TestSchemaManager:
             "hint_review_sessions", "hint_review_recommendations",
             "hint_review_pages", "hint_workflow_trace",
         }
-        tables = set(SchemaManager.get_table_names(in_memory_db))
+        tables = pg_introspect.table_names(in_memory_db)
         assert expected_tables == tables, (
             f"All tables exist: found={sorted(tables)}"
         )
@@ -68,18 +69,22 @@ class TestSchemaManager:
             "idx_rules_score",
             "idx_anti_category", "idx_anti_domain",
         }
-        indexes = set(SchemaManager.get_index_names(in_memory_db))
+        indexes = pg_introspect.index_names(in_memory_db)
         missing = expected_indexes - indexes
         assert len(missing) == 0, (
             f"All 10 indexes exist: missing={sorted(missing)}"
         )
 
-    def test_schema_version_records_v1(self, in_memory_db):
+    def test_schema_version_records_consolidated(self, in_memory_db):
+        # The Postgres schema (pg_schema) is created whole, recording the single
+        # consolidated SCHEMA_VERSION rather than the SQLite per-migration history.
+        from src.backend.crew_ai.optimization.pg_schema import SCHEMA_VERSION
         row = in_memory_db.execute(
-            "SELECT version, description FROM schema_version WHERE version=1"
+            "SELECT version, description FROM schema_version WHERE version=?",
+            (SCHEMA_VERSION,),
         ).fetchone()
-        assert row is not None and row[0] == 1, (
-            "schema_version records v1: "
+        assert row is not None and row[0] == SCHEMA_VERSION, (
+            f"schema_version records v{SCHEMA_VERSION}: "
             + (f"desc='{row[1]}'" if row else "NOT FOUND")
         )
 
@@ -90,6 +95,10 @@ class TestSchemaManager:
             f"version after 2nd call={version2}"
         )
 
+    @pytest.mark.skip(
+        reason="PRAGMA integrity_check is SQLite-only with no Postgres "
+        "equivalent; the SQLite backend is removed at the Phase 4 cutover."
+    )
     def test_integrity_check_passes(self, in_memory_db):
         result = in_memory_db.execute("PRAGMA integrity_check").fetchone()
         assert result[0] == "ok", "PRAGMA integrity_check passes"
@@ -501,12 +510,7 @@ class TestV10Migration:
     """
 
     def test_injected_hint_ids_column_on_execution_records(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(execution_records)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "execution_records")
         assert "injected_hint_ids" in columns, (
             f"injected_hint_ids column missing from execution_records; "
             f"found columns: {sorted(columns)}"
@@ -518,12 +522,7 @@ class TestV10Migration:
             "hint_count", "llm_latency_ms", "error_message", "retry_count",
             "created_at", "completed_at",
         }
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(hint_review_pages)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "hint_review_pages")
         missing = expected - columns
         assert not missing, (
             f"hint_review_pages missing columns: {sorted(missing)}"
@@ -568,24 +567,14 @@ class TestV11Migration:
     """
 
     def test_anchor_query_column_on_nl_feedback_corrections(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(nl_feedback_corrections)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "nl_feedback_corrections")
         assert "anchor_query" in columns, (
             f"anchor_query column missing from nl_feedback_corrections; "
             f"found columns: {sorted(columns)}"
         )
 
     def test_model_version_column_on_execution_records(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(execution_records)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "execution_records")
         assert "model_version" in columns, (
             f"model_version column missing from execution_records; "
             f"found columns: {sorted(columns)}"
@@ -688,12 +677,7 @@ class TestV12Migration:
     """
 
     def test_actually_flagged_column_exists_after_migration(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(trigger_events)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "trigger_events")
         assert "actually_flagged_hint_ids" in columns, (
             f"actually_flagged_hint_ids column missing from trigger_events; "
             f"found columns: {sorted(columns)}"
@@ -788,34 +772,19 @@ class TestV13Migration:
     """
 
     def test_unused_count_column_on_nl_feedback_corrections(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(nl_feedback_corrections)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "nl_feedback_corrections")
         assert "unused_count" in columns, (
             f"unused_count column missing; found: {sorted(columns)}"
         )
 
     def test_hint_attribution_done_column_on_execution_records(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(execution_records)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "execution_records")
         assert "hint_attribution_done" in columns, (
             f"hint_attribution_done column missing; found: {sorted(columns)}"
         )
 
     def test_used_and_unused_hint_ids_columns_on_trigger_events(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(trigger_events)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "trigger_events")
         assert {"used_hint_ids", "unused_hint_ids"} <= columns, (
             f"used/unused_hint_ids columns missing; found: {sorted(columns)}"
         )
@@ -924,12 +893,7 @@ class TestV14Migration:
     }
 
     def test_hint_workflow_trace_columns(self, in_memory_db):
-        columns = {
-            row[1]
-            for row in in_memory_db.execute(
-                "PRAGMA table_info(hint_workflow_trace)"
-            ).fetchall()
-        }
+        columns = pg_introspect.column_names(in_memory_db, "hint_workflow_trace")
         assert self.EXPECTED_COLUMNS <= columns, (
             f"hint_workflow_trace missing columns: "
             f"{sorted(self.EXPECTED_COLUMNS - columns)}"

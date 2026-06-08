@@ -601,11 +601,8 @@ class TestRegression:
         assert SmartKeywordProvider is not None
 
     def test_schema_manager(self, in_memory_db):
-        """SchemaManager should still work with in-memory DB."""
-        # Schema already applied by fixture; verify tables exist
-        tables = in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-        table_names = [t["name"] for t in tables]
+        """The fixture-applied schema should contain the core tables."""
+        from tests.test_optimization import pg_introspect
+        table_names = pg_introspect.table_names(in_memory_db)
         assert "execution_records" in table_names
         assert "structural_rules" in table_names

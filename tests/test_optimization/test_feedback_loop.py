@@ -766,13 +766,13 @@ class TestIntegration:
 
     def test_int_schema_has_learning_metrics_table(self, in_memory_db):
         tables = [r[0] for r in in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
         ).fetchall()]
         assert "learning_metrics" in tables
 
     def test_int_schema_has_indexes(self, in_memory_db):
         indexes = [r[0] for r in in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+            "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
         ).fetchall()]
         assert "idx_metrics_workflow" in indexes
         assert "idx_metrics_first_attempt" in indexes

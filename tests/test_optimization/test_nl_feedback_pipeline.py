@@ -16,6 +16,7 @@ from typing import Optional
 
 import pytest
 
+from tests.test_optimization import pg_introspect
 from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.nl_feedback_engine import (
     NLFeedbackEngine,
@@ -164,15 +165,12 @@ class TestSchema:
     """Schema: nl_feedback_corrections table structure."""
 
     def test_table_exists(self, in_memory_db):
-        tables = in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='nl_feedback_corrections'"
-        ).fetchone()
-        assert tables is not None, "nl_feedback_corrections table not found"
+        assert "nl_feedback_corrections" in pg_introspect.table_names(in_memory_db), (
+            "nl_feedback_corrections table not found"
+        )
 
     def test_columns(self, in_memory_db):
-        cols = in_memory_db.execute("PRAGMA table_info(nl_feedback_corrections)").fetchall()
-        col_names = {c["name"] for c in cols}
+        col_names = pg_introspect.column_names(in_memory_db, "nl_feedback_corrections")
         expected = {
             "id", "feedback_text", "category", "scope", "domain", "url",
             "original_failure_category", "source_workflow_id",
@@ -183,11 +181,7 @@ class TestSchema:
         assert not missing, f"Missing columns: {missing}"
 
     def test_index_exists(self, in_memory_db):
-        indexes = in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND tbl_name='nl_feedback_corrections'"
-        ).fetchall()
-        idx_names = {i["name"] for i in indexes}
+        idx_names = pg_introspect.index_names(in_memory_db, "nl_feedback_corrections")
         assert any("scope" in n or "domain" in n for n in idx_names), (
             f"No scope/domain index found. Indexes: {idx_names}"
         )

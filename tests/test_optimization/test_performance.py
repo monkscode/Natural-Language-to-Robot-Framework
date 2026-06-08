@@ -259,6 +259,11 @@ def test_perf_process_execution_batch(in_memory_db):
 # ===================================================================
 
 @pytest.mark.performance
+@pytest.mark.skip(
+    reason="Measures SQLite page-file growth (PRAGMA page_count/page_size); "
+    "SQLite storage mechanics have no Postgres equivalent and the SQLite "
+    "backend is removed at the Phase 4 cutover."
+)
 def test_perf_db_growth_rate(in_memory_db):
     """DB should grow ~3-5 KB per execution record."""
     conn = in_memory_db
