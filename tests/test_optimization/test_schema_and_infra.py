@@ -96,13 +96,19 @@ class TestSchemaManager:
             f"version after 2nd call={version2}"
         )
 
-    @pytest.mark.skip(
-        reason="PRAGMA integrity_check is SQLite-only with no Postgres "
-        "equivalent; the SQLite backend is removed at the Phase 4 cutover."
-    )
-    def test_integrity_check_passes(self, in_memory_db):
-        result = in_memory_db.execute("PRAGMA integrity_check").fetchone()
-        assert result[0] == "ok", "PRAGMA integrity_check passes"
+    def test_no_invalid_indexes(self, in_memory_db):
+        # Postgres analog of SQLite's PRAGMA integrity_check: every index in the
+        # learning schema is valid (none left half-built / not-ready / corrupt).
+        invalid = [
+            r[0] for r in in_memory_db.execute(
+                "SELECT c.relname FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = current_schema() "
+                "  AND (NOT i.indisvalid OR NOT i.indisready)"
+            ).fetchall()
+        ]
+        assert invalid == [], f"invalid/not-ready indexes present: {invalid}"
 
     def test_check_constraint_on_test_status(self, in_memory_db):
         with pytest.raises(sqlite3.IntegrityError):

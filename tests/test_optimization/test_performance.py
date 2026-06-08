@@ -259,56 +259,56 @@ def test_perf_process_execution_batch(in_memory_db):
 # ===================================================================
 
 @pytest.mark.performance
-@pytest.mark.skip(
-    reason="Measures SQLite page-file growth (PRAGMA page_count/page_size); "
-    "SQLite storage mechanics have no Postgres equivalent and the SQLite "
-    "backend is removed at the Phase 4 cutover."
-)
 def test_perf_db_growth_rate(in_memory_db):
-    """DB should grow ~3-5 KB per execution record."""
+    """Marginal Postgres storage per execution record stays bounded.
+
+    Measures pg_total_relation_size growth between two equal batches, so the
+    fixed per-index page minimums are already paid in the first batch and the
+    delta isolates the marginal cost of each additional row (heap tuple + index
+    entries). The old SQLite PRAGMA page_count form has no Postgres analog.
+    """
     conn = in_memory_db
     em = create_execution_memory(conn)
 
-    # Measure baseline (schema + empty tables)
-    baseline_pages = conn.execute("PRAGMA page_count").fetchone()[0]
-    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-    baseline_kb = (baseline_pages * page_size) / 1024
+    def _store_batch(start, n):
+        for i in range(start, start + n):
+            em.store(ExecutionRecord(
+                workflow_id=f"growth-{i:04d}",
+                timestamp=datetime.now(),
+                user_query=f"verify all rows in table_{i} show Active status",
+                url=f"https://app{i}.example.com/page",
+                domain=f"app{i}.example.com",
+                robot_code=(
+                    "*** Settings ***\n"
+                    "Library    Browser\n\n"
+                    "*** Test Cases ***\n"
+                    f"Test {i}\n"
+                    "    New Browser    headless=true\n"
+                    f"    New Page    https://app{i}.example.com/page\n"
+                    f"    ${{text}}=    Get Text    css=td.status-{i}\n"
+                    "    Should Be Equal    ${text}    Active\n"
+                ),
+                code_structure=None,
+                test_status="passed" if i % 3 != 0 else "failed",
+                failure_category="A1" if i % 3 == 0 else None,
+                error_message=f"Error {i}" if i % 3 == 0 else None,
+            ))
 
-    # Insert 20 records
-    num_records = 20
-    for i in range(num_records):
-        em.store(ExecutionRecord(
-            workflow_id=f"growth-{i:03d}",
-            timestamp=datetime.now(),
-            user_query=f"verify all rows in table_{i} show Active status",
-            url=f"https://app{i}.example.com/page",
-            domain=f"app{i}.example.com",
-            robot_code=(
-                "*** Settings ***\n"
-                "Library    Browser\n\n"
-                "*** Test Cases ***\n"
-                f"Test {i}\n"
-                "    New Browser    headless=true\n"
-                f"    New Page    https://app{i}.example.com/page\n"
-                f"    ${{text}}=    Get Text    css=td.status-{i}\n"
-                "    Should Be Equal    ${text}    Active\n"
-            ),
-            code_structure=None,
-            test_status="passed" if i % 3 != 0 else "failed",
-            failure_category="A1" if i % 3 == 0 else None,
-            error_message=f"Error {i}" if i % 3 == 0 else None,
-        ))
+    def _size():
+        return conn.execute(
+            "SELECT pg_total_relation_size('execution_records')"
+        ).fetchone()[0]
 
-    after_pages = conn.execute("PRAGMA page_count").fetchone()[0]
-    after_kb = (after_pages * page_size) / 1024
-    growth_kb = after_kb - baseline_kb
-    kb_per_record = growth_kb / num_records
+    batch = 50
+    _store_batch(0, batch)
+    size0 = _size()
+    _store_batch(batch, batch)
+    size1 = _size()
 
+    assert size1 >= size0, "relation did not grow after inserting records"
+    kb_per_record = (size1 - size0) / batch / 1024
     assert kb_per_record < 10, (
-        f"DB growth {kb_per_record:.2f} KB/record > 10 KB threshold"
-    )
-    assert kb_per_record > 0.1, (
-        f"DB growth {kb_per_record:.2f} KB/record suspiciously low"
+        f"Postgres growth {kb_per_record:.2f} KB/record > 10 KB threshold"
     )
 
 
