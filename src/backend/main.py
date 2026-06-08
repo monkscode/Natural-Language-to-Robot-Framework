@@ -1,8 +1,6 @@
 import os
 import sys
-import sqlite3
 import logging
-from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -124,11 +122,12 @@ async def startup_event():
 
 
 def _check_learning_health():
-    """Pre-flight validation for learning system databases and paths.
+    """Pre-flight validation for the learning store (Postgres + pgvector).
 
-    Runs at startup when OPTIMIZATION_ENABLED=true. Validates that all
-    required paths exist, SQLite databases pass integrity checks, and
-    the schema is current. Logs warnings on failure but never blocks startup.
+    Runs at startup when OPTIMIZATION_ENABLED=true. Ensures Postgres is
+    reachable, the consolidated learning schema exists (created if missing),
+    and the pgvector extension is installed. Logs warnings on failure but
+    never blocks startup.
     """
     from src.backend.core.config import settings
 
@@ -137,35 +136,23 @@ def _check_learning_health():
         return
 
     issues = []
-
-    # Check 1: data/ directory exists (required for execution_memory.db)
-    from src.backend.crew_ai.optimization.learning_config import LEARNING_CONFIG
-    exec_db_path = LEARNING_CONFIG["EXECUTION_MEMORY_DB"]
-    data_dir = str(Path(exec_db_path).parent)
-    if not os.path.isdir(data_dir):
-        try:
-            os.makedirs(data_dir, exist_ok=True)
-            logging.info(f"[LEARNING HEALTH] Created directory: {data_dir}")
-        except OSError as e:
-            issues.append(f"Cannot create data directory '{data_dir}': {e}")
-
-    # Check 2: execution_memory.db is accessible and healthy
     try:
-        conn = sqlite3.connect(exec_db_path)
-        result = conn.execute("PRAGMA integrity_check").fetchone()
-        if result[0] != "ok":
-            issues.append(f"execution_memory.db integrity check failed: {result[0]}")
-        conn.close()
+        import psycopg
+        from src.backend.crew_ai.optimization import pg_schema
+
+        conn = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+        try:
+            pg_schema.ensure_schema(conn)  # idempotent — creates if absent
+            conn.execute("SELECT 1 FROM execution_records LIMIT 1")
+            if not conn.execute(
+                "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+            ).fetchone():
+                issues.append("pgvector extension 'vector' is not installed")
+        finally:
+            conn.close()
     except Exception as e:
-        issues.append(f"execution_memory.db cannot be opened: {e}")
+        issues.append(f"Postgres learning store unreachable: {e}")
 
-    # Check 3: ChromaDB directory is writable
-    chroma_dir = settings.OPTIMIZATION_CHROMA_DB_PATH
-    chroma_parent = str(Path(chroma_dir).parent) if chroma_dir else "."
-    if chroma_parent and not os.access(chroma_parent, os.W_OK):
-        issues.append(f"ChromaDB parent directory not writable: {chroma_parent}")
-
-    # Report results
     if issues:
         for issue in issues:
             logging.warning(f"[LEARNING HEALTH] {issue}")
@@ -174,7 +161,8 @@ def _check_learning_health():
             "Fix the issues above or set OPTIMIZATION_ENABLED=false."
         )
     else:
-        logging.info("[LEARNING HEALTH] All checks passed — learning system ready")
+        logging.info(
+            "[LEARNING HEALTH] All checks passed — learning system ready (Postgres + pgvector)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -186,7 +174,7 @@ async def shutdown_event():
             feedback_loop.write_queue.shutdown(timeout=5.0)
             logging.info("Learning write queue drained successfully.")
             feedback_loop.execution_memory.close()
-            logging.info("Learning SQLite writer connection closed.")
+            logging.info("Learning store connection closed.")
     except Exception as e:
         logging.warning(f"Learning write queue shutdown error: {e}")
 

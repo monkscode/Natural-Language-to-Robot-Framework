@@ -47,6 +47,9 @@ from src.backend.crew_ai.optimization.execution_memory import (
     ExecutionRecord,
     CodeStructureExtractor,
 )
+from src.backend.crew_ai.optimization.postgres_execution_memory import (
+    PostgresExecutionMemory,
+)
 from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
 from src.backend.crew_ai.optimization.pattern_learning import QueryPatternMatcher
 
@@ -703,8 +706,10 @@ class FeedbackLoop:
         constructed using shared database connections.  Pass mocks in
         tests for deterministic behaviour.
         """
-        # Core infrastructure
-        self.execution_memory = execution_memory or ExecutionMemory()
+        # Core infrastructure. Phase 4 cutover: the learning store is now
+        # PostgreSQL + pgvector (PostgresExecutionMemory); the legacy SQLite
+        # ExecutionMemory is injected only by tests that still target it.
+        self.execution_memory = execution_memory or PostgresExecutionMemory()
         self.failure_analyzer = failure_analyzer or FailureAnalyzer()
         self.write_queue = write_queue or LearningWriteQueue()
         self.circuit_breaker = circuit_breaker or LearningCircuitBreaker()
