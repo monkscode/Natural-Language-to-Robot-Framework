@@ -135,9 +135,14 @@ class TestSettingsValidators:
         with pytest.raises(ValidationError):
             self._make_settings({"MODEL_PROVIDER": "aws"})
 
-    def test_observability_backend_accepts_sqlite(self):
-        s = self._make_settings({"OBSERVABILITY_BACKEND": "sqlite"})
-        assert s.OBSERVABILITY_BACKEND == "sqlite"
+    def test_observability_backend_accepts_postgres(self):
+        s = self._make_settings({"OBSERVABILITY_BACKEND": "postgres"})
+        assert s.OBSERVABILITY_BACKEND == "postgres"
+
+    def test_observability_backend_rejects_sqlite(self):
+        # "sqlite" was retired in the Phase 4 consolidation (trace store -> Postgres).
+        with pytest.raises(ValidationError):
+            self._make_settings({"OBSERVABILITY_BACKEND": "sqlite"})
 
     def test_observability_backend_accepts_none(self):
         s = self._make_settings({"OBSERVABILITY_BACKEND": "none"})

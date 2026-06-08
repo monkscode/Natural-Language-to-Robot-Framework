@@ -6,7 +6,7 @@ Initializes OpenLLMetry (Traceloop SDK) which auto-instruments:
 - LangChain providers (browser-service via langchain-google-genai)
 
 Trace export backends:
-- "sqlite": Built-in trace store (zero infra, default for pilots)
+- "postgres": Built-in Postgres trace store (the consolidated DB; default)
 - "grafana": Grafana Tempo via OTLP
 - "otlp": Any OTLP-compatible endpoint (Langfuse, Jaeger, Datadog)
 - "none": Disabled
@@ -76,22 +76,21 @@ def init_observability() -> bool:
 
 def _get_exporter(backend: str, otlp_endpoint: str):
     """Create the appropriate OTel span exporter for the configured backend."""
-    if backend == "sqlite":
+    if backend == "postgres":
         # Reuse the module-level singleton so the OTel BatchSpanProcessor and
-        # the LiteLLM success-callback path share ONE SQLiteSpanExporter
-        # instance (one connection, one lock) instead of two objects racing on
-        # the same file.
+        # the LiteLLM success-callback path share ONE PostgresSpanExporter
+        # instance (one pool) instead of two objects writing independently.
         from src.backend.core.trace_store import get_trace_store
         store = get_trace_store()
         if store is None:
-            raise RuntimeError("SQLite trace store could not be initialized")
+            raise RuntimeError("Postgres trace store could not be initialized")
         return store
 
     if backend in ("grafana", "otlp"):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         return OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
 
-    raise ValueError(f"Unknown OBSERVABILITY_BACKEND: {backend!r}. Must be sqlite, grafana, otlp, or none.")
+    raise ValueError(f"Unknown OBSERVABILITY_BACKEND: {backend!r}. Must be postgres, grafana, otlp, or none.")
 
 
 def create_workflow_span(

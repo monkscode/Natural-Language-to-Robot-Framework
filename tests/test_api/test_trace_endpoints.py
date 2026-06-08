@@ -8,18 +8,21 @@ Covers all four routes:
 - GET /admin/traces/{span_id}  — single span detail
 
 Each test group runs against two fixtures:
-- `client`    — real SQLite DB with seed data
-- `client_no_db` — DB path that does not exist (FileNotFoundError path)
+- `client`    — Postgres trace schema with seed data
+- `client_no_db` — the trace table is absent (FileNotFoundError graceful path)
 """
-import sqlite3
-import os
 import pytest
+import psycopg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from src.backend.api.trace_endpoints import router
+from src.backend.core.config import settings
 from src.backend.core.trace_store import _ensure_schema
+from src.backend.crew_ai.optimization import pg_compat
+
+_API_TRACE_SCHEMA = "trace_api_test"
 
 
 # ---------------------------------------------------------------------------
@@ -27,46 +30,49 @@ from src.backend.core.trace_store import _ensure_schema
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def db_path(tmp_path):
-    """Create a temp SQLite trace DB with known seed rows."""
-    path = str(tmp_path / "test_traces.db")
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    _ensure_schema(conn)
-
-    conn.executemany(
-        """
-        INSERT INTO llm_traces
-        (id, trace_id, name, start_time_ns, end_time_ns, duration_ms,
-         status, model, prompt_tokens, completion_tokens, total_tokens,
-         cost_usd, workflow_id, prompt_text, response_text, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """,
-        [
-            # LLM call row (name ends in .litellm)
-            ("span-1", "trace-A", "gemini/gemini-2.5-flash.litellm",
-             1000, 2000, 100.0, "OK", "gemini/gemini-2.5-flash",
-             10, 5, 15, 0.001, "wf-1", '["hi"]', "hello"),
-            # Orchestration row (no model, not .litellm)
-            ("span-2", "trace-A", "crewai.agent",
-             500, 3000, 200.0, "OK", None,
-             0, 0, 0, 0.0, "wf-1", None, None),
-            # Error row for a different workflow
-            ("span-3", "trace-B", "vertex_ai/gemini.litellm",
-             4000, 5000, 80.0, "ERROR", "vertex_ai/gemini-2.5-flash",
-             20, 10, 30, 0.002, "wf-2", None, None),
-        ],
-    )
-    conn.commit()
-    conn.close()
-    return path
+def trace_dsn():
+    """Isolated Postgres schema with the trace table + known seed rows."""
+    admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+    admin.execute(f"DROP SCHEMA IF EXISTS {_API_TRACE_SCHEMA} CASCADE")
+    admin.execute(f"CREATE SCHEMA {_API_TRACE_SCHEMA}")
+    dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_API_TRACE_SCHEMA}"
+    conn = psycopg.connect(dsn)
+    try:
+        _ensure_schema(conn)
+        conn.cursor().executemany(
+            "INSERT INTO llm_traces "
+            "(id, trace_id, name, start_time_ns, end_time_ns, duration_ms, status, "
+            " model, prompt_tokens, completion_tokens, total_tokens, cost_usd, "
+            " workflow_id, prompt_text, response_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            [
+                ("span-1", "trace-A", "gemini/gemini-2.5-flash.litellm",
+                 1000, 2000, 100.0, "OK", "gemini/gemini-2.5-flash",
+                 10, 5, 15, 0.001, "wf-1", '["hi"]', "hello"),
+                ("span-2", "trace-A", "crewai.agent",
+                 500, 3000, 200.0, "OK", None, 0, 0, 0, 0.0, "wf-1", None, None),
+                ("span-3", "trace-B", "vertex_ai/gemini.litellm",
+                 4000, 5000, 80.0, "ERROR", "vertex_ai/gemini-2.5-flash",
+                 20, 10, 30, 0.002, "wf-2", None, None),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    yield dsn
+    admin.execute(f"DROP SCHEMA IF EXISTS {_API_TRACE_SCHEMA} CASCADE")
+    admin.close()
 
 
 @pytest.fixture()
-def client(db_path):
+def client(trace_dsn):
     app = FastAPI()
     app.include_router(router)
-    with patch("src.backend.api.trace_endpoints._DB_PATH", db_path):
+
+    def _test_get_db():
+        return pg_compat.connect(trace_dsn, autocommit=True)
+
+    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_get_db):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 
@@ -75,7 +81,11 @@ def client(db_path):
 def client_no_db():
     app = FastAPI()
     app.include_router(router)
-    with patch("src.backend.api.trace_endpoints._DB_PATH", "/nonexistent/path/traces.db"):
+
+    def _raise():
+        raise FileNotFoundError("Trace table not found. No traces have been recorded yet.")
+
+    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_raise):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 

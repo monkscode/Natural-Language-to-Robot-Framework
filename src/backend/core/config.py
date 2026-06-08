@@ -100,13 +100,13 @@ class Settings(BaseSettings):
 
     # LLM Observability Configuration (Enhancement #3)
     # OBSERVABILITY_BACKEND controls where OTel traces are exported:
-    #   "sqlite"  — Built-in SQLite trace store (zero infra, default for pilots)
-    #   "grafana" — Grafana Tempo via OTLP (requires Tempo in docker-compose)
-    #   "otlp"    — Any OTel-compatible endpoint (Langfuse, Jaeger, Datadog, etc.)
-    #   "none"    — Tracing disabled
+    #   "postgres" — Built-in Postgres trace store (the consolidated DB; default)
+    #   "grafana"  — Grafana Tempo via OTLP (requires Tempo in docker-compose)
+    #   "otlp"     — Any OTel-compatible endpoint (Langfuse, Jaeger, Datadog, etc.)
+    #   "none"     — Tracing disabled
     OBSERVABILITY_BACKEND: str = Field(
-        default="sqlite",
-        description="Trace export backend: sqlite | grafana | otlp | none",
+        default="postgres",
+        description="Trace export backend: postgres | grafana | otlp | none",
     )
     OTLP_ENDPOINT: str = Field(
         default="http://localhost:4318",
@@ -237,8 +237,8 @@ class Settings(BaseSettings):
     
     @validator('OBSERVABILITY_BACKEND')
     def validate_observability_backend(cls, v):
-        if v.lower() not in ('sqlite', 'grafana', 'otlp', 'none'):
-            raise ValueError(f"OBSERVABILITY_BACKEND must be sqlite, grafana, otlp, or none, got '{v}'")
+        if v.lower() not in ('postgres', 'grafana', 'otlp', 'none'):
+            raise ValueError(f"OBSERVABILITY_BACKEND must be postgres, grafana, otlp, or none, got '{v}'")
         return v.lower()
 
     @validator('OPTIMIZATION_PATTERN_CONFIDENCE_THRESHOLD', 'OPTIMIZATION_CONTEXT_PRUNING_THRESHOLD')
