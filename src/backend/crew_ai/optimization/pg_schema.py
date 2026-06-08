@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Each statement is executed once inside ensure_schema(). Ordered so referenced
 # tables (nl_feedback_corrections, hint_review_sessions) exist before FKs.
@@ -58,7 +58,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         user_feedback         TEXT,
         user_feedback_type    TEXT,
         working_code          TEXT,
-        injected_hint_ids     TEXT,
+        injected_hint_ids     JSONB,
         model_version         TEXT,
         hint_attribution_done INTEGER NOT NULL DEFAULT 1,
         CONSTRAINT chk_status CHECK (test_status IN ('passed', 'failed', 'error'))
@@ -69,6 +69,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_exec_failure ON execution_records(failure_category)",
     "CREATE INDEX IF NOT EXISTS idx_exec_timestamp ON execution_records(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_exec_structure ON execution_records(code_structure)",
+    # GIN index for jsonb hint-id membership (injected_hint_ids @> to_jsonb(id)) — Tier 1.
+    "CREATE INDEX IF NOT EXISTS idx_exec_injected_gin ON execution_records USING GIN (injected_hint_ids)",
 
     # --- intent_patterns ---
     """
@@ -171,7 +173,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         attempt_number          INTEGER NOT NULL DEFAULT 1,
         hints_available         INTEGER NOT NULL DEFAULT 0,
         hints_injected          INTEGER NOT NULL DEFAULT 0,
-        hint_sources            TEXT DEFAULT '[]',
+        hint_sources            JSONB DEFAULT '[]'::jsonb,
         llm_calls               INTEGER NOT NULL DEFAULT 0,
         llm_cost                DOUBLE PRECISION NOT NULL DEFAULT 0.0,
         hint_tokens             INTEGER NOT NULL DEFAULT 0,
@@ -217,6 +219,9 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_nlfc_active ON nl_feedback_corrections(is_active)",
     "CREATE INDEX IF NOT EXISTS idx_nlfc_domain_scope ON nl_feedback_corrections(domain, scope)",
     "CREATE INDEX IF NOT EXISTS idx_nlfc_conflict ON nl_feedback_corrections(conflict_flagged)",
+    # Partial index for the hot hint-retrieval filter (active, unflagged) — Tier 1.
+    "CREATE INDEX IF NOT EXISTS idx_nlfc_active_unflagged ON nl_feedback_corrections(scope, domain) "
+    "WHERE is_active = 1 AND conflict_flagged = 0",
 
     # --- trigger_events (cols consolidated through v13) ---
     """
@@ -227,8 +232,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         domain                    TEXT,
         url                       TEXT,
         feedback_text             TEXT,
-        active_hint_ids           TEXT,
-        flagged_hint_ids          TEXT,
+        active_hint_ids           JSONB,
+        flagged_hint_ids          JSONB,
         reason                    TEXT,
         llm_model                 TEXT,
         input_tokens              INTEGER,
@@ -237,14 +242,20 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         status                    TEXT NOT NULL,
         error_message             TEXT,
         created_at                TEXT NOT NULL,
-        actually_flagged_hint_ids TEXT,
-        used_hint_ids             TEXT,
-        unused_hint_ids           TEXT
+        actually_flagged_hint_ids JSONB,
+        used_hint_ids             JSONB,
+        unused_hint_ids           JSONB
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_trigger_events_created ON trigger_events(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_trigger_events_workflow ON trigger_events(workflow_id)",
     "CREATE INDEX IF NOT EXISTS idx_trigger_events_type ON trigger_events(trigger_type)",
+    # GIN indexes for jsonb hint-id membership (col @> to_jsonb(id)) — Tier 1.
+    "CREATE INDEX IF NOT EXISTS idx_trigger_active_gin ON trigger_events USING GIN (active_hint_ids)",
+    "CREATE INDEX IF NOT EXISTS idx_trigger_flagged_gin ON trigger_events USING GIN (flagged_hint_ids)",
+    "CREATE INDEX IF NOT EXISTS idx_trigger_actually_flagged_gin ON trigger_events USING GIN (actually_flagged_hint_ids)",
+    "CREATE INDEX IF NOT EXISTS idx_trigger_used_gin ON trigger_events USING GIN (used_hint_ids)",
+    "CREATE INDEX IF NOT EXISTS idx_trigger_unused_gin ON trigger_events USING GIN (unused_hint_ids)",
 
     # --- hint_audit (FK -> nl_feedback_corrections) ---
     """
@@ -336,6 +347,9 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_hint_trace_created_at ON hint_workflow_trace(created_at)",
 
     # --- SQLite-compat SQL functions (so the engines' SQLite SQL runs as-is) ---
+    # NOTE: json_each / json_valid were retired in slice 4.5 — the hint-id array
+    # columns are now native jsonb and the KPI queries use jsonb operators
+    # (col @> to_jsonb(id)) directly, so no text-JSON emulation is needed.
     # SQLite datetime('now', <modifiers...>) -> Postgres text "YYYY-MM-DD HH24:MI:SS".
     # The engines only use 'now'/'localtime' and day-interval modifiers
     # ("-30 days", "? || ' days'"); 'now'/'localtime' map to localtimestamp and
@@ -366,34 +380,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     CREATE OR REPLACE FUNCTION last_insert_rowid()
     RETURNS bigint LANGUAGE sql AS $fn$ SELECT lastval() $fn$
     """,
-    # SQLite json_valid(text) -> boolean (Postgres has no json_valid()). Returns
-    # false for NULL/empty/malformed. The text overload is chosen over any
-    # built-in because the hint-id columns are TEXT.
-    """
-    CREATE OR REPLACE FUNCTION json_valid(j text)
-    RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $fn$
-    BEGIN
-        IF j IS NULL THEN RETURN false; END IF;
-        PERFORM j::json;
-        RETURN true;
-    EXCEPTION WHEN others THEN RETURN false;
-    END $fn$
-    """,
-    # SQLite json_each(text) over a JSON array -> rows (value text, key bigint),
-    # matching how the stats SQL uses it: `json_each(col) j ... CAST(j.value AS
-    # INTEGER)`. Empty/NULL/non-array/malformed -> no rows. Overloads (does not
-    # replace) the built-in json_each(json); the TEXT arg selects this one.
-    """
-    CREATE OR REPLACE FUNCTION json_each(j text)
-    RETURNS TABLE(value text, key bigint) LANGUAGE plpgsql IMMUTABLE AS $fn$
-    BEGIN
-        IF j IS NULL OR btrim(j) = '' OR left(btrim(j), 1) <> '[' THEN RETURN; END IF;
-        RETURN QUERY
-            SELECT elem, (ord - 1)
-            FROM json_array_elements_text(j::json) WITH ORDINALITY AS t(elem, ord);
-    EXCEPTION WHEN others THEN RETURN;
-    END $fn$
-    """,
 )
 
 
@@ -413,7 +399,7 @@ def ensure_schema(conn) -> int:
         cur.execute(
             "INSERT INTO schema_version (version, description, applied_at) "
             "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
-            (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema"),
+            (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
         )
     conn.commit()
     logger.info("[LEARNING] Postgres learning schema ensured (v%d)", SCHEMA_VERSION)

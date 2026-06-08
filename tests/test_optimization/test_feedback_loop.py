@@ -191,7 +191,7 @@ class TestLearningMetricsTracker:
         row = in_memory_db.execute("SELECT * FROM learning_metrics").fetchone()
         assert row["hints_injected"] == 2
         assert row["hint_tokens"] == 150
-        assert json.loads(row["hint_sources"]) == ["structural", "keyword"]
+        assert row["hint_sources"] == ["structural", "keyword"]  # jsonb -> list
 
     def test_metrics_record_retry(self, in_memory_db):
         tracker = LearningMetricsTracker(in_memory_db)

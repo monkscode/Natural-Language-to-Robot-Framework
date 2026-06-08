@@ -48,21 +48,27 @@ from src.backend.api.learning_endpoints import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def db_em(tmp_path):
-    """File-backed ExecutionMemory with schema applied and ChromaDB disabled."""
-    from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
+def _pg_conn(dsn):
+    """Open a SQLite-dialect (pg_compat) connection to the test's Postgres schema.
 
-    db_path = str(tmp_path / "learning_ep_test.db")
-    em = ExecutionMemory(db_path=db_path)
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    yield em, db_path
-    em.close()
+    Replaces the old sqlite3.connect(db_path); the `db_path` value handed to the
+    test bodies is now the schema-scoped DSN. autocommit so each statement is
+    immediately visible to the endpoint's own _admin_conn reads.
+    """
+    from src.backend.crew_ai.optimization import pg_compat
+    return pg_compat.connect(dsn, autocommit=True)
+
+
+@pytest.fixture
+def db_em(api_pg_em):
+    """PostgresExecutionMemory + its DSN (named db_path for call-site continuity)."""
+    em, dsn = api_pg_em
+    yield em, dsn
 
 
 @pytest.fixture
 def learning_client(db_em):
-    """TestClient wired to a real SQLite DB, with _require_feedback_loop overridden."""
+    """TestClient wired to a real Postgres schema, with _require_feedback_loop overridden."""
     em, db_path = db_em
 
     mock_fb = MagicMock()
@@ -75,7 +81,7 @@ def learning_client(db_em):
     mock_fb.metrics_tracker.get_effectiveness_report.return_value = {}
 
     def _test_admin_conn():
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -97,7 +103,7 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
                  applied_count=0, success_count=0, failure_count=0,
                  original_failure_category=None, disabled_at=None) -> int:
     """Helper: insert a hint directly and return its id."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = _pg_conn(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     now = datetime.now(timezone.utc).isoformat()
@@ -208,7 +214,7 @@ class TestListHints:
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, is_active=0)
         # Insert a retract audit row so the hint qualifies as retracted
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_audit (hint_id, action, actor, created_at) VALUES (?, 'retract', 'test', datetime('now'))",
             (hint_id,),
@@ -231,7 +237,7 @@ class TestListHints:
     def test_status_llm_review_disabled_filter(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, is_active=0)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_audit (hint_id, action, actor, created_at) VALUES (?, 'llm_review_disable', 'bot', datetime('now'))",
             (hint_id,),
@@ -307,7 +313,7 @@ class TestGetHint:
     def test_timeline_includes_hint_audit_rows(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, conflict_flagged=1)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_audit (hint_id, action, actor, reason, created_at) "
             "VALUES (?, 'unflag', 'alice', 'resolved', datetime('now'))",
@@ -324,7 +330,7 @@ class TestGetHint:
     def test_timeline_includes_trigger_event_rows(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO trigger_events "
             "(trigger_type, workflow_id, status, flagged_hint_ids, active_hint_ids, created_at) "
@@ -435,7 +441,7 @@ class TestCreateHint:
         assert data["hint"]["conflict_flagged"] == 0
 
         # Both an 'unflag' and a 'create' audit row must be persisted to hint_audit
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         actions = [
             r[0]
             for r in conn.execute(
@@ -623,7 +629,7 @@ class TestReactivateHint:
         to 0 while the earned success_count is preserved."""
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, is_active=0)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "UPDATE nl_feedback_corrections SET unused_count=7, success_count=2 WHERE id=?",
             (hint_id,),
@@ -634,7 +640,7 @@ class TestReactivateHint:
         resp = client.post(f"/hints/{hint_id}/reactivate", json={"actor": "alice"})
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT unused_count, success_count FROM nl_feedback_corrections WHERE id=?",
             (hint_id,),
@@ -651,7 +657,7 @@ class TestReactivateHint:
 class TestListTriggers:
     def _insert_trigger(self, db_path, trigger_type="trigger_1", workflow_id="wf-1",
                         status="succeeded", flagged_hint_ids="[]"):
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO trigger_events (trigger_type, workflow_id, status, flagged_hint_ids, created_at) "
             "VALUES (?, ?, ?, ?, datetime('now'))",
@@ -716,7 +722,7 @@ class TestListTriggers:
 
 class TestGetTrigger:
     def _insert_trigger(self, db_path, workflow_id=None, active_hint_ids="[]"):
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
             "flagged_hint_ids, active_hint_ids, created_at) "
@@ -811,7 +817,7 @@ class TestPart2DashboardPanels:
 
     @staticmethod
     def _conn(db_path):
-        c = sqlite3.connect(db_path, check_same_thread=False)
+        c = _pg_conn(db_path)
         c.row_factory = sqlite3.Row
         return c
 
@@ -962,7 +968,8 @@ class TestGetLearningHealth:
 
 class TestComputeExonerations:
     def _row(self, active_ids, flagged_ids):
-        return {"active_hint_ids": json.dumps(active_ids), "flagged_hint_ids": json.dumps(flagged_ids)}
+        # jsonb columns come back from psycopg as parsed lists, not JSON strings.
+        return {"active_hint_ids": active_ids, "flagged_hint_ids": flagged_ids}
 
     def test_empty_events_returns_empty_dicts(self):
         exon, flags = _compute_exonerations([])
@@ -986,7 +993,7 @@ class TestComputeExonerations:
         assert flags[1] == 1
 
     def test_null_active_ids_treated_as_empty(self):
-        row = {"active_hint_ids": None, "flagged_hint_ids": "[]"}
+        row = {"active_hint_ids": None, "flagged_hint_ids": []}
         exon, flags = _compute_exonerations([row])
         assert exon == {}
         assert flags == {}
@@ -1048,7 +1055,7 @@ class TestStartHintReview:
     def test_409_when_review_already_in_progress(self, learning_client):
         client, _, _, db_path = learning_client
         # Insert a pending_llm session directly
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('pending_llm', 0, datetime('now'))"
@@ -1070,7 +1077,7 @@ class TestListReviewSessions:
 
     def test_is_any_running_true_when_pending_session_exists(self, learning_client):
         client, _, _, db_path = learning_client
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('pending_llm', 0, datetime('now'))"
@@ -1085,7 +1092,7 @@ class TestListReviewSessions:
 
 class TestGetReviewSession:
     def _insert_session(self, db_path, status="pending_review"):
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) VALUES (?, 0, datetime('now'))",
             (status,),
@@ -1114,7 +1121,7 @@ class TestGetReviewSession:
 class TestDecideRecommendation:
     def _setup_pending_review_session_with_rec(self, db_path):
         hint_id = _insert_hint(db_path)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('pending_review', 1, datetime('now'))"
@@ -1150,7 +1157,7 @@ class TestDecideRecommendation:
 
     def test_409_when_session_not_in_pending_review(self, learning_client):
         client, _, _, db_path = learning_client
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('completed', 0, datetime('now'))"
@@ -1192,7 +1199,7 @@ class TestApplyReviewSession:
         rec_configs: list of dicts with {recommendation, hint_kwargs}
         Returns (session_id, [(rec_id, hint_id), ...])
         """
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('pending_review', ?, datetime('now'))",
@@ -1205,7 +1212,7 @@ class TestApplyReviewSession:
         rec_pairs = []
         for cfg in rec_configs:
             hint_id = _insert_hint(db_path, **cfg.get("hint_kwargs", {}))
-            conn = sqlite3.connect(db_path, check_same_thread=False)
+            conn = _pg_conn(db_path)
             conn.execute(
                 "INSERT INTO hint_review_recommendations "
                 "(session_id, hint_id, recommendation, reason, exoneration_count, "
@@ -1227,7 +1234,7 @@ class TestApplyReviewSession:
 
     def test_409_when_session_not_pending_review(self, learning_client):
         client, _, _, db_path = learning_client
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_review_sessions (status, hint_count, created_at) "
             "VALUES ('completed', 0, datetime('now'))"
@@ -1249,7 +1256,7 @@ class TestApplyReviewSession:
         assert resp.json()["applied_count"] == 1
 
         # Verify hint was actually disabled
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT is_active FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
         ).fetchone()
@@ -1264,7 +1271,7 @@ class TestApplyReviewSession:
         resp = client.post(f"/review-hints/sessions/{sid}/apply")
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT is_active FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
         ).fetchone()
@@ -1277,7 +1284,7 @@ class TestApplyReviewSession:
         sid, [(_, hint_id)] = self._build_session_with_recs(db_path, [
             {"recommendation": "reactivate", "hint_kwargs": {"is_active": 0}},
         ])
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "UPDATE nl_feedback_corrections SET unused_count=6 WHERE id=?", (hint_id,),
         )
@@ -1287,7 +1294,7 @@ class TestApplyReviewSession:
         resp = client.post(f"/review-hints/sessions/{sid}/apply")
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT is_active, unused_count FROM nl_feedback_corrections WHERE id=?",
             (hint_id,),
@@ -1304,7 +1311,7 @@ class TestApplyReviewSession:
         resp = client.post(f"/review-hints/sessions/{sid}/apply")
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT conflict_flagged FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
         ).fetchone()
@@ -1323,7 +1330,7 @@ class TestApplyReviewSession:
 
         # Verify both llm_review_keep and llm_review_flagged rows landed in hint_audit
         hint_ids = [hint_id for _, hint_id in pairs]
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         actions = [
             r[0]
             for r in conn.execute(
@@ -1345,7 +1352,7 @@ class TestApplyReviewSession:
         resp = client.post(f"/review-hints/sessions/{sid}/apply")
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         row = conn.execute(
             "SELECT status FROM hint_review_sessions WHERE id = ?", (sid,)
         ).fetchone()
@@ -1361,7 +1368,7 @@ class TestRunsEndpoints:
     @staticmethod
     def _seed_run(db_path, wf, *, status="passed", hint_id=None,
                   query="click the button"):
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         now = datetime.now(timezone.utc).isoformat()
         injected = json.dumps([hint_id] if hint_id else [])
         conn.execute(
@@ -1434,7 +1441,7 @@ class TestRunsEndpoints:
         # (no FK). The endpoint must still return the trace with run=null.
         client, em, mock_fb, db_path = learning_client
         hid = _insert_hint(db_path)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = _pg_conn(db_path)
         conn.execute(
             "INSERT INTO hint_workflow_trace "
             "(workflow_id, hint_id, injected, available, created_at) "

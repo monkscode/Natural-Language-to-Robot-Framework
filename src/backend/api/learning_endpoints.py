@@ -313,11 +313,8 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
         trigger_rows = conn.execute(
             "SELECT 'trigger_events' AS source, id, "
             "       CASE "
-            "         WHEN EXISTS ("
-            "           SELECT 1 FROM json_each("
-            "             COALESCE(actually_flagged_hint_ids, flagged_hint_ids)"
-            "           ) WHERE CAST(value AS INTEGER) = ?"
-            "         ) THEN 'flagged' "
+            "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
+            "              @> to_jsonb(?::int) THEN 'flagged' "
             "         ELSE 'flag_recommended_suppressed' "
             "       END AS action, "
             "       trigger_type AS actor, reason, "
@@ -325,11 +322,8 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
             "       trigger_type, workflow_id "
             "FROM trigger_events "
             "WHERE flagged_hint_ids IS NOT NULL "
-            "  AND flagged_hint_ids != '[]' "
-            "  AND EXISTS ("
-            "    SELECT 1 FROM json_each(flagged_hint_ids) "
-            "    WHERE CAST(value AS INTEGER) = ?"
-            "  )",
+            "  AND flagged_hint_ids <> '[]'::jsonb "
+            "  AND flagged_hint_ids @> to_jsonb(?::int)",
             (hint_id, hint_id),
         ).fetchall()
 
@@ -397,7 +391,7 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM nl_feedback_corrections "
-            "WHERE feedback_text = ? AND domain IS ? AND scope = ?",
+            "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ?",
             (text, request.domain, request.scope),
         ).fetchone()
 
@@ -821,7 +815,8 @@ def get_trigger(trigger_id: int, fb=Depends(_require_feedback_loop)):
         # Resolve hint texts for all active_hint_ids in one query
         hint_texts: dict[int, str] = {}
         try:
-            active_ids = json.loads(row_dict.get("active_hint_ids") or "[]")
+            # active_hint_ids is jsonb → psycopg returns a parsed list (or None).
+            active_ids = row_dict.get("active_hint_ids") or []
         except (ValueError, TypeError):
             active_ids = []
         if active_ids:
@@ -878,9 +873,7 @@ def list_runs(
         for r in rows:
             d = _row_to_dict(r)
             try:
-                d["nl_injected_count"] = len(
-                    json.loads(d.get("injected_hint_ids") or "[]")
-                )
+                d["nl_injected_count"] = len(d.get("injected_hint_ids") or [])
             except (ValueError, TypeError):
                 d["nl_injected_count"] = 0
             runs.append(d)
@@ -947,9 +940,9 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
     original_failure_category (via RELATED_CATEGORIES). Inform-only review signal
     so a harmful never-passing hint is visible without a manual review trigger.
 
-    SQL json_each hybrid: a bounded (LIMIT 2000), 30-day, json_valid-guarded
-    subquery over failing runs, expanded with json_each(injected_hint_ids) and
-    joined to the candidate hints; Python then applies the 4-entry
+    SQL jsonb hybrid: a bounded (LIMIT 2000), 30-day subquery over failing runs,
+    joined to the candidate hints by jsonb containment
+    (injected_hint_ids @> to_jsonb(hint.id), GIN-indexed); Python then applies the 4-entry
     RELATED_CATEGORIES relation so the dict stays the single source of truth.
     Scale caveat: at high volume the row cap binds before 30d → a recent-window
     estimate, not lifetime.
@@ -964,19 +957,17 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
         SELECT hint.id AS hint_id,
                hint.original_failure_category AS orig_cat,
                er.failure_category AS fail_cat
-        FROM nl_feedback_corrections hint,
-             (
-                SELECT injected_hint_ids, failure_category
-                FROM execution_records
-                WHERE test_status = 'failed'
-                  AND json_valid(injected_hint_ids)
-                  AND timestamp >= ?
-                ORDER BY timestamp DESC
-                LIMIT 2000
-             ) er,
-             json_each(er.injected_hint_ids) j
-        WHERE CAST(j.value AS INTEGER) = hint.id
-          AND hint.id IN ({placeholders})
+        FROM nl_feedback_corrections hint
+        JOIN (
+            SELECT injected_hint_ids, failure_category
+            FROM execution_records
+            WHERE test_status = 'failed'
+              AND injected_hint_ids IS NOT NULL
+              AND timestamp >= ?
+            ORDER BY timestamp DESC
+            LIMIT 2000
+        ) er ON er.injected_hint_ids @> to_jsonb(hint.id)
+        WHERE hint.id IN ({placeholders})
         """,
         [cutoff_30d] + list(hint_ids),
     ).fetchall()
@@ -1042,7 +1033,7 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                    SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
                    SUM(CASE WHEN status='succeeded'
                              AND COALESCE(actually_flagged_hint_ids,
-                                          flagged_hint_ids) != '[]'
+                                          flagged_hint_ids) <> '[]'::jsonb
                             THEN 1 ELSE 0 END) AS flagged_events
             FROM trigger_events
             WHERE created_at >= ?
@@ -1062,20 +1053,19 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events
             WHERE created_at >= ?
               AND status = 'succeeded'
-              AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) != '[]'
+              AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) <> '[]'::jsonb
         """, (cutoff_30d,)).fetchone()["n"]
 
         reviewed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
               AND te.status = 'succeeded'
-              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
+              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) <> '[]'::jsonb
               AND EXISTS (
                   SELECT 1
-                  FROM hint_audit ha,
-                       json_each(COALESCE(te.actually_flagged_hint_ids,
-                                          te.flagged_hint_ids)) flag
-                  WHERE ha.hint_id = CAST(flag.value AS INTEGER)
+                  FROM hint_audit ha
+                  WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
+                        @> to_jsonb(ha.hint_id)
                     AND ha.created_at > te.created_at
               )
         """, (cutoff_30d,)).fetchone()["n"]
@@ -1084,13 +1074,12 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
               AND te.status = 'succeeded'
-              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
+              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) <> '[]'::jsonb
               AND EXISTS (
                   SELECT 1
-                  FROM hint_audit ha,
-                       json_each(COALESCE(te.actually_flagged_hint_ids,
-                                          te.flagged_hint_ids)) flag
-                  WHERE ha.hint_id = CAST(flag.value AS INTEGER)
+                  FROM hint_audit ha
+                  WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
+                        @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
                     AND ha.created_at > te.created_at
               )
@@ -1153,8 +1142,8 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events
             WHERE created_at >= ?
               AND trigger_type = 'usage_attribution' AND status = 'succeeded'
-              AND (COALESCE(used_hint_ids,'[]') != '[]'
-                   OR COALESCE(unused_hint_ids,'[]') != '[]')
+              AND (COALESCE(used_hint_ids, '[]'::jsonb) <> '[]'::jsonb
+                   OR COALESCE(unused_hint_ids, '[]'::jsonb) <> '[]'::jsonb)
         """, (cutoff_30d,)).fetchone()["n"]
 
         # F6 — state-based retirement-reversal rate. Of hints auto-disabled with
@@ -1214,18 +1203,16 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                 """
                 SELECT hint.id, hint.feedback_text, hint.scope, hint.domain,
                        COUNT(DISTINCT er.workflow_id) AS injections
-                FROM nl_feedback_corrections hint,
-                     (
-                        SELECT workflow_id, injected_hint_ids
-                        FROM execution_records
-                        WHERE json_valid(injected_hint_ids)
-                          AND timestamp >= ?
-                        ORDER BY timestamp DESC
-                        LIMIT 5000
-                     ) er,
-                     json_each(er.injected_hint_ids) j
-                WHERE CAST(j.value AS INTEGER) = hint.id
-                  AND hint.is_active=1 AND hint.conflict_flagged=0
+                FROM nl_feedback_corrections hint
+                JOIN (
+                    SELECT workflow_id, injected_hint_ids
+                    FROM execution_records
+                    WHERE injected_hint_ids IS NOT NULL
+                      AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 5000
+                ) er ON er.injected_hint_ids @> to_jsonb(hint.id)
+                WHERE hint.is_active=1 AND hint.conflict_flagged=0
                   AND hint.applied_count=0
                   AND hint.created_at <= ?
                 GROUP BY hint.id
@@ -1314,8 +1301,9 @@ def _compute_exonerations(trigger_events) -> tuple:
     exoneration_counts: dict = defaultdict(int)
     flag_counts: dict = defaultdict(int)
     for row in trigger_events:
-        active = json.loads(row["active_hint_ids"] or "[]")
-        flagged = json.loads(row["flagged_hint_ids"] or "[]")
+        # active_hint_ids / flagged_hint_ids are jsonb → already parsed lists.
+        active = row["active_hint_ids"] or []
+        flagged = row["flagged_hint_ids"] or []
         flagged_set = set(flagged)
         for hint_id in active:
             if hint_id in flagged_set:

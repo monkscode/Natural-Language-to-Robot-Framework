@@ -745,10 +745,10 @@ class TestV12Migration:
             "SELECT flagged_hint_ids, actually_flagged_hint_ids "
             "FROM trigger_events WHERE workflow_id = 'wf-v12'"
         ).fetchone()
-        assert row["flagged_hint_ids"] == "[1,2,3]", (
+        assert row["flagged_hint_ids"] == [1, 2, 3], (
             "LLM-recommendation column must round-trip unchanged"
         )
-        assert row["actually_flagged_hint_ids"] == "[2]", (
+        assert row["actually_flagged_hint_ids"] == [2], (
             "Enforcement column must round-trip independently of "
             "the recommendation"
         )

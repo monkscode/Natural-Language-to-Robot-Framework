@@ -15,8 +15,10 @@ that SQLite-style SQL executes on PostgreSQL unchanged:
 - psycopg IntegrityError is re-raised as sqlite3.IntegrityError, so existing
   `except sqlite3.IntegrityError` handlers keep working.
 
-NOT translated (ported at the call sites instead): json_each, last_insert_rowid,
-strftime, INSERT OR IGNORE — Postgres has different syntax for these.
+NOT translated (ported at the call sites instead): last_insert_rowid, strftime,
+INSERT OR IGNORE — Postgres has different syntax for these. (The hint-id array
+columns are native jsonb as of slice 4.5, so there is no json_each/json_valid to
+translate — the KPI queries use jsonb operators directly.)
 
 Referenced by: postgres_execution_memory.py and the learning engines via the
 connection objects it hands out.

@@ -105,7 +105,7 @@ class TestWriteTriggerEventUsageColumns:
             "SELECT used_hint_ids, unused_hint_ids FROM trigger_events "
             "WHERE workflow_id = 'wf-te'"
         ).fetchone()
-        assert row["used_hint_ids"] == "[1]"
+        assert row["used_hint_ids"] == [1]  # jsonb -> list
         # The NULL trap: None must be SQL NULL, NOT the string "null".
         assert row["unused_hint_ids"] is None
 

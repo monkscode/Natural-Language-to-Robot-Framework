@@ -6,8 +6,9 @@ The writer connection and read connections are pg_compat.CompatConnection
 objects, so this class AND the learning engines (which reach into
 `_writer_conn` / `read_conn()`) all speak SQLite-dialect SQL (`?` placeholders,
 sqlite3.Row access, `except sqlite3.IntegrityError`) that the adapter translates
-to psycopg/Postgres. Genuinely dialect-specific spots (RETURNING, json_each,
-strftime, INSERT OR IGNORE) are ported at the call sites, not here.
+to psycopg/Postgres. Genuinely dialect-specific spots (RETURNING, strftime,
+INSERT OR IGNORE, and the jsonb hint-id KPI queries) are ported at the call
+sites, not here.
 
 Single-writer model preserved: ONE writer connection used only by the
 learning-writer thread (LearningWriteQueue), guarded by _assert_writer_thread.
@@ -18,6 +19,7 @@ Reuses ExecutionRecord / helpers from execution_memory.py.
 Referenced by: learning_registry.py (after cutover).
 """
 
+import json
 import logging
 import sqlite3
 import threading
@@ -349,7 +351,12 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             user_feedback=row["user_feedback"],
             user_feedback_type=row["user_feedback_type"],
             working_code=row["working_code"],
-            injected_hint_ids=row["injected_hint_ids"],
+            # injected_hint_ids is jsonb (psycopg returns a parsed list); the
+            # ExecutionRecord contract is a JSON string, so re-serialize.
+            injected_hint_ids=(
+                json.dumps(row["injected_hint_ids"])
+                if row["injected_hint_ids"] is not None else None
+            ),
             model_version=row["model_version"],
             hint_attribution_done=row["hint_attribution_done"],
         )
