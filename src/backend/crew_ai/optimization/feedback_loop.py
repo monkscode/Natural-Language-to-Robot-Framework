@@ -754,10 +754,7 @@ class FeedbackLoop:
                 from src.backend.crew_ai.optimization.keyword_vector_store import (
                     KeywordVectorStore,
                 )
-                from src.backend.core.config import settings as app_settings
-                chroma_store = KeywordVectorStore(
-                    persist_directory=app_settings.OPTIMIZATION_CHROMA_DB_PATH,
-                )
+                chroma_store = KeywordVectorStore()
                 self.pattern_learner = QueryPatternMatcher(
                     chroma_store=chroma_store,
                 )

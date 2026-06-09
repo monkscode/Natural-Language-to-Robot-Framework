@@ -85,9 +85,7 @@ class Settings(BaseSettings):
     TRACK_LLM_COSTS: bool = Field(default=True, description="Enable/disable LLM cost tracking and logging")
     
     # Optimization Configuration
-    OPTIMIZATION_ENABLED: bool = Field(default=True, description="Enable/disable optimization system (pattern learning, ChromaDB)")
-    OPTIMIZATION_CHROMA_DB_PATH: str = Field(default="./chroma_db", description="Path to ChromaDB storage directory")
-    # Note: ChromaDB uses its default ONNX-based embedding function (no sentence-transformers/pytorch needed)
+    OPTIMIZATION_ENABLED: bool = Field(default=True, description="Enable/disable optimization system (pattern learning, pgvector semantic search)")
     OPTIMIZATION_KEYWORD_SEARCH_TOP_K: int = Field(default=3, description="Number of keywords to return from search")
     OPTIMIZATION_PATTERN_CONFIDENCE_THRESHOLD: float = Field(default=0.7, description="Minimum confidence for pattern prediction (0.0-1.0)")
     OPTIMIZATION_CONTEXT_PRUNING_ENABLED: bool = Field(default=True, description="Enable smart context pruning")
