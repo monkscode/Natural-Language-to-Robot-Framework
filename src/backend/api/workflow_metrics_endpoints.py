@@ -187,7 +187,7 @@ async def get_metrics_health():
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "storage_path": str(collector.storage_path),
+            "storage": "postgres:workflow_metrics",
             "recent_workflows_count": len(recent_metrics),
             "last_recorded": recent_metrics[0].timestamp.isoformat() if recent_metrics else None
         }

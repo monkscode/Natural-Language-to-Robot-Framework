@@ -17,7 +17,6 @@ class TestWorkflowMetricsEndpoints:
         mock = MagicMock()
         mock.get_all_metrics.return_value = []
         mock.get_metrics_by_date_range.return_value = []
-        mock.storage_path = "/tmp/fake.jsonl"
         return mock
 
     @pytest.fixture

@@ -16,9 +16,20 @@ class TestWorkflowMetricsCollector:
     """Tests for the metrics collector."""
 
     @pytest.fixture
-    def collector(self, tmp_path):
-        """Fresh collector with temp storage."""
-        return WorkflowMetricsCollector(storage_path=str(tmp_path / "metrics.jsonl"))
+    def collector(self):
+        """Fresh collector on an isolated Postgres schema, dropped after the test."""
+        import psycopg
+        from src.backend.core.config import settings
+        schema = "wf_metrics_test"
+        admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+        admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        admin.execute(f"CREATE SCHEMA {schema}")
+        dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{schema}"
+        c = WorkflowMetricsCollector(dsn=dsn)
+        yield c
+        c.close()
+        admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        admin.close()
 
     def _make_metric(self, wf_id):
         return WorkflowMetrics(
