@@ -4,14 +4,15 @@ Learning Dashboard API endpoints (/api/learning/*).
 Admin curation surface for the Adaptive Learning System.
 Pairs with the /learning frontend SPA (Step 10).
 
-Write design note: admin write endpoints open a fresh SQLite connection
-rather than routing through LearningWriteQueue. This is intentional:
+Write design note: admin write endpoints open a fresh Postgres connection
+(via pg_compat) rather than routing through LearningWriteQueue. This is
+intentional:
   - LearningWriteQueue's "sole writer" invariant targets automated
     pipeline writes (frequent, must not block the workflow thread).
   - Admin writes are synchronous by design (UI needs an immediate
     response) and human-speed (not high-frequency).
-  - SQLite WAL mode + busy_timeout=5000 serializes any momentary
-    contention with the write queue thread safely.
+  - Postgres MVCC handles any momentary contention with the write-queue
+    thread safely — no SQLITE_BUSY, so no WAL/busy_timeout needed.
 
 Referenced by: main.py (router registration, prefix="/api/learning")
 Depends on: execution_memory.py, feedback_loop.py, learning_registry.py
@@ -30,8 +31,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization import pg_compat
+from src.backend.core.config import settings
 from src.backend.crew_ai.optimization.learning_config import (
-    LEARNING_CONFIG,
     MAX_FEEDBACK_TEXT_CHARS,
     _get_conflict_detection_model,
     _get_conflict_detection_completion_kwargs,
@@ -100,20 +102,17 @@ def _require_feedback_loop():
     return fb
 
 
-def _admin_conn() -> sqlite3.Connection:
-    """Open a fresh write-capable connection for admin operations.
+def _admin_conn():
+    """Open a fresh write-capable Postgres connection (via pg_compat) for admin ops.
 
-    Uses WAL + busy_timeout so concurrent pipeline writes from the
-    write queue thread are safely serialized rather than raising errors.
+    Admin writes use their own short-lived connection rather than the
+    LearningWriteQueue: they are synchronous (the UI needs an immediate
+    response) and human-speed. On Postgres, MVCC handles any concurrency
+    with the pipeline's writer thread — no SQLITE_BUSY, so no WAL/busy_timeout
+    needed. SQLite-dialect SQL (`?` placeholders, sqlite3.Row-style access,
+    `last_insert_rowid()`) runs unchanged through the pg_compat adapter.
     """
-    conn = sqlite3.connect(
-        LEARNING_CONFIG["EXECUTION_MEMORY_DB"], check_same_thread=False
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    return pg_compat.connect(settings.DATABASE_URL)
 
 
 # ---------------------------------------------------------------------------
