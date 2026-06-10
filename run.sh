@@ -70,23 +70,63 @@ else
     rfbrowser install chromium
 fi
 
+# --- Postgres (auth + learning stack live here as of Phase 4) ---
+echo "Starting Postgres (nlrf-postgres)..."
+docker compose up -d postgres || { echo "Error: failed to start the postgres container. Is Docker running?"; exit 1; }
+
+echo -n "Waiting for Postgres to accept connections"
+for i in $(seq 1 30); do
+    if docker exec nlrf-postgres pg_isready -U "${POSTGRES_USER:-nlrf}" -d "${POSTGRES_DB:-nlrf}" > /dev/null 2>&1; then
+        echo " ready."
+        PG_READY=1
+        break
+    fi
+    echo -n "."
+    sleep 1
+done
+if [ -z "$PG_READY" ]; then
+    echo
+    echo "Error: Postgres did not become ready within 30s. Check 'docker logs nlrf-postgres'."
+    exit 1
+fi
+
+# --- React SPA dev server (Vite, :5173) ---
+if [ ! -d "src/frontend-react/node_modules" ]; then
+    echo "Installing frontend dependencies (first run)..."
+    (cd src/frontend-react && npm install)
+fi
+
 # Run the application
 echo "Starting the application..."
-echo "You can access it at http://localhost:${APP_PORT}"
 python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
 UVICORN_PID=$!
 
 python tools/browser_use_service.py > bus.log 2>&1 &
 BROWSER_SERVICE_PID=$!
 
+# vite.js is run with node directly (not 'npm run dev') and exec'd so the PID
+# we kill on exit is the actual dev-server process, not a wrapper around it.
+(cd src/frontend-react && exec node node_modules/vite/bin/vite.js) > frontend.log 2>&1 &
+FRONTEND_PID=$!
+
+echo ""
+echo "  React SPA (validate here):  http://localhost:5173"
+echo "  FastAPI backend + legacy UI: http://localhost:${APP_PORT}"
+echo "  BrowserUse service:          http://localhost:4999/health"
+echo "  Postgres:                    localhost:5432 (container nlrf-postgres)"
+echo ""
+echo "  Logs: backend in this console; bus.log (BrowserUse); frontend.log (Vite)"
+echo "  Press Ctrl+C to stop everything (Postgres container stays up)."
+echo ""
+
 cleanup() {
-    kill "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+    kill "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
-wait -n "$UVICORN_PID" "$BROWSER_SERVICE_PID"
+wait -n "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID"
 EXIT_CODE=$?
 cleanup
-wait "$UVICORN_PID" "$BROWSER_SERVICE_PID" 2>/dev/null || true
+wait "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
 exit "$EXIT_CODE"
