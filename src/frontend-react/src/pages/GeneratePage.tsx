@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink } from 'lucide-react'
+import RobotCodeEditor from '@/components/RobotCodeEditor'
 
 /* ── Types ── */
 type Phase = 'idle' | 'generating' | 'executing'
@@ -37,6 +38,11 @@ function LogsSection({ title, desc, logs, running }: {
   title: string; desc: string; logs: LogEntry[]; running: boolean
 }) {
   const [open, setOpen] = useState(true)
+  const listRef = useRef<HTMLDivElement>(null)
+  // Keep the newest log line in view while streaming (legacy-UI behaviour)
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
+  }, [logs.length])
   return (
     <Card className="mb-3">
       <CardHeader className="flex-row items-center justify-between space-y-0 py-3 px-4">
@@ -56,7 +62,7 @@ function LogsSection({ title, desc, logs, running }: {
               <div className="progress-shimmer h-full w-1/3 animate-pulse bg-primary" />
             </div>
           )}
-          <div className="max-h-56 overflow-y-auto font-mono text-xs">
+          <div ref={listRef} className="max-h-56 overflow-y-auto font-mono text-xs">
             {logs.map((log, i) => (
               <div
                 key={i}
@@ -170,6 +176,8 @@ export default function GeneratePage() {
   const [query, setQuery]   = useState('')
   const [code, setCode]     = useState('')
   const [phase, setPhase]   = useState<Phase>('idle')
+  const [genProgress, setGenProgress] = useState(0)
+  const [genStage, setGenStage]       = useState('')
   const [genLogs, setGenLogs]   = useState<LogEntry[]>([])
   const [execLogs, setExecLogs] = useState<LogEntry[]>([])
   const [outcome, setOutcome]   = useState<Outcome>(null)
@@ -180,8 +188,18 @@ export default function GeneratePage() {
   const workflowId = useRef<string | null>(null)   // set on generation complete
   const feedbackId = useRef<string | null>(null)   // run_id used for feedback
   const generatedQuery = useRef<string>('')        // query that produced `code`
+  const progressRef = useRef<HTMLDivElement>(null) // auto-scroll target while generating
+  const execRef = useRef<HTMLDivElement>(null)     // auto-scroll target while executing
 
   const busy = phase === 'generating' || phase === 'executing'
+
+  // Bring the active progress/logs section into view when a run starts —
+  // it renders below the fold and the user otherwise gets no cue (legacy-UI parity).
+  useEffect(() => {
+    const target = phase === 'generating' ? progressRef.current
+      : phase === 'executing' ? execRef.current : null
+    if (target) setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
+  }, [phase])
 
   const addGen  = (kind: LogEntry['kind'], msg: string) =>
     setGenLogs(l => [...l, { kind, ts: nowTs(), msg }])
@@ -191,14 +209,22 @@ export default function GeneratePage() {
   async function handleGenerate() {
     if (!query.trim() || busy) return
     setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setCode('')
+    setGenProgress(0); setGenStage('Starting test generation…')
     workflowId.current = null
     generatedQuery.current = query
     setPhase('generating')
     try {
       await streamSSE('/generate-test', { query }, (data) => {
         if (data.status === 'running') {
+          // The backend sends a monotonic 0–100 `progress` on stage boundaries;
+          // events without it (e.g. dryrun repair iterations) hold the bar.
+          if (typeof data.progress === 'number') {
+            setGenProgress(p => Math.max(p, data.progress))
+          }
+          if (data.message) setGenStage(data.message)
           addGen('info', data.message || data.log || '…')
         } else if (data.status === 'complete' && data.robot_code) {
+          setGenProgress(100)
           setCode(data.robot_code)
           workflowId.current = data.workflow_id || null
           if (data.dryrun_status === 'failed' || data.dryrun_status === 'unverified') {
@@ -271,12 +297,13 @@ export default function GeneratePage() {
 
   function handleNew() {
     setQuery(''); setCode(''); setPhase('idle')
+    setGenProgress(0); setGenStage('')
     setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setError('')
     workflowId.current = null; feedbackId.current = null; generatedQuery.current = ''
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-0">
+    <div className="w-full space-y-0">
       {/* Page header */}
       <div className="mb-5 flex items-start justify-between">
         <div>
@@ -298,17 +325,17 @@ export default function GeneratePage() {
         </div>
       )}
 
-      {/* Two-column workspace */}
-      <div className="grid grid-cols-2 gap-4 mb-4 max-lg:grid-cols-1">
+      {/* Two-column workspace — fills the viewport like the legacy runner */}
+      <div className="mb-4 grid grid-cols-5 gap-4 max-lg:grid-cols-1 lg:h-[calc(100vh-235px)] lg:min-h-[480px]">
         {/* Input card */}
-        <Card className="flex flex-col">
+        <Card className="col-span-2 flex flex-col max-lg:col-span-1">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm">Test Description</CardTitle>
             <CardDescription className="text-xs">Write what you want to test in plain English</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-1 flex-col gap-3 pt-0">
             <Textarea
-              className="font-mono text-[13px] flex-1 resize-none min-h-[260px]"
+              className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
               placeholder={PLACEHOLDER}
               value={query}
               onChange={e => setQuery(e.target.value)}
@@ -318,13 +345,13 @@ export default function GeneratePage() {
               {phase === 'generating'
                 ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
                 : <Zap className="h-4 w-4" />}
-              {phase === 'generating' ? 'Generating…' : 'Generate Test'}
+              {phase === 'generating' ? `Generating… ${genProgress}%` : 'Generate Test'}
             </Button>
           </CardContent>
         </Card>
 
         {/* Generated / editable code card */}
-        <Card className="flex flex-col">
+        <Card className="col-span-3 flex flex-col max-lg:col-span-1">
           <CardHeader className="flex-row items-start justify-between space-y-0 pb-3">
             <div>
               <CardTitle className="text-sm">Generated Code</CardTitle>
@@ -346,16 +373,17 @@ export default function GeneratePage() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="flex flex-1 flex-col gap-3 p-0">
-            <Textarea
+          <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-0">
+            {/* Inset, bordered dark code block (GitHub-style) rather than an
+                edge-to-edge black panel */}
+            <RobotCodeEditor
               value={code}
-              onChange={e => setCode(e.target.value)}
+              onChange={setCode}
               disabled={busy}
-              spellCheck={false}
-              placeholder="*** Settings ***&#10;Library    Browser&#10;&#10;Generated code appears here, or paste your own…"
-              className="flex-1 min-h-[300px] resize-none rounded-none border-x-0 bg-[#0d1117] font-mono text-[12.5px] leading-relaxed text-[#e6edf3] focus-visible:ring-0"
+              placeholder={'*** Settings ***\nLibrary    Browser\n\nGenerated code appears here, or paste your own…'}
+              className="min-h-[300px] flex-1 rounded-lg border border-border shadow-sm"
             />
-            <div className="px-4 pb-4">
+            <div className="pb-1">
               <Button onClick={handleRun} disabled={!code.trim() || busy} className="w-full gap-2">
                 {phase === 'executing'
                   ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -367,12 +395,35 @@ export default function GeneratePage() {
         </Card>
       </div>
 
+      {/* Generation progress — driven by the pipeline's stage events */}
+      {(phase === 'generating' || (genProgress > 0 && genProgress < 100 && genLogs.length > 0)) && (
+        <Card ref={progressRef} className="mb-4 scroll-mt-4">
+          <CardContent className="space-y-2.5 py-4">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="min-w-0 truncate font-medium">{genStage || 'Working…'}</span>
+              <span className="shrink-0 font-semibold tabular-nums text-muted-foreground">{genProgress}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-700 ease-out"
+                style={{ width: `${Math.max(genProgress, 2)}%` }}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Planning steps → finding page elements → writing code → verifying
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Logs */}
       {genLogs.length > 0 && (
         <LogsSection title="Generation Logs" desc="Real-time test generation progress" logs={genLogs} running={phase === 'generating'} />
       )}
       {execLogs.length > 0 && (
-        <LogsSection title="Execution Logs" desc="Real-time Docker execution output" logs={execLogs} running={phase === 'executing'} />
+        <div ref={execRef} className="scroll-mt-4">
+          <LogsSection title="Execution Logs" desc="Real-time Docker execution output" logs={execLogs} running={phase === 'executing'} />
+        </div>
       )}
 
       {/* Report link */}

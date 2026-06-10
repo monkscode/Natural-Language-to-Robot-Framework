@@ -2,25 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Plus } from 'lucide-react'
 import { useFetch } from '@/lib/useFetch'
 import { api } from '@/lib/api'
 import { useAuth } from '@/auth/AuthContext'
 import { cn } from '@/lib/utils'
-
-/* ── Shapes (only the fields we render) ── */
-interface Hint {
-  id: number
-  feedback_text: string
-  scope?: string
-  domain?: string
-  is_active: number
-  conflict_flagged: number
-  llm_review_disabled?: number
-  success_count?: number
-  applied_count?: number
-  last_seen?: string
-}
-interface HintsResp { total: number; hints: Hint[] }
+import TriggersTab from './learning/TriggersTab'
+import StatsTab from './learning/StatsTab'
+import HintDrawer from './learning/HintDrawer'
+import AddFeedbackSheet from './learning/AddFeedbackSheet'
+import RunDrawer from './learning/RunDrawer'
+import type { Hint, HintsResp } from './learning/types'
 interface Run {
   workflow_id: string
   timestamp: string
@@ -71,7 +63,7 @@ interface ReviewSessionDetail {
   recommendations: ReviewRec[]
 }
 
-type View = 'overview' | 'hints' | 'runs' | 'review'
+type View = 'overview' | 'hints' | 'triggers' | 'runs' | 'stats' | 'review'
 const HINT_FILTERS = [
   { key: '', label: 'All' },
   { key: 'flagged', label: 'Flagged' },
@@ -91,6 +83,22 @@ function hintStatus(h: Hint): { label: string; cls: string } {
 
 function ErrorNote({ msg }: { msg: string }) {
   return <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive">{msg}</div>
+}
+
+/* ── Learning-system health banner (OK / DEGRADED / FAILED / DISABLED) ── */
+function HealthBanner() {
+  const { data } = useFetch<{ status: string }>('/api/learning/health')
+  if (!data) return null
+  const s = (data.status || 'unknown').toUpperCase()
+  const cls =
+    s === 'OK' ? 'border-green-200 bg-green-50 text-green-700'
+      : s === 'DISABLED' ? 'border-border bg-muted/40 text-muted-foreground'
+        : 'border-amber-200 bg-amber-50 text-amber-700'
+  return (
+    <div className={cn('rounded-md border px-4 py-2 text-sm', cls)}>
+      {s === 'OK' ? '✓' : '⚠'} Learning system: {s}
+    </div>
+  )
 }
 
 /* ── Overview ── */
@@ -129,7 +137,21 @@ function Hints() {
   const [filter, setFilter] = useState('')
   const [busyId, setBusyId] = useState<number | null>(null)
   const [actErr, setActErr] = useState('')
-  const path = `/api/learning/hints?limit=100${filter ? `&status=${filter}` : ''}`
+  const [detailId, setDetailId] = useState<number | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [scopeFilter, setScopeFilter] = useState('')
+  const [domainFilter, setDomainFilter] = useState('')
+  const [search, setSearch] = useState('')
+  // Debounce text inputs so we don't refetch per keystroke
+  const [applied, setApplied] = useState({ domain: '', search: '' })
+  useEffect(() => {
+    const t = setTimeout(() => setApplied({ domain: domainFilter.trim(), search: search.trim() }), 350)
+    return () => clearTimeout(t)
+  }, [domainFilter, search])
+  const path = `/api/learning/hints?limit=100${filter ? `&status=${filter}` : ''}` +
+    (scopeFilter ? `&scope=${scopeFilter}` : '') +
+    (applied.domain ? `&domain=${encodeURIComponent(applied.domain)}` : '') +
+    (applied.search ? `&search=${encodeURIComponent(applied.search)}` : '')
   const { data, loading, error, reload } = useFetch<HintsResp>(path)
 
   async function act(id: number, action: 'unflag' | 'retract' | 'reactivate') {
@@ -149,13 +171,38 @@ function Hints() {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         {HINT_FILTERS.map(f => (
           <Button key={f.key} size="sm" variant={filter === f.key ? 'default' : 'outline'} className="h-7 text-xs" onClick={() => setFilter(f.key)}>
             {f.label}
           </Button>
         ))}
+        <select
+          className="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+          value={scopeFilter}
+          onChange={e => setScopeFilter(e.target.value)}
+        >
+          <option value="">Scope: all</option>
+          <option value="url">url</option>
+          <option value="domain">domain</option>
+          <option value="global">global</option>
+        </select>
+        <input
+          className="h-7 w-32 rounded-md border border-input bg-background px-2 text-xs"
+          placeholder="Domain filter…"
+          value={domainFilter}
+          onChange={e => setDomainFilter(e.target.value)}
+        />
+        <input
+          className="h-7 w-40 rounded-md border border-input bg-background px-2 text-xs"
+          placeholder="Search hint text…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
         <span className="ml-auto self-center text-xs text-muted-foreground">{data ? `${data.total} hint${data.total !== 1 ? 's' : ''}` : ''}</span>
+        <Button size="sm" className="h-7 gap-1 text-xs" onClick={() => setAdding(true)}>
+          <Plus className="h-3 w-3" /> Add feedback
+        </Button>
       </div>
       {actErr && <ErrorNote msg={actErr} />}
       {error && <ErrorNote msg={error} />}
@@ -192,6 +239,7 @@ function Hints() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex justify-end gap-1.5">
+                            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setDetailId(h.id)}>Detail</Button>
                             {h.is_active === 1 && h.conflict_flagged === 1 && (
                               <Button size="sm" variant="outline" className="h-7 text-xs" disabled={disabled} onClick={() => act(h.id, 'unflag')}>Unflag</Button>
                             )}
@@ -212,52 +260,98 @@ function Hints() {
           )}
         </CardContent>
       </Card>
+      {detailId != null && (
+        <HintDrawer id={detailId} onChanged={reload} onClose={() => setDetailId(null)} />
+      )}
+      {adding && (
+        <AddFeedbackSheet onCreated={reload} onClose={() => setAdding(false)} />
+      )}
     </div>
   )
 }
 
 /* ── Runs ── */
 function Runs() {
-  const { data, loading, error } = useFetch<RunsResp>('/api/learning/runs?limit=50')
-  if (loading) return <p className="text-sm text-muted-foreground">Loading…</p>
-  if (error) return <ErrorNote msg={error} />
+  const [status, setStatus] = useState('')
+  const [search, setSearch] = useState('')
+  const [applied, setApplied] = useState('')
+  const [openRun, setOpenRun] = useState<string | null>(null)
+  useEffect(() => {
+    const t = setTimeout(() => setApplied(search.trim()), 350)
+    return () => clearTimeout(t)
+  }, [search])
+  const path = `/api/learning/runs?limit=50${status ? `&status=${status}` : ''}${applied ? `&q=${encodeURIComponent(applied)}` : ''}`
+  const { data, loading, error } = useFetch<RunsResp>(path)
+
   return (
-    <Card>
-      <CardContent className="p-0">
-        {data && data.runs.length === 0 && <p className="px-4 py-6 text-sm text-muted-foreground">No runs recorded yet.</p>}
-        {data && data.runs.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="px-4 py-2.5">Query</th>
-                  <th className="px-4 py-2.5">Status</th>
-                  <th className="px-4 py-2.5 hidden md:table-cell">Hints used</th>
-                  <th className="px-4 py-2.5 hidden lg:table-cell">When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.runs.map((r, i) => (
-                  <tr key={r.workflow_id + i} className="border-b last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-2.5 max-w-md"><span className="line-clamp-1">{r.user_query || '—'}</span></td>
-                    <td className="px-4 py-2.5">
-                      <Badge className={cn('text-xs',
-                        r.test_status === 'passed' ? 'bg-green-100 text-green-700 border-green-200'
-                          : r.test_status === 'failed' ? 'bg-red-100 text-red-700 border-red-200'
-                            : 'bg-muted text-muted-foreground')}>{r.test_status}</Badge>
-                    </td>
-                    <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.nl_injected_count ?? 0}</td>
-                    <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
-                      {r.timestamp ? new Date(r.timestamp).toLocaleString() : '—'}
-                    </td>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input
+          className="h-7 w-48 rounded-md border border-input bg-background px-2 text-xs"
+          placeholder="Search query…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+        <select
+          className="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+          value={status}
+          onChange={e => setStatus(e.target.value)}
+        >
+          <option value="">All statuses</option>
+          <option value="passed">passed</option>
+          <option value="failed">failed</option>
+        </select>
+        <span className="ml-auto self-center text-xs text-muted-foreground">
+          {data ? `${data.total} run${data.total !== 1 ? 's' : ''} · click a row for its learning journey` : ''}
+        </span>
+      </div>
+      {error && <ErrorNote msg={error} />}
+      <Card>
+        <CardContent className="p-0">
+          {loading && !data && <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>}
+          {data && data.runs.length === 0 && <p className="px-4 py-6 text-sm text-muted-foreground">No runs match.</p>}
+          {data && data.runs.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-4 py-2.5">Query</th>
+                    <th className="px-4 py-2.5">Status</th>
+                    <th className="px-4 py-2.5 hidden md:table-cell">Hints used</th>
+                    <th className="px-4 py-2.5 hidden xl:table-cell">Workflow</th>
+                    <th className="px-4 py-2.5 hidden lg:table-cell">When</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+                </thead>
+                <tbody>
+                  {data.runs.map((r, i) => (
+                    <tr
+                      key={r.workflow_id + i}
+                      className="cursor-pointer border-b last:border-0 hover:bg-muted/30"
+                      onClick={() => setOpenRun(r.workflow_id)}
+                    >
+                      <td className="px-4 py-2.5 max-w-md"><span className="line-clamp-1">{r.user_query || '(paste-and-execute)'}</span></td>
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        <Badge className={cn('text-xs',
+                          r.test_status === 'passed' ? 'bg-green-100 text-green-700 border-green-200'
+                            : r.test_status === 'failed' ? 'bg-red-100 text-red-700 border-red-200'
+                              : 'bg-muted text-muted-foreground')}>{r.test_status}</Badge>
+                        {r.failure_category && <span className="ml-1.5 text-xs text-muted-foreground">({r.failure_category})</span>}
+                      </td>
+                      <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.nl_injected_count ?? 0}</td>
+                      <td className="px-4 py-2.5 hidden xl:table-cell"><code className="text-xs text-muted-foreground">{r.workflow_id.slice(0, 13)}…</code></td>
+                      <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
+                        {r.timestamp ? new Date(r.timestamp).toLocaleString() : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      {openRun && <RunDrawer workflowId={openRun} onClose={() => setOpenRun(null)} />}
+    </div>
   )
 }
 
@@ -498,20 +592,23 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
 const VIEWS: { key: View; label: string }[] = [
   { key: 'overview', label: 'Overview' },
   { key: 'hints', label: 'Hints' },
+  { key: 'triggers', label: 'Triggers' },
   { key: 'runs', label: 'Runs' },
-  { key: 'review', label: 'Review' },
+  { key: 'stats', label: 'Stats' },
+  { key: 'review', label: 'LLM Review' },
 ]
 
 export default function LearningPage() {
   const [view, setView] = useState<View>('overview')
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
+    <div className="mx-auto w-full max-w-7xl space-y-4">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Learning</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">Review learned hints, runs, and the adaptive-learning system</p>
         </div>
       </div>
+      <HealthBanner />
       <div className="flex gap-1.5 border-b pb-2">
         {VIEWS.map(v => (
           <Button key={v.key} size="sm" variant={view === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
@@ -521,7 +618,9 @@ export default function LearningPage() {
       </div>
       {view === 'overview' && <Overview />}
       {view === 'hints' && <Hints />}
+      {view === 'triggers' && <TriggersTab />}
       {view === 'runs' && <Runs />}
+      {view === 'stats' && <StatsTab />}
       {view === 'review' && <Review />}
     </div>
   )

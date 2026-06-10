@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useFetch } from '@/lib/useFetch'
 import { cn } from '@/lib/utils'
-import { RefreshCw, Activity } from 'lucide-react'
+import { RefreshCw, Activity, ChevronRight } from 'lucide-react'
+import { PerformanceChartCard, CostChartCard } from './metrics/MetricsCharts'
+import type { MetricsRow } from './metrics/MetricsCharts'
 
 /* ── API shapes ── */
 interface Aggregate {
@@ -36,21 +38,11 @@ interface LearningHealth {
   contradictions?: number
   circuit_breaker?: { is_open?: boolean; error_rate?: number; state?: string } | null
 }
-interface WorkflowRow {
-  workflow_id: string
-  url: string
-  timestamp: string
-  total_llm_calls: number
-  total_cost: number
-  execution_time: number
-  success_rate: number
-}
-
 const WINDOWS = [
-  { key: 'last_24_hours', label: '24h' },
-  { key: 'last_7_days', label: '7d' },
-  { key: 'last_30_days', label: '30d' },
-  { key: 'all_time', label: 'All time' },
+  { key: 'last_24_hours', label: '24h', hours: 24 },
+  { key: 'last_7_days', label: '7d', hours: 24 * 7 },
+  { key: 'last_30_days', label: '30d', hours: 24 * 30 },
+  { key: 'all_time', label: 'All time', hours: null },
 ] as const
 type WindowKey = (typeof WINDOWS)[number]['key']
 
@@ -102,20 +94,39 @@ function Metric({ label, value }: { label: string; value: number | string }) {
   )
 }
 
+function statusOf(r: MetricsRow): { label: string; cls: string } {
+  if ((r.success_rate ?? 0) >= 0.999) return { label: 'PASS', cls: 'bg-green-100 text-green-700 border-green-200' }
+  if ((r.success_rate ?? 0) > 0) return { label: 'PARTIAL', cls: 'bg-amber-100 text-amber-700 border-amber-200' }
+  return { label: 'FAIL', cls: 'bg-red-100 text-red-700 border-red-200' }
+}
+
+function DetailCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className="mt-0.5 text-xs font-medium tabular-nums">{value}</p>
+    </div>
+  )
+}
+
 export default function MetricsPage() {
   const [win, setWin] = useState<WindowKey>('last_7_days')
+  const [openRow, setOpenRow] = useState<string | null>(null)
   const summary = useFetch<Summary>('/api/workflow-metrics/summary')
   const learning = useFetch<LearningHealth>('/api/workflow-metrics/learning-health')
-  const recent = useFetch<WorkflowRow[]>('/api/workflow-metrics/?limit=20')
+  const recent = useFetch<MetricsRow[]>('/api/workflow-metrics/?limit=200')
 
   const agg = summary.data?.[win]
+  const hours = WINDOWS.find(w => w.key === win)?.hours ?? null
+  const cutoff = hours == null ? 0 : Date.now() - hours * 3600_000
+  const windowRows = (recent.data ?? []).filter(r => !cutoff || new Date(r.timestamp).getTime() >= cutoff)
 
   function reloadAll() {
     summary.reload(); learning.reload(); recent.reload()
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
+    <div className="mx-auto w-full max-w-7xl space-y-4">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight">Metrics</h1>
@@ -144,11 +155,18 @@ export default function MetricsPage() {
           : agg && (
             <>
               <StatCard label="Workflows" value={String(agg.total_workflows)} sub={`${agg.total_elements} elements`} />
-              <StatCard label="Success rate" value={pct(agg.avg_success_rate)} sub={`${agg.successful_elements}/${agg.total_elements} elements`} />
+              {/* summary avg_success_rate is already 0–100 (unlike per-row 0–1) */}
+              <StatCard label="Success rate" value={`${(agg.avg_success_rate ?? 0).toFixed(1)}%`} sub={`${agg.successful_elements}/${agg.total_elements} elements`} />
               <StatCard label="Total cost" value={money(agg.total_cost)} sub={`${money(agg.avg_cost_per_element)}/element`} />
               <StatCard label="Avg exec time" value={secs(agg.avg_execution_time)} sub={`${agg.total_llm_calls} LLM calls`} />
             </>
           )}
+      </div>
+
+      {/* Charts — performance over time + cost breakdowns (window-filtered) */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
+        <div className="xl:col-span-3"><PerformanceChartCard rows={windowRows} /></div>
+        <div className="xl:col-span-2"><CostChartCard rows={windowRows} /></div>
       </div>
 
       {/* Learning health */}
@@ -168,27 +186,60 @@ export default function MetricsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
-                    <th className="px-4 py-2.5">URL</th>
-                    <th className="px-4 py-2.5 hidden sm:table-cell">Success</th>
+                    <th className="w-8 px-2 py-2.5"></th>
+                    <th className="px-2 py-2.5">Status</th>
+                    <th className="px-4 py-2.5 hidden xl:table-cell">Workflow</th>
+                    <th className="px-4 py-2.5">URL / Task</th>
                     <th className="px-4 py-2.5 hidden md:table-cell">LLM calls</th>
+                    <th className="px-4 py-2.5 hidden sm:table-cell">Elements</th>
                     <th className="px-4 py-2.5">Cost</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">Time</th>
                     <th className="px-4 py-2.5 hidden lg:table-cell">When</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {recent.data.map((r, i) => (
-                    <tr key={r.workflow_id + i} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="px-4 py-2.5 max-w-xs"><span className="line-clamp-1 font-mono text-xs">{r.url || '—'}</span></td>
-                      <td className="px-4 py-2.5 hidden sm:table-cell">{pct(r.success_rate)}</td>
-                      <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.total_llm_calls}</td>
-                      <td className="px-4 py-2.5">{money(r.total_cost)}</td>
-                      <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground">{secs(r.execution_time)}</td>
-                      <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
-                        {r.timestamp ? new Date(r.timestamp).toLocaleString() : '—'}
-                      </td>
-                    </tr>
-                  ))}
+                  {recent.data.slice(0, 25).map((r, i) => {
+                    const st = statusOf(r)
+                    const open = openRow === r.workflow_id
+                    return (
+                      <Fragment key={r.workflow_id + i}>
+                        <tr
+                          className="cursor-pointer border-b last:border-0 hover:bg-muted/30"
+                          onClick={() => setOpenRow(open ? null : r.workflow_id)}
+                        >
+                          <td className="px-2 py-2.5">
+                            <ChevronRight className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-90')} />
+                          </td>
+                          <td className="px-2 py-2.5"><Badge className={cn('text-[10px]', st.cls)}>{st.label}</Badge></td>
+                          <td className="px-4 py-2.5 hidden xl:table-cell"><code className="text-xs text-muted-foreground">{r.workflow_id.slice(0, 13)}…</code></td>
+                          <td className="px-4 py-2.5 max-w-xs"><span className="line-clamp-1 font-mono text-xs">{r.url || '—'}</span></td>
+                          <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.total_llm_calls}</td>
+                          <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground">{r.total_elements ?? '—'}</td>
+                          <td className="px-4 py-2.5 tabular-nums">{money(r.total_cost)}</td>
+                          <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground tabular-nums">{secs(r.execution_time)}</td>
+                          <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
+                            {r.timestamp ? new Date(r.timestamp).toLocaleString() : '—'}
+                          </td>
+                        </tr>
+                        {open && (
+                          <tr className="border-b bg-muted/20 last:border-0">
+                            <td colSpan={9} className="px-6 py-3">
+                              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                <DetailCell label="Workflow ID" value={r.workflow_id} />
+                                <DetailCell label="Element success" value={`${r.successful_elements ?? 0} ok / ${r.failed_elements ?? 0} failed (${pct(r.success_rate)})`} />
+                                <DetailCell label="CrewAI" value={`${r.crewai_llm_calls ?? 0} calls · ${money(r.crewai_cost ?? 0)}`} />
+                                <DetailCell label="Browser actions" value={`${r.browser_use_llm_calls ?? 0} calls · ${money(r.browser_use_cost ?? 0)}`} />
+                                <DetailCell label="CrewAI tokens" value={`${(r.crewai_prompt_tokens ?? 0).toLocaleString()} in / ${(r.crewai_completion_tokens ?? 0).toLocaleString()} out`} />
+                                <DetailCell label="Browser tokens" value={`${(r.browser_use_prompt_tokens ?? 0).toLocaleString()} in / ${(r.browser_use_completion_tokens ?? 0).toLocaleString()} out`} />
+                                <DetailCell label="Execution time" value={secs(r.execution_time)} />
+                                <DetailCell label="Total cost" value={money(r.total_cost)} />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
