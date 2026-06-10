@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -37,7 +37,41 @@ interface Stats {
   llm_cost?: { total_estimated_usd: number }
 }
 
-type View = 'overview' | 'hints' | 'runs'
+interface ReviewSession {
+  id: number
+  status: string
+  hint_count: number
+  llm_latency_ms?: number | null
+  warning?: string | null
+  error_message?: string | null
+  created_at: string
+  completed_at?: string | null
+}
+interface ReviewSessionsResp { is_any_running: boolean; sessions: ReviewSession[] }
+interface ReviewRec {
+  id: number
+  hint_id: number
+  recommendation: string
+  reason: string
+  exoneration_count: number
+  admin_decision: 'approved' | 'rejected' | null
+  admin_notes?: string | null
+  applied: number
+  feedback_text: string
+  scope?: string
+  domain?: string
+  applied_count?: number
+  success_count?: number
+  failure_count?: number
+  is_active: number
+  conflict_flagged: number
+}
+interface ReviewSessionDetail {
+  session: ReviewSession
+  recommendations: ReviewRec[]
+}
+
+type View = 'overview' | 'hints' | 'runs' | 'review'
 const HINT_FILTERS = [
   { key: '', label: 'All' },
   { key: 'flagged', label: 'Flagged' },
@@ -227,10 +261,245 @@ function Runs() {
   )
 }
 
+/* ── Review (LLM batch hint review) ── */
+function sessionStatus(s: string): { label: string; cls: string } {
+  if (s === 'pending_llm') return { label: 'Running…', cls: 'bg-amber-100 text-amber-700 border-amber-200' }
+  if (s === 'pending_review') return { label: 'Awaiting review', cls: 'bg-blue-100 text-blue-700 border-blue-200' }
+  if (s === 'failed') return { label: 'Failed', cls: 'bg-red-100 text-red-700 border-red-200' }
+  if (s === 'completed' || s === 'applied') return { label: 'Applied', cls: 'bg-green-100 text-green-700 border-green-200' }
+  return { label: s, cls: 'bg-muted text-muted-foreground' }
+}
+
+const REC_BADGES: Record<string, { label: string; cls: string }> = {
+  disable: { label: 'Disable', cls: 'bg-red-100 text-red-700 border-red-200' },
+  reactivate: { label: 'Reactivate', cls: 'bg-green-100 text-green-700 border-green-200' },
+  unflag: { label: 'Unflag', cls: 'bg-blue-100 text-blue-700 border-blue-200' },
+  keep: { label: 'Keep', cls: 'bg-muted text-muted-foreground' },
+  flag_review: { label: 'Flag for review', cls: 'bg-amber-100 text-amber-700 border-amber-200' },
+}
+
+function Review() {
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [startErr, setStartErr] = useState('')
+  const { data, loading, error, reload } = useFetch<ReviewSessionsResp>('/api/learning/review-hints/sessions')
+
+  // Poll while the LLM is running so pending_llm flips to pending_review.
+  useEffect(() => {
+    if (!data?.is_any_running) return
+    const t = setInterval(reload, 4000)
+    return () => clearInterval(t)
+  }, [data?.is_any_running, reload])
+
+  async function startReview() {
+    setStarting(true); setStartErr('')
+    try {
+      const resp = await api<{ session_id: number }>('/api/learning/review-hints/start', { method: 'POST' })
+      setSelectedId(resp.session_id)
+      await reload()
+    } catch (e) {
+      setStartErr(e instanceof Error ? e.message : 'Failed to start review')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const selected = data?.sessions.find(s => s.id === selectedId)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <Button size="sm" className="h-7 text-xs" disabled={starting || !!data?.is_any_running} onClick={startReview}>
+          {data?.is_any_running ? 'Review in progress…' : starting ? 'Starting…' : 'Start review'}
+        </Button>
+        <span className="text-xs text-muted-foreground">Runs an LLM batch review of all learned hints.</span>
+      </div>
+      {startErr && <ErrorNote msg={startErr} />}
+      {error && <ErrorNote msg={error} />}
+      <Card>
+        <CardContent className="p-0">
+          {loading && !data && <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>}
+          {data && data.sessions.length === 0 && <p className="px-4 py-6 text-sm text-muted-foreground">No review sessions yet.</p>}
+          {data && data.sessions.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+                    <th className="px-4 py-2.5">Started</th>
+                    <th className="px-4 py-2.5">Status</th>
+                    <th className="px-4 py-2.5 hidden sm:table-cell">Hints</th>
+                    <th className="px-4 py-2.5"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.sessions.map(s => {
+                    const st = sessionStatus(s.status)
+                    return (
+                      <tr
+                        key={s.id}
+                        className={cn('cursor-pointer border-b last:border-0 hover:bg-muted/30', selectedId === s.id && 'bg-muted/40')}
+                        onClick={() => setSelectedId(s.id)}
+                      >
+                        <td className="px-4 py-2.5 text-xs text-muted-foreground whitespace-nowrap">
+                          {s.created_at ? new Date(s.created_at).toLocaleString() : '—'}
+                        </td>
+                        <td className="px-4 py-2.5"><Badge className={cn('text-xs', st.cls)}>{st.label}</Badge></td>
+                        <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground">{s.hint_count}</td>
+                        <td className="px-4 py-2.5 text-right text-xs text-muted-foreground">{selectedId === s.id ? 'Viewing' : 'View'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      {selectedId != null && (
+        <ReviewSessionPanel id={selectedId} listStatus={selected?.status} onSessionsChanged={reload} />
+      )}
+    </div>
+  )
+}
+
+function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
+  id: number
+  listStatus?: string
+  onSessionsChanged: () => void
+}) {
+  const [busyId, setBusyId] = useState<number | null>(null)
+  const [applying, setApplying] = useState(false)
+  const [actErr, setActErr] = useState('')
+  const [appliedMsg, setAppliedMsg] = useState('')
+  const { data, loading, error, reload } = useFetch<ReviewSessionDetail>(`/api/learning/review-hints/sessions/${id}`)
+
+  // Refetch the detail when the polled list reports a status change
+  // (pending_llm → pending_review). Skip the initial render: useFetch
+  // already loads on mount.
+  const prevStatus = useRef(listStatus)
+  useEffect(() => {
+    if (prevStatus.current !== listStatus) {
+      prevStatus.current = listStatus
+      reload()
+    }
+  }, [listStatus, reload])
+
+  async function decide(recId: number, decision: 'approved' | 'rejected') {
+    setBusyId(recId); setActErr(''); setAppliedMsg('')
+    try {
+      await api(`/api/learning/review-hints/sessions/${id}/recommendations/${recId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ admin_decision: decision }),
+      })
+      await reload()
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : 'Failed to save decision')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function applyApproved() {
+    setApplying(true); setActErr(''); setAppliedMsg('')
+    try {
+      const resp = await api<{ applied_count: number }>(`/api/learning/review-hints/sessions/${id}/apply`, { method: 'POST' })
+      setAppliedMsg(`Applied ${resp.applied_count} recommendation${resp.applied_count !== 1 ? 's' : ''}.`)
+      await reload()
+      onSessionsChanged()
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : 'Failed to apply')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  if (loading && !data) return <p className="text-sm text-muted-foreground">Loading session…</p>
+  if (error) return <ErrorNote msg={error} />
+  if (!data) return null
+
+  const { session, recommendations } = data
+  const reviewable = session.status === 'pending_review'
+  const approvedPending = recommendations.filter(r => r.admin_decision === 'approved' && r.applied === 0).length
+  const decided = recommendations.filter(r => r.admin_decision != null).length
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-sm font-semibold">Session #{session.id}</h2>
+        <Badge className={cn('text-xs', sessionStatus(session.status).cls)}>{sessionStatus(session.status).label}</Badge>
+        <span className="text-xs text-muted-foreground">{decided} of {recommendations.length} decided</span>
+        {reviewable && (
+          <Button size="sm" className="ml-auto h-7 text-xs" disabled={applying || approvedPending === 0} onClick={applyApproved}>
+            {applying ? 'Applying…' : `Apply approved (${approvedPending})`}
+          </Button>
+        )}
+      </div>
+      {session.warning && <ErrorNote msg={session.warning} />}
+      {session.status === 'failed' && session.error_message && <ErrorNote msg={session.error_message} />}
+      {actErr && <ErrorNote msg={actErr} />}
+      {appliedMsg && <div className="rounded-md border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-700">{appliedMsg}</div>}
+      {session.status === 'pending_llm' && (
+        <p className="text-sm text-muted-foreground">The LLM review is running — recommendations will appear here when it finishes.</p>
+      )}
+      {recommendations.length === 0 && session.status !== 'pending_llm' && (
+        <p className="text-sm text-muted-foreground">No recommendations in this session.</p>
+      )}
+      {recommendations.map(r => {
+        const rec = REC_BADGES[r.recommendation] ?? { label: r.recommendation, cls: 'bg-muted text-muted-foreground' }
+        const busy = busyId === r.id
+        return (
+          <Card key={r.id}>
+            <CardContent className="space-y-2 p-4">
+              <div className="flex flex-wrap items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm">{r.feedback_text}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {[r.scope, r.domain].filter(Boolean).join(' · ') || '—'}
+                    {' · '}{r.success_count ?? 0} ok / {r.failure_count ?? 0} fail / {r.applied_count ?? 0} applied
+                  </p>
+                </div>
+                <Badge className={cn('text-xs', rec.cls)}>{rec.label}</Badge>
+              </div>
+              <p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">{r.reason}</p>
+              <div className="flex items-center gap-1.5">
+                {r.applied === 1 ? (
+                  <span className="text-xs font-medium text-green-700">✓ Applied</span>
+                ) : reviewable ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant={r.admin_decision === 'approved' ? 'default' : 'outline'}
+                      className="h-7 text-xs"
+                      disabled={busy}
+                      onClick={() => decide(r.id, 'approved')}
+                    >Approve</Button>
+                    <Button
+                      size="sm"
+                      variant={r.admin_decision === 'rejected' ? 'default' : 'outline'}
+                      className="h-7 text-xs text-destructive"
+                      disabled={busy}
+                      onClick={() => decide(r.id, 'rejected')}
+                    >Reject</Button>
+                  </>
+                ) : r.admin_decision ? (
+                  <span className="text-xs text-muted-foreground">Decision: {r.admin_decision}</span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">No decision</span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })}
+    </div>
+  )
+}
+
 const VIEWS: { key: View; label: string }[] = [
   { key: 'overview', label: 'Overview' },
   { key: 'hints', label: 'Hints' },
   { key: 'runs', label: 'Runs' },
+  { key: 'review', label: 'Review' },
 ]
 
 export default function LearningPage() {
@@ -253,6 +522,7 @@ export default function LearningPage() {
       {view === 'overview' && <Overview />}
       {view === 'hints' && <Hints />}
       {view === 'runs' && <Runs />}
+      {view === 'review' && <Review />}
     </div>
   )
 }
