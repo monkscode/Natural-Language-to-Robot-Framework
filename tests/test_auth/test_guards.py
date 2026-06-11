@@ -2,7 +2,8 @@
 
 Calls get_current_user / require_user / require_admin directly with crafted
 credentials (no DB, no TestClient, no httpx) to validate the security matrix:
-permissive while AUTH_ENFORCED is False, strict when True.
+require_user is permissive only while AUTH_ENFORCED is False; require_admin
+and get_current_user are always strict.
 """
 
 import pytest
@@ -34,7 +35,18 @@ def _secret(monkeypatch):
 def test_permissive_allows_missing_token(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", False)
     assert jwt_utils.require_user(None) is None
-    assert jwt_utils.require_admin(None) is None
+
+
+def test_require_admin_is_strict_even_when_not_enforced(monkeypatch):
+    """The escape hatch never opens admin routes: no token -> 401, user token -> 403."""
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", False)
+    with pytest.raises(HTTPException) as e1:
+        jwt_utils.require_admin(None)
+    assert e1.value.status_code == 401
+    with pytest.raises(HTTPException) as e2:
+        jwt_utils.require_admin(_creds(_token("user")))
+    assert e2.value.status_code == 403
+    assert jwt_utils.require_admin(_creds(_token("admin")))["role"] == "admin"
 
 
 def test_get_current_user_is_always_strict(monkeypatch):

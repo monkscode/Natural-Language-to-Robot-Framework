@@ -9,7 +9,8 @@ header. Three dependencies guard endpoints; verification is stateless (no DB):
                        an escape hatch for local API-only debugging: token-less
                        requests pass through (returns the user if a token is
                        present, None if absent).
-- require_admin      — like require_user, plus a role=='admin' check when enforced.
+- require_admin      — always strict: valid token + role=='admin'. The escape
+                       hatch does not apply to admin routes.
 
 A token that is PRESENT but invalid/expired always yields 401, even when not
 enforced (a broken token is a client error regardless of the flag).
@@ -93,12 +94,10 @@ def require_user(
 
 def require_admin(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> dict | None:
-    """Admin guard: valid token + role=='admin', unless settings.AUTH_ENFORCED
-    is disabled."""
+) -> dict:
+    """Admin guard: always requires a valid token with role=='admin'. The
+    AUTH_ENFORCED escape hatch does NOT apply — admin routes are never open."""
     user = _decode_to_user(credentials)
-    if not settings.AUTH_ENFORCED:
-        return user
     if user is None:
         raise HTTPException(401, "Not authenticated", headers=_UNAUTH_HEADERS)
     if user.get("role") != "admin":
