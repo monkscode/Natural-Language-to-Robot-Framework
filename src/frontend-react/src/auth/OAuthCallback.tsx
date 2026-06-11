@@ -7,7 +7,7 @@
  * via the auth context, and forward to /generate.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 
@@ -15,8 +15,13 @@ export default function OAuthCallback() {
   const navigate = useNavigate()
   const { loginWithToken } = useAuth()
   const [error, setError] = useState('')
+  const ranOnce = useRef(false)
 
   useEffect(() => {
+    // StrictMode double-invokes effects in dev; the second run would see the
+    // already-stripped hash and flash a spurious "token missing" error.
+    if (ranOnce.current) return
+    ranOnce.current = true
     const raw = window.location.hash.startsWith('#')
       ? window.location.hash.slice(1)
       : window.location.hash
