@@ -94,3 +94,26 @@ def test_google_login_rejects_inactive_account(repo):
         conn.commit()
     with pytest.raises(AccountInactive):
         r.get_or_create_google_user(sub, email, "G User")
+
+
+def test_role_synced_to_allowlist_at_signin(repo, monkeypatch):
+    """Editing ADMIN_EMAILS takes effect at the next sign-in, both directions:
+    an added email is promoted, a removed one is demoted."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    assert r.create_user(email, "S3cretpw!")["role"] == "user"
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    assert r.verify_credentials(email, "S3cretpw!")["role"] == "admin"
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", "")
+    assert r.verify_credentials(email, "S3cretpw!")["role"] == "user"
+
+
+def test_google_only_account_denies_password_login(repo):
+    """A google-only account (no password hash) can never password-login; the
+    denial burns the bcrypt timing equalizer instead of returning instantly."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email, "G User")
+    assert r.verify_credentials(email, "any-password-1!") is None

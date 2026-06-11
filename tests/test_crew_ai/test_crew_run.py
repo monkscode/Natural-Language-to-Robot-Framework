@@ -320,7 +320,12 @@ class TestRunCrewProgressQueue:
                 "src.backend.crew_ai.optimization.learning_registry.get_feedback_loop",
                 return_value=None,
             ))
-            stack.enter_context(patch("src.backend.crew_ai.optimization.KeywordVectorStore"))
+            # crew.py resolves get_keyword_vector_store on the optimization
+            # package at call time — patching the accessor (not the class)
+            # keeps the real pgvector store (DB + libdoc bootstrap) out of
+            # this test and leaves the process-wide singleton untouched.
+            stack.enter_context(
+                patch("src.backend.crew_ai.optimization.get_keyword_vector_store"))
             stack.enter_context(patch("src.backend.crew_ai.optimization.QueryPatternMatcher"))
             stack.enter_context(patch("src.backend.crew_ai.optimization.SmartKeywordProvider",
                                       return_value=mock_provider))

@@ -468,7 +468,7 @@ def create_hint(
             raise HTTPException(
                 status_code=409,
                 detail="An identical hint was just created — refresh to see it.",
-            )
+            ) from None
         hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _write_hint_audit(
             conn, hint_id, "create", actor, None, None,

@@ -188,7 +188,10 @@ async def logout(response: Response):
 async def forgot_password(req: ForgotPasswordRequest):
     """Stub (no email service yet). Always returns the same message so it never
     reveals whether an email is registered."""
-    logger.info("[AUTH] Password reset requested for %s (stub — no email sent)", req.email)
+    # The address is deliberately NOT logged: even validated, it is the one
+    # user-controlled value flowing straight to a log sink here (Sonar S5145),
+    # and a stub that sends no email has no operational need for it.
+    logger.info("[AUTH] Password reset requested (stub — no email sent)")
     return {"status": "ok", "message": "If that email exists, a reset link has been sent."}
 
 
