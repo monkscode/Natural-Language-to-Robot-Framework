@@ -228,6 +228,8 @@ export default function TriggersTab() {
                     <th className="px-4 py-2.5">When</th>
                     <th className="px-4 py-2.5">Type</th>
                     <th className="px-4 py-2.5 hidden md:table-cell">Domain</th>
+                    {/* Full id (no truncation) so a workflow can be found with Ctrl+F */}
+                    <th className="px-4 py-2.5 hidden md:table-cell">Workflow</th>
                     <th className="px-4 py-2.5">Status</th>
                     <th className="px-4 py-2.5 hidden lg:table-cell">Tokens in → out</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">Latency</th>
@@ -243,6 +245,9 @@ export default function TriggersTab() {
                       <td className="px-4 py-2.5 whitespace-nowrap text-xs text-muted-foreground">{fmtWhen(t.created_at)}</td>
                       <td className="px-4 py-2.5">{TRIGGER_TYPE_LABELS[t.trigger_type] ?? t.trigger_type}</td>
                       <td className="px-4 py-2.5 hidden md:table-cell text-xs text-muted-foreground">{t.domain || '—'}</td>
+                      <td className="px-4 py-2.5 hidden md:table-cell whitespace-nowrap">
+                        {t.workflow_id ? <code className="text-xs text-muted-foreground">{t.workflow_id}</code> : <span className="text-xs text-muted-foreground">—</span>}
+                      </td>
                       <td className="px-4 py-2.5"><Badge className={cn('text-xs', statusBadge(t.status))}>{t.status}</Badge></td>
                       <td className="px-4 py-2.5 hidden lg:table-cell text-xs tabular-nums text-muted-foreground">
                         {t.input_tokens != null ? `${t.input_tokens.toLocaleString()} → ${(t.output_tokens ?? 0).toLocaleString()}` : '—'}

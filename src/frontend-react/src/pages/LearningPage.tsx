@@ -336,7 +336,8 @@ function Runs() {
                     <th className="px-4 py-2.5">Query</th>
                     <th className="px-4 py-2.5">Status</th>
                     <th className="px-4 py-2.5 hidden md:table-cell">Hints used</th>
-                    <th className="px-4 py-2.5 hidden xl:table-cell">Workflow</th>
+                    {/* Full id (no truncation) so a workflow can be found with Ctrl+F */}
+                    <th className="px-4 py-2.5 hidden md:table-cell">Workflow</th>
                     <th className="px-4 py-2.5 hidden lg:table-cell">When</th>
                   </tr>
                 </thead>
@@ -356,7 +357,7 @@ function Runs() {
                         {r.failure_category && <span className="ml-1.5 text-xs text-muted-foreground">({r.failure_category})</span>}
                       </td>
                       <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.nl_injected_count ?? 0}</td>
-                      <td className="px-4 py-2.5 hidden xl:table-cell"><code className="text-xs text-muted-foreground">{r.workflow_id.slice(0, 13)}…</code></td>
+                      <td className="px-4 py-2.5 hidden md:table-cell whitespace-nowrap"><code className="text-xs text-muted-foreground">{r.workflow_id}</code></td>
                       <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
                         {r.timestamp ? new Date(r.timestamp).toLocaleString() : '—'}
                       </td>

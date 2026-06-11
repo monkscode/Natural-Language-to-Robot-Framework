@@ -188,7 +188,8 @@ export default function MetricsPage() {
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
                     <th className="w-8 px-2 py-2.5"></th>
                     <th className="px-2 py-2.5">Status</th>
-                    <th className="px-4 py-2.5 hidden xl:table-cell">Workflow</th>
+                    {/* Full id (no truncation) so a workflow can be found with Ctrl+F */}
+                    <th className="px-4 py-2.5 hidden md:table-cell">Workflow</th>
                     <th className="px-4 py-2.5">URL / Task</th>
                     <th className="px-4 py-2.5 hidden md:table-cell">LLM calls</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">Elements</th>
@@ -211,7 +212,7 @@ export default function MetricsPage() {
                             <ChevronRight className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-90')} />
                           </td>
                           <td className="px-2 py-2.5"><Badge className={cn('text-[10px]', st.cls)}>{st.label}</Badge></td>
-                          <td className="px-4 py-2.5 hidden xl:table-cell"><code className="text-xs text-muted-foreground">{r.workflow_id.slice(0, 13)}…</code></td>
+                          <td className="px-4 py-2.5 hidden md:table-cell whitespace-nowrap"><code className="text-xs text-muted-foreground">{r.workflow_id}</code></td>
                           <td className="px-4 py-2.5 max-w-xs"><span className="line-clamp-1 font-mono text-xs">{r.url || '—'}</span></td>
                           <td className="px-4 py-2.5 hidden md:table-cell text-muted-foreground">{r.total_llm_calls}</td>
                           <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground">{r.total_elements ?? '—'}</td>

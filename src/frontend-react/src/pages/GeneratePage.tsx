@@ -190,8 +190,10 @@ function AssembleActivity() {
     <div>
       {ASSEMBLE_LINES.map((l, i) => (
         <div key={i} className="ghost-line flex h-[20px] items-center" style={{ animationDelay: `${i * 110}ms` }}>
+          {/* Muted gray, NOT the editor's red section-header token: in a
+              progress skeleton red reads as an error, not as syntax. */}
           {l.header
-            ? <span className="font-semibold text-[#ff7b72]/70">{l.header}</span>
+            ? <span className="font-semibold text-[#8b949e]/70">{l.header}</span>
             : <span className={cn('ghost-bar relative h-3 overflow-hidden rounded-sm bg-[#21262d]', l.w, l.indent && 'ml-8')} />}
         </div>
       ))}
