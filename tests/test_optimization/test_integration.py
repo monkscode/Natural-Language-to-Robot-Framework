@@ -17,7 +17,7 @@ All tests marked with @pytest.mark.integration.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import pytest
@@ -235,7 +235,7 @@ def test_e2e_passing_daily_stats(in_memory_db):
         robot_code="*** Test Cases ***",
         test_status="passed",
     )
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
     ).fetchone()

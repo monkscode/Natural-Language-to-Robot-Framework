@@ -31,9 +31,9 @@ init_observability()
 from src.backend.api.endpoints import router as api_router
 
 # Auth (Phase 1): JWT/role guards + /auth router + Postgres users store.
-from fastapi import Depends
+from fastapi import Depends, Request
 from src.backend.core.config import settings
-from src.backend.auth.jwt_utils import require_admin
+from src.backend.auth.jwt_utils import require_admin, check_reports_access
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
 
@@ -82,6 +82,22 @@ ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 
 # Create robot_tests directory if it doesn't exist
 os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
+
+# Auth gate for the report files: log.html records every keyword argument
+# (including credentials typed during a test), so the static mount must not be
+# public. StaticFiles keeps doing the file serving (it has hardened traversal
+# protection); this middleware only decides access. A mount cannot carry
+# Depends(require_user), hence middleware. Reports authenticate via the
+# Path=/reports httpOnly cookie set at login (browser navigations cannot send
+# an Authorization header) or a Bearer header (API clients).
+
+@app.middleware("http")
+async def _reports_auth(request: Request, call_next):
+    if request.url.path.startswith("/reports"):
+        denied = check_reports_access(request)
+        if denied is not None:
+            return denied
+    return await call_next(request)
 
 app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
 
@@ -133,9 +149,12 @@ def _check_learning_health():
     issues = []
     try:
         import psycopg
+        from src.backend.core.config import PG_CONNECT_TIMEOUT_S
         from src.backend.crew_ai.optimization import pg_schema
 
-        conn = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+        conn = psycopg.connect(
+            settings.DATABASE_URL, autocommit=True,
+            connect_timeout=PG_CONNECT_TIMEOUT_S)
         try:
             pg_schema.ensure_schema(conn)  # idempotent — creates if absent
             conn.execute("SELECT 1 FROM execution_records LIMIT 1")
@@ -172,6 +191,15 @@ async def shutdown_event():
             logging.info("Learning store connection closed.")
     except Exception as e:
         logging.warning(f"Learning write queue shutdown error: {e}")
+
+    # Close the shared keyword-vector-store pool (no-op if never created).
+    try:
+        from src.backend.crew_ai.optimization.keyword_vector_store import (
+            close_keyword_vector_store,
+        )
+        close_keyword_vector_store()
+    except Exception as e:
+        logging.warning(f"Keyword store shutdown error: {e}")
 
     # Close the auth Postgres pool.
     try:

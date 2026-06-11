@@ -29,7 +29,7 @@ def _reset_singleton():
     """
     import src.backend.crew_ai.optimization.learning_registry as lr
     lr._feedback_loop_instance = None
-    lr._feedback_loop_init_attempted = False
+    lr._init_failed_at = None
 
 
 # ===================================================================
@@ -198,8 +198,8 @@ class TestSingleton:
 
         _reset_singleton()
 
-    def test_only_tries_once(self):
-        """After a failed init, get_feedback_loop() does NOT retry."""
+    def test_no_retry_within_cooldown(self):
+        """After a failed init, calls inside the cooldown window do NOT retry."""
         _reset_singleton()
         import src.backend.crew_ai.optimization.learning_registry as lr
 
@@ -208,9 +208,28 @@ class TestSingleton:
             with patch('src.backend.crew_ai.optimization.feedback_loop.FeedbackLoop',
                        mock_cls):
                 lr.get_feedback_loop()  # First call -- fails
-                lr.get_feedback_loop()  # Second call -- should NOT retry
+                lr.get_feedback_loop()  # Second call -- inside cooldown, no retry
                 assert mock_cls.call_count == 1, \
                     f"Expected 1 init attempt, got {mock_cls.call_count}"
+
+        _reset_singleton()
+
+    def test_retries_after_cooldown(self):
+        """A failed init is retried once the cooldown has elapsed — a transient
+        Postgres outage at startup must not disable learning permanently."""
+        _reset_singleton()
+        import src.backend.crew_ai.optimization.learning_registry as lr
+
+        with patch.object(lr.settings, 'OPTIMIZATION_ENABLED', True):
+            mock_fl = MagicMock()
+            mock_cls = MagicMock(side_effect=[RuntimeError("DB down"), mock_fl])
+            with patch('src.backend.crew_ai.optimization.feedback_loop.FeedbackLoop',
+                       mock_cls):
+                assert lr.get_feedback_loop() is None      # fails, starts cooldown
+                # Age the failure past the cooldown window.
+                lr._init_failed_at -= (lr._INIT_RETRY_COOLDOWN_S + 1)
+                assert lr.get_feedback_loop() is mock_fl   # retried and recovered
+                assert mock_cls.call_count == 2
 
         _reset_singleton()
 

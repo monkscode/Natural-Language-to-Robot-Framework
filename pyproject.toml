@@ -54,6 +54,12 @@ dependencies = [
     # psycopg[binary] ships prebuilt wheels (no local libpq/compiler needed);
     # [pool] adds the ConnectionPool used by the auth store.
     "psycopg[binary,pool]",
+    # Direct imports of the auth module. Both are otherwise only transitive
+    # (bcrypt via chromadb, PyJWT via crewai) and would vanish the moment those
+    # are removed/upgraded — declare them so auth never depends on that accident.
+    # bcrypt is used directly (NOT via passlib, which breaks on bcrypt 5.x).
+    "bcrypt>=4.1,<6",
+    "PyJWT>=2.8,<3",
     # Authlib drives the server-side Google OAuth2/OIDC flow (token exchange +
     # id_token verification against Google's JWKS). Already present transitively;
     # declared here so the built image is guaranteed to include it.

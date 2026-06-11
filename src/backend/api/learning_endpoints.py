@@ -173,7 +173,7 @@ def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
 
 
 def _write_hint_audit(
-    conn: sqlite3.Connection,
+    conn,  # pg_compat.CompatConnection (sqlite3-Connection-like)
     hint_id: int,
     action: str,
     actor: str,
@@ -446,17 +446,29 @@ def create_hint(
             ).fetchone()
             return {"hint": _row_to_dict(row), "created": False}
 
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, category, scope, domain, url, original_failure_category, "
-            " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-            " created_via) "
-            "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
-            (
-                text, category, request.scope, request.domain, request.url,
-                request.original_failure_category, anchor, now, now,
-            ),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO nl_feedback_corrections "
+                "(feedback_text, category, scope, domain, url, original_failure_category, "
+                " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
+                " created_via) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
+                (
+                    text, category, request.scope, request.domain, request.url,
+                    request.original_failure_category, anchor, now, now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # BEGIN IMMEDIATE is a no-op on Postgres, so the duplicate check
+            # above no longer holds a write lock: a concurrent identical create
+            # can land between the SELECT and this INSERT. The UNIQUE constraint
+            # is the real guard — surface the loser as a retriable conflict,
+            # not a 500.
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="An identical hint was just created — refresh to see it.",
+            )
         hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _write_hint_audit(
             conn, hint_id, "create", actor, None, None,

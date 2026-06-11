@@ -122,11 +122,11 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Authentication & Database (Phase 1: login/signup, roles, Google SSO)
     # ------------------------------------------------------------------
-    # PostgreSQL DSN for the auth/users store ONLY. The learning stack still
-    # uses SQLite/ChromaDB (migrated to Postgres/pgvector in a later phase).
+    # PostgreSQL DSN for the consolidated database: auth/users, the learning
+    # stack (Postgres + pgvector), LLM traces and workflow metrics all live here.
     DATABASE_URL: str = Field(
         default="postgresql://nlrf:nlrf@localhost:5432/nlrf",
-        description="PostgreSQL connection string for the auth/users database",
+        description="PostgreSQL connection string for the consolidated database",
     )
     JWT_SECRET_KEY: str = Field(
         default="change-me-in-production",
@@ -244,9 +244,24 @@ class Settings(BaseSettings):
             raise ValueError(f"Confidence threshold must be between 0.0 and 1.0, got {v}")
         return v
 
+    @validator('JWT_EXPIRY_HOURS')
+    def validate_jwt_expiry_hours(cls, v):
+        """1 hour to 30 days — zero/negative mints already-expired tokens."""
+        if v < 1 or v > 720:
+            raise ValueError(f"JWT_EXPIRY_HOURS must be between 1 and 720, got {v}")
+        return v
+
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'
         extra = 'allow'  # Allow extra fields from .env file
 
 settings = Settings()
+
+# Connect timeout (seconds) for every psycopg connection/pool in the app.
+# libpq's default is "wait forever": against an unreachable host (network
+# partition, Docker Desktop's black-holed IPv6 binds) each connect would hang
+# for minutes instead of failing fast into the existing degrade paths.
+# Module constant, not a Settings field — it is an internal resilience bound,
+# not a deployment knob.
+PG_CONNECT_TIMEOUT_S = 5

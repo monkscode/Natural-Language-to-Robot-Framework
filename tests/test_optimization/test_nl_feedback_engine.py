@@ -241,7 +241,10 @@ class TestLearningRegistry:
     def test_module_globals_exist(self):
         import src.backend.crew_ai.optimization.learning_registry as reg
         assert hasattr(reg, '_feedback_loop_instance')
-        assert hasattr(reg, '_feedback_loop_init_attempted')
+        # Failed inits are cached with a retry cooldown (not forever) so a
+        # transient Postgres outage cannot disable learning permanently.
+        assert hasattr(reg, '_init_failed_at')
+        assert hasattr(reg, '_INIT_RETRY_COOLDOWN_S')
         # _registry_lock was added to fix the singleton race condition
         assert hasattr(reg, '_registry_lock')
 
@@ -250,11 +253,11 @@ class TestLearningRegistry:
         src_code = open(reg.__file__, 'r', encoding='utf-8').read()
         assert 'from src.backend.core.config import settings' in src_code
 
-    def test_try_once_caching_pattern(self):
+    def test_retry_cooldown_caching_pattern(self):
         import src.backend.crew_ai.optimization.learning_registry as reg
         src_code = open(reg.__file__, 'r', encoding='utf-8').read()
-        assert '_feedback_loop_init_attempted' in src_code
-        assert 'if _feedback_loop_init_attempted:' in src_code
+        assert '_init_failed_at' in src_code
+        assert '_in_cooldown()' in src_code
 
 
 # ===================================================================

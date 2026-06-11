@@ -13,25 +13,19 @@ from src.backend.core.config import settings
 from src.backend.auth import db as auth_db
 from src.backend.auth.repository import AccountInactive, EmailAlreadyExists, UserRepository
 
-pytestmark = pytest.mark.integration
+# auth_isolated_schema (conftest) reroutes auth_db to the auth_test schema —
+# these tests never touch the live public.users table — and skips the module
+# when Postgres is unreachable.
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
 
 @pytest.fixture(scope="module")
 def repo():
-    """Bootstrap the schema, yield (repo, created_emails); clean up rows after."""
-    try:
-        auth_db.init_auth_db()
-    except Exception as exc:  # noqa: BLE001 — any connect failure = skip, not fail
-        pytest.skip(f"Postgres unavailable: {exc}")
+    """Yield (repo, created_emails). Rows live in the throwaway auth_test
+    schema (dropped at session end), so no per-row cleanup is needed; the
+    `created` list is kept only because the tests append to it."""
     created: list[str] = []
     yield UserRepository(), created
-    try:
-        with auth_db.get_pool().connection() as conn:
-            for email in created:
-                conn.execute("DELETE FROM users WHERE email = %s", (email.lower(),))
-            conn.commit()
-    except Exception:  # noqa: BLE001 — best-effort cleanup
-        pass
 
 
 def _unique_email() -> str:

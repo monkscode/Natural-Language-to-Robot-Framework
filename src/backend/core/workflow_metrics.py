@@ -17,7 +17,7 @@ from threading import Lock
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 # Import the Pydantic model from models
 from .models import WorkflowMetrics
 
@@ -50,13 +50,16 @@ class WorkflowMetricsCollector:
 
     def __init__(self, dsn: str = None):
         self.dsn = dsn or settings.DATABASE_URL
-        setup = psycopg.connect(self.dsn, autocommit=True)
+        setup = psycopg.connect(
+            self.dsn, autocommit=True, connect_timeout=PG_CONNECT_TIMEOUT_S)
         try:
             for ddl in _SCHEMA_DDL:
                 setup.execute(ddl)
         finally:
             setup.close()
-        self._pool = ConnectionPool(conninfo=self.dsn, min_size=1, max_size=4, open=True)
+        self._pool = ConnectionPool(
+            conninfo=self.dsn, min_size=1, max_size=4,
+            kwargs={"connect_timeout": PG_CONNECT_TIMEOUT_S}, open=True)
         logger.info("[WORKFLOW_METRICS] Postgres workflow-metrics store ready")
 
     def close(self) -> None:

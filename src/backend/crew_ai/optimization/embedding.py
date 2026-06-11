@@ -12,6 +12,7 @@ Returns vectors as pgvector text literals ('[v1,v2,...]') so they insert into a
 import logging
 import os
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,11 @@ EMBEDDING_DIM = 384
 
 _embedder = None
 _lock = threading.Lock()
+_failed_at: float | None = None  # time.monotonic() of the last failed init
+# Same cooldown as PostgresExecutionMemory._CHROMA_RETRY_COOLDOWN_S: a failed
+# init can mean an ~80MB model download attempt, so without the cooldown every
+# embed call would retry it (serialized under the lock — blocking callers).
+_RETRY_COOLDOWN_S = 300
 
 
 def _cache_dir() -> str:
@@ -29,18 +35,31 @@ def _cache_dir() -> str:
 
 
 def get_embedder():
-    """Return the shared fastembed TextEmbedding, loading it once (or None on failure)."""
-    global _embedder
+    """Return the shared fastembed TextEmbedding, loading it once.
+
+    Returns None while embedding is unavailable; a failed init is retried at
+    most every _RETRY_COOLDOWN_S seconds.
+    """
+    global _embedder, _failed_at
     if _embedder is not None:
         return _embedder
+    if _failed_at is not None and time.monotonic() - _failed_at < _RETRY_COOLDOWN_S:
+        return None
     with _lock:
-        if _embedder is None:
-            try:
-                from fastembed import TextEmbedding
-                _embedder = TextEmbedding(model_name=EMBED_MODEL, cache_dir=_cache_dir())
-            except Exception as e:
-                logger.error("[EMBED] fastembed init failed: %s", e)
-                return None
+        if _embedder is not None:
+            return _embedder
+        if _failed_at is not None and time.monotonic() - _failed_at < _RETRY_COOLDOWN_S:
+            return None
+        try:
+            from fastembed import TextEmbedding
+            _embedder = TextEmbedding(model_name=EMBED_MODEL, cache_dir=_cache_dir())
+            _failed_at = None
+        except Exception as e:
+            _failed_at = time.monotonic()
+            logger.error(
+                "[EMBED] fastembed init failed: %s — retrying in %ds", e, _RETRY_COOLDOWN_S
+            )
+            return None
     return _embedder
 
 

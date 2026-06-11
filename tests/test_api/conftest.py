@@ -15,13 +15,25 @@ _API_PG_SCHEMA = "learning_api_test"
 
 @pytest.fixture(autouse=True)
 def _auth_not_enforced():
-    """These tests exercise endpoint logic, not auth — disable JWT enforcement.
+    """These tests exercise endpoint logic, not auth — disable JWT enforcement
+    and stub require_admin's per-request DB re-validation (the crafted test
+    tokens carry non-UUID ids and no users row exists for them; without the
+    stub the re-check 401s and opens a real auth pool the bare-router apps
+    never close).
 
-    The guard security matrix (401/403 per flag and role) is covered by
-    tests/test_auth/test_guards.py.
+    The guard security matrix (401/403 per flag, role, and DB state) is
+    covered by tests/test_auth/test_guards.py.
     """
+    from src.backend.auth import jwt_utils
     from src.backend.core.config import settings
-    with patch.object(settings, "AUTH_ENFORCED", False):
+    with patch.object(settings, "AUTH_ENFORCED", False), \
+         patch.object(
+             jwt_utils._admin_repo, "get_by_id",
+             side_effect=lambda uid: {
+                 "id": uid, "email": "admin@test.local",
+                 "role": "admin", "is_active": True,
+             },
+         ):
         yield
 _API_PG_TABLES = (
     "execution_records", "intent_patterns", "structural_rules", "keyword_corrections",

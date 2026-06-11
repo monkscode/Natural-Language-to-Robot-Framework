@@ -18,6 +18,7 @@ Referenced by: keyword_search_tool.py, pattern_learning.py, feedback_loop.py, cr
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -25,7 +26,7 @@ from typing import Dict, List, Optional
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import embedding
 
 logger = logging.getLogger(__name__)
@@ -72,13 +73,16 @@ class KeywordVectorStore:
         # persist_directory is kept for call-site compatibility (the old ChromaDB
         # signature) and ignored — the store now lives in Postgres.
         self.dsn = dsn or settings.DATABASE_URL
-        setup = psycopg.connect(self.dsn, autocommit=True)
+        setup = psycopg.connect(
+            self.dsn, autocommit=True, connect_timeout=PG_CONNECT_TIMEOUT_S)
         try:
             for ddl in _SCHEMA_DDL:
                 setup.execute(ddl)
         finally:
             setup.close()
-        self._pool = ConnectionPool(conninfo=self.dsn, min_size=1, max_size=4, open=True)
+        self._pool = ConnectionPool(
+            conninfo=self.dsn, min_size=1, max_size=4,
+            kwargs={"connect_timeout": PG_CONNECT_TIMEOUT_S}, open=True)
         logger.info("[KEYWORD_STORE] pgvector keyword store ready")
 
     # ------------------------------------------------------------------
@@ -308,3 +312,40 @@ class KeywordVectorStore:
             self._pool.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Process-wide singleton — one pool + one DDL bootstrap per process, shared by
+# FeedbackLoop and run_crew (mirrors trace_store.get_trace_store). Constructing
+# a store per workflow would open a new ConnectionPool each run and, with no
+# close() call, leak connections until Postgres hits max_connections — which
+# takes auth down with it (same database).
+# ---------------------------------------------------------------------------
+_singleton: "KeywordVectorStore | None" = None
+_singleton_lock = threading.Lock()
+
+
+def get_keyword_vector_store() -> KeywordVectorStore:
+    """Return the shared KeywordVectorStore, creating it on first use.
+
+    Raises if Postgres is unreachable (the constructor fails before the pool
+    is created, so a failed attempt leaks nothing). Failures are NOT cached —
+    the next caller retries, so the store comes up as soon as the DB does.
+    Callers treat the keyword store as optional and already catch.
+    """
+    global _singleton
+    if _singleton is not None:
+        return _singleton
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = KeywordVectorStore()
+    return _singleton
+
+
+def close_keyword_vector_store() -> None:
+    """Close the shared store's pool (app shutdown; best-effort)."""
+    global _singleton
+    with _singleton_lock:
+        if _singleton is not None:
+            _singleton.close()
+            _singleton = None

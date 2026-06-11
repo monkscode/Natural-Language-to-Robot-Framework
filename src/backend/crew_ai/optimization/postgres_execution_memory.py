@@ -11,9 +11,10 @@ INSERT OR IGNORE, and the jsonb hint-id KPI queries) are ported at the call
 sites, not here.
 
 Single-writer model preserved: ONE writer connection used only by the
-learning-writer thread (LearningWriteQueue), guarded by _assert_writer_thread.
-Reads use a pooled connection per call. ChromaDB (vectors) is reused as-is for
-now and moves to pgvector in the vector slice.
+learning-writer thread (LearningWriteQueue), guarded by _assert_writer_thread
+and reopened transparently if Postgres drops it (the _writer_conn property).
+Reads use a pooled connection per call. Vectors live in pgvector, embedded
+with fastembed (see the vector methods below).
 
 Reuses ExecutionRecord / helpers from execution_memory.py.
 Referenced by: learning_registry.py (after cutover).
@@ -31,7 +32,7 @@ from datetime import datetime, timezone, timedelta
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import pg_compat, pg_schema
 from src.backend.crew_ai.optimization.pg_compat import CompatConnection, compat_row
 from src.backend.crew_ai.optimization.execution_memory import (
@@ -80,18 +81,23 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
         # Schema bootstrap on a throwaway raw connection (pg_schema uses native
         # %s SQL, so it must NOT go through the ?-translating compat adapter).
-        _setup = psycopg.connect(self.dsn, autocommit=True)
+        _setup = psycopg.connect(
+            self.dsn, autocommit=True, connect_timeout=PG_CONNECT_TIMEOUT_S)
         try:
             pg_schema.ensure_schema(_setup)
         finally:
             _setup.close()
 
         # Writer: one compat connection, used only by the learning-writer thread.
+        # Accessed through the _writer_conn property, which transparently
+        # reopens it if Postgres dropped it (see property docstring).
         self._writer_conn = pg_compat.connect(self.dsn, autocommit=False)
         # Reads: pooled raw connections (compat_row factory) wrapped per borrow.
         self._read_pool = ConnectionPool(
             conninfo=self.dsn, min_size=1, max_size=10,
-            kwargs={"row_factory": compat_row, "autocommit": True}, open=True,
+            kwargs={"row_factory": compat_row, "autocommit": True,
+                    "connect_timeout": PG_CONNECT_TIMEOUT_S},
+            open=True,
         )
 
         # fastembed embedder: lazy. `_chroma_client` holds None (not yet loaded),
@@ -107,6 +113,36 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     # -------------------------------------------------------------------
     # Connections (compat — engines reach into these directly)
     # -------------------------------------------------------------------
+
+    @property
+    def _writer_conn(self):
+        """The single writer connection, reopened transparently if it died.
+
+        Unlike the pooled read connections (psycopg_pool replaces broken pool
+        members on its own), this is a bare long-lived connection: without this
+        check, one Postgres restart or dropped TCP session would fail every
+        learning write until the app restarts — silently, since all write
+        callers log-and-continue. The write that hit the outage is still lost
+        (learning is best-effort by design); the next one recovers.
+
+        Writer-thread-only access (enforced by _assert_writer_thread at the
+        call sites), so the check-then-reconnect needs no lock. Reconnect
+        failures propagate to the caller's existing error handling.
+        """
+        conn = self._writer
+        if conn is None or getattr(conn, "closed", False) or getattr(conn, "broken", False):
+            self._writer = pg_compat.connect(self.dsn, autocommit=False)
+            if conn is not None:
+                logger.warning(
+                    "[LEARNING] writer connection was %s — reopened",
+                    "broken" if getattr(conn, "broken", False) else "closed",
+                )
+        return self._writer
+
+    @_writer_conn.setter
+    def _writer_conn(self, value):
+        # Tests inject fakes/proxies here; __init__ and reconnect set the real one.
+        self._writer = value
 
     @contextmanager
     def read_conn(self):
@@ -218,7 +254,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def update_daily_stats(self, test_status: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory.update_daily_stats")
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # UTC day buckets
         self._writer_conn.execute(
             """
             INSERT INTO learning_stats (stat_date, total_executions, total_passed, total_failed)
@@ -481,6 +517,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             return []
 
     def store_embedding(self, text: str, metadata: dict) -> None:
+        _assert_writer_thread("PostgresExecutionMemory.store_embedding")
         vec = self._embed(text)
         if vec is None:
             return
@@ -628,8 +665,10 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def close(self):
         try:
-            if self._writer_conn:
-                self._writer_conn.close()
+            # Backing attribute, NOT the property — the property would reopen
+            # a dead connection just so close() could close it again.
+            if self._writer:
+                self._writer.close()
         finally:
             try:
                 self._read_pool.close()

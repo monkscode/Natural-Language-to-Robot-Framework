@@ -29,6 +29,8 @@ import sqlite3
 
 import psycopg
 
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,7 +153,10 @@ class CompatCursor:
         return self
 
     def executemany(self, sql, seq):
-        self._real.executemany(translate(sql), list(seq))
+        try:
+            self._real.executemany(translate(sql), list(seq))
+        except psycopg.errors.IntegrityError as e:
+            raise sqlite3.IntegrityError(str(e)) from e
         return self
 
     def fetchone(self):
@@ -202,7 +207,10 @@ class CompatConnection:
 
     def executemany(self, sql, seq):
         cur = self._real.cursor()
-        cur.executemany(translate(sql), list(seq))
+        try:
+            cur.executemany(translate(sql), list(seq))
+        except psycopg.errors.IntegrityError as e:
+            raise sqlite3.IntegrityError(str(e)) from e
         return cur
 
     def cursor(self):
@@ -221,8 +229,17 @@ class CompatConnection:
     def closed(self):
         return self._real.closed
 
+    @property
+    def broken(self):
+        """True when the underlying connection died mid-use (server restart,
+        network drop) — used by the writer's reconnect check."""
+        return self._real.broken
+
 
 def connect(dsn: str, autocommit: bool = False) -> CompatConnection:
-    """Open a SQLite-compatible psycopg connection."""
-    real = psycopg.connect(dsn, row_factory=compat_row, autocommit=autocommit)
+    """Open a SQLite-compatible psycopg connection (bounded connect timeout)."""
+    real = psycopg.connect(
+        dsn, row_factory=compat_row, autocommit=autocommit,
+        connect_timeout=PG_CONNECT_TIMEOUT_S,
+    )
     return CompatConnection(real)

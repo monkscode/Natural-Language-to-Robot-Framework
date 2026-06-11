@@ -1,11 +1,12 @@
 """
 Auth database — PostgreSQL connection pool + users-table bootstrap.
 
-Owns the ONLY Postgres connection in the app (the learning stack still uses
-SQLite/ChromaDB; that migration is a separate phase). A lazily-opened psycopg
-ConnectionPool is shared by the UserRepository. Importing this module never
-touches the database, so the app and unit tests import cleanly even when
-Postgres is down — only the first actual query opens the pool.
+Owns the auth/users pool on the consolidated Postgres database (the learning
+stack keeps its own pools in optimization/, the trace store in core/). A
+lazily-opened psycopg ConnectionPool is shared by the UserRepository.
+Importing this module never touches the database, so the app and unit tests
+import cleanly even when Postgres is down — only the first actual query opens
+the pool.
 
 Referenced by: auth/repository.py, auth/endpoints.py, main.py (init_auth_db/close_pool).
 Depends on: src/backend/core/config.py (DATABASE_URL), psycopg, psycopg_pool.
@@ -17,7 +18,7 @@ import threading
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def get_pool() -> ConnectionPool:
                 conninfo=settings.DATABASE_URL,
                 min_size=1,
                 max_size=10,
-                kwargs={"row_factory": dict_row},
+                kwargs={"row_factory": dict_row, "connect_timeout": PG_CONNECT_TIMEOUT_S},
                 open=False,
             )
             pool.open()

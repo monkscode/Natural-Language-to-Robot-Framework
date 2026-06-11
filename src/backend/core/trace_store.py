@@ -38,7 +38,7 @@ from psycopg_pool import ConnectionPool
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import StatusCode
 
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 
 logger = logging.getLogger(__name__)
 
@@ -134,12 +134,15 @@ class PostgresSpanExporter(SpanExporter):
     def __init__(self, dsn: str = None):
         self.dsn = dsn or settings.DATABASE_URL
         # Bootstrap the schema on a throwaway raw connection.
-        setup = psycopg.connect(self.dsn, autocommit=False)
+        setup = psycopg.connect(
+            self.dsn, autocommit=False, connect_timeout=PG_CONNECT_TIMEOUT_S)
         try:
             _ensure_schema(setup)
         finally:
             setup.close()
-        self._pool = ConnectionPool(conninfo=self.dsn, min_size=1, max_size=4, open=True)
+        self._pool = ConnectionPool(
+            conninfo=self.dsn, min_size=1, max_size=4,
+            kwargs={"connect_timeout": PG_CONNECT_TIMEOUT_S}, open=True)
         logger.info("[TRACE_STORE] Postgres trace store ready (schema v%d)", _SCHEMA_VERSION)
 
     # ------------------------------------------------------------------

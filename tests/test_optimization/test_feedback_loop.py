@@ -8,7 +8,7 @@ Uses in-memory SQLite with full Phase 1 schema.
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import pytest
@@ -714,7 +714,7 @@ class TestFeedbackLoop:
             url="https://example.com", robot_code="code",
             test_status="failed",
         )
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         row = conn.execute(
             "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
         ).fetchone()
@@ -783,7 +783,7 @@ class TestIntegration:
         em.update_daily_stats("passed")
         em.update_daily_stats("passed")
         em.update_daily_stats("failed")
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         row = in_memory_db.execute(
             "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
         ).fetchone()

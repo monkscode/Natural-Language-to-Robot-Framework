@@ -37,9 +37,10 @@ def _get_db():
     sqlite3.Row-style access through the compat adapter.
     """
     conn = pg_compat.connect(settings.DATABASE_URL, autocommit=True)
-    exists = conn.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'llm_traces'"
-    ).fetchone()
+    # to_regclass respects the connection's search_path — an llm_traces table
+    # in some other schema (e.g. an isolated test schema) neither hides nor
+    # fakes the one this connection would actually query.
+    exists = conn.execute("SELECT to_regclass('llm_traces')").fetchone()[0]
     if not exists:
         conn.close()
         raise FileNotFoundError("Trace table not found. No traces have been recorded yet.")

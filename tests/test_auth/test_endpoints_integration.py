@@ -12,32 +12,23 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.backend.auth import db as auth_db
 from src.backend.auth import endpoints as auth_endpoints
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.repository import PasswordTooLong
 
-pytestmark = pytest.mark.integration
+# auth_isolated_schema (conftest) reroutes auth_db to the auth_test schema —
+# these tests never touch the live public.users table — and skips the module
+# when Postgres is unreachable.
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
 
 @pytest.fixture(scope="module")
 def client_and_emails():
-    try:
-        auth_db.init_auth_db()
-    except Exception as exc:  # noqa: BLE001 — connect failure = skip, not fail
-        pytest.skip(f"Postgres unavailable: {exc}")
     app = FastAPI()
     app.include_router(auth_router)
     created: list[str] = []
     with TestClient(app) as client:
         yield client, created
-    try:
-        with auth_db.get_pool().connection() as conn:
-            for email in created:
-                conn.execute("DELETE FROM users WHERE email = %s", (email.lower(),))
-            conn.commit()
-    except Exception:  # noqa: BLE001 — best-effort cleanup
-        pass
 
 
 def _unique_email() -> str:

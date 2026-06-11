@@ -170,7 +170,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         try:
             logger.info("🚀 Optimization system enabled - initializing components")
             from src.backend.crew_ai.optimization import (
-                KeywordVectorStore,
+                get_keyword_vector_store,
                 QueryPatternMatcher,
                 SmartKeywordProvider,
                 ContextPruner,
@@ -216,7 +216,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                     "(avoids double ONNX model load)"
                 )
             else:
-                vector_store = KeywordVectorStore()
+                # Shared process-wide store (NOT a per-workflow instance: each
+                # KeywordVectorStore owns a connection pool, and per-run pools
+                # were never closed — leaking connections until Postgres hit
+                # max_connections and took auth down with it).
+                vector_store = get_keyword_vector_store()
                 pattern_matcher = QueryPatternMatcher(
                     chroma_store=vector_store
                 )

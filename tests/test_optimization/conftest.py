@@ -24,11 +24,15 @@ def _isolate_keyword_store():
     KeywordVectorStore, which would write learned query patterns to the LIVE
     public schema (test pollution / non-isolation). Tests that exercise the
     keyword store inject their own mock store, so this never affects them.
+
+    `_singleton` is patched to None as well: get_keyword_vector_store() caches
+    its first instance process-wide, so without the reset a MagicMock cached by
+    one test would be handed to every later test (or a real store cached before
+    the class patch would bypass it entirely).
     """
-    with patch(
-        "src.backend.crew_ai.optimization.keyword_vector_store.KeywordVectorStore",
-        MagicMock(),
-    ):
+    from src.backend.crew_ai.optimization import keyword_vector_store as kvs
+    with patch.object(kvs, "KeywordVectorStore", MagicMock()), \
+         patch.object(kvs, "_singleton", None):
         yield
 
 

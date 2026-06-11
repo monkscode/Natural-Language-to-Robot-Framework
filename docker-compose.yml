@@ -28,6 +28,12 @@ services:
       # Auth/users Postgres DSN — in-container host is the 'postgres' service name
       # (overrides the localhost value in src/backend/.env for the Docker network)
       - DATABASE_URL=postgresql://${POSTGRES_USER:-nlrf}:${POSTGRES_PASSWORD:-nlrf}@postgres:5432/${POSTGRES_DB:-nlrf}
+      # In compose the SPA is the nginx container on :3000 — without this the
+      # post-Google-login redirect lands on the dev-server URL (:5173) from
+      # .env, which is dead in container mode. Override via shell env when
+      # deploying behind a different host. GOOGLE_REDIRECT_URI stays
+      # .env-driven: it must EXACTLY match what is registered with Google.
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env

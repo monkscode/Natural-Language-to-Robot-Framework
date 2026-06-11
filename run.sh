@@ -111,7 +111,7 @@ FRONTEND_PID=$!
 
 echo ""
 echo "  React SPA (validate here):  http://localhost:5173"
-echo "  FastAPI backend + legacy UI: http://localhost:${APP_PORT}"
+echo "  FastAPI backend (API only):  http://localhost:${APP_PORT}"
 echo "  BrowserUse service:          http://localhost:4999/health"
 echo "  Postgres:                    localhost:5432 (container nlrf-postgres)"
 echo ""

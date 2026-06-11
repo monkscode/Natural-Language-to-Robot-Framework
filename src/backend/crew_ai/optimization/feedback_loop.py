@@ -31,7 +31,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
@@ -752,9 +752,11 @@ class FeedbackLoop:
         else:
             try:
                 from src.backend.crew_ai.optimization.keyword_vector_store import (
-                    KeywordVectorStore,
+                    get_keyword_vector_store,
                 )
-                chroma_store = KeywordVectorStore()
+                # Shared process-wide store — run_crew reuses this same instance
+                # instead of opening a second pool per workflow.
+                chroma_store = get_keyword_vector_store()
                 self.pattern_learner = QueryPatternMatcher(
                     chroma_store=chroma_store,
                 )
@@ -838,7 +840,7 @@ class FeedbackLoop:
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("FeedbackLoop._recover_stale_review_sessions")
         try:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             cursor = self.execution_memory._writer_conn.execute(
                 "UPDATE hint_review_sessions "
                 "SET status = 'failed', "
@@ -952,7 +954,10 @@ class FeedbackLoop:
             )
             record = ExecutionRecord(
                 workflow_id=workflow_id,
-                timestamp=datetime.now(),
+                # UTC, tz-aware: stored as ISO text and compared against the
+                # UTC cutoffs the dashboard queries use — local time would skew
+                # every window by the host's UTC offset.
+                timestamp=datetime.now(timezone.utc),
                 user_query=user_query,
                 url=url,
                 domain=extract_domain(url) if url else None,

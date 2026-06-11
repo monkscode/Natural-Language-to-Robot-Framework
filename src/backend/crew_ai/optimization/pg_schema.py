@@ -352,7 +352,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     # fresh database (e.g. CI's service container) installs into the first
     # search_path schema — an isolated test schema — and every other schema's
     # DDL then fails with 'type "vector" does not exist'.
-    # 384 dims = fastembed BAAI/bge-small-en-v1.5.
+    # 384 dims = fastembed all-MiniLM-L6-v2 (see embedding.EMBED_MODEL).
     "CREATE EXTENSION IF NOT EXISTS vector SCHEMA public",
     # learning_anchors — the hint-retrieval similarity gate (filter_by_query_similarity).
     """
@@ -388,13 +388,17 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     # (col @> to_jsonb(id)) directly, so no text-JSON emulation is needed.
     # SQLite datetime('now', <modifiers...>) -> Postgres text "YYYY-MM-DD HH24:MI:SS".
     # The engines only use 'now'/'localtime' and day-interval modifiers
-    # ("-30 days", "? || ' days'"); 'now'/'localtime' map to localtimestamp and
-    # interval modifiers are applied. All writers use this one function, so the
-    # stored TEXT timestamps stay mutually comparable.
+    # ("-30 days", "? || ' days'"); all base modifiers map to **UTC** and
+    # interval modifiers are applied on top.
+    # UTC, NOT localtimestamp: the Python writers in the same tables stamp
+    # datetime.now(timezone.utc), and with run.sh the backend (host TZ) and
+    # Postgres (UTC container) disagree on "local" — server-local here would
+    # skew every cross-writer comparison and retention window by the TZ offset.
+    # ('localtime' is accepted for source compatibility but still means UTC.)
     """
     CREATE OR REPLACE FUNCTION datetime(VARIADIC mods text[])
     RETURNS text LANGUAGE plpgsql AS $fn$
-    DECLARE ts timestamp := localtimestamp; m text; i int;
+    DECLARE ts timestamp := (now() at time zone 'utc'); m text; i int;
     BEGIN
         IF mods IS NOT NULL THEN
             FOR i IN 1 .. COALESCE(array_length(mods, 1), 0) LOOP
@@ -419,8 +423,43 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Forward-only migrations for EXISTING databases.
+#
+# The consolidated DDL above always describes the CURRENT schema, but CREATE
+# IF NOT EXISTS never alters a table that already exists — so a change to an
+# existing table needs BOTH:
+#   1. the change folded into PG_SCHEMA_DDL (fresh databases), AND
+#   2. a numbered entry here (existing databases), AND
+#   3. SCHEMA_VERSION bumped to the new number.
+# Contract: every migration statement must be idempotent (ADD COLUMN IF NOT
+# EXISTS, CREATE INDEX IF NOT EXISTS, …) — on a fresh database the baseline
+# DDL already contains the change and the migration re-runs as a no-op.
+# Each entry: (version, description, (statement, ...)).
+# ---------------------------------------------------------------------------
+PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    # Example:
+    # (17, "track per-hint cost on execution_records",
+    #  ("ALTER TABLE execution_records ADD COLUMN IF NOT EXISTS hint_cost DOUBLE PRECISION",)),
+)
+
+if PG_MIGRATIONS and SCHEMA_VERSION != max(v for v, _, _ in PG_MIGRATIONS):
+    raise RuntimeError(
+        "pg_schema contract violation: SCHEMA_VERSION must equal the highest "
+        "PG_MIGRATIONS entry"
+    )
+
+# Database-wide advisory lock serializing schema bootstrap/migration. Several
+# components ensure the schema concurrently at startup (health check, learning
+# store, …) and concurrent CREATE IF NOT EXISTS can fail with "tuple
+# concurrently updated". Session-level so it works on autocommit connections.
+_SCHEMA_LOCK_KEY = 0x6E6C7266  # 'nlrf'
+
+
 def ensure_schema(conn) -> int:
-    """Create the full learning schema if absent. Idempotent.
+    """Create the learning schema if absent and apply pending migrations.
+
+    Idempotent. Serialized across processes/threads via an advisory lock.
 
     Args:
         conn: a psycopg connection (autocommit or transactional — we commit).
@@ -429,14 +468,34 @@ def ensure_schema(conn) -> int:
         SCHEMA_VERSION after ensuring the schema exists.
     """
     with conn.cursor() as cur:
-        for ddl in PG_SCHEMA_DDL:
-            cur.execute(ddl)
-        # Record the consolidated version once.
-        cur.execute(
-            "INSERT INTO schema_version (version, description, applied_at) "
-            "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
-            (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
-        )
+        cur.execute("SELECT pg_advisory_lock(%s)", (_SCHEMA_LOCK_KEY,))
+        try:
+            for ddl in PG_SCHEMA_DDL:
+                cur.execute(ddl)
+            # Record the consolidated baseline version once.
+            cur.execute(
+                "INSERT INTO schema_version (version, description, applied_at) "
+                "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
+                (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
+            )
+            # Apply any migrations this database has not recorded yet, in
+            # version order (sorted, so authoring order in the tuple can't
+            # accidentally reorder dependent migrations).
+            cur.execute("SELECT version FROM schema_version")
+            recorded = {row[0] for row in cur.fetchall()}
+            for version, description, statements in sorted(PG_MIGRATIONS):
+                if version in recorded:
+                    continue
+                for stmt in statements:
+                    cur.execute(stmt)
+                cur.execute(
+                    "INSERT INTO schema_version (version, description, applied_at) "
+                    "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
+                    (version, description),
+                )
+                logger.info("[LEARNING] Applied schema migration v%d: %s", version, description)
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_SCHEMA_LOCK_KEY,))
     conn.commit()
     logger.info("[LEARNING] Postgres learning schema ensured (v%d)", SCHEMA_VERSION)
     return SCHEMA_VERSION

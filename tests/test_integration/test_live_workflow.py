@@ -3,12 +3,17 @@ Live integration tests for workflow_service streaming (Tier 2).
 
 Purpose: Verify the full workflow pipeline when the NL backend is running —
          generator yields, SSE event shapes, Docker execution, and the
-         _process_learning() side-effect against a real ChromaDB/SQLite store.
+         _process_learning() side-effect against the real Postgres store.
 
 Requires:
   - NL backend running on localhost:5000
   - Docker Desktop running
-  - GEMINI_API_KEY set in environment (for 'gemini' provider tests)
+  - Live LLM credentials matching MODEL_PROVIDER in src/backend/.env
+    (vertex: VERTEXAI_CREDENTIALS service-account JSON; gemini: GEMINI_API_KEY)
+
+The API requests authenticate with a token minted from the same
+JWT_SECRET_KEY the running backend loads from src/backend/.env — the
+endpoints are require_user-guarded (AUTH_ENFORCED defaults to true).
 
 Run with:
   pytest tests/test_integration/test_live_workflow.py -m integration -v
@@ -25,6 +30,16 @@ import requests
 pytestmark = pytest.mark.integration
 
 SERVICE_URL = "http://localhost:5000"
+
+
+def _auth_headers() -> dict:
+    """Bearer token for the live backend (same secret via src/backend/.env)."""
+    from src.backend.auth.jwt_utils import create_access_token
+    token = create_access_token(
+        {"id": "live-test", "email": "live-test@local", "role": "user",
+         "display_name": "Live Test"}
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 class TestWorkflowStreamEvents:
@@ -87,6 +102,7 @@ class TestWorkflowApiEndpoints:
         resp = requests.post(
             f"{SERVICE_URL}/generate-test",
             json={"query": "click the submit button"},
+            headers=_auth_headers(),
             stream=True,
             timeout=10,
         )
@@ -98,6 +114,7 @@ class TestWorkflowApiEndpoints:
         resp = requests.post(
             f"{SERVICE_URL}/generate-test",
             json={"query": "click submit on example.com"},
+            headers=_auth_headers(),
             stream=True,
             timeout=30,
         )
@@ -119,6 +136,7 @@ class TestWorkflowApiEndpoints:
         resp = requests.post(
             f"{SERVICE_URL}/execute-test",
             json={"robot_code": "*** Test Cases ***\nDummy\n    Log    hello"},
+            headers=_auth_headers(),
             timeout=10,
         )
         # Anything except 404 — the endpoint exists
