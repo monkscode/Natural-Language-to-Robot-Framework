@@ -6,27 +6,36 @@ with the exact same function the app uses at registration, so the user can log i
 immediately. Works for password accounts and for Google-SSO-only accounts (it just
 sets a password on them).
 
-Run:  venv/Scripts/python.exe -m tools.reset_user_password <email> <new_password>
+Run:  venv/Scripts/python.exe -m tools.reset_user_password <email>
+(The new password is prompted — never pass it on the command line, where it
+would land in shell history and process listings.)
 """
 
+import getpass
 import sys
 
 import psycopg
 
 from src.backend.core.config import settings
-from src.backend.auth.repository import hash_password
+from src.backend.auth.repository import MAX_PASSWORD_BYTES, hash_password
 
 MIN_LEN = 8
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        print("usage: python -m tools.reset_user_password <email> <new_password>")
+    if len(sys.argv) != 2:
+        print("usage: python -m tools.reset_user_password <email>")
         sys.exit(2)
     email = sys.argv[1].strip().lower()
-    new_password = sys.argv[2]
+    new_password = getpass.getpass("New password: ")
     if len(new_password) < MIN_LEN:
         print(f"refusing: password must be at least {MIN_LEN} characters")
+        sys.exit(2)
+    if len(new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        print(f"refusing: password must be at most {MAX_PASSWORD_BYTES} bytes (bcrypt limit)")
+        sys.exit(2)
+    if getpass.getpass("Confirm new password: ") != new_password:
+        print("refusing: passwords do not match")
         sys.exit(2)
 
     hashed = hash_password(new_password)

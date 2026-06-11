@@ -54,6 +54,9 @@ class RegisterRequest(BaseModel):
     def _password_ok(cls, v: str) -> str:
         if len(v) < _MIN_PASSWORD_LEN:
             raise ValueError(f"Password must be at least {_MIN_PASSWORD_LEN} characters")
+        # bcrypt hard limit — hashpw raises on longer input (UTF-8 bytes, not chars)
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 bytes")
         return v
 
 
