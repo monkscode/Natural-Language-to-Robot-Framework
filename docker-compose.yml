@@ -101,9 +101,12 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nlrf}
       - POSTGRES_DB=${POSTGRES_DB:-nlrf}
     ports:
-      # Loopback-only: host tools (backend, psql) reach it via localhost; the
-      # DB is never exposed on the network interface.
+      # Loopback-only (IPv4 AND IPv6): the DB is never exposed on the network
+      # interface. Both binds are required — Windows resolves `localhost` to
+      # ::1 first, and Docker Desktop black-holes unbound IPv6 ports (hangs,
+      # not refused), which stalls every pooled connect by the full timeout.
       - "127.0.0.1:5432:5432"
+      - "[::1]:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -141,7 +144,8 @@ services:
         max-file: "3"
         labels: "service=frontend"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/ || exit 1"]
+      # 127.0.0.1 (not localhost): busybox wget prefers ::1, nginx is IPv4-only
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
