@@ -347,10 +347,13 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_hint_trace_created_at ON hint_workflow_trace(created_at)",
 
     # --- pgvector embeddings (Phase 4 slice 6; replaces ChromaDB) ---
-    # The extension installs into whatever schema is first resolvable (public on
-    # the real DB); the vector TYPE is then visible to any search_path that
-    # includes public. 384 dims = fastembed BAAI/bge-small-en-v1.5.
-    "CREATE EXTENSION IF NOT EXISTS vector",
+    # SCHEMA public pins the extension so the vector TYPE resolves from any
+    # search_path that includes public. Without it, the first bootstrap on a
+    # fresh database (e.g. CI's service container) installs into the first
+    # search_path schema — an isolated test schema — and every other schema's
+    # DDL then fails with 'type "vector" does not exist'.
+    # 384 dims = fastembed BAAI/bge-small-en-v1.5.
+    "CREATE EXTENSION IF NOT EXISTS vector SCHEMA public",
     # learning_anchors — the hint-retrieval similarity gate (filter_by_query_similarity).
     """
     CREATE TABLE IF NOT EXISTS learning_anchors (

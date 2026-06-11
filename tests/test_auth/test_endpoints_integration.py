@@ -6,13 +6,16 @@ Postgres is unreachable. Run after `docker compose up -d postgres`.
 """
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.backend.auth import db as auth_db
+from src.backend.auth import endpoints as auth_endpoints
 from src.backend.auth.endpoints import auth_router
+from src.backend.auth.repository import PasswordTooLong
 
 pytestmark = pytest.mark.integration
 
@@ -70,6 +73,29 @@ def test_register_short_password_returns_422(client_and_emails):
     client, _ = client_and_emails
     resp = client.post("/auth/register", json={"email": _unique_email(), "password": "short"})
     assert resp.status_code == 422
+
+
+def test_register_long_password_returns_422(client_and_emails):
+    """Over the 72-byte bcrypt limit -> rejected by the request model, not a 500."""
+    client, _ = client_and_emails
+    resp = client.post(
+        "/auth/register", json={"email": _unique_email(), "password": "p" * 73}
+    )
+    assert resp.status_code == 422
+
+
+def test_register_password_too_long_returns_400(client_and_emails):
+    """If the repo's bcrypt length guard fires anyway, it surfaces as 400, never 500."""
+    client, _ = client_and_emails
+    with patch.object(
+        auth_endpoints._repo, "create_user",
+        side_effect=PasswordTooLong("password longer than 72 bytes"),
+    ):
+        resp = client.post(
+            "/auth/register", json={"email": _unique_email(), "password": "S3cretpw!"}
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "password longer than 72 bytes"
 
 
 def test_login_and_me_flow(client_and_emails):

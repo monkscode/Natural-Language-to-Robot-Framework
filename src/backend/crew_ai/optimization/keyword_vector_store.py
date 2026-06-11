@@ -31,7 +31,8 @@ from src.backend.crew_ai.optimization import embedding
 logger = logging.getLogger(__name__)
 
 _SCHEMA_DDL = (
-    "CREATE EXTENSION IF NOT EXISTS vector",
+    # SCHEMA public pins the extension deterministically — see pg_schema.py.
+    "CREATE EXTENSION IF NOT EXISTS vector SCHEMA public",
     """
     CREATE TABLE IF NOT EXISTS kw_keywords (
         library   TEXT NOT NULL,

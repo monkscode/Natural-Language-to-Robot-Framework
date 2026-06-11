@@ -19,7 +19,12 @@ from pydantic import BaseModel, field_validator
 
 from src.backend.auth import google_oauth
 from src.backend.auth.jwt_utils import create_access_token, get_current_user
-from src.backend.auth.repository import AccountInactive, EmailAlreadyExists, UserRepository
+from src.backend.auth.repository import (
+    AccountInactive,
+    EmailAlreadyExists,
+    PasswordTooLong,
+    UserRepository,
+)
 from src.backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -110,6 +115,10 @@ async def register(req: RegisterRequest):
         row = _repo.create_user(req.email, req.password, req.display_name)
     except EmailAlreadyExists:
         raise HTTPException(status_code=409, detail="Email already registered")
+    except PasswordTooLong as exc:
+        # RegisterRequest already rejects >72-byte passwords (422), but the
+        # repo's bcrypt length guard must surface as a user error, never a 500.
+        raise HTTPException(status_code=400, detail=str(exc))
     logger.info("[AUTH] Registered user %s (role=%s)", row["email"], row["role"])
     return _token_payload(row)
 

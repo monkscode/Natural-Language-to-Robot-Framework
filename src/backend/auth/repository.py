@@ -29,6 +29,10 @@ class AccountInactive(Exception):
     """Raised by get_or_create_google_user when the matched account is disabled."""
 
 
+class PasswordTooLong(Exception):
+    """Raised when the password exceeds bcrypt's byte limit."""
+
+
 MAX_PASSWORD_BYTES = 72  # hard bcrypt limit — hashpw raises ValueError beyond it
 
 
@@ -36,7 +40,7 @@ def hash_password(password: str) -> str:
     """bcrypt hash (work factor default 12). Returns a str for TEXT storage."""
     encoded = password.encode("utf-8")
     if len(encoded) > MAX_PASSWORD_BYTES:
-        raise ValueError(f"password longer than {MAX_PASSWORD_BYTES} bytes")
+        raise PasswordTooLong(f"password longer than {MAX_PASSWORD_BYTES} bytes")
     return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
 
 
