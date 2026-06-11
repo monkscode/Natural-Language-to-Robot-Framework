@@ -84,11 +84,8 @@ class KeywordVectorStore:
     # Keyword index (per library)
     # ------------------------------------------------------------------
 
-    def add_keywords(self, library_name: str, keywords: List[Dict]) -> None:
-        """Upsert keyword rows for a library (embeds 'name doc')."""
-        if not keywords:
-            logger.warning("No keywords provided for %s", library_name)
-            return
+    def _prepare_keyword_rows(self, library_name: str, keywords: List[Dict]) -> list:
+        """Embed keywords into insert-ready rows (no DB access)."""
         rows = []
         for kw in keywords:
             name = kw.get("name", "")
@@ -100,39 +97,56 @@ class KeywordVectorStore:
                 continue
             rows.append((library_name, name, json.dumps(kw.get("args", [])),
                          doc[:500], vec))
+        return rows
+
+    @staticmethod
+    def _upsert_keyword_rows(conn, rows: list) -> None:
+        """Upsert prepared rows on the caller's connection (caller commits)."""
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO kw_keywords (library, name, args, doc, embedding) "
+                "VALUES (%s, %s, %s, %s, %s::vector) "
+                "ON CONFLICT (library, name) DO UPDATE SET "
+                "  args = EXCLUDED.args, doc = EXCLUDED.doc, "
+                "  embedding = EXCLUDED.embedding",
+                rows)
+
+    def add_keywords(self, library_name: str, keywords: List[Dict]) -> None:
+        """Upsert keyword rows for a library (embeds 'name doc')."""
+        if not keywords:
+            logger.warning("No keywords provided for %s", library_name)
+            return
+        rows = self._prepare_keyword_rows(library_name, keywords)
         if not rows:
             logger.warning("No embeddable keywords for %s", library_name)
             return
         try:
             with self._pool.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        "INSERT INTO kw_keywords (library, name, args, doc, embedding) "
-                        "VALUES (%s, %s, %s, %s, %s::vector) "
-                        "ON CONFLICT (library, name) DO UPDATE SET "
-                        "  args = EXCLUDED.args, doc = EXCLUDED.doc, "
-                        "  embedding = EXCLUDED.embedding",
-                        rows)
+                self._upsert_keyword_rows(conn, rows)
                 conn.commit()
             logger.info("Added %d keywords to %s", len(rows), library_name)
         except Exception as e:
             logger.error("Failed to add keywords to %s: %s", library_name, e)
             raise
 
+    def _extract_public_keywords(self, library_name: str) -> List[Dict]:
+        """Pull the library's public, non-deprecated keywords from its docs."""
+        from ..library_context.dynamic_context import DynamicLibraryDocumentation
+        logger.info("Extracting keywords from %s...", library_name)
+        doc_data = DynamicLibraryDocumentation(library_name).get_library_documentation()
+        keywords = doc_data.get("keywords", [])
+        public_keywords = [
+            kw for kw in keywords
+            if not kw["name"].startswith("_")
+            and "deprecated" not in kw.get("doc", "")[:150].lower()
+        ]
+        logger.info("Found %d public keywords in %s", len(public_keywords), library_name)
+        return public_keywords
+
     def ingest_library_keywords(self, library_name: str) -> None:
         """Extract all keywords from a library's docs and index them."""
         try:
-            from ..library_context.dynamic_context import DynamicLibraryDocumentation
-            logger.info("Extracting keywords from %s...", library_name)
-            doc_data = DynamicLibraryDocumentation(library_name).get_library_documentation()
-            keywords = doc_data.get("keywords", [])
-            public_keywords = [
-                kw for kw in keywords
-                if not kw["name"].startswith("_")
-                and "deprecated" not in kw.get("doc", "")[:150].lower()
-            ]
-            logger.info("Found %d public keywords in %s", len(public_keywords), library_name)
-            self.add_keywords(library_name, public_keywords)
+            self.add_keywords(library_name, self._extract_public_keywords(library_name))
         except Exception as e:
             logger.error("Failed to ingest keywords from %s: %s", library_name, e)
             raise
@@ -214,12 +228,25 @@ class KeywordVectorStore:
 
     def rebuild_collection(self, library_name: str) -> None:
         try:
+            # Extract + embed BEFORE touching the table, so a failure there
+            # leaves the existing index untouched and the transaction stays short.
+            rows = self._prepare_keyword_rows(
+                library_name, self._extract_public_keywords(library_name))
+            version = self.get_library_version(library_name)
+            # Delete + refill + version bump in ONE transaction: concurrent
+            # searches keep seeing the old index (MVCC) until the commit swaps
+            # it atomically, and a mid-rebuild failure rolls back to the old
+            # index instead of leaving the library empty.
             with self._pool.connection() as conn:
                 conn.execute("DELETE FROM kw_keywords WHERE library = %s", (library_name,))
+                if rows:
+                    self._upsert_keyword_rows(conn, rows)
+                conn.execute(
+                    "INSERT INTO kw_library_version (library, version) VALUES (%s, %s) "
+                    "ON CONFLICT (library) DO UPDATE SET version = EXCLUDED.version",
+                    (library_name, version))
                 conn.commit()
-            self.ingest_library_keywords(library_name)
-            self._set_collection_version(library_name, self.get_library_version(library_name))
-            logger.info("Rebuilt keyword index for %s", library_name)
+            logger.info("Rebuilt keyword index for %s (%d keywords)", library_name, len(rows))
         except Exception as e:
             logger.error("Failed to rebuild keyword index for %s: %s", library_name, e)
             raise
