@@ -30,6 +30,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from src.backend.auth.jwt_utils import require_user
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization import pg_compat
 from src.backend.core.config import settings
@@ -157,6 +158,18 @@ def _row_to_dict(row) -> dict | None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
+    """Audit identity. ALWAYS the authenticated user's email when a token is
+    present — in the live app require_admin guards this router, so a verified
+    token always exists and the client-supplied actor is never trusted. The
+    request_actor fallback only engages in tests (bare-router apps without a
+    token, or endpoint functions called directly — where `admin` is the
+    un-resolved Depends sentinel, hence the isinstance check)."""
+    if not isinstance(admin, dict):
+        admin = None
+    return (admin or {}).get("email") or (request_actor or "").strip() or "admin"
 
 
 def _write_hint_audit(
@@ -345,9 +358,14 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
 # ---------------------------------------------------------------------------
 
 @router.post("/hints", status_code=201)
-def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
+def create_hint(
+    request: HintCreateRequest,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
@@ -413,12 +431,12 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
             )
             if was_flagged:
                 _write_hint_audit(
-                    conn, existing["id"], "unflag", request.actor,
+                    conn, existing["id"], "unflag", actor,
                     "Admin re-submitted existing hint — implicit unflag",
                     {"conflict_flagged": 1}, {"conflict_flagged": 0},
                 )
             _write_hint_audit(
-                conn, existing["id"], "create", request.actor,
+                conn, existing["id"], "create", actor,
                 "Admin re-submitted existing hint — evidence incremented",
                 None, {"evidence_count": existing["evidence_count"] + 1},
             )
@@ -441,7 +459,7 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
         )
         hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _write_hint_audit(
-            conn, hint_id, "create", request.actor, None, None,
+            conn, hint_id, "create", actor, None, None,
             {
                 "feedback_text": text, "scope": request.scope,
                 "domain": request.domain, "url": request.url,
@@ -494,6 +512,7 @@ def patch_hint(
     hint_id: int,
     request: HintPatchRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if request.feedback_text is not None:
         raise HTTPException(
@@ -502,6 +521,7 @@ def patch_hint(
         )
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -567,7 +587,7 @@ def patch_hint(
         # single action verb cannot name all of them, and before/after already
         # records exactly which fields changed. Use a neutral label rather than
         # mislabel a url- or domain-only patch as a category change.
-        _write_hint_audit(conn, hint_id, "patch", request.actor, request.reason, before, after)
+        _write_hint_audit(conn, hint_id, "patch", actor, request.reason, before, after)
         conn.commit()
 
         updated = conn.execute(
@@ -592,9 +612,11 @@ def unflag_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -614,7 +636,7 @@ def unflag_hint(
             (hint_id,),
         )
         _write_hint_audit(
-            conn, hint_id, "unflag", request.actor, request.reason,
+            conn, hint_id, "unflag", actor, request.reason,
             {"conflict_flagged": 1}, {"conflict_flagged": 0},
         )
         conn.commit()
@@ -641,9 +663,11 @@ def retract_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -661,7 +685,7 @@ def retract_hint(
             (_now(), hint_id),
         )
         _write_hint_audit(
-            conn, hint_id, "retract", request.actor, request.reason,
+            conn, hint_id, "retract", actor, request.reason,
             {"is_active": 1}, {"is_active": 0},
         )
         conn.commit()
@@ -688,9 +712,11 @@ def reactivate_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -712,7 +738,7 @@ def reactivate_hint(
             (hint_id,),
         )
         _write_hint_audit(
-            conn, hint_id, "reactivate", request.actor, request.reason,
+            conn, hint_id, "reactivate", actor, request.reason,
             {"is_active": 0}, {"is_active": 1, "conflict_flagged": 0},
         )
         conn.commit()
@@ -1938,7 +1964,11 @@ def decide_recommendation(
 
 
 @router.post("/review-hints/sessions/{session_id}/apply")
-def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
+def apply_review_session(
+    session_id: int,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+):
     conn = _admin_conn()
     try:
         # BEGIN IMMEDIATE takes the SQLite write lock before the status check, so
@@ -1990,7 +2020,7 @@ def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
             note = (rec.get("admin_notes") or "").strip()
             llm_reason = rec.get("reason") or ""
             audit_reason = f"{note}  —  [LLM: {llm_reason}]" if note else llm_reason
-            actor = "user1"
+            actor = _audit_actor(admin)
 
             if recommendation == "disable":
                 conn.execute(
