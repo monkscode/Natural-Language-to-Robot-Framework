@@ -14,8 +14,7 @@ from src.backend.services.docker_service import get_docker_client, rebuild_image
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
-# require_user/require_admin are coexistence-aware: permissive while
-# settings.AUTH_ENFORCED is False (legacy UI keeps working), strict at cutover.
+# require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin
 
 router = APIRouter()

@@ -6,9 +6,23 @@ SQLite ExecutionMemory. Mirrors tests/test_optimization/conftest.py: one
 session-scoped PostgresExecutionMemory on an isolated schema, truncated per test.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 _API_PG_SCHEMA = "learning_api_test"
+
+
+@pytest.fixture(autouse=True)
+def _auth_not_enforced():
+    """These tests exercise endpoint logic, not auth — disable JWT enforcement.
+
+    The guard security matrix (401/403 per flag and role) is covered by
+    tests/test_auth/test_guards.py.
+    """
+    from src.backend.core.config import settings
+    with patch.object(settings, "AUTH_ENFORCED", False):
+        yield
 _API_PG_TABLES = (
     "execution_records", "intent_patterns", "structural_rules", "keyword_corrections",
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",

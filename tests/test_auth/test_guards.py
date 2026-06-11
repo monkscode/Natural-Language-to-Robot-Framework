@@ -1,4 +1,4 @@
-"""Unit tests for the coexistence-aware auth dependencies.
+"""Unit tests for the auth dependencies.
 
 Calls get_current_user / require_user / require_admin directly with crafted
 credentials (no DB, no TestClient, no httpx) to validate the security matrix:
@@ -29,7 +29,7 @@ def _secret(monkeypatch):
     monkeypatch.setattr(settings, "JWT_EXPIRY_HOURS", 24)
 
 
-# --- Coexistence window: AUTH_ENFORCED=False (legacy UI keeps working) ---
+# --- Escape hatch: AUTH_ENFORCED=False (local API-only debugging) ---
 
 def test_permissive_allows_missing_token(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", False)
@@ -44,7 +44,7 @@ def test_get_current_user_is_always_strict(monkeypatch):
     assert exc.value.status_code == 401
 
 
-# --- Enforced: AUTH_ENFORCED=True (cutover) ---
+# --- Enforced: AUTH_ENFORCED=True (the default) ---
 
 def test_enforced_blocks_missing_token(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)

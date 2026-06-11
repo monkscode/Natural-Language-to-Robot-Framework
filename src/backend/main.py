@@ -61,8 +61,7 @@ app.include_router(auth_router)
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
 
-# Admin-only dashboards. require_admin is permissive while settings.AUTH_ENFORCED
-# is False (coexistence with the legacy unauthenticated UI), strict at cutover.
+# Admin-only dashboards (the React Learning/Metrics pages) — JWT + admin role.
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
 

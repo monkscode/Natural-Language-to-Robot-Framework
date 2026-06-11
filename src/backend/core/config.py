@@ -158,14 +158,12 @@ class Settings(BaseSettings):
         default="http://localhost:5173,http://localhost:3000,http://localhost:5000",
         description="Comma-separated CORS allow-list for the SPA",
     )
-    # When False (default, during the React migration coexistence window) the
-    # EXISTING endpoints accept requests with OR without a token, so the legacy
-    # src/frontend UI keeps working unchanged. Flip to True at cutover to
-    # hard-require a valid JWT (and admin role on admin routes). The /auth/*
-    # routes and the React frontend route guards are active regardless.
+    # Require a valid JWT on the API endpoints (and the admin role on admin
+    # routes). False is an escape hatch for local API-only debugging — it lets
+    # token-less requests through; never disable in production.
     AUTH_ENFORCED: bool = Field(
-        default=False,
-        description="Hard-require JWT on existing endpoints (enable at React cutover)",
+        default=True,
+        description="Require a valid JWT (and admin role on admin routes) on API endpoints",
     )
     # Mark auth cookies (the Google OAuth state cookie) Secure so browsers only
     # send them over HTTPS. Keep False for local http dev; set True in production.
