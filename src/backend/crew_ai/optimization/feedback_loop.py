@@ -1152,10 +1152,17 @@ class FeedbackLoop:
             # `if active_hints:` DB check is the gate. Cost per call is small
             # (~$0.0001 at Gemini 2.5 Flash); the maintenance tax of regex
             # heuristics is not worth the saving.
+            #
+            # Empty text IS gated: the one-click verdicts (P0/N0 fast paths,
+            # e.g. the failure-path Skip) carry no words to judge hints
+            # against, so the LLM call would be pure waste. Code-evidence
+            # conflict detection for those workflows still happens at
+            # execution time via Trigger 1.
             if (
                 self.nl_engine is not None
                 and record is not None
                 and record.robot_code
+                and feedback_text.strip()
             ):
                 from src.backend.crew_ai.optimization.conflict_detection import (
                     fire_conflict_detection,
