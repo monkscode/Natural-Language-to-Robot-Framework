@@ -202,14 +202,6 @@ class KeywordVectorStore:
             logger.warning("Could not get stored version for %s: %s", library_name, e)
             return None
 
-    def _set_collection_version(self, library_name: str, version: Optional[str]) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO kw_library_version (library, version) VALUES (%s, %s) "
-                "ON CONFLICT (library) DO UPDATE SET version = EXCLUDED.version",
-                (library_name, version))
-            conn.commit()
-
     def needs_rebuild(self, library_name: str) -> bool:
         try:
             stored = self.get_collection_version(library_name)
