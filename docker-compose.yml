@@ -101,7 +101,9 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nlrf}
       - POSTGRES_DB=${POSTGRES_DB:-nlrf}
     ports:
-      - "5432:5432"
+      # Loopback-only: host tools (backend, psql) reach it via localhost; the
+      # DB is never exposed on the network interface.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -128,7 +130,7 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: nlrf-frontend
     ports:
-      - "3000:80"
+      - "3000:8080"
     depends_on:
       - fastapi
     restart: unless-stopped
@@ -139,7 +141,7 @@ services:
         max-file: "3"
         labels: "service=frontend"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
