@@ -63,7 +63,7 @@ const BUCKET_BADGES: Record<string, string> = {
 }
 
 export default function RunDrawer({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
-  const { data, loading, error } = useFetch<RunDetail>(`/api/learning/runs/${workflowId}`)
+  const { data, loading, error } = useFetch<RunDetail>(`/api/learning/runs/${encodeURIComponent(workflowId)}`)
   const run = data?.run
 
   return (

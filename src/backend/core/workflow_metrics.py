@@ -61,7 +61,14 @@ class WorkflowMetricsCollector:
 
     def close(self) -> None:
         """Close the connection pool (tests; the app singleton lives for the process)."""
+        global _metrics_collector
         self._pool.close()
+        # If this instance is the process singleton, drop the reference so a
+        # later get_workflow_metrics_collector() builds a fresh pool instead of
+        # silently reusing a closed one.
+        with _metrics_collector_init_lock:
+            if _metrics_collector is self:
+                _metrics_collector = None
 
     def _rows_to_metrics(self, rows) -> List[WorkflowMetrics]:
         out: List[WorkflowMetrics] = []
@@ -182,9 +189,9 @@ class WorkflowMetricsCollector:
 
 # Global instance
 _metrics_collector: Optional[WorkflowMetricsCollector] = None
-# Guards singleton initialisation so two concurrent first-callers cannot create
-# two separate instances each with their own self._lock, which would allow
-# concurrent file writes from different lock objects to the same JSONL file.
+# Guards singleton initialisation (and the reset in close()) so two concurrent
+# first-callers cannot each construct an instance and open a duplicate
+# connection pool against the same database.
 _metrics_collector_init_lock = Lock()
 
 

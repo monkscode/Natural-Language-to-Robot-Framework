@@ -173,10 +173,8 @@ function LoginForm({ className }: { className?: string }) {
       </Card>
 
       <p className="text-center text-xs text-muted-foreground">
-        By signing in you agree to our{' '}
-        <a href="#" className="underline underline-offset-4 hover:text-foreground">Terms of Service</a>
-        {' '}and{' '}
-        <a href="#" className="underline underline-offset-4 hover:text-foreground">Privacy Policy</a>.
+        By signing in you agree that your test runs and feedback are recorded to
+        improve generation quality.
       </p>
     </div>
   )

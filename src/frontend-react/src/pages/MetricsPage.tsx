@@ -178,10 +178,10 @@ export default function MetricsPage() {
         <CardContent className="p-0">
           {recent.error && <div className="p-4"><ErrorNote msg={recent.error} /></div>}
           {recent.loading && <p className="px-4 py-6 text-sm text-muted-foreground">Loading…</p>}
-          {recent.data && recent.data.length === 0 && (
-            <p className="px-4 py-6 text-sm text-muted-foreground">No workflow metrics recorded yet.</p>
+          {recent.data && windowRows.length === 0 && (
+            <p className="px-4 py-6 text-sm text-muted-foreground">No workflow metrics in this time window.</p>
           )}
-          {recent.data && recent.data.length > 0 && (
+          {recent.data && windowRows.length > 0 && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -199,7 +199,9 @@ export default function MetricsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recent.data.slice(0, 25).map((r, i) => {
+                  {/* Same window filter as the charts — the table and charts
+                      must describe the same set of runs */}
+                  {windowRows.slice(0, 25).map((r, i) => {
                     const st = statusOf(r)
                     const open = openRow === r.workflow_id
                     return (
@@ -249,8 +251,8 @@ export default function MetricsPage() {
                                 />
                                 <DetailCell
                                   label="Context reduction"
-                                  value={r.context_reduction?.baseline_tokens
-                                    ? `${(r.context_reduction.baseline_tokens ?? 0).toLocaleString()} → ${(r.context_reduction.optimized_tokens ?? 0).toLocaleString()} (−${(r.context_reduction.reduction_percentage ?? 0).toFixed(1)}%)`
+                                  value={r.context_reduction?.baseline_tokens != null
+                                    ? `${r.context_reduction.baseline_tokens.toLocaleString()} → ${(r.context_reduction.optimized_tokens ?? 0).toLocaleString()} (−${(r.context_reduction.reduction_percentage ?? 0).toFixed(1)}%)`
                                     : 'N/A'}
                                 />
                                 <DetailCell

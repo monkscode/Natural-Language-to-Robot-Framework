@@ -230,7 +230,9 @@ class PostgresSpanExporter(SpanExporter):
         try:
             self._pool.close()
         except Exception:
-            pass
+            # Shutdown stays best-effort, but a failed close is worth a trace
+            # in the log — silent suppression hides resource-leak regressions.
+            logger.warning("[TRACE_STORE] pool close failed during shutdown", exc_info=True)
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         return True  # writes commit synchronously per call/batch

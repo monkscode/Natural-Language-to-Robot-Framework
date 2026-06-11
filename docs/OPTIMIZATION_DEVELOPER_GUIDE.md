@@ -1,5 +1,10 @@
 # CrewAI Optimization System - Developer Guide
 
+> ⚠️ **SUPERSEDED — storage/env/install sections are out of date (2026 Postgres migration).**
+> The learning stack is now **PostgreSQL + pgvector + fastembed**, not SQLite + ChromaDB.
+> Ignore any `OPTIMIZATION_CHROMA_DB_PATH`, `chromadb`, or `sentence-transformers` references
+> here. Current state: `docs/SESSION_HANDOFF_REACT_POSTGRES.md` and `src/backend/core/config.py`.
+
 This guide provides technical documentation for developers working on or extending the CrewAI optimization system.
 
 ## Table of Contents
