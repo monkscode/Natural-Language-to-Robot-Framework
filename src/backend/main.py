@@ -3,7 +3,6 @@ import sys
 import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
@@ -79,25 +78,13 @@ from src.backend.api.health import health_check, api_health_check
 app.get("/health")(health_check)
 app.get("/api/health")(api_health_check)
 
-# --- Static Files and Root Endpoint ---
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
+# --- Static Files (generated Robot Framework test reports) ---
 ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")
 
 # Create robot_tests directory if it doesn't exist
 os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
 
-# /learning SPA catch-all — must be registered before the static mount so
-# clean URLs like /learning and /learning/hints/5 serve learning.html
-_learning_html = os.path.join(FRONTEND_DIR, "learning.html")
-
-@app.get("/learning")
-@app.get("/learning/{path:path}")
-async def learning_spa():
-    return FileResponse(_learning_html)
-
-# Mount static files
 app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="static")
 
 @app.on_event("startup")
 async def startup_event():
