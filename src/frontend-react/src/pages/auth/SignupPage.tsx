@@ -193,10 +193,7 @@ export default function SignupPage() {
                       className="mt-0.5 h-4 w-4 cursor-pointer accent-foreground"
                     />
                     <label htmlFor="terms" className="text-xs text-muted-foreground leading-relaxed cursor-pointer">
-                      I agree to the{' '}
-                      <a href="#" className="text-foreground underline underline-offset-4">Terms of Service</a>
-                      {' '}and{' '}
-                      <a href="#" className="text-foreground underline underline-offset-4">Privacy Policy</a>
+                      I agree that my test runs and feedback are recorded to improve generation quality
                     </label>
                   </div>
                   {errors.terms && <p className="text-xs text-destructive -mt-2">{errors.terms}</p>}

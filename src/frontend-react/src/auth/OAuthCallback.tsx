@@ -21,6 +21,9 @@ export default function OAuthCallback() {
       ? window.location.hash.slice(1)
       : window.location.hash
     const token = new URLSearchParams(raw).get('token')
+    // Strip the fragment immediately so the JWT never lingers in the address
+    // bar or browser history while (or after) the async login runs.
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
     if (!token) {
       setError('Sign-in token missing from the callback.')
       return

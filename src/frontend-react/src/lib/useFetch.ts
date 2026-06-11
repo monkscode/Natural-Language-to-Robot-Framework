@@ -3,24 +3,32 @@
  * Returns { data, loading, error, reload }. Pass null to skip fetching.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 
 export function useFetch<T = unknown>(path: string | null) {
   const [data, setData] = useState<T | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!!path)
   const [error, setError] = useState('')
+  // Monotonic request id — a response only lands if no newer request started
+  // since (path can change mid-flight, e.g. switching drawer rows).
+  const seq = useRef(0)
 
   const reload = useCallback(async () => {
-    if (!path) return
+    if (!path) {
+      setLoading(false)
+      return
+    }
+    const id = ++seq.current
     setLoading(true)
     setError('')
     try {
-      setData(await api<T>(path))
+      const result = await api<T>(path)
+      if (id === seq.current) setData(result)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load')
+      if (id === seq.current) setError(e instanceof Error ? e.message : 'Failed to load')
     } finally {
-      setLoading(false)
+      if (id === seq.current) setLoading(false)
     }
   }, [path])
 

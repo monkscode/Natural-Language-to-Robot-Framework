@@ -17,7 +17,7 @@ interface Field {
   type: 'text' | 'password' | 'select'
   placeholder?: string
   defaultValue: string
-  options?: string[]
+  options?: { value: string; label: string }[]
 }
 
 interface Section {
@@ -33,11 +33,20 @@ const SECTIONS: Section[] = [
     fields: [
       {
         id: 'provider', label: 'Model Provider', type: 'select', defaultValue: 'gemini',
-        options: ['Google Gemini', 'OpenAI', 'Anthropic (Claude)'],
+        options: [
+          { value: 'gemini', label: 'Google Gemini' },
+          { value: 'openai', label: 'OpenAI' },
+          { value: 'anthropic', label: 'Anthropic (Claude)' },
+        ],
       },
       {
         id: 'model', label: 'Model', type: 'select', defaultValue: 'gemini-2.5-flash',
-        options: ['gemini-2.5-flash', 'gemini-2.0-pro', 'gpt-4o', 'claude-3-5-sonnet'],
+        options: [
+          { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
+          { value: 'gemini-2.0-pro', label: 'gemini-2.0-pro' },
+          { value: 'gpt-4o', label: 'gpt-4o' },
+          { value: 'claude-3-5-sonnet', label: 'claude-3-5-sonnet' },
+        ],
       },
       {
         id: 'apiKey', label: 'API Key', type: 'password',
@@ -52,15 +61,25 @@ const SECTIONS: Section[] = [
     fields: [
       {
         id: 'library', label: 'Library', type: 'select', defaultValue: 'browser',
-        options: ['Browser (Playwright) — Recommended', 'SeleniumLibrary — Legacy'],
+        options: [
+          { value: 'browser', label: 'Browser (Playwright) — Recommended' },
+          { value: 'selenium', label: 'SeleniumLibrary — Legacy' },
+        ],
       },
       {
         id: 'browser', label: 'Browser', type: 'select', defaultValue: 'chromium',
-        options: ['chromium', 'firefox', 'webkit'],
+        options: [
+          { value: 'chromium', label: 'chromium' },
+          { value: 'firefox', label: 'firefox' },
+          { value: 'webkit', label: 'webkit' },
+        ],
       },
       {
         id: 'headless', label: 'Headless Mode', type: 'select', defaultValue: 'true',
-        options: ['Enabled (headless=True)', 'Disabled (headless=False)'],
+        options: [
+          { value: 'true', label: 'Enabled (headless=True)' },
+          { value: 'false', label: 'Disabled (headless=False)' },
+        ],
       },
     ],
   },
@@ -93,8 +112,8 @@ function SettingsSection({ section }: { section: Section }) {
                 </SelectTrigger>
                 <SelectContent>
                   {field.options?.map(opt => (
-                    <SelectItem key={opt} value={opt.split(' ')[0].toLowerCase()} className="text-sm">
-                      {opt}
+                    <SelectItem key={opt.value} value={opt.value} className="text-sm">
+                      {opt.label}
                     </SelectItem>
                   ))}
                 </SelectContent>

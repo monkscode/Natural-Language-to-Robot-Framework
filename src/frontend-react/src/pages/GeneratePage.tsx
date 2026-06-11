@@ -824,7 +824,18 @@ export default function GeneratePage() {
               >
                 <RobotCodeEditor
                   value={code}
-                  onChange={setCode}
+                  onChange={v => {
+                    setCode(v)
+                    // Clearing the editor severs the link to the last generation
+                    // (the clear-then-paste flow). Whatever is typed/pasted next
+                    // runs unattributed, so old query/workflow ids can't pollute
+                    // the learning records. Partial edits keep attribution —
+                    // tweaking generated code before running is the intended flow.
+                    if (!v.trim()) {
+                      workflowId.current = null
+                      generatedQuery.current = ''
+                    }
+                  }}
                   disabled={busy}
                   placeholder={'*** Settings ***\nLibrary    Browser\n\nGenerated code appears here, or paste your own…'}
                   className="min-h-[300px] flex-1 rounded-lg border border-border shadow-sm"
