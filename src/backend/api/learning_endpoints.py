@@ -232,11 +232,14 @@ def list_hints(
             params.append(scope)
 
         if domain:
-            conditions.append("domain = ?")
+            # Domains are stored lowercased (extract_domain), but admin-created
+            # hints may predate that — compare case-insensitively on both sides.
+            conditions.append("LOWER(domain) = LOWER(?)")
             params.append(domain)
 
         if search:
-            conditions.append("feedback_text LIKE ?")
+            # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.
+            conditions.append("feedback_text ILIKE ?")
             params.append(f"%{search}%")
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -855,7 +858,8 @@ def list_runs(
             where.append("test_status = ?")
             params.append(status)
         if q:
-            where.append("user_query LIKE ?")
+            # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.
+            where.append("user_query ILIKE ?")
             params.append(f"%{q}%")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         total = conn.execute(

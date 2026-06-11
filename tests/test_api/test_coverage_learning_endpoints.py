@@ -278,6 +278,31 @@ class TestListHints:
         assert resp.status_code == 200
         assert resp.json()["total"] == 1
 
+    def test_search_filter_case_insensitive(self, learning_client):
+        """Postgres LIKE is case-sensitive (unlike SQLite) — the endpoint uses
+        ILIKE so search keeps the legacy case-insensitive behaviour."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use XPath Locators")
+        _insert_hint(db_path, feedback_text="avoid CSS selectors")
+
+        resp = client.get("/hints", params={"search": "xpath"})
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+
+        resp = client.get("/hints", params={"search": "XPATH"})
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+
+    def test_domain_filter_case_insensitive(self, learning_client):
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="hint a")
+
+        resp = client.get("/hints", params={"domain": "Example.COM"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["hints"][0]["domain"] == "example.com"
+
     def test_pagination(self, learning_client):
         client, _, _, db_path = learning_client
         for i in range(5):
@@ -1477,3 +1502,16 @@ class TestRunsEndpoints:
         assert r.status_code == 200
         statuses = {row["test_status"] for row in r.json()["runs"]}
         assert statuses == {"failed"}
+
+    def test_runs_list_query_search_case_insensitive(self, learning_client):
+        """q is a user_query substring filter; ILIKE keeps it case-insensitive
+        on Postgres (legacy SQLite LIKE behaviour)."""
+        client, em, mock_fb, db_path = learning_client
+        self._seed_run(db_path, "wf-q-1", query="Open Flipkart and search shoes")
+        self._seed_run(db_path, "wf-q-2", query="click the button")
+
+        r = client.get("/runs?q=flipkart")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 1
+        assert data["runs"][0]["workflow_id"] == "wf-q-1"
