@@ -87,6 +87,15 @@ app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
 
 @app.on_event("startup")
 async def startup_event():
+    # Refuse to run with a missing/placeholder JWT secret — every minted token
+    # would be forgeable. .env.example documents how to generate a real one.
+    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
+        raise RuntimeError(
+            "JWT_SECRET_KEY is unset or still the placeholder. Generate one with "
+            "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and "
+            "set it in src/backend/.env (or the container environment)."
+        )
+
     logging.info("Application startup complete.")
     _check_learning_health()
 

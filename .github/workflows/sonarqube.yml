@@ -70,6 +70,9 @@ jobs:
             -v
         env:
           PYTHONPATH: ${{ github.workspace }}/src/backend
+          # App startup refuses the placeholder secret; tests that boot the app
+          # (TestClient on src.backend.main) need a real-looking one.
+          JWT_SECRET_KEY: ci-only-jwt-secret-not-used-outside-this-workflow
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
