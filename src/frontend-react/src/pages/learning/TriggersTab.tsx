@@ -62,6 +62,26 @@ function TriggerDrawer({ id, onClose }: { id: number; onClose: () => void }) {
               </section>
             )}
 
+            {(t.flagged_hint_ids?.length ?? 0) > 0 && (
+              <section>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Flag outcome</h3>
+                <div className="space-y-1 rounded-md border px-3 py-2 text-xs">
+                  <p>
+                    <span className="text-muted-foreground">LLM recommended: </span>
+                    <span className="font-mono">{(t.flagged_hint_ids ?? []).join(', ') || '—'}</span>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">Actually flagged: </span>
+                    {/* actually_flagged_hint_ids = enforcement (schema v12); NULL on
+                        legacy rows → fall back to the recommendation list */}
+                    {(t.actually_flagged_hint_ids ?? t.flagged_hint_ids ?? []).length > 0
+                      ? <span className="font-mono text-destructive">{(t.actually_flagged_hint_ids ?? t.flagged_hint_ids ?? []).join(', ')}</span>
+                      : <span className="text-muted-foreground">none — all suppressed by the strong-history guard</span>}
+                  </p>
+                </div>
+              </section>
+            )}
+
             {data && Object.keys(data.hint_texts).length > 0 && (
               <section>
                 <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -69,13 +89,21 @@ function TriggerDrawer({ id, onClose }: { id: number; onClose: () => void }) {
                 </h3>
                 <ul className="space-y-1.5">
                   {Object.entries(data.hint_texts).map(([hid, text]) => {
-                    const flagged = (t.actually_flagged_hint_ids ?? t.flagged_hint_ids ?? []).includes(Number(hid))
-                    const used = (t.used_hint_ids ?? []).includes(Number(hid))
+                    const idNum = Number(hid)
+                    const enforced = (t.actually_flagged_hint_ids ?? t.flagged_hint_ids ?? []).includes(idNum)
+                    const recommended = (t.flagged_hint_ids ?? []).includes(idNum)
+                    const used = (t.used_hint_ids ?? []).includes(idNum)
                     return (
                       <li key={hid} className="rounded-md border px-3 py-2 text-xs">
                         <div className="mb-1 flex items-center gap-1.5">
                           <span className="font-semibold text-muted-foreground">#{hid}</span>
-                          {flagged && <Badge className="bg-amber-100 text-amber-700 border-amber-200 text-[10px]">flagged</Badge>}
+                          {enforced && <Badge className="bg-amber-100 text-amber-700 border-amber-200 text-[10px]">flagged</Badge>}
+                          {!enforced && recommended && (
+                            <Badge
+                              className="bg-muted text-muted-foreground text-[10px]"
+                              title="LLM recommended flagging — suppressed by the strong-history guard"
+                            >suppressed</Badge>
+                          )}
                           {used && <Badge className="bg-green-100 text-green-700 border-green-200 text-[10px]">credited</Badge>}
                         </div>
                         <span className="line-clamp-3">{text}</span>
@@ -94,6 +122,38 @@ function TriggerDrawer({ id, onClose }: { id: number; onClose: () => void }) {
                   <p><span className="text-muted-foreground">Result: </span>{data.execution.test_status || '—'}</p>
                   <p><span className="text-muted-foreground">When: </span>{fmtWhen(data.execution.timestamp)}</p>
                 </div>
+              </section>
+            )}
+
+            {/* Case-B evidence: failed v1 → corrected v2 when both exist; otherwise
+                the run's single code version (legacy trigger-detail parity). */}
+            {(data?.execution?.robot_code || data?.execution?.working_code) && (
+              <section>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  {data!.execution!.working_code && data!.execution!.robot_code
+                    ? 'Code comparison (failed v1 → working v2)'
+                    : data!.execution!.test_status === 'passed' ? 'Passing code' : 'Generated code'}
+                </h3>
+                {data!.execution!.working_code && data!.execution!.robot_code ? (
+                  <div className="space-y-2">
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-muted-foreground">Failed code (v1)</p>
+                      <pre className="max-h-56 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                        {data!.execution!.robot_code}
+                      </pre>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-muted-foreground">Working code (v2)</p>
+                      <pre className="max-h-56 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                        {data!.execution!.working_code}
+                      </pre>
+                    </div>
+                  </div>
+                ) : (
+                  <pre className="max-h-56 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                    {data!.execution!.working_code || data!.execution!.robot_code}
+                  </pre>
+                )}
               </section>
             )}
 

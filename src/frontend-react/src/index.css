@@ -166,6 +166,14 @@
 .neo .rf-testname { color: #ff00ff; }
 
 /* ── Progress shimmer ── */
+/* The ::after is absolutely positioned, so the element itself must be the
+   containing block AND clip it — otherwise inset:0 resolves against a distant
+   positioned ancestor and the translateX sweep pushes the page width out,
+   flashing a horizontal scrollbar (verified live with document.scrollWidth). */
+.progress-shimmer {
+  position: relative;
+  overflow: hidden;
+}
 .progress-shimmer::after {
   content: '';
   position: absolute;
@@ -173,3 +181,69 @@
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
   animation: shimmer 1.5s infinite;
 }
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+/* ── Generate page: in-panel pipeline view + execution scan line ── */
+/* Ghost .robot file skeleton bars (GenerationPipeline) */
+.ghost-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  transform: translateX(-100%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ghost-bar::after { animation: shimmer 2.2s infinite; }
+  .ghost-line { animation: ghost-in 0.35s ease both; }
+  .ghost-caret { animation: caret-blink 1.1s step-end infinite; }
+  .stage-active { animation: stage-glow 1.8s ease-in-out infinite; }
+}
+@keyframes ghost-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes caret-blink { 50% { opacity: 0; } }
+@keyframes stage-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(56,189,248,0.35); }
+  50%      { box-shadow: 0 0 0 5px rgba(56,189,248,0); }
+}
+
+/* ── Execution result card (Generate page) ── */
+/* Pieces stay invisible under prefers-reduced-motion; the card and check
+   simply render static in that case. */
+.confetti-piece { opacity: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .result-pop { animation: result-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+  .check-pop { animation: check-pop 0.5s 0.1s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+  .confetti-piece { animation: confetti-fall 1.6s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards; }
+}
+@keyframes result-pop {
+  from { opacity: 0; transform: scale(0.97) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes check-pop {
+  from { opacity: 0; transform: scale(0.3); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes confetti-fall {
+  0%   { opacity: 1; transform: translate3d(0, -6px, 0) rotate(0deg); }
+  80%  { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(var(--x, 0px), 140px, 0) rotate(var(--r, 220deg)); }
+}
+
+/* Robot Framework token colors (Prism robotframework grammar), GitHub-dark palette.
+   Scoped to the Generate-page code editor. */
+.robot-editor .token.section-header { color: #ff7b72; font-weight: 600; }
+.robot-editor .token.test-name,
+.robot-editor .token.keyword-name,
+.robot-editor .token.task-name { color: #7ee787; font-weight: 600; }
+.robot-editor .token.property { color: #79c0ff; }
+.robot-editor .token.variable { color: #d2a8ff; }
+.robot-editor .token.variable .token.punctuation { color: #d2a8ff; }
+.robot-editor .token.tag { color: #f0883e; }
+.robot-editor .token.tag .token.punctuation { color: #f0883e; }
+.robot-editor .token.documentation { color: #a5d6ff; }
+.robot-editor .token.comment { color: #8b949e; font-style: italic; }

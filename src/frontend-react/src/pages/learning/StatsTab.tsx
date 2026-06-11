@@ -7,7 +7,7 @@
 import { Card, CardContent } from '@/components/ui/card'
 import { useFetch } from '@/lib/useFetch'
 import { cn } from '@/lib/utils'
-import { TRIGGER_TYPE_LABELS, pctOrDash } from './types'
+import { TRIGGER_TYPE_LABELS, pctOrDash, fmtLift } from './types'
 import type { Stats, CatStats } from './types'
 
 function Num({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
@@ -79,12 +79,12 @@ export default function StatsTab() {
         <div className="mt-4 space-y-1.5 border-l-2 pl-3 text-sm">
           <p>
             <span className="font-medium">Biased lift (B − A): </span>
-            <span className="tabular-nums">{nc ? pctOrDash(nc.lift) : '—'}</span>
+            <span className="tabular-nums">{nc ? fmtLift(nc.lift) : '—'}</span>
             <span className="text-xs text-muted-foreground"> — Cat B resembles past successes; flattering, not trusted</span>
           </p>
           <p>
             <span className="font-medium">Honest lift (B − C): </span>
-            <span className="tabular-nums">{nc?.honest_lift != null ? pctOrDash(nc.honest_lift) : 'insufficient data'}</span>
+            <span className="tabular-nums">{nc?.honest_lift != null ? fmtLift(nc.honest_lift) : 'insufficient data'}</span>
             <span className="text-xs text-muted-foreground"> — the unbiased control; the trustworthy number</span>
           </p>
           <p>
@@ -111,7 +111,7 @@ export default function StatsTab() {
           />
           <Num
             label="Holdout lift (B − C)"
-            value={att?.holdout_lift != null ? pctOrDash(att.holdout_lift) : 'n/a'}
+            value={att?.holdout_lift != null ? fmtLift(att.holdout_lift) : 'n/a'}
           />
           <Num
             label="Cost / successful test"
@@ -185,8 +185,12 @@ export default function StatsTab() {
         )}
       </Section>
 
-      {(data.review_candidates?.length ?? 0) > 0 && (
-        <Section title="Review candidates" hint="Active hints that never succeeded and associate with related failures — worth a manual look">
+      {/* Always rendered (legacy parity): an explicit "none" tells the operator
+          the check ran and found nothing — silence would be ambiguous. */}
+      <Section title="Review candidates" hint="Active hints that never succeeded and associate with related failures — worth a manual look">
+        {(data.review_candidates?.length ?? 0) === 0 ? (
+          <p className="text-sm text-muted-foreground">None — no never-succeeded hint crosses the review threshold.</p>
+        ) : (
           <ul className="space-y-1 text-sm">
             {data.review_candidates!.map(c => (
               <li key={c.hint_id} className="flex items-center gap-2">
@@ -195,11 +199,13 @@ export default function StatsTab() {
               </li>
             ))}
           </ul>
-        </Section>
-      )}
+        )}
+      </Section>
 
-      {(data.never_attributed?.length ?? 0) > 0 && (
-        <Section title="Never attributed" hint="Hints injected repeatedly but never once credited on a pass — candidates for retirement">
+      <Section title="Never attributed" hint="Hints injected repeatedly but never once credited on a pass — candidates for retirement">
+        {(data.never_attributed?.length ?? 0) === 0 ? (
+          <p className="text-sm text-muted-foreground">None — every injected hint has been scored at least once.</p>
+        ) : (
           <ul className="space-y-1.5 text-sm">
             {data.never_attributed!.map(h => (
               <li key={h.id} className="rounded-md border px-3 py-2 text-xs">
@@ -209,8 +215,8 @@ export default function StatsTab() {
               </li>
             ))}
           </ul>
-        </Section>
-      )}
+        )}
+      </Section>
     </div>
   )
 }

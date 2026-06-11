@@ -58,9 +58,18 @@ interface ReviewRec {
   is_active: number
   conflict_flagged: number
 }
+interface ReviewPage {
+  id: number
+  scope_type?: string | null
+  scope_value?: string | null
+  status: string
+  hint_count?: number | null
+  error_message?: string | null
+}
 interface ReviewSessionDetail {
   session: ReviewSession
   recommendations: ReviewRec[]
+  pages?: ReviewPage[]
 }
 
 type View = 'overview' | 'hints' | 'triggers' | 'runs' | 'stats' | 'review'
@@ -69,6 +78,7 @@ const HINT_FILTERS = [
   { key: 'flagged', label: 'Flagged' },
   { key: 'active', label: 'Active' },
   { key: 'auto_disabled', label: 'Auto-disabled' },
+  { key: 'llm_review_disabled', label: 'LLM-disabled' },
   { key: 'retracted', label: 'Retracted' },
 ] as const
 
@@ -76,9 +86,11 @@ const pctOrDash = (n: number | null | undefined) => (n == null ? '—' : `${(n *
 
 function hintStatus(h: Hint): { label: string; cls: string } {
   if (h.is_active === 1 && h.conflict_flagged === 1) return { label: 'Flagged', cls: 'bg-amber-100 text-amber-700 border-amber-200' }
-  if (h.is_active === 1) return { label: 'Active', cls: 'bg-green-100 text-green-700 border-green-200' }
-  if (h.llm_review_disabled === 1) return { label: 'LLM-disabled', cls: 'bg-red-100 text-red-700 border-red-200' }
-  return { label: 'Disabled', cls: 'bg-muted text-muted-foreground' }
+  if (h.is_active === 1) return { label: h.created_via === 'admin' ? 'Active (admin)' : 'Active', cls: 'bg-green-100 text-green-700 border-green-200' }
+  // sort_priority=4 → has a retract audit row (manual); =3 → auto / LLM-review disabled
+  if (h.sort_priority === 4) return { label: 'Retracted', cls: 'bg-muted text-muted-foreground' }
+  if (h.llm_review_disabled === 1) return { label: 'LLM-disabled', cls: 'bg-purple-100 text-purple-700 border-purple-200' }
+  return { label: 'Auto-disabled', cls: 'bg-amber-50 text-amber-600 border-amber-200' }
 }
 
 function ErrorNote({ msg }: { msg: string }) {
@@ -93,10 +105,12 @@ function HealthBanner() {
   const cls =
     s === 'OK' ? 'border-green-200 bg-green-50 text-green-700'
       : s === 'DISABLED' ? 'border-border bg-muted/40 text-muted-foreground'
-        : 'border-amber-200 bg-amber-50 text-amber-700'
+        : s === 'FAILED' ? 'border-red-200 bg-red-50 text-red-700'
+          : 'border-amber-200 bg-amber-50 text-amber-700'
   return (
     <div className={cn('rounded-md border px-4 py-2 text-sm', cls)}>
-      {s === 'OK' ? '✓' : '⚠'} Learning system: {s}
+      {s === 'OK' ? '✓' : s === 'FAILED' ? '✕' : '⚠'} Learning system: {s}
+      {(s === 'DEGRADED' || s === 'FAILED') && ' — a learning reliability check is failing; see server logs.'}
     </div>
   )
 }
@@ -155,6 +169,7 @@ function Hints() {
   const { data, loading, error, reload } = useFetch<HintsResp>(path)
 
   async function act(id: number, action: 'unflag' | 'retract' | 'reactivate') {
+    if (action === 'retract' && !window.confirm('Retract this hint? It will stop injecting into agent prompts.')) return
     setBusyId(id); setActErr('')
     try {
       await api(`/api/learning/hints/${id}/${action}`, {
@@ -218,7 +233,7 @@ function Hints() {
                     <th className="px-4 py-2.5">Hint</th>
                     <th className="px-4 py-2.5 hidden md:table-cell">Scope</th>
                     <th className="px-4 py-2.5">Status</th>
-                    <th className="px-4 py-2.5 hidden sm:table-cell">Success/Applied</th>
+                    <th className="px-4 py-2.5 hidden sm:table-cell">OK / Fail / Applied</th>
                     <th className="px-4 py-2.5"></th>
                   </tr>
                 </thead>
@@ -231,11 +246,14 @@ function Hints() {
                         <td className="px-4 py-3 max-w-md">
                           <span className="line-clamp-2">{h.feedback_text}</span>
                           {h.domain && <span className="mt-0.5 block text-xs text-muted-foreground">{h.domain}</span>}
+                          {h.conflict_flagged === 1 && h.conflict_flag_reason && (
+                            <span className="mt-0.5 block text-xs italic text-amber-700 line-clamp-2">⚠ {h.conflict_flag_reason}</span>
+                          )}
                         </td>
                         <td className="px-4 py-3 hidden md:table-cell text-xs text-muted-foreground">{h.scope || '—'}</td>
                         <td className="px-4 py-3"><Badge className={cn('text-xs', st.cls)}>{st.label}</Badge></td>
                         <td className="px-4 py-3 hidden sm:table-cell text-xs text-muted-foreground whitespace-nowrap">
-                          {(h.success_count ?? 0)} / {(h.applied_count ?? 0)}
+                          {(h.success_count ?? 0)} / {(h.failure_count ?? 0)} / {(h.applied_count ?? 0)}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex justify-end gap-1.5">
@@ -422,6 +440,9 @@ function Review() {
                     <th className="px-4 py-2.5">Started</th>
                     <th className="px-4 py-2.5">Status</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">Hints</th>
+                    <th className="px-4 py-2.5 hidden md:table-cell">LLM latency</th>
+                    <th className="px-4 py-2.5 hidden md:table-cell">Warning</th>
+                    <th className="px-4 py-2.5 hidden lg:table-cell">Completed</th>
                     <th className="px-4 py-2.5"></th>
                   </tr>
                 </thead>
@@ -439,6 +460,15 @@ function Review() {
                         </td>
                         <td className="px-4 py-2.5"><Badge className={cn('text-xs', st.cls)}>{st.label}</Badge></td>
                         <td className="px-4 py-2.5 hidden sm:table-cell text-muted-foreground">{s.hint_count}</td>
+                        <td className="px-4 py-2.5 hidden md:table-cell text-xs tabular-nums text-muted-foreground">
+                          {s.llm_latency_ms != null ? `${(s.llm_latency_ms / 1000).toFixed(1)}s` : '—'}
+                        </td>
+                        <td className="px-4 py-2.5 hidden md:table-cell text-xs">
+                          {s.warning ? <span className="text-amber-700">⚠ Yes</span> : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap">
+                          {s.completed_at ? new Date(s.completed_at).toLocaleString() : '—'}
+                        </td>
                         <td className="px-4 py-2.5 text-right text-xs text-muted-foreground">{selectedId === s.id ? 'Viewing' : 'View'}</td>
                       </tr>
                     )
@@ -479,11 +509,18 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   }, [listStatus, reload])
 
   async function decide(recId: number, decision: 'approved' | 'rejected') {
+    // Optional rationale — stored as admin_notes and written into the hint's
+    // audit trail when the session is applied (legacy-UI parity).
+    const notes = window.prompt(
+      decision === 'approved'
+        ? 'Optional note — why you agree with this recommendation (leave blank to skip):'
+        : 'Optional note — why you are overriding this recommendation (leave blank to skip):',
+    )
     setBusyId(recId); setActErr(''); setAppliedMsg('')
     try {
       await api(`/api/learning/review-hints/sessions/${id}/recommendations/${recId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ admin_decision: decision }),
+        body: JSON.stringify({ admin_decision: decision, admin_notes: notes || null }),
       })
       await reload()
     } catch (e) {
@@ -494,6 +531,8 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   }
 
   async function applyApproved() {
+    const n = recommendations.filter(r => r.admin_decision === 'approved' && r.applied === 0).length
+    if (!window.confirm(`Apply ${n} approved change${n !== 1 ? 's' : ''}? This updates the live hints.`)) return
     setApplying(true); setActErr(''); setAppliedMsg('')
     try {
       const resp = await api<{ applied_count: number }>(`/api/learning/review-hints/sessions/${id}/apply`, { method: 'POST' })
@@ -535,6 +574,21 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
       {session.status === 'pending_llm' && (
         <p className="text-sm text-muted-foreground">The LLM review is running — recommendations will appear here when it finishes.</p>
       )}
+      {/* Per-scope chunk progress (one LLM page per domain / global scope) */}
+      {(data.pages?.length ?? 0) > 0 && (
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-0.5">
+          {data.pages!.map(p => {
+            const label = p.scope_type === 'global' ? 'Global hints' : (p.scope_value || 'No domain')
+            const icon = p.status === 'succeeded' ? '✅' : p.status === 'failed' ? '❌' : session.status === 'pending_llm' ? '⟳' : '⏳'
+            const note = p.status === 'succeeded' ? `${p.hint_count ?? 0} hints reviewed`
+              : p.status === 'failed' ? (p.error_message || 'Failed')
+                : session.status === 'pending_llm' ? 'In progress…' : 'Queued'
+            return (
+              <p key={p.id}>{icon} <span className="font-medium">{label}</span> — <span className="text-muted-foreground">{note}</span></p>
+            )
+          })}
+        </div>
+      )}
       {recommendations.length === 0 && session.status !== 'pending_llm' && (
         <p className="text-sm text-muted-foreground">No recommendations in this session.</p>
       )}
@@ -550,11 +604,15 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     {[r.scope, r.domain].filter(Boolean).join(' · ') || '—'}
                     {' · '}{r.success_count ?? 0} ok / {r.failure_count ?? 0} fail / {r.applied_count ?? 0} applied
+                    {' · '}{r.exoneration_count} exoneration{r.exoneration_count !== 1 ? 's' : ''}
                   </p>
                 </div>
                 <Badge className={cn('text-xs', rec.cls)}>{rec.label}</Badge>
               </div>
               <p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">{r.reason}</p>
+              {r.admin_notes?.trim() && (
+                <p className="text-xs text-muted-foreground">📝 {r.admin_notes}</p>
+              )}
               <div className="flex items-center gap-1.5">
                 {r.applied === 1 ? (
                   <span className="text-xs font-medium text-green-700">✓ Applied</span>

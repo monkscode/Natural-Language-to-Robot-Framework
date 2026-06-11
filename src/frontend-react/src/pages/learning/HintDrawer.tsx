@@ -23,8 +23,13 @@ const ACTION_LABELS: Record<string, string> = {
   reactivate: 'reactivated',
   auto_disable: 'auto-disabled',
   edit: 'edited',
+  patch: 'edited',
+  change_scope: 'changed scope',
+  change_category: 'changed category',
   flagged: 'flagged this hint',
-  flag_recommended_suppressed: 'flag recommended (suppressed)',
+  flag_recommended_suppressed: 'recommended flag (suppressed by history guard)',
+  trigger_1_flag: 'Trigger 1: flagged',
+  trigger_2_flag: 'Trigger 2: flagged',
   llm_review_disable: 'disabled via LLM review',
   llm_review_reactivate: 'reactivated via LLM review',
   llm_review_unflag: 'unflagged via LLM review',
@@ -32,14 +37,27 @@ const ACTION_LABELS: Record<string, string> = {
   llm_review_flagged: 'flagged for review via LLM review',
 }
 
+/** "{a:1} → {a:2}" detail for audit rows that carry before/after values. */
+function beforeAfter(e: TimelineEntry): string {
+  if (!e.before_value || !e.after_value) return ''
+  try {
+    const parse = (v: unknown) => (typeof v === 'string' ? JSON.parse(v) : v) as Record<string, unknown>
+    const fmt = (o: Record<string, unknown>) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(', ')
+    const b = fmt(parse(e.before_value)); const a = fmt(parse(e.after_value))
+    return b && a ? ` (${b} → ${a})` : ''
+  } catch { return '' }
+}
+
 function TimelineRow({ e }: { e: TimelineEntry }) {
+  // trigger_events rows have no actor — show the trigger type instead.
+  const actor = e.actor || (e.source === 'trigger_events' ? (e.trigger_type || 'trigger') : 'system')
   return (
     <li className="relative border-l-2 pb-4 pl-4 last:pb-0">
       <span className="absolute -left-[5px] top-1 h-2 w-2 rounded-full bg-border" />
       <p className="text-xs text-muted-foreground">{fmtWhen(e.created_at)}</p>
       <p className="mt-0.5 text-sm">
-        <span className="font-medium">{e.actor || 'system'}</span>{' '}
-        {ACTION_LABELS[e.action] ?? e.action}
+        <span className="font-medium">{actor}</span>{' '}
+        {ACTION_LABELS[e.action] ?? e.action}{beforeAfter(e)}
       </p>
       {e.reason && <p className="mt-0.5 text-xs italic text-muted-foreground">{e.reason}</p>}
       {e.workflow_id && <p className="mt-0.5 text-xs text-muted-foreground">workflow: <code>{e.workflow_id}</code></p>}
@@ -98,8 +116,10 @@ export default function HintDrawer({ id, onChanged, onClose }: {
     actor,
     reason: 'edited via admin dashboard',
   })
-  const lifecycle = (action: 'unflag' | 'retract' | 'reactivate') =>
+  const lifecycle = (action: 'unflag' | 'retract' | 'reactivate') => {
+    if (action === 'retract' && !window.confirm('Retract this hint? It will stop injecting into agent prompts.')) return
     call('POST', `/api/learning/hints/${id}/${action}`, { actor, reason: 'via admin dashboard' })
+  }
 
   const status = !h ? null
     : h.is_active === 1 && h.conflict_flagged === 1 ? { label: 'Flagged', cls: 'bg-amber-100 text-amber-700 border-amber-200' }

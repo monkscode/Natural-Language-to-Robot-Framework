@@ -36,6 +36,9 @@ interface RunDetail {
     domain?: string | null
     test_status?: string
     failure_category?: string | null
+    failed_keyword?: string | null
+    error_message?: string | null
+    model_version?: string | null
     robot_code?: string | null
     working_code?: string | null
   } | null
@@ -49,7 +52,11 @@ interface RunDetail {
   triggers: { id: number; trigger_type: string; status: string; created_at: string; reason?: string | null }[]
 }
 
+// Attribution buckets as the backend emits them (used/harmful/unused);
+// success/failure kept as aliases for older trace rows.
 const BUCKET_BADGES: Record<string, string> = {
+  used: 'bg-green-100 text-green-700 border-green-200',
+  harmful: 'bg-red-100 text-red-700 border-red-200',
   success: 'bg-green-100 text-green-700 border-green-200',
   failure: 'bg-red-100 text-red-700 border-red-200',
   unused: 'bg-muted text-muted-foreground',
@@ -86,6 +93,15 @@ export default function RunDrawer({ workflowId, onClose }: { workflowId: string;
                 <p className="rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed">{run.user_query || '(paste-and-execute — no query)'}</p>
                 {(run.domain || run.url) && (
                   <p className="text-xs text-muted-foreground">{run.url || run.domain}</p>
+                )}
+                {(run.failed_keyword || run.error_message) && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+                    {run.failed_keyword && <p className="font-medium">Failed keyword: {run.failed_keyword}</p>}
+                    {run.error_message && <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">{run.error_message}</p>}
+                  </div>
+                )}
+                {run.model_version && (
+                  <p className="text-xs text-muted-foreground">Model: {run.model_version}</p>
                 )}
               </section>
             )}
@@ -148,13 +164,41 @@ export default function RunDrawer({ workflowId, onClose }: { workflowId: string;
             {(run?.working_code || run?.robot_code) && (
               <section>
                 <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  {run.working_code ? 'Working code' : 'Generated code'}
+                  {run.working_code && run.robot_code ? 'Code comparison (failed v1 → working v2)'
+                    : run.working_code ? 'Working code' : 'Generated code'}
                 </h3>
-                <pre className="max-h-72 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
-                  {run.working_code || run.robot_code}
-                </pre>
+                {/* working_code only exists when a failed run was edited into a
+                    passing one — that v1→v2 diff is the Case-B evidence, so show
+                    both sides (legacy-UI parity), not just the winner. */}
+                {run.working_code && run.robot_code ? (
+                  <div className="space-y-2">
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-muted-foreground">Failed code (v1)</p>
+                      <pre className="max-h-60 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                        {run.robot_code}
+                      </pre>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-[11px] font-medium text-muted-foreground">Working code (v2)</p>
+                      <pre className="max-h-60 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                        {run.working_code}
+                      </pre>
+                    </div>
+                  </div>
+                ) : (
+                  <pre className="max-h-72 overflow-auto rounded-md bg-[#0d1117] p-3 text-[11px] leading-relaxed text-[#e6edf3]">
+                    {run.working_code || run.robot_code}
+                  </pre>
+                )}
               </section>
             )}
+
+            <details className="text-xs">
+              <summary className="cursor-pointer font-medium text-muted-foreground">Raw debug data (run · metrics · trace · triggers)</summary>
+              <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-muted/40 p-3 text-[11px] leading-relaxed">
+                {JSON.stringify(data, null, 2)}
+              </pre>
+            </details>
           </div>
         )}
       </SheetContent>

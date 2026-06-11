@@ -19,7 +19,10 @@ export interface Hint {
   is_active: number
   conflict_flagged: number
   conflict_flag_reason?: string | null
+  conflict_flagged_at?: string | null
   llm_review_disabled?: number
+  /** Server-computed status rank: 1 flagged, 2 active, 3 auto/LLM-disabled, 4 retracted */
+  sort_priority?: number
   success_count?: number
   failure_count?: number
   applied_count?: number
@@ -136,6 +139,10 @@ export const FAILURE_CATEGORIES = ['B1', 'B2', 'C1', 'D1'] as const
 
 export const pctOrDash = (n: number | null | undefined, digits = 1) =>
   n == null ? '—' : `${(n * 100).toFixed(digits)}%`
+
+/** Signed 0–1 fraction (a lift) → "+4.2%" / "−4.2%" with an explicit sign. */
+export const fmtLift = (n: number | null | undefined) =>
+  n == null ? '—' : `${n >= 0 ? '+' : '−'}${Math.abs(n * 100).toFixed(1)}%`
 
 export const fmtWhen = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString() : '—'

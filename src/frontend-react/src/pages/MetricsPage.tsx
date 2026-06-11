@@ -233,6 +233,31 @@ export default function MetricsPage() {
                                 <DetailCell label="Browser tokens" value={`${(r.browser_use_prompt_tokens ?? 0).toLocaleString()} in / ${(r.browser_use_completion_tokens ?? 0).toLocaleString()} out`} />
                                 <DetailCell label="Execution time" value={secs(r.execution_time)} />
                                 <DetailCell label="Total cost" value={money(r.total_cost)} />
+                                {/* Optimization-system stats (legacy detail-panel parity) */}
+                                <DetailCell
+                                  label="LLM cleaning"
+                                  value={r.llm_cleaning_stats?.total_responses != null
+                                    ? `${r.llm_cleaning_stats.cleaned_responses ?? 0}/${r.llm_cleaning_stats.total_responses} cleaned (${(r.llm_cleaning_stats.clean_rate ?? 0).toFixed(1)}%)`
+                                    : 'N/A'}
+                                />
+                                <DetailCell
+                                  label="Formatting errors"
+                                  value={r.llm_cleaning_stats?.formatting_errors_detected != null
+                                    ? String(r.llm_cleaning_stats.formatting_errors_detected)
+                                    : 'N/A'}
+                                />
+                                <DetailCell
+                                  label="Context reduction"
+                                  value={r.context_reduction?.baseline_tokens
+                                    ? `${(r.context_reduction.baseline_tokens ?? 0).toLocaleString()} → ${(r.context_reduction.optimized_tokens ?? 0).toLocaleString()} (−${(r.context_reduction.reduction_percentage ?? 0).toFixed(1)}%)`
+                                    : 'N/A'}
+                                />
+                                <DetailCell
+                                  label="Pattern learning"
+                                  value={r.keyword_search_stats?.calls != null
+                                    ? `${r.keyword_search_stats.calls} searches · ${(r.keyword_search_stats.avg_latency_ms ?? 0).toFixed(1)}ms · ${r.pattern_learning_stats?.prediction_used ? `used (${r.pattern_learning_stats?.predicted_keywords_count ?? 0} kw)` : 'not used'}`
+                                    : 'N/A'}
+                                />
                               </div>
                             </td>
                           </tr>

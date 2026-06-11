@@ -18,6 +18,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/generate':  'Generate',
   '/history':   'History',
   '/metrics':   'Metrics',
+  '/learning':  'Learning',
   '/templates': 'Templates',
   '/settings':  'Settings',
   '/docs':      'Documentation',
