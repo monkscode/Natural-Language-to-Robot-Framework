@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 class EmailAlreadyExists(Exception):
-    """Raised by create_user when the email is already registered."""
+    """Raised when the email is already registered (signup or Google sign-in
+    against an existing non-Google account)."""
+
+
+class AccountInactive(Exception):
+    """Raised by get_or_create_google_user when the matched account is disabled."""
 
 
 def hash_password(password: str) -> str:
@@ -97,38 +102,45 @@ class UserRepository:
     def get_or_create_google_user(
         self, google_sub: str, email: str, display_name: str = ""
     ) -> dict:
-        """Find a user by google_sub or email; create one if absent.
+        """Find a user by google_sub; create one if absent.
 
-        If an existing password account shares the email, its google_sub is
-        backfilled (account linking). Always updates last_login.
+        Lookup is by google_sub ONLY — an email match alone is not proof of
+        account ownership, so an existing account with the same email is never
+        auto-linked (raises EmailAlreadyExists; the owner signs in with their
+        password instead). Disabled accounts raise AccountInactive. Updates
+        last_login on success.
         """
         email = email.strip().lower()
         with get_pool().connection() as conn:
             row = conn.execute(
-                "SELECT * FROM users WHERE google_sub = %s OR email = %s",
-                (google_sub, email),
+                "SELECT * FROM users WHERE google_sub = %s",
+                (google_sub,),
             ).fetchone()
             if row:
-                if not row.get("google_sub"):
-                    conn.execute(
-                        "UPDATE users SET google_sub = %s, last_login = now() WHERE id = %s",
-                        (google_sub, row["id"]),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE users SET last_login = now() WHERE id = %s",
-                        (row["id"],),
-                    )
+                if not row.get("is_active"):
+                    raise AccountInactive(email)
+                conn.execute(
+                    "UPDATE users SET last_login = now() WHERE id = %s",
+                    (row["id"],),
+                )
                 conn.commit()
                 return row
-            new_row = conn.execute(
-                """
-                INSERT INTO users (email, display_name, role, auth_provider, google_sub, last_login)
-                VALUES (%s, %s, %s, 'google', %s, now())
-                RETURNING id, email, display_name, role
-                """,
-                (email, display_name, role_for_email(email), google_sub),
-            ).fetchone()
+            if conn.execute(
+                "SELECT 1 FROM users WHERE email = %s", (email,)
+            ).fetchone():
+                raise EmailAlreadyExists(email)
+            try:
+                new_row = conn.execute(
+                    """
+                    INSERT INTO users (email, display_name, role, auth_provider, google_sub, last_login)
+                    VALUES (%s, %s, %s, 'google', %s, now())
+                    RETURNING id, email, display_name, role
+                    """,
+                    (email, display_name, role_for_email(email), google_sub),
+                ).fetchone()
+            except psycopg.errors.UniqueViolation as exc:
+                # Lost a create race with a concurrent signup for the same email.
+                raise EmailAlreadyExists(email) from exc
             conn.commit()
             return new_row
 

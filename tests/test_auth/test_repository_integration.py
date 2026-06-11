@@ -11,7 +11,7 @@ import pytest
 
 from src.backend.core.config import settings
 from src.backend.auth import db as auth_db
-from src.backend.auth.repository import EmailAlreadyExists, UserRepository
+from src.backend.auth.repository import AccountInactive, EmailAlreadyExists, UserRepository
 
 pytestmark = pytest.mark.integration
 
@@ -77,3 +77,26 @@ def test_google_user_create_is_idempotent(repo):
     second = r.get_or_create_google_user(sub, email, "G User")
     assert first["email"] == email
     assert str(second["id"]) == str(first["id"])
+
+
+def test_google_login_never_auto_links_existing_email(repo):
+    """A same-email password account is NOT proof of ownership — no auto-link."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    r.create_user(email, "S3cretpw!")
+    with pytest.raises(EmailAlreadyExists):
+        r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email)
+
+
+def test_google_login_rejects_inactive_account(repo):
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    sub = f"google-{uuid.uuid4().hex}"
+    r.get_or_create_google_user(sub, email, "G User")
+    with auth_db.get_pool().connection() as conn:
+        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
+        conn.commit()
+    with pytest.raises(AccountInactive):
+        r.get_or_create_google_user(sub, email, "G User")

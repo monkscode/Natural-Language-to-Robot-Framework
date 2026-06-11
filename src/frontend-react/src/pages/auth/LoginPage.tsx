@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -37,15 +37,28 @@ function GoogleIcon() {
   )
 }
 
+/** Messages for the ?error= codes the backend OAuth callback redirects with */
+const OAUTH_ERRORS: Record<string, string> = {
+  email_exists:     'An account with this email already exists — sign in with your password.',
+  account_disabled: 'This account has been disabled. Contact an administrator.',
+  email_unverified: 'Your Google email is not verified.',
+  invalid_state:    'Google sign-in expired — please try again.',
+  google_failed:    'Google sign-in failed — please try again.',
+}
+
 /** Login form — matches shadcn login-03 "muted background" template */
 function LoginForm({ className }: { className?: string }) {
   const navigate = useNavigate()
   const { login } = useAuth()
+  const [searchParams] = useSearchParams()
+  const oauthError = searchParams.get('error')
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [showPw, setShowPw]     = useState(false)
   const [loading, setLoading]   = useState(false)
-  const [error, setError]       = useState('')
+  const [error, setError]       = useState(() =>
+    oauthError ? (OAUTH_ERRORS[oauthError] ?? 'Google sign-in failed — please try again.') : ''
+  )
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()

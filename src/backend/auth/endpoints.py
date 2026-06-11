@@ -19,7 +19,7 @@ from pydantic import BaseModel, field_validator
 
 from src.backend.auth import google_oauth
 from src.backend.auth.jwt_utils import create_access_token, get_current_user
-from src.backend.auth.repository import EmailAlreadyExists, UserRepository
+from src.backend.auth.repository import AccountInactive, EmailAlreadyExists, UserRepository
 from src.backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -184,9 +184,14 @@ async def google_callback(request: Request):
     if not email or not profile.get("email_verified", False):
         return _frontend_redirect("/login?error=email_unverified")
 
-    row = _repo.get_or_create_google_user(
-        google_sub=profile["sub"], email=email, display_name=profile.get("name", ""),
-    )
+    try:
+        row = _repo.get_or_create_google_user(
+            google_sub=profile["sub"], email=email, display_name=profile.get("name", ""),
+        )
+    except EmailAlreadyExists:
+        return _frontend_redirect("/login?error=email_exists")
+    except AccountInactive:
+        return _frontend_redirect("/login?error=account_disabled")
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*
