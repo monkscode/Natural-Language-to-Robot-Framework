@@ -93,9 +93,6 @@ class Settings(BaseSettings):
     HINT_TRACE_ENABLED: bool = Field(default=True, description="Capture the per-(workflow,hint) selection/attribution trace (N3 observability); gated by OPTIMIZATION_ENABLED")
     HINT_TRACE_RETENTION_DAYS: int = Field(default=90, description="Days to retain hint_workflow_trace rows; an opportunistic daily prune deletes older rows (0 = keep all)")
     
-    # Learning System Configuration (Adaptive Learning — Phase 1+)
-    EXECUTION_MEMORY_DB: str = Field(default="./data/execution_memory.db", description="Path to execution memory SQLite database for the learning system")
-
     # LLM Observability Configuration (Enhancement #3)
     # OBSERVABILITY_BACKEND controls where OTel traces are exported:
     #   "postgres" — Built-in Postgres trace store (the consolidated DB; default)

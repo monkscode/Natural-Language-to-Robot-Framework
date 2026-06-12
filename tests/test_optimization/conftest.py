@@ -5,8 +5,6 @@ Provides reusable database connections, temporary directories,
 and helper factories used across all test_day*.py files.
 """
 
-import os
-import sqlite3
 import shutil
 import tempfile
 import threading
@@ -15,7 +13,6 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from src.backend.crew_ai.optimization.learning_config import WRITER_THREAD_NAME
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 
 
 @pytest.fixture(autouse=True)
@@ -37,12 +34,12 @@ def _isolate_keyword_store():
 
 
 class _EngineCompatConn:
-    """Satisfies both sqlite3.Connection and ExecutionMemory interfaces.
+    """Satisfies both the raw-connection and execution-store interfaces.
 
     Tests pass this as both a raw connection (via .execute/.commit/.rollback)
-    and as an ExecutionMemory substitute (via ._writer_conn and .read_conn()).
+    and as an execution-store substitute (via ._writer_conn and .read_conn()).
     This lets all 692+ in_memory_db fixture references work without changes
-    while the engines now expect ExecutionMemory, not sqlite3.Connection.
+    while the engines expect the execution store, not a raw connection.
     """
 
     def __init__(self, writer_conn, em):
@@ -199,11 +196,11 @@ def in_memory_em(_pg_test_em, _pg_admin):
 
 @pytest.fixture
 def in_memory_db(in_memory_em):
-    """Fresh database satisfying both sqlite3.Connection and ExecutionMemory interfaces.
+    """Fresh database satisfying both the raw-connection and store interfaces.
 
     Returns an _EngineCompatConn wrapping in_memory_em so that:
     - conn.execute() / .commit() / .rollback() work (sqlite3.Connection API)
-    - conn._writer_conn and conn.read_conn() work (ExecutionMemory API)
+    - conn._writer_conn and conn.read_conn() work (execution-store API)
     """
     return _EngineCompatConn(in_memory_em._writer_conn, in_memory_em)
 
@@ -215,8 +212,3 @@ def tmp_dir():
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
-
-@pytest.fixture
-def tmp_db_path(tmp_dir):
-    """Return a path to a temporary SQLite database file."""
-    return os.path.join(tmp_dir, "test.db")

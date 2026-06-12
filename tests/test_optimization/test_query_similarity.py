@@ -1,24 +1,25 @@
-"""Query-similarity hint filtering — ExecutionMemory layer.
+"""Query-similarity hint filtering — execution-store layer.
 
-Covers the learning_anchors collection, filter_by_query_similarity,
-add_anchor and reconcile_anchors.
+Covers the store-agnostic behaviour (fail-open guards, selection trace,
+holdout, health status) on the Postgres store. The real-similarity behaviour
+(genuine fastembed embeddings on pgvector) lives in test_pgvector_similarity.py.
 See docs/QUERY_SIMILARITY_HINT_INJECTION_PLAN.md.
 """
 
-import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
-from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
 
+from src.backend.crew_ai.optimization import pg_compat
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
 )
+from src.backend.crew_ai.optimization.postgres_execution_memory import (
+    PostgresExecutionMemory,
+)
 from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
-from src.backend.crew_ai.optimization.anti_pattern_engine import AntiPatternEngine
 from src.backend.crew_ai.optimization.feedback_loop import (
     LearningMetricsTracker,
     FeedbackLoop,
@@ -29,27 +30,12 @@ from src.backend.crew_ai.optimization.smart_keyword_provider import (
 
 
 @pytest.fixture
-def em_chroma(tmp_path):
-    """ExecutionMemory backed by a real (temp) ChromaDB so similarity
-    behaviour is exercised against genuine MiniLM embeddings."""
-    em = ExecutionMemory(
-        db_path=str(tmp_path / "qs.db"),
-        chroma_dir=str(tmp_path / "chroma"),
-    )
-    yield em
-    em.close()
-
-
-@pytest.fixture
-def fresh_em(tmp_path):
-    """ExecutionMemory with ChromaDB NOT yet initialized (_chroma_client is
-    None) — the state get_health_status must treat as transient, not FAILED."""
-    em = ExecutionMemory(
-        db_path=str(tmp_path / "fresh.db"),
-        chroma_dir=str(tmp_path / "chroma"),
-    )
-    yield em
-    em.close()
+def fresh_em(in_memory_em):
+    """Store with the embedder NOT yet initialized (_chroma_client is None) —
+    the state get_health_status must treat as transient, not FAILED. The
+    in_memory_em fixture restores the instance __dict__ after each test."""
+    in_memory_em._chroma_client = None
+    return in_memory_em
 
 
 def _make_feedback_loop(em):
@@ -109,18 +95,6 @@ def _insert_nl_hint(em, hint_id, feedback_text, anchor_query,
     em._writer_conn.commit()
 
 
-def _insert_anti(em, anti_id, failure_category, query_pattern,
-                 score=0.5, evidence_count=1):
-    em._writer_conn.execute(
-        "INSERT INTO anti_patterns "
-        "(id, failure_category, query_pattern, score, evidence_count, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (anti_id, failure_category, query_pattern, score, evidence_count,
-         "2026-01-01"),
-    )
-    em._writer_conn.commit()
-
-
 # ===================================================================
 # model_version column round-trip (pure SQLite)
 # ===================================================================
@@ -156,7 +130,7 @@ class TestModelVersionColumn:
         # dedup UPDATE, which must refresh model_version (a current-state
         # field, kept latest like robot_code) — not leave it stale. A domain
         # is required: the dedup match is keyed on (query, domain, status).
-        thr = ExecutionMemory.DEDUPLICATION_THRESHOLD
+        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
         for i in range(thr):
             in_memory_em.store(ExecutionRecord(
                 workflow_id=f"wf-dv-{i}",
@@ -193,7 +167,7 @@ class TestUrlLessDeduplication:
     rows accumulated unbounded. COALESCE(domain,'') in the match fixes it."""
 
     def test_url_less_workflows_deduplicate(self, in_memory_em):
-        thr = ExecutionMemory.DEDUPLICATION_THRESHOLD
+        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
         for i in range(thr + 1):          # thr inserts, then one more
             in_memory_em.store(ExecutionRecord(
                 workflow_id=f"wf-nourl-{i}",
@@ -207,18 +181,6 @@ class TestUrlLessDeduplication:
             "WHERE user_query = 'a query with no url'"
         ).fetchone()[0]
         assert count == thr                # the last store deduped, not inserted
-
-
-# ===================================================================
-# learning_anchors collection
-# ===================================================================
-
-
-class TestLearningAnchorsCollection:
-    def test_collection_is_cosine(self, em_chroma):
-        em_chroma._init_chromadb()
-        assert em_chroma._learning_anchors is not None
-        assert em_chroma._learning_anchors.metadata.get("hnsw:space") == "cosine"
 
 
 # ===================================================================
@@ -240,59 +202,6 @@ class TestFilterBySimilarity:
             "a query", [1, 2, 3], "nl")
         assert result == {1, 2, 3}
 
-    def test_count_zero_with_candidates_fails_open(self, em_chroma):
-        # Fresh learning_anchors is empty → n==0 and count()==0 → fail-open.
-        result = em_chroma.filter_by_query_similarity("some query", [1, 2], "nl")
-        assert result == {1, 2}
-
-    def test_keeps_relevant_drops_irrelevant(self, em_chroma):
-        em_chroma.add_anchor("nl", 1, "log into my account")
-        em_chroma.add_anchor("nl", 2, "search for a laptop under 1000")
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [1, 2], "nl")
-        assert 2 in survivors          # laptop anchor — semantically close
-        assert 1 not in survivors      # login anchor — unrelated, dropped
-
-    def test_missing_anchor_doc_dropped(self, em_chroma):
-        em_chroma.add_anchor("nl", 1, "search for a laptop under 1000")
-        # Candidate 2 has no learning_anchors document.
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop", [1, 2], "nl")
-        assert 2 not in survivors      # fail-closed for the missing doc
-
-    def test_n_results_sized_to_filtered_set(self, em_chroma):
-        # C18: collection count must NOT drive n_results. Pad with anti-kind
-        # docs so count() far exceeds the nl filtered set.
-        em_chroma.add_anchor("nl", 1, "search for a laptop under 1000")
-        em_chroma.add_anchor("nl", 2, "buy a cheap notebook computer")
-        for i in range(1, 6):
-            em_chroma.add_anchor("anti", i, "an unrelated anti pattern note")
-        # count() is now 7; the nl filtered set for [1,2,3] is 2.
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop", [1, 2, 3], "nl")
-        assert 3 not in survivors      # no doc → dropped, NOT fail-open
-        assert survivors <= {1, 2}
-
-    def test_kind_isolation(self, em_chroma):
-        # NL id 5 and anti id 5 are different rows; kind must select correctly.
-        em_chroma.add_anchor("nl", 5, "log into my account")
-        em_chroma.add_anchor("anti", 5, "verify every row has a price")
-        nl_survivors = em_chroma.filter_by_query_similarity(
-            "sign in to my account", [5], "nl")
-        assert nl_survivors == {5}     # resolved the nl anchor (login)
-        anti_survivors = em_chroma.filter_by_query_similarity(
-            "sign in to my account", [5], "anti")
-        assert anti_survivors == set()  # resolved the anti anchor (price) → drop
-
-    def test_query_failure_fails_open(self, em_chroma):
-        em_chroma.add_anchor("nl", 1, "search for a laptop")
-        em_chroma._init_chromadb()
-        with patch.object(em_chroma._learning_anchors, "query",
-                           side_effect=RuntimeError("boom")):
-            result = em_chroma.filter_by_query_similarity(
-                "find a laptop", [1, 2], "nl")
-        assert result == {1, 2}        # fail-open on query exception
-
 
 # ===================================================================
 # filter_by_query_similarity — opt-in score_sink (F1 / N3)
@@ -308,42 +217,6 @@ class TestFilterBySimilarityScoreSink:
     outcome enum: survived / similarity_below / no_anchor / fail_open.
     """
 
-    def test_survivor_set_identical_with_and_without_sink(self, em_chroma):
-        # FR4 guard #1 on a mixed survive/drop case.
-        em_chroma.add_anchor("nl", 1, "log into my account")
-        em_chroma.add_anchor("nl", 2, "search for a laptop under 1000")
-        without = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [1, 2], "nl")
-        sink = {}
-        with_sink = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [1, 2], "nl", score_sink=sink)
-        assert with_sink == without == {2}
-
-    def test_survived_and_similarity_below_recorded(self, em_chroma):
-        em_chroma.add_anchor("nl", 1, "log into my account")
-        em_chroma.add_anchor("nl", 2, "search for a laptop under 1000")
-        sink = {}
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [1, 2], "nl", score_sink=sink)
-        assert survivors == {2}
-        assert sink[2]["outcome"] == "survived"
-        assert sink[2]["sim"] is not None and sink[2]["sim"] >= 0.55
-        assert sink[1]["outcome"] == "similarity_below"
-        assert sink[1]["sim"] is not None and sink[1]["sim"] < 0.55
-
-    def test_no_anchor_recorded_for_missing_doc(self, em_chroma):
-        # Candidate 1 has a doc and matches; candidate 2 has no doc → it never
-        # appears in the query metas, so it keeps the pre-seeded no_anchor.
-        em_chroma.add_anchor("nl", 1, "search for a laptop under 1000")
-        sink = {}
-        without = em_chroma.filter_by_query_similarity(
-            "find me a laptop", [1, 2], "nl")
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop", [1, 2], "nl", score_sink=sink)
-        assert survivors == without
-        assert 2 not in survivors
-        assert sink[2] == {"sim": None, "outcome": "no_anchor"}
-
     def test_fail_open_chroma_unavailable(self, in_memory_em):
         # learning_anchors is None (sentinel) → fail-open: all survive.
         without = in_memory_em.filter_by_query_similarity(
@@ -355,140 +228,6 @@ class TestFilterBySimilarityScoreSink:
         assert all(sink[i] == {"sim": None, "outcome": "fail_open"}
                    for i in (1, 2, 3))
 
-    def test_fail_open_whole_store_empty(self, em_chroma):
-        # n==0 AND count()==0 → fail-open (store empty), NOT no_anchor.
-        sink = {}
-        survivors = em_chroma.filter_by_query_similarity(
-            "some query", [1, 2], "nl", score_sink=sink)
-        assert survivors == {1, 2}
-        assert all(sink[i] == {"sim": None, "outcome": "fail_open"}
-                   for i in (1, 2))
-
-    def test_un_reconciled_keeps_no_anchor(self, em_chroma):
-        # n==0 but count()>0 (only other-kind docs exist) → fail-CLOSED drop;
-        # candidates keep the pre-seeded no_anchor (must NOT become fail_open).
-        for i in range(1, 6):
-            em_chroma.add_anchor("anti", i, "an unrelated anti pattern note")
-        sink = {}
-        survivors = em_chroma.filter_by_query_similarity(
-            "find a laptop", [1, 2], "nl", score_sink=sink)
-        assert survivors == set()
-        assert all(sink[i] == {"sim": None, "outcome": "no_anchor"}
-                   for i in (1, 2))
-
-    def test_fail_open_on_query_exception(self, em_chroma):
-        em_chroma.add_anchor("nl", 1, "search for a laptop")
-        em_chroma._init_chromadb()
-        sink = {}
-        with patch.object(em_chroma._learning_anchors, "query",
-                          side_effect=RuntimeError("boom")):
-            survivors = em_chroma.filter_by_query_similarity(
-                "find a laptop", [1, 2], "nl", score_sink=sink)
-        assert survivors == {1, 2}
-        assert all(sink[i] == {"sim": None, "outcome": "fail_open"}
-                   for i in (1, 2))
-
-    def test_empty_query_leaves_sink_untouched(self, em_chroma):
-        # Pre-seed happens AFTER the empty-guard → an empty/whitespace query
-        # records nothing (nothing was evaluated).
-        sink = {}
-        assert em_chroma.filter_by_query_similarity(
-            "", [1, 2], "nl", score_sink=sink) == set()
-        assert em_chroma.filter_by_query_similarity(
-            "   ", [1, 2], "nl", score_sink=sink) == set()
-        assert sink == {}
-
-    def test_empty_candidates_leaves_sink_untouched(self, em_chroma):
-        sink = {}
-        assert em_chroma.filter_by_query_similarity(
-            "a query", [], "nl", score_sink=sink) == set()
-        assert sink == {}
-
-    def test_corrupt_anchor_record_id_skipped(self, em_chroma):
-        # edge #3: a meta row missing record_id is skipped (meta.get + continue),
-        # not a KeyError crash. The candidate keeps its pre-seeded no_anchor.
-        em_chroma.add_anchor("nl", 1, "search for a laptop under 1000")
-        em_chroma._init_chromadb()
-        fake = {"metadatas": [[{"kind": "nl"}]], "distances": [[0.1]]}
-        sink = {}
-        with patch.object(em_chroma._learning_anchors, "query",
-                          return_value=fake):
-            survivors = em_chroma.filter_by_query_similarity(
-                "find me a laptop", [1], "nl", score_sink=sink)
-        assert survivors == set()        # no record_id → skipped, not crashed
-        assert sink[1] == {"sim": None, "outcome": "no_anchor"}
-
-    def test_duplicate_candidate_ids_fail_open(self, em_chroma):
-        # corner #6 (CORRECTED vs the design doc, verified against live Chroma):
-        # real ChromaDB rejects duplicate ids in get() ("Expected IDs to be
-        # unique"), so a candidate list with dups hits the fail-open path — the
-        # unique ids survive, marked fail_open (NOT "dict+set dedup → survived"
-        # as the audit claimed). Pre-existing behavior; F1 only adds the
-        # annotation. Production passes distinct SQL PKs, so this never fires.
-        em_chroma.add_anchor("nl", 2, "search for a laptop under 1000")
-        without = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [2, 2], "nl")
-        sink = {}
-        survivors = em_chroma.filter_by_query_similarity(
-            "find me a laptop to buy", [2, 2], "nl", score_sink=sink)
-        assert survivors == without == {2}
-        assert sink == {2: {"sim": None, "outcome": "fail_open"}}
-
-
-# ===================================================================
-# reconcile_anchors
-# ===================================================================
-
-
-class TestReconcileAnchors:
-    def test_populates_on_first_run(self, em_chroma):
-        _insert_nl_hint(em_chroma, 1, "use X not Y", "log into my account")
-        _insert_nl_hint(em_chroma, 2, "wait for spinner", "add an item to cart")
-        _insert_anti(em_chroma, 1, "C1", "verify all rows have prices")
-        result = em_chroma.reconcile_anchors()
-        assert result["checked"] == 3
-        assert result["missing_count"] == 0
-        ids = set(em_chroma._learning_anchors.get(include=[])["ids"])
-        assert ids == {"nl:1", "nl:2", "anti:1"}
-
-    def test_idempotent(self, em_chroma):
-        _insert_nl_hint(em_chroma, 1, "h", "log into my account")
-        em_chroma.reconcile_anchors()
-        result2 = em_chroma.reconcile_anchors()
-        assert result2["checked"] == 1
-        assert result2["missing_count"] == 0
-        assert em_chroma._learning_anchors.count() == 1
-
-    def test_heals_missing_doc(self, em_chroma):
-        _insert_nl_hint(em_chroma, 1, "h1", "log into my account")
-        _insert_nl_hint(em_chroma, 2, "h2", "search for a laptop")
-        em_chroma.reconcile_anchors()
-        em_chroma._learning_anchors.delete(ids=["nl:1"])
-        assert em_chroma._learning_anchors.count() == 1
-        result = em_chroma.reconcile_anchors()
-        assert result["missing_count"] == 0
-        assert em_chroma._learning_anchors.count() == 2
-
-    def test_skips_null_anchor_rows(self, em_chroma):
-        _insert_nl_hint(em_chroma, 1, "good", "log into my account")
-        em_chroma._writer_conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(id, feedback_text, anchor_query, created_at, last_seen) "
-            "VALUES (2, 'bad', NULL, '2026-01-01', '2026-01-01')"
-        )
-        em_chroma._writer_conn.commit()
-        result = em_chroma.reconcile_anchors()
-        assert result["checked"] == 1   # only the row with a real anchor
-        assert result["missing_count"] == 0
-        ids = set(em_chroma._learning_anchors.get(include=[])["ids"])
-        assert ids == {"nl:1"}
-
-    def test_returns_ran_at_timestamp(self, em_chroma):
-        result = em_chroma.reconcile_anchors()
-        assert "ran_at" in result and isinstance(result["ran_at"], str)
-        assert result["checked"] == 0   # empty DB
-        assert result["missing_count"] == 0
-
 
 # ===================================================================
 # Bank 1 — NLFeedbackEngine.get_hints_with_ids similarity filter
@@ -496,41 +235,6 @@ class TestReconcileAnchors:
 
 
 class TestBank1Retrieval:
-    def test_empty_query_returns_empty(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "a hint", "some anchor query")
-        em_chroma.reconcile_anchors()
-        assert eng.get_hints_with_ids("", "http://x.com", "planner") == ([], [])
-        assert eng.get_hints_with_ids("  ", "http://x.com", "planner") == ([], [])
-
-    def test_keeps_relevant_hint(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "use Get Element Count for counting",
-                        "count the number of products on the page")
-        em_chroma.reconcile_anchors()
-        hints, ids = eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner")
-        assert ids == [1]
-        assert len(hints) == 1
-
-    def test_drops_irrelevant_hint(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "click Sign In not Sign Up",
-                        "log into my account")
-        em_chroma.reconcile_anchors()
-        hints, ids = eng.get_hints_with_ids(
-            "search for laptops and verify the count", "http://x.com", "planner")
-        assert hints == [] and ids == []
-
-    def test_filter_applies_to_global_scope(self, em_chroma):
-        # A global-scope hint is NOT exempt from the similarity filter.
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "click the cookie banner first",
-                        "accept cookies on first visit", scope="global")
-        em_chroma.reconcile_anchors()
-        hints, ids = eng.get_hints_with_ids(
-            "filter products by price and sort them", "http://x.com", "planner")
-        assert hints == [] and ids == []
 
     def test_chroma_unavailable_fails_open_to_scope_only(self, in_memory_em):
         # ChromaDB down → similarity filter fails open → scope-only behaviour.
@@ -552,84 +256,6 @@ class TestBank1SelectionTrace:
     dict. The returned (hints, ids) stay byte-identical with or without it.
     Stage 5 (holdout / outer cap / injected) is overlaid later by the provider.
     """
-
-    def test_trace_none_is_noop(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "use Get Element Count for counting",
-                        "count the number of products on the page")
-        em_chroma.reconcile_anchors()
-        hints, ids = eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner")
-        assert ids == [1]          # unchanged behaviour, no trace requested
-
-    def test_returned_ids_identical_with_and_without_trace(self, em_chroma):
-        # The load-bearing guard: a populated trace never changes (hints, ids).
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "use Get Element Count for counting",
-                        "count the number of products on the page")
-        _insert_nl_hint(em_chroma, 2, "click Sign In not Sign Up",
-                        "log into my account")
-        em_chroma.reconcile_anchors()
-        h0, i0 = eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner")
-        trace = {}
-        h1, i1 = eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner",
-            selection_trace=trace)
-        assert (h1, i1) == (h0, i0)
-
-    def test_survived_hint_available_with_real_sim(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "use Get Element Count for counting",
-                        "count the number of products on the page",
-                        scope="global")
-        em_chroma.reconcile_anchors()
-        trace = {}
-        eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner",
-            selection_trace=trace)
-        assert trace[1]["available"] == 1
-        assert trace[1]["injected"] == 0            # stage 5 not applied here
-        assert trace[1]["drop_reason"] is None
-        assert trace[1]["source"] == "nl"
-        assert trace[1]["priority"] == "high"
-        assert trace[1]["scope"] == "global"
-        assert trace[1]["similarity_score"] is not None
-        assert trace[1]["similarity_score"] >= 0.55
-
-    def test_similarity_below_recorded(self, em_chroma):
-        # Single irrelevant hint → dropped at similarity → no survivors path,
-        # but the trace still records it (the "why wasn't it used" answer).
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "click Sign In not Sign Up",
-                        "log into my account")
-        em_chroma.reconcile_anchors()
-        trace = {}
-        hints, ids = eng.get_hints_with_ids(
-            "search for laptops and verify the count", "http://x.com",
-            "planner", selection_trace=trace)
-        assert ids == []
-        assert trace[1]["available"] == 0
-        assert trace[1]["drop_reason"] == "similarity_below"
-        assert trace[1]["similarity_score"] is not None
-
-    def test_no_anchor_recorded(self, em_chroma):
-        # id 1 has a row but no learning_anchors doc; id 2 keeps its doc so the
-        # store is non-empty (count>0) → id 1 is no_anchor, not fail-open.
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "hint one needs no doc",
-                        "count the products on the page")
-        _insert_nl_hint(em_chroma, 2, "hint two keeps its doc",
-                        "count the products on the page")
-        em_chroma.reconcile_anchors()
-        em_chroma._learning_anchors.delete(ids=["nl:1"])     # drop id 1's doc
-        trace = {}
-        eng.get_hints_with_ids(
-            "how many products are on the page", "http://x.com", "planner",
-            selection_trace=trace)
-        assert trace[1]["drop_reason"] == "no_anchor"
-        assert trace[1]["similarity_score"] is None
-        assert trace[1]["available"] == 0
 
     def test_dedup_recorded(self, in_memory_em):
         # ChromaDB unavailable → similarity fails open (both survive); the two
@@ -682,184 +308,6 @@ class TestBank1SelectionTrace:
         assert trace[1]["available"] == 1
         assert trace[1]["drop_reason"] is None
         assert trace[1]["similarity_score"] is None  # fail-open
-
-    def test_empty_query_leaves_trace_empty(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        _insert_nl_hint(em_chroma, 1, "h", "an anchor query")
-        em_chroma.reconcile_anchors()
-        trace = {}
-        eng.get_hints_with_ids("", "http://x.com", "planner",
-                               selection_trace=trace)
-        assert trace == {}                           # nothing evaluated
-
-
-# ===================================================================
-# Bank 1 — learn_from_feedback anchor write
-# ===================================================================
-
-
-class TestLearnFromFeedbackAnchor:
-    def test_new_hint_stores_anchor_and_doc(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        record = SimpleNamespace(
-            workflow_id="wf-1",
-            user_query="add a laptop to my cart",
-            domain="amazon.com",
-            url="https://amazon.com/x",
-            failure_category=None,
-        )
-        eng.learn_from_feedback(
-            record,
-            {"feedback_text": "wait for the spinner before clicking",
-             "category": "timing"},
-        )
-        row = em_chroma._writer_conn.execute(
-            "SELECT id, anchor_query FROM nl_feedback_corrections "
-            "WHERE feedback_text LIKE 'wait for the spinner%'"
-        ).fetchone()
-        assert row["anchor_query"] == "add a laptop to my cart"
-        doc_ids = set(em_chroma._learning_anchors.get(include=[])["ids"])
-        assert f"nl:{row['id']}" in doc_ids
-
-    def test_reinforced_hint_keeps_original_anchor(self, em_chroma):
-        eng = NLFeedbackEngine(em_chroma)
-        insight = {"feedback_text": "some correction text", "category": "timing"}
-        eng.learn_from_feedback(
-            SimpleNamespace(workflow_id="wf-1", user_query="the first query",
-                            domain="x.com", url="https://x.com",
-                            failure_category=None),
-            insight,
-        )
-        # Same feedback_text + domain + scope → UPSERT (reinforcement).
-        eng.learn_from_feedback(
-            SimpleNamespace(workflow_id="wf-2", user_query="a totally different query",
-                            domain="x.com", url="https://x.com",
-                            failure_category=None),
-            insight,
-        )
-        rows = em_chroma._writer_conn.execute(
-            "SELECT anchor_query, evidence_count FROM nl_feedback_corrections "
-            "WHERE feedback_text LIKE 'some correction%'"
-        ).fetchall()
-        assert len(rows) == 1                         # deduped via UPSERT
-        assert rows[0]["evidence_count"] == 2
-        assert rows[0]["anchor_query"] == "the first query"   # anchor frozen
-
-
-# ===================================================================
-# Bank 2 — AntiPatternEngine._find_matching_anti_patterns similarity filter
-# ===================================================================
-
-
-class TestBank2Retrieval:
-    def test_empty_query_returns_empty(self, em_chroma):
-        eng = AntiPatternEngine(em_chroma)
-        _insert_anti(em_chroma, 1, "C1", "verify products have prices",
-                     score=0.6, evidence_count=5)
-        em_chroma.reconcile_anchors()
-        assert eng._find_matching_anti_patterns("") == []
-        assert eng._find_matching_anti_patterns("   ") == []
-
-    def test_semantic_match(self, em_chroma):
-        eng = AntiPatternEngine(em_chroma)
-        _insert_anti(em_chroma, 1, "C1",
-                     "verify every product on the page has a price",
-                     score=0.6, evidence_count=5)
-        em_chroma.reconcile_anchors()
-        matches = eng._find_matching_anti_patterns(
-            "check that all products on the page show their prices")
-        assert [m["id"] for m in matches] == [1]
-
-    def test_drops_unrelated(self, em_chroma):
-        eng = AntiPatternEngine(em_chroma)
-        _insert_anti(em_chroma, 1, "C1",
-                     "verify every product on the page has a price",
-                     score=0.6, evidence_count=5)
-        em_chroma.reconcile_anchors()
-        matches = eng._find_matching_anti_patterns(
-            "log in and open the account settings page")
-        assert matches == []
-
-    def test_score_evidence_gate_runs_before_filter(self, em_chroma):
-        # evidence_count below the gate → row never reaches the filter.
-        eng = AntiPatternEngine(em_chroma)
-        _insert_anti(em_chroma, 1, "C1",
-                     "verify every product on the page has a price",
-                     score=0.6, evidence_count=2)
-        em_chroma.reconcile_anchors()
-        matches = eng._find_matching_anti_patterns(
-            "check that all products on the page show their prices")
-        assert matches == []
-
-
-# ===================================================================
-# Bank 2 — learn() anti-pattern anchor write
-# ===================================================================
-
-
-class TestBank2LearnAnchor:
-    def test_learn_creates_anti_pattern_anchor(self, em_chroma):
-        eng = AntiPatternEngine(em_chroma)
-        failing = SimpleNamespace(
-            test_status="failed",
-            failure_category="C1",
-            error_message="element not found: .price",
-            user_query="get the price of every product",
-            robot_code="Get Text    css=.price",
-            failed_keyword="Get Text",
-            domain="shop.com",
-        )
-        eng.learn(failing)
-        row = em_chroma._writer_conn.execute(
-            "SELECT id, query_pattern FROM anti_patterns "
-            "WHERE failure_category = 'C1'"
-        ).fetchone()
-        assert row["query_pattern"] == "get the price of every product"
-        doc_ids = set(em_chroma._learning_anchors.get(include=[])["ids"])
-        assert f"anti:{row['id']}" in doc_ids
-
-    def test_learn_reinforce_keeps_single_anchor(self, em_chroma):
-        eng = AntiPatternEngine(em_chroma)
-        common = dict(test_status="failed", failure_category="C1",
-                      error_message="err", robot_code="X",
-                      failed_keyword=None, domain=None)
-        eng.learn(SimpleNamespace(
-            user_query="get the price of every single product item", **common))
-        eng.learn(SimpleNamespace(
-            user_query="get the price of every single product now", **common))
-        rows = em_chroma._writer_conn.execute(
-            "SELECT id, evidence_count FROM anti_patterns"
-        ).fetchall()
-        assert len(rows) == 1                       # merged, not duplicated
-        assert rows[0]["evidence_count"] == 2
-        # The merge branch must not add a second anchor doc.
-        doc_ids = set(em_chroma._learning_anchors.get(include=[])["ids"])
-        assert doc_ids == {f"anti:{rows[0]['id']}"}
-
-    def test_check_for_correct_alternative_semantic(self, em_chroma):
-        # PASS-path still backfills correct_alternative under semantic matching.
-        eng = AntiPatternEngine(em_chroma)
-        em_chroma._writer_conn.execute(
-            "INSERT INTO anti_patterns "
-            "(id, failure_category, query_pattern, bad_code_snippet, "
-            " error_message, score, evidence_count, last_seen) "
-            "VALUES (1, 'C1', 'verify every product on the page has a price', "
-            "'Get Text    css=.bad', 'element not found', 0.6, 5, '2026-01-01')"
-        )
-        em_chroma._writer_conn.commit()
-        em_chroma.reconcile_anchors()
-        passing = SimpleNamespace(
-            test_status="passed",
-            user_query="check that all products on the page show their prices",
-            robot_code="Get Element Count    css=.good",
-            domain=None, failure_category=None, failed_keyword=None,
-        )
-        eng.learn(passing)
-        row = em_chroma._writer_conn.execute(
-            "SELECT correct_alternative FROM anti_patterns WHERE id = 1"
-        ).fetchone()
-        assert row["correct_alternative"] is not None
-        assert "Get Element Count" in row["correct_alternative"]
 
 
 # ===================================================================
@@ -1003,7 +451,7 @@ class TestHealthStatus:
     def test_chromadb_init_failed_is_failed(self, fresh_em):
         fl = _make_feedback_loop(fresh_em)
         fl.execution_memory._chroma_client = (
-            ExecutionMemory._CHROMADB_INIT_FAILED
+            PostgresExecutionMemory._CHROMADB_INIT_FAILED
         )
         assert fl.get_health_status() == "FAILED"
 
@@ -1465,12 +913,11 @@ class TestLearningEndpoints:
             create_hint(req, fb=MagicMock())
         assert exc.value.status_code == 400
 
-    def test_create_hint_stores_anchor_and_enqueues(self, tmp_path):
+    def test_create_hint_stores_anchor_and_enqueues(self, in_memory_em):
         from src.backend.api.learning_endpoints import (
             HintCreateRequest, create_hint,
         )
-        db_path = str(tmp_path / "admin.db")
-        em = ExecutionMemory(db_path=db_path)          # migrates to v11
+        em = in_memory_em
         fb = MagicMock()
         fb.execution_memory = em
         req = HintCreateRequest(
@@ -1478,10 +925,8 @@ class TestLearningEndpoints:
             anchor_query="verify the product list loads after filtering",
             scope="global", run_triage=False, actor="admin",
         )
-        test_conn = sqlite3.connect(db_path)
-        test_conn.row_factory = sqlite3.Row
         with patch("src.backend.api.learning_endpoints._admin_conn",
-                   return_value=test_conn):
+                   side_effect=lambda: pg_compat.connect(em.dsn)):
             result = create_hint(req, fb=fb)
         assert result["created"] is True
         assert result["hint"]["anchor_query"] == (
@@ -1492,7 +937,6 @@ class TestLearningEndpoints:
             c.args and c.args[0] == em.add_anchor
             for c in fb.write_queue.submit.call_args_list
         )
-        em.close()
 
     def test_health_endpoint_none_fb_optimization_on_is_failed(self):
         from src.backend.api import learning_endpoints

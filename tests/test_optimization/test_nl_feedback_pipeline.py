@@ -17,7 +17,6 @@ from typing import Optional
 import pytest
 
 from tests.test_optimization import pg_introspect
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.nl_feedback_engine import (
     NLFeedbackEngine,
     _SCOPE_BY_CATEGORY,
@@ -34,7 +33,6 @@ from src.backend.crew_ai.optimization.feedback_loop import (
     FeedbackLoop,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
 )
 
@@ -97,22 +95,12 @@ class FakeRecord:
 
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 def _insert_hint(conn, text, scope="global", domain=None, url=None,

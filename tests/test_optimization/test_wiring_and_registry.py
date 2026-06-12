@@ -13,7 +13,6 @@ from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 
 
 # ===================================================================
@@ -582,9 +581,11 @@ class TestIntegrationSmoke:
 class TestRegression:
 
     def test_day01_import(self):
-        """ExecutionMemory should still import."""
-        from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
-        assert ExecutionMemory is not None
+        """The execution store should still import."""
+        from src.backend.crew_ai.optimization.postgres_execution_memory import (
+            PostgresExecutionMemory,
+        )
+        assert PostgresExecutionMemory is not None
 
     def test_day02_import(self):
         """FailureAnalyzer should still import."""

@@ -12,25 +12,24 @@ All tests marked with @pytest.mark.performance.
 Timing assertions are preserved.
 """
 
-import os
 import time
-import sqlite3
 import threading
 from datetime import datetime
 from dataclasses import dataclass
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
+from src.backend.crew_ai.optimization import pg_compat
 from src.backend.crew_ai.optimization.learning_config import (
-    LEARNING_CONFIG,
     LearningCircuitBreaker,
     LearningWriteQueue,
     WRITER_THREAD_NAME,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
+)
+from src.backend.crew_ai.optimization.postgres_execution_memory import (
+    PostgresExecutionMemory,
 )
 from src.backend.crew_ai.optimization.structural_rule_engine import (
     IntentExtractor,
@@ -54,22 +53,12 @@ from src.backend.crew_ai.optimization.feedback_loop import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 class SynchronousWriteQueue:
@@ -360,50 +349,44 @@ def test_perf_write_queue_ordering():
 
 
 @pytest.mark.performance
-def test_perf_process_execution_with_async_queue(tmp_db_path):
+def test_perf_process_execution_with_async_queue(in_memory_em):
     """FeedbackLoop with real LearningWriteQueue works end-to-end.
 
-    Uses a file-based temp DB with check_same_thread=False because
-    LearningWriteQueue submits work to a background thread, and
-    in-memory SQLite connections cannot be shared across threads.
+    Uses the Postgres store: LearningWriteQueue submits work to its background
+    writer thread, which drains into the store's single writer connection.
     """
-    em = ExecutionMemory(db_path=tmp_db_path)
-    try:
-        ie = IntentExtractor(em)
-        se = StructuralRuleEngine(em, ie)
-        ke = KeywordCorrectionEngine(em)
-        ae = AntiPatternEngine(em)
-        mt = LearningMetricsTracker(em)
-        cd = ContradictionDetector(em)
-        wq = LearningWriteQueue()  # Real async queue
-        cb = LearningCircuitBreaker()
-        fa = MockFailureAnalyzer()
-        fl = FeedbackLoop(
-            execution_memory=em, failure_analyzer=fa,
-            structural_engine=se, keyword_engine=ke,
-            anti_pattern_engine=ae, metrics_tracker=mt,
-            contradiction_detector=cd, write_queue=wq,
-            circuit_breaker=cb,
-        )
+    em = in_memory_em
+    ie = IntentExtractor(em)
+    se = StructuralRuleEngine(em, ie)
+    ke = KeywordCorrectionEngine(em)
+    ae = AntiPatternEngine(em)
+    mt = LearningMetricsTracker(em)
+    cd = ContradictionDetector(em)
+    wq = LearningWriteQueue()  # Real async queue
+    cb = LearningCircuitBreaker()
+    fa = MockFailureAnalyzer()
+    fl = FeedbackLoop(
+        execution_memory=em, failure_analyzer=fa,
+        structural_engine=se, keyword_engine=ke,
+        anti_pattern_engine=ae, metrics_tracker=mt,
+        contradiction_detector=cd, write_queue=wq,
+        circuit_breaker=cb,
+    )
 
-        start = time.perf_counter()
-        fl.process_execution(
-            workflow_id="async-001",
-            user_query="click button",
-            url="https://example.com",
-            robot_code="*** Test Cases ***\nTest\n    Click    id=btn",
-            test_status="passed",
-        )
-        call_ms = (time.perf_counter() - start) * 1000
+    fl.process_execution(
+        workflow_id="async-001",
+        user_query="click button",
+        url="https://example.com",
+        robot_code="*** Test Cases ***\nTest\n    Click    id=btn",
+        test_status="passed",
+    )
 
-        # Wait for background writes to complete
-        time.sleep(1.5)
-        record = em.get("async-001")
-        assert record is not None, (
-            "Record should be stored after async queue drains"
-        )
-    finally:
-        em.close()
+    # Wait for background writes to complete
+    time.sleep(1.5)
+    record = em.get("async-001")
+    assert record is not None, (
+        "Record should be stored after async queue drains"
+    )
 
 
 # ===================================================================
@@ -411,19 +394,14 @@ def test_perf_process_execution_with_async_queue(tmp_db_path):
 # ===================================================================
 
 @pytest.mark.performance
-def test_concurrent_sqlite_writes(tmp_db_path):
-    """5 threads writing execution records concurrently — no database locked errors.
+def test_concurrent_postgres_writes(in_memory_em):
+    """5 threads writing execution records concurrently - no lock errors.
 
-    Verifies that SQLite WAL mode + busy_timeout handles 5 concurrent writers,
-    each inserting 10 records for a total of 50 records.
+    Verifies Postgres MVCC handles 5 concurrent writers, each with its own
+    connection, inserting 10 records apiece for a total of 50 records (the
+    concurrency the old SQLite WAL + busy_timeout setup covered).
     """
-    conn = sqlite3.connect(tmp_db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    SchemaManager.ensure_current(conn)
-    conn.close()
-
+    dsn = in_memory_em.dsn
     errors = []
     records_per_thread = 10
     num_threads = 5
@@ -431,10 +409,7 @@ def test_concurrent_sqlite_writes(tmp_db_path):
     def writer(thread_id):
         try:
             # Each thread gets its own connection (simulates separate users)
-            tc = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            tc.row_factory = sqlite3.Row
-            tc.execute("PRAGMA journal_mode=WAL")
-            tc.execute("PRAGMA busy_timeout=5000")
+            tc = pg_compat.connect(dsn)
 
             for i in range(records_per_thread):
                 wf_id = f"concurrent-t{thread_id}-{i}"
@@ -465,7 +440,7 @@ def test_concurrent_sqlite_writes(tmp_db_path):
     assert len(errors) == 0, f"Concurrent write errors: {errors}"
 
     # Verify all records were written
-    verify_conn = sqlite3.connect(tmp_db_path)
+    verify_conn = pg_compat.connect(dsn)
     count = verify_conn.execute("SELECT COUNT(*) FROM execution_records").fetchone()[0]
     verify_conn.close()
 
@@ -476,19 +451,16 @@ def test_concurrent_sqlite_writes(tmp_db_path):
 
 
 @pytest.mark.performance
-def test_concurrent_read_write(tmp_db_path):
-    """Concurrent readers and writers — readers never blocked by writers in WAL mode.
+def test_concurrent_read_write(in_memory_em):
+    """Concurrent readers and writers - readers never blocked by writers.
 
     3 writer threads + 2 reader threads operating simultaneously. Readers
-    should always get consistent snapshots via WAL's snapshot isolation.
+    should always get consistent snapshots via Postgres MVCC.
     """
-    conn = sqlite3.connect(tmp_db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    SchemaManager.ensure_current(conn)
+    dsn = in_memory_em.dsn
 
     # Seed with initial records
+    conn = pg_compat.connect(dsn)
     for i in range(5):
         conn.execute("""
             INSERT INTO execution_records (
@@ -504,9 +476,7 @@ def test_concurrent_read_write(tmp_db_path):
 
     def writer(thread_id):
         try:
-            tc = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            tc.execute("PRAGMA journal_mode=WAL")
-            tc.execute("PRAGMA busy_timeout=5000")
+            tc = pg_compat.connect(dsn)
 
             for i in range(10):
                 tc.execute("""
@@ -528,10 +498,7 @@ def test_concurrent_read_write(tmp_db_path):
 
     def reader(thread_id):
         try:
-            tc = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            tc.row_factory = sqlite3.Row
-            tc.execute("PRAGMA journal_mode=WAL")
-            tc.execute("PRAGMA busy_timeout=5000")
+            tc = pg_compat.connect(dsn, autocommit=True)
 
             for _ in range(20):
                 count = tc.execute(
@@ -563,15 +530,20 @@ def test_concurrent_read_write(tmp_db_path):
 
 
 @pytest.mark.performance
-def test_concurrent_engine_learns(tmp_db_path):
+def test_concurrent_engine_learns(in_memory_em):
     """5 concurrent FeedbackLoop.process_execution calls via write queues.
 
-    Each thread creates its own FeedbackLoop with a shared file-based DB,
-    simulating 5 users submitting test results simultaneously.
+    Each user thread runs its own FeedbackLoop on its own store instance
+    (its own writer connection) against the same Postgres schema, simulating
+    5 users submitting test results simultaneously.
     """
-    # Initialize schema + WAL then close so threads open fresh connections.
-    _init_em = ExecutionMemory(db_path=tmp_db_path)
-    _init_em.close()
+    # Construct the per-user stores sequentially: ensure_schema in __init__ is
+    # idempotent but CREATE IF NOT EXISTS races under concurrent bootstrap.
+    stores = []
+    for _ in range(5):
+        em = PostgresExecutionMemory(dsn=in_memory_em.dsn)
+        em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
+        stores.append(em)
 
     errors = []
 
@@ -579,8 +551,8 @@ def test_concurrent_engine_learns(tmp_db_path):
         try:
             # Rename to writer name so _assert_writer_thread passes for this user.
             threading.current_thread().name = WRITER_THREAD_NAME
-            # Each user gets their own ExecutionMemory (its own _writer_conn).
-            em = ExecutionMemory(db_path=tmp_db_path)
+            # Each user has their own store (its own _writer_conn).
+            em = stores[user_id]
             ie = IntentExtractor(em)
             se = StructuralRuleEngine(em, ie)
             ke = KeywordCorrectionEngine(em)
@@ -612,21 +584,26 @@ def test_concurrent_engine_learns(tmp_db_path):
                     ),
                     test_status="passed" if i % 2 == 0 else "failed",
                 )
-
-            em.close()
         except Exception as e:
             errors.append(f"User {user_id}: {e}")
 
-    threads = [threading.Thread(target=user_thread, args=(u,)) for u in range(5)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
+    try:
+        threads = [threading.Thread(target=user_thread, args=(u,)) for u in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+    finally:
+        for em in stores:
+            try:
+                em.close()
+            except Exception:
+                pass
 
     assert len(errors) == 0, f"Concurrent engine errors: {errors}"
 
     # Verify records were written
-    verify_conn = sqlite3.connect(tmp_db_path)
+    verify_conn = pg_compat.connect(in_memory_em.dsn)
     count = verify_conn.execute("SELECT COUNT(*) FROM execution_records").fetchone()[0]
     verify_conn.close()
 

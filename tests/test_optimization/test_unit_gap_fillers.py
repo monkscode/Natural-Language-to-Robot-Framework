@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
@@ -28,7 +27,6 @@ from src.backend.crew_ai.optimization.learning_config import (
     EffectivenessScore,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
 )
 from src.backend.core.url_utils import extract_domain
@@ -61,22 +59,12 @@ from src.backend.crew_ai.optimization.nl_feedback_engine import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 class SynchronousWriteQueue:

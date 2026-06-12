@@ -10,9 +10,11 @@ Public API — symbols used by crew.py and workflow_service.py:
 - AgentContextResult: Return type of SmartKeywordProvider.get_context()
 - ContextPruner: Category-based context classification
 
-Internal symbols (ExecutionMemory, FailureAnalyzer, engines, etc.) are
-not re-exported here. Import them directly from their modules if needed:
-    from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
+Internal symbols (PostgresExecutionMemory, FailureAnalyzer, engines, etc.)
+are not re-exported here. Import them directly from their modules if needed:
+    from src.backend.crew_ai.optimization.postgres_execution_memory import (
+        PostgresExecutionMemory,
+    )
 """
 
 from .keyword_vector_store import KeywordVectorStore, get_keyword_vector_store

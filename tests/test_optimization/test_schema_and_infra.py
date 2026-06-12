@@ -6,18 +6,12 @@ Uses pytest fixtures from conftest.py for database and temporary directory manag
 """
 
 import sqlite3
-import os
-import shutil
 import threading
 import time
 
 import pytest
 
 from tests.test_optimization import pg_introspect
-from src.backend.crew_ai.optimization.schema_manager import (
-    SchemaManager,
-    SCHEMA_MIGRATIONS,
-)
 from src.backend.crew_ai.optimization.learning_config import (
     EffectivenessScore,
     LearningCircuitBreaker,
@@ -27,25 +21,8 @@ from src.backend.crew_ai.optimization.learning_config import (
 )
 
 
-class TestSchemaManager:
+class TestSchema:
     """Verify schema creation and structure."""
-
-    def test_schema_created_successfully(self, tmp_db_path):
-        conn = sqlite3.connect(tmp_db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 1, f"Schema created successfully: version={version}"
-        conn.close()
-
-    def test_wal_mode_enabled(self, tmp_db_path):
-        conn = sqlite3.connect(tmp_db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        SchemaManager.ensure_current(conn)
-        journal = conn.execute("PRAGMA journal_mode").fetchone()
-        assert journal[0] == "wal", f"WAL mode enabled: mode={journal[0]}"
-        conn.close()
 
     def test_all_tables_exist(self, in_memory_db):
         expected_tables = {
@@ -87,13 +64,6 @@ class TestSchemaManager:
         assert row is not None and row[0] == SCHEMA_VERSION, (
             f"schema_version records v{SCHEMA_VERSION}: "
             + (f"desc='{row[1]}'" if row else "NOT FOUND")
-        )
-
-    def test_ensure_current_is_idempotent(self, in_memory_db):
-        version2 = SchemaManager.ensure_current(in_memory_db)
-        assert version2 >= 1, (
-            f"SchemaManager.ensure_current() is idempotent: "
-            f"version after 2nd call={version2}"
         )
 
     def test_no_invalid_indexes(self, in_memory_db):
@@ -292,51 +262,8 @@ class TestLearningEngine:
         assert hints == ["test hint"], "LearningEngine concrete implementation works"
 
 
-class TestMigrationScript:
-    """Verify migration script backup/rollback logic."""
-
-    def test_backup_and_rollback(self, tmp_dir):
-        # Create a fake old DB
-        fake_old = os.path.join(tmp_dir, "fake_pattern_learning.db")
-        conn = sqlite3.connect(fake_old)
-        conn.execute(
-            "CREATE TABLE keyword_stats "
-            "(keyword_name TEXT, usage_count INTEGER, last_used TEXT)"
-        )
-        conn.execute(
-            "INSERT INTO keyword_stats VALUES ('Click', 10, '2026-01-01')"
-        )
-        conn.commit()
-        conn.close()
-
-        # Backup test
-        backup_path = f"{fake_old}.backup.test"
-        shutil.copy2(fake_old, backup_path)
-        assert os.path.exists(backup_path), "Backup mechanism works"
-
-        # Verify original is intact
-        conn = sqlite3.connect(fake_old)
-        count = conn.execute("SELECT COUNT(*) FROM keyword_stats").fetchone()[0]
-        conn.close()
-        assert count == 1, "Original DB intact after backup"
-
-        # Rollback test
-        os.remove(backup_path)
-        assert not os.path.exists(backup_path), (
-            "Backup can be removed (simulated rollback)"
-        )
-
-
 class TestConfig:
     """Verify config.py has the new settings."""
-
-    def test_execution_memory_db_setting_exists(self):
-        from src.backend.core.config import Settings
-
-        s = Settings()
-        assert hasattr(s, "EXECUTION_MEMORY_DB"), (
-            "EXECUTION_MEMORY_DB setting exists"
-        )
 
     def test_optimization_enabled_setting_exists(self):
         from src.backend.core.config import Settings
@@ -541,28 +468,6 @@ class TestV10Migration:
 # ===================================================================
 
 
-def _apply_migrations_through(conn, max_version):
-    """Apply migrations 1..max_version exactly as SchemaManager.ensure_current
-    would, recording each in schema_version, leaving the DB at max_version so a
-    subsequent ensure_current() applies only the migrations that follow."""
-    conn.execute(SchemaManager.VERSION_TABLE_SQL)
-    for version in sorted(SCHEMA_MIGRATIONS.keys()):
-        if version > max_version:
-            break
-        for sql in SCHEMA_MIGRATIONS[version]["sql"]:
-            conn.execute(sql)
-        conn.execute(
-            "INSERT INTO schema_version (version, description, applied_at) "
-            "VALUES (?, ?, ?)",
-            (
-                version,
-                SCHEMA_MIGRATIONS[version]["description"],
-                "2026-01-01T00:00:00+00:00",
-            ),
-        )
-    conn.commit()
-
-
 class TestV11Migration:
     """Verify the three additions introduced by schema migration v11.
 
@@ -602,70 +507,6 @@ class TestV11Migration:
             f"got {row[0]}"
         )
 
-    def test_migration_v11_backfills_anchor_query(self):
-        """Pre-v11 DB with hint rows + matching execution_records → after v11
-        every resolvable row's anchor_query is populated; an unresolvable
-        source_workflow_id stays NULL (fail-closed) without aborting v11."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        _apply_migrations_through(conn, 10)
-
-        # Rows that pre-date v11 (anchor_query column does not exist yet).
-        conn.execute(
-            "INSERT INTO execution_records "
-            "(workflow_id, timestamp, user_query, test_status) "
-            "VALUES ('wf-1', '2026-01-01', 'log into my account', 'passed')"
-        )
-        conn.execute(
-            "INSERT INTO execution_records "
-            "(workflow_id, timestamp, user_query, test_status) "
-            "VALUES ('wf-2', '2026-01-01', 'search for a laptop', 'failed')"
-        )
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, source_workflow_id, created_at, last_seen) "
-            "VALUES ('hint A', 'wf-1', '2026-01-01', '2026-01-01')"
-        )
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, source_workflow_id, created_at, last_seen) "
-            "VALUES ('hint B', 'wf-2', '2026-01-01', '2026-01-01')"
-        )
-        # source_workflow_id with no matching execution_records row.
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, source_workflow_id, created_at, last_seen) "
-            "VALUES ('hint orphan', 'wf-missing', '2026-01-01', '2026-01-01')"
-        )
-        conn.commit()
-
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 11, f"expected schema v11+, got v{version}"
-
-        anchors = {
-            r["feedback_text"]: r["anchor_query"]
-            for r in conn.execute(
-                "SELECT feedback_text, anchor_query FROM nl_feedback_corrections"
-            ).fetchall()
-        }
-        assert anchors["hint A"] == "log into my account"
-        assert anchors["hint B"] == "search for a laptop"
-        assert anchors["hint orphan"] is None, (
-            "an unresolvable source_workflow_id must leave anchor_query NULL "
-            "(fail-closed), not abort the migration"
-        )
-
-        null_count = conn.execute(
-            "SELECT COUNT(*) FROM nl_feedback_corrections "
-            "WHERE anchor_query IS NULL"
-        ).fetchone()[0]
-        assert null_count == 1, (
-            f"only the orphan row should remain NULL after backfill; "
-            f"got {null_count}"
-        )
-        conn.close()
-
 
 # ===================================================================
 # TestV12Migration — split flagged_hint_ids into recommendation vs enforcement
@@ -689,46 +530,6 @@ class TestV12Migration:
             f"actually_flagged_hint_ids column missing from trigger_events; "
             f"found columns: {sorted(columns)}"
         )
-
-    def test_legacy_pre_v12_rows_get_null_actually_flagged(self):
-        """Rows inserted before v12 retain NULL for actually_flagged_hint_ids.
-
-        KPI queries COALESCE this back to flagged_hint_ids so legacy data
-        preserves its pre-v12 semantics until it ages out of the rolling
-        30-day window.
-        """
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        _apply_migrations_through(conn, 11)
-
-        # Pre-v12: only the 14-column INSERT exists (no actually_flagged_hint_ids).
-        conn.execute(
-            "INSERT INTO trigger_events ("
-            " trigger_type, workflow_id, domain, url, feedback_text, "
-            " active_hint_ids, flagged_hint_ids, reason, llm_model, "
-            " input_tokens, output_tokens, llm_latency_ms, status, "
-            " error_message, created_at"
-            ") VALUES ('trigger_1', 'wf-pre-v12', 'example.com', "
-            "          'https://example.com', NULL, '[1,2]', '[1,2]', "
-            "          NULL, 'gemini/gemini-2.5-flash', 100, 50, 1200, "
-            "          'succeeded', NULL, '2026-01-01T00:00:00+00:00')"
-        )
-        conn.commit()
-
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 12, f"expected schema v12+, got v{version}"
-
-        row = conn.execute(
-            "SELECT flagged_hint_ids, actually_flagged_hint_ids "
-            "FROM trigger_events WHERE workflow_id = 'wf-pre-v12'"
-        ).fetchone()
-        assert row["flagged_hint_ids"] == "[1,2]"
-        assert row["actually_flagged_hint_ids"] is None, (
-            "Pre-v12 row must have NULL actually_flagged_hint_ids — "
-            "KPI queries COALESCE it back to flagged_hint_ids"
-        )
-        conn.close()
 
     def test_post_v12_row_can_carry_distinct_values(self, in_memory_db):
         """A v12+ insert separately populating both columns must round-trip
@@ -807,75 +608,6 @@ class TestV13Migration:
             "WHERE feedback_text = 'a fresh hint'"
         ).fetchone()
         assert row[0] == 0
-
-    def test_migration_v13_resets_nl_counters_preserving_the_rest(self):
-        """FR1: applying v13 zeros applied/success/failure on every NL hint
-        while preserving evidence_count, is_active, conflict_flagged,
-        anchor_query, created_at, and last_seen (only the all-injected-credit
-        counters reset; the rest are earned/identity state)."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        _apply_migrations_through(conn, 12)
-
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, category, scope, evidence_count, applied_count, "
-            " success_count, failure_count, is_active, conflict_flagged, "
-            " anchor_query, created_at, last_seen) "
-            "VALUES ('legacy hint', 'C1', 'global', 7, 112, 90, 2, 1, 0, "
-            "        'log in to the account', '2026-01-01', '2026-02-01')"
-        )
-        conn.commit()
-
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 13, f"expected schema v13+, got v{version}"
-
-        row = conn.execute(
-            "SELECT * FROM nl_feedback_corrections WHERE feedback_text = 'legacy hint'"
-        ).fetchone()
-        # FR1 reset
-        assert row["applied_count"] == 0
-        assert row["success_count"] == 0
-        assert row["failure_count"] == 0
-        # new column default
-        assert row["unused_count"] == 0
-        # preserved (NOT reset)
-        assert row["evidence_count"] == 7
-        assert row["is_active"] == 1
-        assert row["conflict_flagged"] == 0
-        assert row["anchor_query"] == "log in to the account"
-        assert row["created_at"] == "2026-01-01"
-        assert row["last_seen"] == "2026-02-01"
-        conn.close()
-
-    def test_pre_v13_execution_record_reads_attribution_done_1(self):
-        """N4: a row inserted before v13 materialises hint_attribution_done=1
-        (already-attributed under the old Step-7 credit) so a cross-deploy
-        re-run cannot double-credit on top of it. O(1) DEFAULT, no backfill."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        _apply_migrations_through(conn, 12)
-
-        conn.execute(
-            "INSERT INTO execution_records "
-            "(workflow_id, timestamp, user_query, test_status) "
-            "VALUES ('wf-pre-v13', '2026-01-01', 'a query', 'failed')"
-        )
-        conn.commit()
-
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 13, f"expected schema v13+, got v{version}"
-
-        row = conn.execute(
-            "SELECT hint_attribution_done FROM execution_records "
-            "WHERE workflow_id = 'wf-pre-v13'"
-        ).fetchone()
-        assert row["hint_attribution_done"] == 1, (
-            "pre-v13 rows must read 1 (already-attributed) — DEFAULT 1, no backfill"
-        )
-        conn.close()
 
 
 # ===================================================================
@@ -1006,33 +738,3 @@ class TestV14Migration:
         ).fetchone()
         assert abs(row[0] - 0.78) < 1e-9
         assert row[1] == 1 and row[2] == 1
-
-    def test_migration_v14_creates_table_and_index(self):
-        # In isolation: v14 is the step that creates the table + the created_at
-        # index (neither exists at v13).
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        _apply_migrations_through(conn, 13)
-
-        pre = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'hint_workflow_trace'"
-        ).fetchone()
-        assert pre is None, "hint_workflow_trace must not exist before v14"
-
-        version = SchemaManager.ensure_current(conn)
-        assert version >= 14, f"expected schema v14+, got v{version}"
-
-        tbl = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'hint_workflow_trace'"
-        ).fetchone()
-        assert tbl is not None, "v14 must create hint_workflow_trace"
-
-        idx = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'index' "
-            "AND name = 'idx_hint_trace_created_at'"
-        ).fetchone()
-        assert idx is not None, "v14 must create the created_at index (G3 prune)"
-        conn.close()

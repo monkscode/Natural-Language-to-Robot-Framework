@@ -1,6 +1,6 @@
 """
 PostgresExecutionMemory — PostgreSQL relational store for the learning system
-(Phase 4 migration; the Postgres equivalent of execution_memory.ExecutionMemory).
+(Phase 4 migration; replaced the removed SQLite ExecutionMemory store).
 
 The writer connection and read connections are pg_compat.CompatConnection
 objects, so this class AND the learning engines (which reach into
@@ -36,7 +36,6 @@ from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import pg_compat, pg_schema
 from src.backend.crew_ai.optimization.pg_compat import CompatConnection, compat_row
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
     _assert_writer_thread,
     _mark,
@@ -67,10 +66,12 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     DEDUPLICATION_THRESHOLD = LEARNING_CONFIG["DEDUPLICATION_THRESHOLD"]
 
-    # Reuse ExecutionMemory's sentinel object so the shared FeedbackLoop health
-    # check (`_chroma_client is ExecutionMemory._CHROMADB_INIT_FAILED`) and the
-    # conftest disable both work against either backend.
-    _CHROMADB_INIT_FAILED = ExecutionMemory._CHROMADB_INIT_FAILED
+    # Sentinel for failed embedder init. The shared FeedbackLoop health check
+    # compares against the store instance's own class attribute
+    # (`self.execution_memory._CHROMADB_INIT_FAILED`), so a dedicated object
+    # is sufficient — no cross-class identity required. A dedicated object
+    # (not a magic string) keeps `is not None` checks honest.
+    _CHROMADB_INIT_FAILED = object()
     _CHROMA_RETRY_COOLDOWN_S: int = 300
 
     def __init__(self, dsn: str = None, chroma_dir: str = None):

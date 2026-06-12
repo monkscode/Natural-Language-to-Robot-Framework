@@ -43,7 +43,6 @@ MAX_FEEDBACK_TEXT_CHARS = 500
 
 LEARNING_CONFIG = {
     # Database paths
-    "EXECUTION_MEMORY_DB": "data/execution_memory.db",
     "CHROMADB_DIR": "data/learning_chromadb",
 
     # Scoring thresholds
@@ -448,7 +447,7 @@ class ExecutionStore(ABC):
     """
     Abstract execution storage interface.
 
-    Current implementation: SQLite (ExecutionMemory).
+    Current implementation: PostgreSQL (PostgresExecutionMemory).
     Future: PostgresExecutionStore for multi-tenant SaaS.
 
     Why this exists:
@@ -476,7 +475,7 @@ class SemanticStore(ABC):
     """
     Abstract semantic search interface.
 
-    Current implementation: ChromaDB (inside ExecutionMemory).
+    Current implementation: pgvector + fastembed (inside PostgresExecutionMemory).
     Future: PineconeSemanticStore for cloud deployment.
     """
 

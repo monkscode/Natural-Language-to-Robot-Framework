@@ -7,7 +7,7 @@ Three classes:
 2. ContradictionDetector — Extensible scanner that flags learned rules whose
    counter-evidence ratio exceeds a configurable threshold. Read-only: never
    modifies rules, only reports.
-3. FeedbackLoop — Orchestrator that connects FailureAnalyzer, ExecutionMemory,
+3. FeedbackLoop — Orchestrator that connects FailureAnalyzer, the execution store,
    all learning engines, and the metrics tracker.  Called after every execution
    and after user feedback.  Non-blocking: all writes go through LearningWriteQueue.
 
@@ -43,7 +43,6 @@ from src.backend.crew_ai.optimization.learning_config import (
     extract_domain,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
     CodeStructureExtractor,
 )
@@ -265,7 +264,7 @@ class LearningMetricsTracker:
         Initialize LearningMetricsTracker.
 
         Args:
-            execution_memory: ExecutionMemory instance. Write methods
+            execution_memory: execution-store instance. Write methods
                               use _writer_conn; reads use read_conn().
         """
         self._em = execution_memory
@@ -677,7 +676,7 @@ class FeedbackLoop:
     1. Parse output.xml (if exists)
     2. Classify failure (if failed)
     3. Build ExecutionRecord
-    4. Store in ExecutionMemory
+    4. Store in the execution store
     5. Route to relevant learning engines
     6. Record learning metrics
     7. Update daily stats
@@ -688,7 +687,7 @@ class FeedbackLoop:
 
     def __init__(
         self,
-        execution_memory: ExecutionMemory = None,
+        execution_memory: PostgresExecutionMemory = None,
         failure_analyzer: FailureAnalyzer = None,
         structural_engine=None,
         keyword_engine=None,
@@ -706,15 +705,15 @@ class FeedbackLoop:
         constructed using shared database connections.  Pass mocks in
         tests for deterministic behaviour.
         """
-        # Core infrastructure. Phase 4 cutover: the learning store is now
-        # PostgreSQL + pgvector (PostgresExecutionMemory); the legacy SQLite
-        # ExecutionMemory is injected only by tests that still target it.
+        # Core infrastructure. Phase 4 cutover: the learning store is
+        # PostgreSQL + pgvector (PostgresExecutionMemory); tests inject their
+        # own schema-isolated instance.
         self.execution_memory = execution_memory or PostgresExecutionMemory()
         self.failure_analyzer = failure_analyzer or FailureAnalyzer()
         self.write_queue = write_queue or LearningWriteQueue()
         self.circuit_breaker = circuit_breaker or LearningCircuitBreaker()
 
-        # Shared ExecutionMemory for all engine + tracker construction
+        # Shared execution store for all engine + tracker construction
         em = self.execution_memory
 
         # Learning engines (lazy import to avoid circular dependencies)
@@ -801,7 +800,7 @@ class FeedbackLoop:
 
         # Submit the one-time anchor reconcile to the writer thread. Lazy by
         # construction: FeedbackLoop is built lazily and the reconcile runs on
-        # the writer thread, so ExecutionMemory's deferred ONNX load is
+        # the writer thread, so the store's deferred ONNX load is
         # respected (no eager 80 MB model load at process startup).
         self.write_queue.submit(self._run_anchor_reconcile)
 
@@ -1385,12 +1384,12 @@ class FeedbackLoop:
         if not settings.OPTIMIZATION_ENABLED:
             return "DISABLED"
 
-        # FAILED — hard failures. The ChromaDB check is tri-state: ONLY the
+        # FAILED — hard failures. The embedder check is tri-state: ONLY the
         # _CHROMADB_INIT_FAILED sentinel means "failed". `None` means "not yet
         # lazily initialized" — transient, not a fault — so it must not raise
         # a false FAILED in the seconds after a restart.
         if (self.execution_memory._chroma_client
-                is ExecutionMemory._CHROMADB_INIT_FAILED):
+                is self.execution_memory._CHROMADB_INIT_FAILED):
             return "FAILED"
         if not self.circuit_breaker.is_enabled():
             return "FAILED"

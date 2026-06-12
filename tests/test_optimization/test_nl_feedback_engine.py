@@ -392,8 +392,10 @@ class TestRegression:
     """Regression: Day 01-08 core imports still work."""
 
     def test_day01_execution_memory_imports(self):
-        from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
-        assert ExecutionMemory is not None
+        from src.backend.crew_ai.optimization.postgres_execution_memory import (
+            PostgresExecutionMemory,
+        )
+        assert PostgresExecutionMemory is not None
 
     def test_day02_failure_analyzer_imports(self):
         from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
