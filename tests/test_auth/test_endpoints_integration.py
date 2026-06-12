@@ -89,6 +89,56 @@ def test_register_password_too_long_returns_400(client_and_emails):
     assert resp.json()["detail"] == "password longer than 72 bytes"
 
 
+def test_register_invalid_email_returns_422(client_and_emails):
+    client, _ = client_and_emails
+    for bad in ("not-an-email", "two words@example.com", "a@b", "x@" + "d" * 260 + ".com"):
+        resp = client.post("/auth/register", json={"email": bad, "password": "S3cretpw!"})
+        assert resp.status_code == 422, f"{bad!r} should be rejected"
+
+
+def test_forgot_password_never_reveals_registration(client_and_emails):
+    """Registered and unknown emails must get the identical response."""
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    known = client.post("/auth/forgot-password", json={"email": email})
+    unknown = client.post("/auth/forgot-password", json={"email": _unique_email()})
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json()
+    # Malformed email still 422s (validator shared with register).
+    assert client.post(
+        "/auth/forgot-password", json={"email": "nope"}
+    ).status_code == 422
+
+
+def test_logout_clears_report_cookie(client_and_emails):
+    client, _ = client_and_emails
+    resp = client.post("/auth/logout")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "mark1_report_token=" in set_cookie  # deletion = empty value + expiry
+    assert "Path=/reports" in set_cookie
+
+
+def test_me_rejects_deactivated_user(client_and_emails):
+    """A valid, unexpired token must stop working the moment the account is
+    disabled — /me re-reads the DB precisely for this."""
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    token = reg.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/auth/me", headers=headers).status_code == 200
+    from src.backend.auth import db as auth_db
+    with auth_db.get_pool().connection() as conn:
+        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
+        conn.commit()
+    assert client.get("/auth/me", headers=headers).status_code == 401
+
+
 def test_login_and_me_flow(client_and_emails):
     client, created = client_and_emails
     email = _unique_email()
@@ -108,3 +158,139 @@ def test_login_and_me_flow(client_and_emails):
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["email"] == email
+
+
+# ---------------------------------------------------------------------------
+# Google SSO flow — google_oauth is patched at the endpoints' reference, so no
+# real Google round-trip happens; the user rows land in the isolated schema.
+# ---------------------------------------------------------------------------
+
+def _google_enabled():
+    return patch.object(auth_endpoints.google_oauth, "google_enabled", return_value=True)
+
+
+def _callback_with_profile(client, profile):
+    """Drive /auth/google/callback with a valid state and a canned profile."""
+    with _google_enabled(), patch.object(
+        auth_endpoints.google_oauth, "exchange_code", return_value=profile
+    ):
+        client.cookies.set("oauth_state", "stt")
+        resp = client.get(
+            "/auth/google/callback?state=stt&code=c", follow_redirects=False
+        )
+        client.cookies.clear()
+    return resp
+
+
+def test_google_endpoints_503_when_not_configured(client_and_emails):
+    client, _ = client_and_emails
+    with patch.object(
+        auth_endpoints.google_oauth, "google_enabled", return_value=False
+    ):
+        assert client.get("/auth/google/login").status_code == 503
+        assert client.get("/auth/google/callback").status_code == 503
+
+
+def test_google_login_redirects_with_state_cookie(client_and_emails):
+    client, _ = client_and_emails
+    with _google_enabled(), patch.object(
+        auth_endpoints.google_oauth, "build_authorization_url",
+        return_value=("https://accounts.google.com/o/oauth2/v2/auth?x=1", "stt-123"),
+    ):
+        resp = client.get("/auth/google/login", follow_redirects=False)
+    client.cookies.clear()
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"].startswith("https://accounts.google.com/")
+    assert "oauth_state=stt-123" in resp.headers.get("set-cookie", "")
+
+
+def test_google_callback_error_param_is_urlencoded(client_and_emails):
+    """An attacker-suppliable ?error= value never lands unencoded in the redirect."""
+    client, _ = client_and_emails
+    with _google_enabled():
+        resp = client.get(
+            "/auth/google/callback?error=access%20denied", follow_redirects=False
+        )
+    assert resp.status_code in (302, 307)
+    assert "/login?error=access%20denied" in resp.headers["location"]
+
+
+def test_google_callback_state_mismatch_rejected(client_and_emails):
+    client, _ = client_and_emails
+    with _google_enabled():
+        # No state cookie at all:
+        resp = client.get(
+            "/auth/google/callback?state=whatever&code=c", follow_redirects=False
+        )
+        assert "error=invalid_state" in resp.headers["location"]
+        # Cookie present but different from the state param:
+        client.cookies.set("oauth_state", "expected")
+        resp = client.get(
+            "/auth/google/callback?state=different&code=c", follow_redirects=False
+        )
+        client.cookies.clear()
+        assert "error=invalid_state" in resp.headers["location"]
+
+
+def test_google_callback_exchange_failure_redirects(client_and_emails):
+    client, _ = client_and_emails
+    with _google_enabled(), patch.object(
+        auth_endpoints.google_oauth, "exchange_code",
+        side_effect=RuntimeError("token endpoint down"),
+    ):
+        client.cookies.set("oauth_state", "stt")
+        resp = client.get(
+            "/auth/google/callback?state=stt&code=c", follow_redirects=False
+        )
+        client.cookies.clear()
+    assert "error=google_failed" in resp.headers["location"]
+
+
+def test_google_callback_unverified_email_rejected(client_and_emails):
+    client, _ = client_and_emails
+    resp = _callback_with_profile(
+        client, {"sub": "g-unverified", "email": "x@y.com", "email_verified": False}
+    )
+    assert "error=email_unverified" in resp.headers["location"]
+
+
+def test_google_callback_success_sets_token_and_report_cookie(client_and_emails):
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    resp = _callback_with_profile(
+        client,
+        {"sub": f"sub-{email}", "email": email, "email_verified": True, "name": "G"},
+    )
+    assert "/oauth/callback#token=" in resp.headers["location"]
+    cookies = "; ".join(resp.headers.get_list("set-cookie"))
+    assert "mark1_report_token=" in cookies
+    assert "Path=/reports" in cookies
+    assert 'oauth_state="";' in cookies or "oauth_state=;" in cookies  # single-use
+
+
+def test_google_callback_existing_email_never_autolinked(client_and_emails):
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    client.cookies.clear()
+    resp = _callback_with_profile(
+        client, {"sub": f"other-{email}", "email": email, "email_verified": True}
+    )
+    assert "error=email_exists" in resp.headers["location"]
+
+
+def test_google_callback_disabled_account_rejected(client_and_emails):
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    sub = f"sub-{email}"
+    profile = {"sub": sub, "email": email, "email_verified": True}
+    assert "#token=" in _callback_with_profile(client, profile).headers["location"]
+    from src.backend.auth import db as auth_db
+    with auth_db.get_pool().connection() as conn:
+        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
+        conn.commit()
+    resp = _callback_with_profile(client, profile)
+    assert "error=account_disabled" in resp.headers["location"]
