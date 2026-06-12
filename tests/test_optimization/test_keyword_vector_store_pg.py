@@ -115,8 +115,8 @@ def test_add_keywords_upserts_on_conflict(store):
 # ---------------------------------------------------------------------------
 
 def test_needs_rebuild_true_when_no_stored_version(store):
-    assert store.get_collection_version("vlib") is None
-    assert store.needs_rebuild("vlib") is True
+    assert store.get_collection_version("neverseenlib") is None
+    assert store.needs_rebuild("neverseenlib") is True
 
 
 def test_rebuild_collection_swaps_index_and_records_version(store):
@@ -132,7 +132,8 @@ def test_rebuild_collection_swaps_index_and_records_version(store):
 
 
 def test_rebuild_failure_leaves_existing_index_untouched(store):
-    lib = "vlib"  # populated by the previous test's rebuild
+    lib = "faillib"  # own library + own seed: order-independent
+    store.add_keywords(lib, _KEYWORDS)
     with patch.object(
         store, "_extract_public_keywords", side_effect=RuntimeError("no libdoc")
     ):
