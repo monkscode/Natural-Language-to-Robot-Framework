@@ -57,15 +57,33 @@ def test_reports_are_auth_gated(app_client):
             headers={"Authorization": "Bearer not-a-jwt"},
         )
         assert bad.status_code == 401
-        # A valid token passes the gate; 404 = StaticFiles answered (no such file).
+        # A valid USER token passes authentication, but report OWNERSHIP
+        # fails closed: an unknown/unattributed run is 403, never a 404 probe.
+        from src.backend.auth import jwt_utils
         from src.backend.auth.jwt_utils import create_access_token
         token = create_access_token(
             {"id": "00000000-0000-0000-0000-000000000000", "email": "t@t.t",
              "role": "user", "display_name": "t"})
-        ok = app_client.get(
+        denied_owner = app_client.get(
             "/reports/no-such-run/log.html",
             headers={"Authorization": f"Bearer {token}"},
         )
+        assert denied_owner.status_code == 403
+        # A validated admin clears the ownership gate; the 404 then comes from
+        # the route's file resolver (no such run/file) — proving auth let it
+        # through rather than denying.
+        admin_token = create_access_token(
+            {"id": "00000000-0000-0000-0000-000000000001", "email": "a@t.t",
+             "role": "admin", "display_name": "a"})
+        with patch.object(
+            jwt_utils._admin_repo, "get_by_id",
+            return_value={"id": "x", "email": "a@t.t", "role": "admin",
+                          "is_active": True},
+        ):
+            ok = app_client.get(
+                "/reports/no-such-run/log.html",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
         assert ok.status_code == 404
 
 

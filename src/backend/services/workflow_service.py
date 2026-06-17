@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
+from src.backend.services.docker_service import ROBOT_TESTS_DIR, get_docker_client, build_image, run_test_in_container
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
@@ -20,6 +20,7 @@ from src.backend.core.workflow_metrics import (
     WorkflowMetrics,
     calculate_crewai_cost
 )
+from src.backend.core.run_registry import get_run_registry
 from src.backend.core.config import settings
 
 
@@ -857,6 +858,40 @@ class _GenerationError(Exception):
     """
 
 
+def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
+                robot_code: str | None = None, rerun_of: str | None = None) -> None:
+    """History bookkeeping (test_runs row) — must never break the run pipeline.
+
+    get_run_registry() itself can raise on first use when Postgres is down, so
+    the guard sits here rather than relying on the registry's internal
+    swallowing alone.
+    """
+    try:
+        get_run_registry().record_start(
+            run_id, user, user_query, status,
+            robot_code=robot_code, rerun_of=rerun_of,
+        )
+    except Exception as e:
+        logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
+
+
+def _set_run_status(run_id: str, status: str) -> None:
+    """Advance a test_runs row's status — never breaks the run pipeline."""
+    try:
+        get_run_registry().set_status(run_id, status)
+    except Exception as e:
+        logging.error(f"[RUN_REGISTRY] unavailable — status for {run_id} not recorded: {e}")
+
+
+def _run_owner(run_id: str) -> str | None:
+    """test_runs owner lookup that never breaks the run pipeline (None on error)."""
+    try:
+        return get_run_registry().get_owner(run_id)
+    except Exception as e:
+        logging.error(f"[RUN_REGISTRY] owner lookup failed for {run_id}: {e}")
+        return None
+
+
 def _capacity_error_sse(stage: str) -> str:
     """Return a formatted SSE capacity-exceeded error string for the given pipeline stage."""
     max_wf = settings.MAX_CONCURRENT_WORKFLOWS
@@ -939,21 +974,22 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     freed before the background learning step — which may make a 5-30s Trigger 1
     LLM call — runs. Idempotent: the caller's finally releases the slot too.
     """
-    robot_tests_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "robot_tests"
-    )
-    run_dir = os.path.join(robot_tests_dir, run_id)
-    os.makedirs(run_dir, exist_ok=True)
+    run_dir = os.path.join(ROBOT_TESTS_DIR, run_id)
     test_filename = "test.robot"
     test_filepath = os.path.join(run_dir, test_filename)
 
-    try:
+    def _write_test_file():
+        os.makedirs(run_dir, exist_ok=True)
         with open(test_filepath, "w", encoding="utf-8") as f:
             f.write(robot_code)
+
+    try:
+        await asyncio.to_thread(_write_test_file)
         logging.info(f"📝 Saved test code to {test_filepath}")
     except Exception as e:
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
+        await asyncio.to_thread(_set_run_status, run_id, "error")
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
         return
 
@@ -969,6 +1005,13 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
 
         logging.info(f"🚀 Executing test: {test_filename}")
         result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
+
+        # History row: only passed/failed are real verdicts (from output.xml);
+        # anything else means the run errored before producing one.
+        _status = result.get("test_status")
+        await asyncio.to_thread(
+            _set_run_status, run_id, _status if _status in ("passed", "failed") else "error")
+
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
 
         # The user now has their result. Release the workflow slot before the
@@ -981,13 +1024,19 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     except Exception as e:
         logging.error(f"An error occurred during Docker execution: {e}")
         _safe_evict_hint_metadata(run_id)
+        await asyncio.to_thread(_set_run_status, run_id, "error")
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
 
 
-async def stream_generate_only(user_query: str, model_provider: str, model_name: str) -> AsyncGenerator[str, None]:
+async def stream_generate_only(
+    user_query: str, model_provider: str, model_name: str, user: dict | None = None
+) -> AsyncGenerator[str, None]:
     """
     Generates Robot Framework test code without executing it.
     Allows user to review and edit before execution.
+
+    user: the authenticated requester (from require_user) — recorded on the
+    test_runs history row so regular users can see their own runs.
     """
     if not _acquire_workflow_slot():
         yield _capacity_error_sse("generation")
@@ -1007,12 +1056,27 @@ async def stream_generate_only(user_query: str, model_provider: str, model_name:
                 yield sse
         except _GenerationError:
             return
+
+        # History row: a generate-only run is terminal at 'generated' until the
+        # user executes it (execute-test upserts the same id to 'running').
+        wf_id = result_store.get("workflow_id")
+        if wf_id:
+            try:
+                await asyncio.to_thread(
+                    _record_run, str(uuid.UUID(wf_id)), user, user_query, status="generated",
+                    robot_code=result_store.get("robot_code"))
+            except ValueError:
+                logging.warning("[RUN_REGISTRY] non-UUID workflow_id from generation; run not recorded")
+
         logging.info("✅ Test generation complete. Ready for user review.")
     finally:
         releaser.done()  # Generator's share of the latch
 
 
-async def stream_execute_only(robot_code: str, user_query: str = None, workflow_id: str = None) -> AsyncGenerator[str, None]:
+async def stream_execute_only(
+    robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
+    history_query: str | None = None, rerun_of: str | None = None
+) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
     Accepts user-edited or manually-written code.
@@ -1021,6 +1085,15 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         robot_code: Robot Framework test code to execute
         user_query: Optional original user query for pattern learning
         workflow_id: Optional workflow ID from generation phase (for unified ID tracking)
+        user: Authenticated requester (require_user) for the test_runs history row
+        history_query: Description for the test_runs history row ONLY — used by
+            history reruns, which re-execute stored code verbatim. Deliberately
+            NOT passed to learning: a rerun has no generation step, so a pass
+            would double-count the original (query -> code) evidence and a fail
+            usually means site drift, not bad generation.
+        rerun_of: The ORIGINAL run this re-run was cloned from (root-flattened
+            by the endpoint). Stored on the history row so /api/feedback can
+            route feedback to the run that owns the learning record.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -1052,9 +1125,26 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
             except ValueError:
                 yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'Invalid workflow_id: must be a UUID'})}\n\n"
                 return
+            # A client-supplied id can reference another user's run. Never let
+            # one user overwrite another's artifacts (robot_tests/{id}) or
+            # history row: reuse is allowed only when the row is unowned/
+            # unknown or owned by this requester — otherwise fork to a fresh id.
+            owner = await asyncio.to_thread(_run_owner, run_id)
+            if owner is not None and user is not None and owner != user.get("user_id"):
+                logging.warning(
+                    f"[RUN_REGISTRY] run {run_id} is owned by another user — forking to a fresh run id"
+                )
+                run_id = str(uuid.uuid4())
         else:
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
+
+        # History row. When this run_id came from a generation by another (or
+        # the same) session, the upsert only advances status — the original
+        # owner/query attribution is write-once.
+        await asyncio.to_thread(
+            _record_run, run_id, user, history_query or user_query, status="running",
+            robot_code=robot_code, rerun_of=rerun_of)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
@@ -1067,7 +1157,9 @@ async def stream_execute_only(robot_code: str, user_query: str = None, workflow_
         releaser.done()
 
 
-async def stream_generate_and_run(user_query: str, model_provider: str, model_name: str) -> AsyncGenerator[str, None]:
+async def stream_generate_and_run(
+    user_query: str, model_provider: str, model_name: str, user: dict | None = None
+) -> AsyncGenerator[str, None]:
     """
     Legacy endpoint: Generates and executes test in one flow.
     Kept for backward compatibility.
@@ -1108,6 +1200,10 @@ async def stream_generate_and_run(user_query: str, model_provider: str, model_na
         else:
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified with generation): {run_id}")
+
+        # History row: generation is done and Docker execution starts now.
+        await asyncio.to_thread(
+            _record_run, run_id, user, user_query, status="running", robot_code=robot_code)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse

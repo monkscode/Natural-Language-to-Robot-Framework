@@ -50,7 +50,7 @@ interface NavItem {
 
 const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
-  { title: 'History', url: '/history', icon: History, admin: true },
+  { title: 'History', url: '/history', icon: History, admin: false },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
   { title: 'Learning', url: '/learning', icon: Brain, admin: true },
   { title: 'Templates', url: '/templates', icon: LayoutGrid, admin: true },

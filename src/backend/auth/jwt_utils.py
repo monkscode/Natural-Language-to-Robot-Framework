@@ -19,8 +19,10 @@ header. Three dependencies guard endpoints:
 A token that is PRESENT but invalid/expired always yields 401, even when not
 enforced (a broken token is a client error regardless of the flag).
 
-Referenced by: auth/endpoints.py, api/endpoints.py, main.py (router guards).
-Depends on: PyJWT, src/backend/core/config.py (JWT_SECRET_KEY, JWT_EXPIRY_HOURS, AUTH_ENFORCED).
+Referenced by: auth/endpoints.py, api/endpoints.py, api/history_endpoints.py,
+api/report_endpoints.py (the /reports ownership gate), main.py (router guards).
+Depends on: PyJWT, src/backend/core/config.py (JWT_SECRET_KEY, JWT_EXPIRY_HOURS,
+AUTH_ENFORCED), core/run_registry.py (lazy, report ownership).
 """
 
 import logging
@@ -105,8 +107,23 @@ def require_user(
     return user
 
 
+def is_validated_admin(user: dict | None) -> bool:
+    """True only when the token claims admin AND the users row still says
+    admin + active. Mirrors require_admin's per-request DB re-validation but
+    as a boolean (no raise) so callers can fall back to user-scoped behaviour.
+    Fails CLOSED: any storage error means "not admin"."""
+    if not user or user.get("role") != "admin":
+        return False
+    try:
+        row = _admin_repo.get_by_id(user["user_id"])
+    except Exception as exc:
+        logger.warning("[AUTH] admin re-validation unavailable: %s", exc)
+        return False
+    return bool(row and row.get("is_active") and row.get("role") == "admin")
+
+
 # --------------------------------------------------------------------------
-# Report access (static /reports files)
+# Report access (owner-gated /reports route)
 # --------------------------------------------------------------------------
 # Robot Framework log.html records every keyword argument (including text typed
 # into password fields), so /reports must sit behind auth. The SPA opens reports
@@ -115,13 +132,25 @@ def require_user(
 # cookie scoped to Path=/reports. This checker accepts either credential and
 # mirrors require_user semantics: token-less requests pass only when
 # settings.AUTH_ENFORCED is off; a present-but-invalid token is always 401.
+#
+# Beyond authentication, access is per-OWNER: /reports/{run_id}/* is served
+# only to the user who ran it (test_runs.user_id) or to a validated admin.
+# Unattributed runs (legacy rows, unknown ids) are admin-only — fail closed.
 REPORT_TOKEN_COOKIE = "mark1_report_token"
 
 
-def check_reports_access(request) -> "JSONResponse | None":
-    """Middleware guard for GET /reports/*. Returns a 401 JSONResponse to deny,
-    or None to let the request through. Never raises (middleware exceptions
-    bypass FastAPI's HTTPException handlers and would surface as 500s)."""
+def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
+    """Owner-or-admin gate for GET/HEAD /reports/{run_id}/*. Returns a 401/403
+    JSONResponse to deny, or None to allow. Never raises (the report route does
+    no HTTPException handling around this; a raise would surface as a 500 with a
+    filesystem path in the body).
+
+    run_id is the route's parsed path parameter — NOT re-parsed from the URL.
+    The ownership check and the file lookup (report_endpoints.resolve_report_file)
+    therefore key off one identical value, which closes the '//' (empty segment)
+    and '..' (parent traversal) parser-disagreement bypass that the old
+    middleware + StaticFiles split allowed.
+    """
     # Scheme is case-insensitive (RFC 7235) — same parse as FastAPI's
     # HTTPBearer, so a client that works on the API works here too.
     scheme, _, param = request.headers.get("Authorization", "").partition(" ")
@@ -136,12 +165,29 @@ def check_reports_access(request) -> "JSONResponse | None":
             )
         return None
     try:
-        decode_token(token)
+        user = decode_token(token)
     except HTTPException as exc:
         return JSONResponse(
             {"detail": exc.detail}, status_code=exc.status_code, headers=_UNAUTH_HEADERS
         )
-    return None
+
+    if is_validated_admin(user):
+        return None
+
+    try:
+        # Lazy import: jwt_utils loads during early app wiring; the registry
+        # opens a DB pool on first use and must not do so at import time.
+        from src.backend.core.run_registry import get_run_registry
+        owner = get_run_registry().get_owner(run_id)
+    except Exception as exc:
+        logger.warning("[AUTH] report ownership lookup unavailable: %s", exc)
+        owner = None  # fail closed
+
+    if owner is not None and owner == user.get("user_id"):
+        return None
+    return JSONResponse(
+        {"detail": "You do not have access to this report"}, status_code=403
+    )
 
 
 def require_admin(

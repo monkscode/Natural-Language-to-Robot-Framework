@@ -2,7 +2,6 @@ import os
 import sys
 import logging
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
@@ -31,9 +30,9 @@ init_observability()
 from src.backend.api.endpoints import router as api_router
 
 # Auth (Phase 1): JWT/role guards + /auth router + Postgres users store.
-from fastapi import Depends, Request
+from fastapi import Depends
 from src.backend.core.config import settings
-from src.backend.auth.jwt_utils import require_admin, check_reports_access
+from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
 
@@ -61,6 +60,11 @@ app.include_router(auth_router)
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
 
+# Run history — every authenticated user; the endpoint scopes rows by role
+# (own runs for regular users, all runs for validated admins).
+from src.backend.api.history_endpoints import router as history_router
+app.include_router(history_router, prefix="/api")
+
 # Admin-only dashboards (the React Learning/Metrics pages) — JWT + admin role.
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
@@ -77,29 +81,19 @@ from src.backend.api.health import health_check, api_health_check
 app.get("/health")(health_check)
 app.get("/api/health")(api_health_check)
 
-# --- Static Files (generated Robot Framework test reports) ---
-ROBOT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "robot_tests")
-
-# Create robot_tests directory if it doesn't exist
+# --- Report artifacts (generated Robot Framework reports) ---
+# Same constant Docker execution writes artifacts to.
+from src.backend.services.docker_service import ROBOT_TESTS_DIR
 os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
 
-# Auth gate for the report files: log.html records every keyword argument
-# (including credentials typed during a test), so the static mount must not be
-# public. StaticFiles keeps doing the file serving (it has hardened traversal
-# protection); this middleware only decides access. A mount cannot carry
-# Depends(require_user), hence middleware. Reports authenticate via the
-# Path=/reports httpOnly cookie set at login (browser navigations cannot send
-# an Authorization header) or a Bearer header (API clients).
-
-@app.middleware("http")
-async def _reports_auth(request: Request, call_next):
-    if request.url.path.startswith("/reports"):
-        denied = check_reports_access(request)
-        if denied is not None:
-            return denied
-    return await call_next(request)
-
-app.mount("/reports", StaticFiles(directory=ROBOT_TESTS_DIR), name="reports")
+# Reports are served by an explicit owner-gated route, not a StaticFiles mount.
+# log.html records every keyword argument (including passwords typed during a
+# test), so each file is authorized per-owner. The route parses one run_id that
+# drives BOTH the ownership check and the file lookup, so the '//'/'..' parser-
+# disagreement bypass the mount+middleware split allowed is structurally
+# impossible. See src/backend/api/report_endpoints.py.
+from src.backend.api.report_endpoints import router as report_router
+app.include_router(report_router)
 
 @app.on_event("startup")
 async def startup_event():

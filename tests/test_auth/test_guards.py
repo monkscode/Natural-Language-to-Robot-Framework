@@ -10,6 +10,7 @@ re-validation is exercised against a patched repository (no live DB).
 from unittest.mock import patch
 
 import pytest
+
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -167,19 +168,37 @@ def test_expired_token_401(monkeypatch):
     assert exc.value.status_code == 401
 
 
-# --- check_reports_access (the /reports middleware guard) ---
+# --- authorize_report_access (the /reports ownership gate) ---
 
 class _FakeRequest:
-    """Minimal stand-in: check_reports_access only touches .headers/.cookies."""
+    """Minimal stand-in: authorize_report_access touches .headers/.cookies."""
 
     def __init__(self, authorization: str | None = None, cookie: str | None = None):
         self.headers = {"Authorization": authorization} if authorization else {}
         self.cookies = {jwt_utils.REPORT_TOKEN_COOKIE: cookie} if cookie else {}
 
 
+class _StubRegistry:
+    """get_owner stub for the ownership layer under authorize_report_access."""
+
+    def __init__(self, owner: str | None):
+        self._owner = owner
+
+    def get_owner(self, run_id: str) -> str | None:
+        return self._owner
+
+
+def _allow_ownership(monkeypatch, owner: str = "u-1"):
+    """Make the requested run belong to the _token() identity (sub='u-1')."""
+    monkeypatch.setattr(
+        "src.backend.core.run_registry.get_run_registry",
+        lambda: _StubRegistry(owner),
+    )
+
+
 def test_reports_no_token_enforced_denied(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
-    denied = jwt_utils.check_reports_access(_FakeRequest())
+    denied = jwt_utils.authorize_report_access(_FakeRequest(), "run-x")
     assert denied is not None
     assert denied.status_code == 401
 
@@ -187,26 +206,29 @@ def test_reports_no_token_enforced_denied(monkeypatch):
 def test_reports_no_token_permissive_allows(monkeypatch):
     """Mirrors require_user's AUTH_ENFORCED=False escape hatch."""
     monkeypatch.setattr(settings, "AUTH_ENFORCED", False)
-    assert jwt_utils.check_reports_access(_FakeRequest()) is None
+    assert jwt_utils.authorize_report_access(_FakeRequest(), "run-x") is None
 
 
 def test_reports_valid_bearer_allows(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    _allow_ownership(monkeypatch)
     req = _FakeRequest(authorization=f"Bearer {_token()}")
-    assert jwt_utils.check_reports_access(req) is None
+    assert jwt_utils.authorize_report_access(req, "run-x") is None
 
 
 def test_reports_bearer_scheme_is_case_insensitive(monkeypatch):
     """RFC 7235: the auth scheme is case-insensitive — same parse as HTTPBearer."""
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    _allow_ownership(monkeypatch)
     req = _FakeRequest(authorization=f"bearer {_token()}")
-    assert jwt_utils.check_reports_access(req) is None
+    assert jwt_utils.authorize_report_access(req, "run-x") is None
 
 
 def test_reports_valid_cookie_allows(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    _allow_ownership(monkeypatch)
     req = _FakeRequest(cookie=_token())
-    assert jwt_utils.check_reports_access(req) is None
+    assert jwt_utils.authorize_report_access(req, "run-x") is None
 
 
 def test_reports_invalid_token_denied_even_when_not_enforced(monkeypatch):
@@ -216,6 +238,6 @@ def test_reports_invalid_token_denied_even_when_not_enforced(monkeypatch):
         _FakeRequest(authorization="Bearer not-a-jwt"),
         _FakeRequest(cookie="not-a-jwt"),
     ):
-        denied = jwt_utils.check_reports_access(req)
+        denied = jwt_utils.authorize_report_access(req, "run-x")
         assert denied is not None
         assert denied.status_code == 401

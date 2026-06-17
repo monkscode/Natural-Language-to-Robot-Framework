@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -576,6 +577,17 @@ export default function GeneratePage() {
   const resultRef = useRef<HTMLDivElement>(null)   // auto-scroll target on completion
 
   const busy = phase === 'generating' || phase === 'executing'
+
+  // Prefill from History's Re-run action. One-shot: the router state is
+  // cleared immediately so a refresh starts from a clean page.
+  const location = useLocation()
+  useEffect(() => {
+    const prefill = (location.state as { prefillQuery?: string } | null)?.prefillQuery
+    if (prefill) {
+      setQuery(prefill)
+      window.history.replaceState({}, '')
+    }
+  }, [location.state])
 
   // Bring the execution logs into view when a run starts — they render below
   // the fold and the user otherwise gets no cue (legacy-UI parity). Generation

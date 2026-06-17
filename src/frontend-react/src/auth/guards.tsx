@@ -1,12 +1,13 @@
 /**
  * Route guards.
  *
- * - RequireAuth: redirects unauthenticated users to /login.
- * - RequireAdmin: redirects non-admins to /generate (regular users only get the
- *   Generate page; History/Metrics/Templates/Settings are admin-only).
+ * - RequireAuth: redirects unauthenticated users to /login. Waits for the
+ *   initial /auth/me hydration so a reload doesn't flicker to /login before
+ *   the session is restored.
  *
- * Both wait for the initial /auth/me hydration so a reload doesn't flicker to
- * /login before the session is restored.
+ * Admin gating is no longer a route guard: KeepAlivePages (App.tsx) owns it,
+ * mounting admin-only pages only for admins and bouncing non-admins to
+ * /generate. Regular users get Generate + their own History.
  */
 
 import type { ReactElement } from 'react'
@@ -28,12 +29,5 @@ export function RequireAuth({ children }: { children: ReactElement }) {
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
-  return children
-}
-
-export function RequireAdmin({ children }: { children: ReactElement }) {
-  const { isAdmin, loading } = useAuth()
-  if (loading) return <FullScreenSpinner />
-  if (!isAdmin) return <Navigate to="/generate" replace />
   return children
 }
