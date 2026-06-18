@@ -95,7 +95,10 @@ def inline_report_screenshots(run_dir: str | Path) -> int:
             continue
         try:
             html = html_path.read_text(encoding="utf-8")
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # UnicodeDecodeError is a ValueError, not an OSError; a run that wrote
+            # non-UTF-8 bytes over log.html must degrade to a skip, not break the
+            # module's documented never-raises contract.
             logger.warning("[REPORT] could not read %s: %s", html_path, e)
             continue
 
@@ -147,7 +150,7 @@ def _warn_on_uninlined(run_dir: Path) -> None:
         if p.is_file():
             try:
                 combined += p.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 pass
     leftover = sorted({p.name for p in imgs if p.name in combined})
     if leftover:

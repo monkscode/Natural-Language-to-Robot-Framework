@@ -157,9 +157,21 @@ class S3ArtifactStore(ArtifactStore):
             logger.warning("[ARTIFACT_STORE] persist_run: no staging dir for %s", rid)
             return
         try:
-            for path in sorted(p for p in d.rglob("*") if p.is_file()):
+            for path in sorted(d.rglob("*")):
+                if not path.is_file():
+                    continue
                 rel = path.relative_to(d).as_posix()
-                self._s3.upload_file(str(path), self.bucket, self._key(rid, rel))
+                # rglob + is_file() follow symlinks, so a symlink planted in the
+                # run dir (paste-and-execute Robot code can create one inside the
+                # bind-mounted container) could resolve outside the run scope.
+                # Re-resolve and containment-check before upload so a crafted
+                # symlink cannot exfiltrate host files into the bucket.
+                safe = self._safe_subpath(d, rel)
+                if safe is None or not safe.is_file():
+                    logger.warning(
+                        "[ARTIFACT_STORE] skipping unsafe path during persist: %s", path)
+                    continue
+                self._s3.upload_file(str(safe), self.bucket, self._key(rid, rel))
             # Ops-only completeness marker (see class docstring); not read by the app.
             self._s3.put_object(
                 Bucket=self.bucket, Key=self._key(rid, ".complete"), Body=b"")

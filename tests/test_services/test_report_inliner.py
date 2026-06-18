@@ -131,3 +131,17 @@ def test_dryrun_screenshots_ignored_by_drift_check(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert inline_report_screenshots(run) == 0
     assert not any("may have changed" in r.message for r in caplog.records)
+
+
+def test_non_utf8_html_degrades_without_raising(tmp_path):
+    # A run that overwrote log.html with non-UTF-8 bytes (paste-and-execute Robot
+    # code can) must NOT break the module's never-raises contract: UnicodeDecodeError
+    # is a ValueError, not an OSError, so it has to be caught explicitly. The png
+    # on disk also forces _warn_on_uninlined to read the bad html (second site).
+    run = tmp_path / str(uuid.uuid4())
+    run.mkdir()
+    (run / "log.html").write_bytes(b"\xff\xfe not valid utf-8 <img src=\\\"x.png\\\"/>")
+    shots = run / "browser" / "screenshot"
+    shots.mkdir(parents=True)
+    (shots / "fail-screenshot-1.png").write_bytes(_PNG)
+    assert inline_report_screenshots(run) == 0  # no exception, nothing inlined
