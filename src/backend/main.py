@@ -35,6 +35,7 @@ from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
+from src.backend.auth.org_db import init_org_db
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -115,9 +116,13 @@ async def startup_event():
     # block the rest of the app from starting (auth fails until Postgres is up).
     try:
         init_auth_db()
+        # Org tenancy lives in the same identity domain and must init AFTER users
+        # (org_members references users). Same best-effort guard.
+        init_org_db()
     except Exception as e:
         logging.warning(
-            f"[AUTH] init_auth_db failed — auth unavailable until Postgres is reachable: {e}"
+            f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
+            f"Postgres is reachable: {e}"
         )
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
