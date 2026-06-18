@@ -24,6 +24,7 @@ from src.backend.auth.jwt_utils import (
     create_access_token,
     get_current_user,
 )
+from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import (
     AccountInactive,
     EmailAlreadyExists,
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 _repo = UserRepository()
+_org_repo = OrgRepository()
 
 _OAUTH_STATE_COOKIE = "oauth_state"
 _MIN_PASSWORD_LEN = 8
@@ -155,6 +157,7 @@ async def register(req: RegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail=str(exc))
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
+    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
@@ -256,6 +259,7 @@ async def google_callback(request: Request):
         return _error_redirect("email_exists")
     except AccountInactive:
         return _error_redirect("account_disabled")
+    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*
