@@ -52,6 +52,25 @@ class OrgRepository:
             logger.info("[AUTH] provisioned personal org for user %s", user_id)
             return str(org["id"])
 
+    def backfill_personal_orgs(self) -> int:
+        """Provision a personal org for every user that has no membership.
+
+        Idempotent: re-running provisions only users still missing an org.
+        Returns the number of users newly provisioned. Called once at startup
+        from init_org_db(); safe to call repeatedly.
+        """
+        with get_pool().connection() as conn:
+            orphans = conn.execute(
+                "SELECT u.id, u.email FROM users u "
+                "LEFT JOIN org_members m ON m.user_id = u.id "
+                "WHERE m.user_id IS NULL",
+            ).fetchall()
+        for row in orphans:
+            self.ensure_personal_org(str(row["id"]), row["email"])
+        if orphans:
+            logger.info("[AUTH] backfilled %d user(s) into personal orgs", len(orphans))
+        return len(orphans)
+
     def get_orgs_for_user(self, user_id: str) -> list[dict]:
         """Org memberships for a user, oldest first. Empty list if none."""
         with get_pool().connection() as conn:

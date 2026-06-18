@@ -59,3 +59,7 @@ def init_org_db() -> None:
             conn.execute(ddl)
         conn.commit()
     logger.info("[AUTH] organizations + org_members tables ready")
+
+    # Backfill pre-tenancy users — idempotent, no-op once every user has an org.
+    from src.backend.auth.org_repository import OrgRepository
+    OrgRepository().backfill_personal_orgs()
