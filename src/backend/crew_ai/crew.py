@@ -170,7 +170,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         try:
             logger.info("🚀 Optimization system enabled - initializing components")
             from src.backend.crew_ai.optimization import (
-                KeywordVectorStore,
+                get_keyword_vector_store,
                 QueryPatternMatcher,
                 SmartKeywordProvider,
                 ContextPruner,
@@ -194,12 +194,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 logger.warning(f"⚠️ Learning DB init failed: {e}")
                 logger.warning("   Learning hints will be disabled")
 
-            # Initialize ChromaDB vector store and pattern matcher.
+            # Initialize the pgvector keyword store and pattern matcher.
             # FeedbackLoop.__init__() already created its own KeywordVectorStore
-            # and QueryPatternMatcher internally (feedback_loop.py lines 555-574).
-            # Reuse those instances when available to avoid opening a second
-            # PersistentClient on ./chroma_db, which loads the ONNX embedding
-            # model a second time and risks SQLite write-lock contention.
+            # and QueryPatternMatcher internally. Reuse those instances when
+            # available to avoid opening a second store and loading the fastembed
+            # ONNX model a second time.
             _fl_pattern_learner = (
                 getattr(feedback_loop, "pattern_learner", None)
                 if feedback_loop is not None else None
@@ -217,9 +216,11 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                     "(avoids double ONNX model load)"
                 )
             else:
-                vector_store = KeywordVectorStore(
-                    persist_directory=settings.OPTIMIZATION_CHROMA_DB_PATH
-                )
+                # Shared process-wide store (NOT a per-workflow instance: each
+                # KeywordVectorStore owns a connection pool, and per-run pools
+                # were never closed — leaking connections until Postgres hit
+                # max_connections and took auth down with it).
+                vector_store = get_keyword_vector_store()
                 pattern_matcher = QueryPatternMatcher(
                     chroma_store=vector_store
                 )

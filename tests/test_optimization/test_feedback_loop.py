@@ -7,13 +7,11 @@ Uses in-memory SQLite with full Phase 1 schema.
 """
 
 import json
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LearningCircuitBreaker,
     EffectivenessScore,
@@ -22,9 +20,6 @@ from src.backend.crew_ai.optimization.feedback_loop import (
     LearningMetricsTracker,
     ContradictionDetector,
     FeedbackLoop,
-)
-from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
 )
 
 
@@ -86,31 +81,13 @@ class MockMetrics:
     total_cost: float = 0.05
 
 
-def create_test_db():
-    """Create in-memory SQLite with full Phase 1 schema."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    SchemaManager.ensure_current(conn)
-    return conn
-
-
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 def _insert_structural_rule(conn, name, evidence, counter_evidence):
@@ -139,8 +116,7 @@ def _insert_anti_pattern(conn, category, evidence, score, last_seen=None):
     conn.commit()
 
 
-def _build_feedback_loop(conn=None):
-    conn = conn or create_test_db()
+def _build_feedback_loop(conn):
     em = create_execution_memory(conn)
     fa = MockFailureAnalyzer()
     se = MockEngine()
@@ -191,7 +167,7 @@ class TestLearningMetricsTracker:
         row = in_memory_db.execute("SELECT * FROM learning_metrics").fetchone()
         assert row["hints_injected"] == 2
         assert row["hint_tokens"] == 150
-        assert json.loads(row["hint_sources"]) == ["structural", "keyword"]
+        assert row["hint_sources"] == ["structural", "keyword"]  # jsonb -> list
 
     def test_metrics_record_retry(self, in_memory_db):
         tracker = LearningMetricsTracker(in_memory_db)
@@ -714,7 +690,7 @@ class TestFeedbackLoop:
             url="https://example.com", robot_code="code",
             test_status="failed",
         )
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         row = conn.execute(
             "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
         ).fetchone()
@@ -766,13 +742,13 @@ class TestIntegration:
 
     def test_int_schema_has_learning_metrics_table(self, in_memory_db):
         tables = [r[0] for r in in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
         ).fetchall()]
         assert "learning_metrics" in tables
 
     def test_int_schema_has_indexes(self, in_memory_db):
         indexes = [r[0] for r in in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+            "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
         ).fetchall()]
         assert "idx_metrics_workflow" in indexes
         assert "idx_metrics_first_attempt" in indexes
@@ -783,7 +759,7 @@ class TestIntegration:
         em.update_daily_stats("passed")
         em.update_daily_stats("passed")
         em.update_daily_stats("failed")
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         row = in_memory_db.execute(
             "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
         ).fetchone()

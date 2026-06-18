@@ -13,6 +13,24 @@ jobs:
     name: SonarQube
     runs-on: ubuntu-latest
 
+    # The test suite needs live Postgres + pgvector (optimization/api/trace/auth
+    # tests run on isolated schemas). Credentials match the DATABASE_URL default
+    # in src/backend/core/config.py; the schema bootstrap creates the extension.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nlrf
+          POSTGRES_PASSWORD: nlrf
+          POSTGRES_DB: nlrf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nlrf -d nlrf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,6 +52,14 @@ jobs:
             --output-file /tmp/requirements-ci.txt --quiet
           uv pip install --system -r /tmp/requirements-ci.txt
 
+      # The pgvector tests embed with fastembed (all-MiniLM-L6-v2, ~80 MB ONNX
+      # download on first use) — cache the model between runs.
+      - name: Cache fastembed model
+        uses: actions/cache@v4
+        with:
+          path: data/fastembed_cache
+          key: fastembed-all-MiniLM-L6-v2
+
       - name: Run tests with coverage
         run: |
           pytest tests/ \
@@ -44,6 +70,9 @@ jobs:
             -v
         env:
           PYTHONPATH: ${{ github.workspace }}/src/backend
+          # App startup refuses the placeholder secret; tests that boot the app
+          # (TestClient on src.backend.main) need a real-looking one.
+          JWT_SECRET_KEY: ci-only-jwt-secret-not-used-outside-this-workflow
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7

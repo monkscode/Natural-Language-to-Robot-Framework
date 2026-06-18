@@ -1,5 +1,5 @@
 """
-Admin API for querying LLM traces stored in the SQLite trace store.
+Admin API for querying LLM traces stored in the Postgres trace store.
 
 Provides endpoints for debugging generation failures:
 - GET /api/admin/traces/              — list traces with optional filtering
@@ -7,37 +7,43 @@ Provides endpoints for debugging generation failures:
 - GET /api/admin/traces/workflow/{id} — all LLM calls for a single workflow in order
 - GET /api/admin/traces/stats/cost    — aggregate cost and token usage by model
 
+Queries use SQLite-dialect SQL (`?` placeholders, sqlite3.Row access) translated
+to Postgres by the pg_compat adapter, so the endpoint SQL is unchanged from the
+former SQLite store.
+
 Referenced by: main.py (router registration with prefix="/api")
-Depends on: core/trace_store.py (SQLite schema), core/observability.py (db_path constant)
+Depends on: core/trace_store.py (Postgres schema), crew_ai/optimization/pg_compat
 """
 import logging
-import os
-import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.backend.core.trace_store import TRACE_DB_PATH
+from src.backend.core.config import settings
+from src.backend.crew_ai.optimization import pg_compat
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/traces", tags=["traces"])
 
-_DB_PATH = TRACE_DB_PATH
 
+def _get_db():
+    """Open a connection to the Postgres trace store (SQLite-dialect via pg_compat).
 
-def _get_db() -> sqlite3.Connection:
-    """Open a read-only connection to the trace store.
-
-    Raises FileNotFoundError if no traces have been written yet (DB does not exist).
+    Maps "the llm_traces table does not exist yet" to FileNotFoundError so the
+    endpoints' existing graceful-degradation branches fire unchanged (no traces
+    have been recorded yet). The endpoint SQL keeps its `?` placeholders and
+    sqlite3.Row-style access through the compat adapter.
     """
-    if not os.path.exists(_DB_PATH):
-        raise FileNotFoundError(f"Trace database not found at {_DB_PATH}. No traces have been recorded yet.")
-    # Use absolute path — SQLite URI mode does not resolve relative paths on Windows.
-    abs_path = os.path.abspath(_DB_PATH).replace("\\", "/")
-    conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    conn = pg_compat.connect(settings.DATABASE_URL, autocommit=True)
+    # to_regclass respects the connection's search_path — an llm_traces table
+    # in some other schema (e.g. an isolated test schema) neither hides nor
+    # fakes the one this connection would actually query.
+    exists = conn.execute("SELECT to_regclass('llm_traces')").fetchone()[0]
+    if not exists:
+        conn.close()
+        raise FileNotFoundError("Trace table not found. No traces have been recorded yet.")
     return conn
 
 
@@ -100,7 +106,9 @@ async def get_cost_stats(
     """Aggregate cost and token usage per model for the last N days."""
     try:
         with closing(_get_db()) as conn:
-            cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=last_days)).strftime("%Y-%m-%d %H:%M:%S")
+            # tz-aware datetime → psycopg adapts to timestamptz (correct regardless
+            # of the server's session TZ); created_at is now timestamptz.
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=last_days)
 
             row = conn.execute(
                 """SELECT

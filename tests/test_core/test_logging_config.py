@@ -175,6 +175,33 @@ class TestAddOtelContext:
 
 
 # ---------------------------------------------------------------------------
+# sanitize_for_log
+# ---------------------------------------------------------------------------
+
+class TestSanitizeForLog:
+    def test_strips_crlf_forged_line(self):
+        """An embedded CRLF (the log-forging payload) is removed."""
+        from src.backend.config.logging_config import sanitize_for_log
+        payload = "a@b.com\r\n[AUTH] Registered user admin (role=admin)"
+        result = sanitize_for_log(payload)
+        assert "\n" not in result and "\r" not in result
+        assert result == "a@b.com[AUTH] Registered user admin (role=admin)"
+
+    def test_strips_lone_newline_and_cr(self):
+        from src.backend.config.logging_config import sanitize_for_log
+        assert sanitize_for_log("x\ny\rz") == "xyz"
+
+    def test_passes_clean_value_through(self):
+        from src.backend.config.logging_config import sanitize_for_log
+        assert sanitize_for_log("user@example.com") == "user@example.com"
+
+    def test_coerces_none_and_non_str(self):
+        from src.backend.config.logging_config import sanitize_for_log
+        assert sanitize_for_log(None) == "None"
+        assert sanitize_for_log(42) == "42"
+
+
+# ---------------------------------------------------------------------------
 # Module constants
 # ---------------------------------------------------------------------------
 

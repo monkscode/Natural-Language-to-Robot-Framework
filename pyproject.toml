@@ -35,6 +35,12 @@ dependencies = [
     "google-auth",
     # ChromaDB — uses default ONNX embeddings (no pytorch/sentence-transformers)
     "chromadb",
+    # fastembed — standalone ONNX embeddings for the learning vectors on pgvector
+    # (Phase 4 slice 6). Like ChromaDB it is onnxruntime-based; NO torch /
+    # sentence-transformers (same constraint). We pin all-MiniLM-L6-v2 (384-dim),
+    # the same model ChromaDB used, so similarity behaviour and the 0.55 threshold
+    # carry over unchanged.
+    "fastembed",
     "posthog>=2.4.0,<8.0.0",
     # LLM Observability — OTel-first (Enhancement #3)
     "traceloop-sdk>=0.30.0",
@@ -44,6 +50,20 @@ dependencies = [
     "opentelemetry-instrumentation-requests>=0.41b0",
     # Structured Logging (Enhancement #4)
     "structlog>=24.1.0",
+    # Auth + Postgres (Phase 1: login/signup, JWT, Google SSO).
+    # psycopg[binary] ships prebuilt wheels (no local libpq/compiler needed);
+    # [pool] adds the ConnectionPool used by the auth store.
+    "psycopg[binary,pool]",
+    # Direct imports of the auth module. Both are otherwise only transitive
+    # (bcrypt via chromadb, PyJWT via crewai) and would vanish the moment those
+    # are removed/upgraded — declare them so auth never depends on that accident.
+    # bcrypt is used directly (NOT via passlib, which breaks on bcrypt 5.x).
+    "bcrypt>=4.1,<6",
+    "PyJWT>=2.8,<3",
+    # Authlib drives the server-side Google OAuth2/OIDC flow (token exchange +
+    # id_token verification against Google's JWKS). Already present transitively;
+    # declared here so the built image is guaranteed to include it.
+    "authlib",
 ]
 
 [project.optional-dependencies]

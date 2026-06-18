@@ -1,5 +1,14 @@
 # CrewAI Performance Optimization Guide
 
+> ⚠️ **SUPERSEDED — storage/env/install sections are out of date (2026 Postgres migration).**
+> This guide still describes the old **SQLite + ChromaDB** learning stores, the
+> `OPTIMIZATION_CHROMA_DB_PATH` / `OPTIMIZATION_PATTERN_DB_PATH` env vars, and tells you to
+> `pip install sentence-transformers` / `chromadb` — **all wrong now.** The learning stack
+> runs on **PostgreSQL + pgvector + fastembed** (no extra ML deps). For the current state see
+> `docs/SESSION_HANDOFF_REACT_POSTGRES.md` and `src/backend/core/config.py`. The conceptual
+> material below (what the optimization system does) is still useful — but ignore every
+> storage, env-var, and installation instruction.
+
 This guide explains how to use Mark 1's performance optimization system to reduce token usage and costs while maintaining code generation accuracy.
 
 ## Overview

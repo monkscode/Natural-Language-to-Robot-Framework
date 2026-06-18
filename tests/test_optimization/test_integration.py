@@ -17,19 +17,17 @@ All tests marked with @pytest.mark.integration.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
     EffectivenessScore,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
 )
 from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
@@ -58,22 +56,12 @@ from src.backend.crew_ai.optimization.nl_feedback_engine import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 class SynchronousWriteQueue:
@@ -235,7 +223,7 @@ def test_e2e_passing_daily_stats(in_memory_db):
         robot_code="*** Test Cases ***",
         test_status="passed",
     )
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
     ).fetchone()

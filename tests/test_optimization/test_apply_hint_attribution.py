@@ -49,11 +49,11 @@ def _insert_hint(conn, text, *, applied=0, success=0, failure=0, unused=0,
         "(feedback_text, category, scope, applied_count, success_count, "
         " failure_count, unused_count, is_active, conflict_flagged, "
         " created_at, last_seen) "
-        "VALUES (?, 'C1', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, 'C1', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (text, scope, applied, success, failure, unused, is_active,
          conflict_flagged, created_at, created_at),
     )
-    return cur.lastrowid
+    return cur.fetchone()["id"]
 
 
 def _hint_row(conn, hint_id):

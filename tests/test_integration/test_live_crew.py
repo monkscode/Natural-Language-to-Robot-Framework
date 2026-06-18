@@ -4,9 +4,10 @@ Live integration tests for CrewAI workflow (Tier 2).
 Purpose: Verify that run_crew() produces valid Robot Framework code when
          executed with a real LLM provider.
 
-Requires:
-  - GEMINI_API_KEY env variable set (for gemini provider)
-  - OR a running Ollama instance (for local provider)
+Requires (matching MODEL_PROVIDER in src/backend/.env):
+  - vertex: VERTEXAI_CREDENTIALS pointing at an existing service-account JSON
+            + VERTEXAI_PROJECT set
+  - gemini: GEMINI_API_KEY set
 
 Run with:
   pytest tests/test_integration/test_live_crew.py -m integration -v
@@ -25,8 +26,29 @@ pytestmark = pytest.mark.integration
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _has_gemini_key():
-    return bool(os.getenv("GEMINI_API_KEY"))
+def _live_provider() -> "tuple[str, str] | None":
+    """(provider, model) for live runs, from the SAME settings production uses.
+
+    None when the configured provider has no usable credentials — the live
+    class then skips instead of failing. Importing settings here also loads
+    src/backend/.env (python-dotenv), so the gate behaves identically whether
+    this module runs solo or after other tests already imported config.
+    """
+    from src.backend.core.config import settings
+    if settings.MODEL_PROVIDER == "vertex":
+        creds = os.getenv("VERTEXAI_CREDENTIALS")
+        if creds and os.path.exists(creds) and settings.VERTEXAI_PROJECT:
+            return ("vertex", settings.ONLINE_MODEL)
+        return None
+    if settings.MODEL_PROVIDER == "gemini":
+        if os.getenv("GEMINI_API_KEY"):
+            return ("gemini", settings.ONLINE_MODEL)
+        return None
+    return None  # local/ollama is not exercised by the online live suite
+
+
+_LIVE = _live_provider()
+_PROVIDER, _MODEL = _LIVE if _LIVE else ("", "")
 
 
 def _is_valid_robot_code(code: str) -> bool:
@@ -65,44 +87,56 @@ class TestExtractUrlFromQueryLive:
 # Tests for run_crew() return contract — requires LLM
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not _has_gemini_key(), reason="GEMINI_API_KEY not set")
+@pytest.mark.skipif(
+    _LIVE is None,
+    reason="No usable live LLM credentials for the configured MODEL_PROVIDER "
+           "(vertex: VERTEXAI_CREDENTIALS file + VERTEXAI_PROJECT; gemini: GEMINI_API_KEY)",
+)
 class TestLiveLLMCrewOnline:
-    """Tests that invoke a real Gemini LLM call."""
+    """Tests that invoke the real configured LLM (vertex or gemini)."""
 
     def test_run_crew_returns_five_values(self):
         """run_crew() always returns (output, crew, metrics, hint_metadata, llm_monitor)."""
         from src.backend.crew_ai.crew import run_crew
         result = run_crew(
             "click the login button on example.com",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-001",
         )
         assert len(result) == 5
 
     def test_run_crew_output_is_non_empty_string(self):
-        """First return value (validation_output) is a non-empty string."""
+        """The assembler task's raw output is a non-empty string.
+
+        Contract (CLAUDE.md): Robot code is extracted from
+        crew.tasks[2].output.raw — the first return value is the CrewOutput
+        object, not a string (the old string contract predates the dryrun
+        redesign that removed the validator agent).
+        """
         from src.backend.crew_ai.crew import run_crew
-        validation_output, _, _, _, _ = run_crew(
+        _, crew_obj, _, _, _ = run_crew(
             "click the login button on example.com",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-002",
         )
-        assert isinstance(validation_output, str)
-        assert len(validation_output) > 0
+        assembler_raw = crew_obj.tasks[2].output.raw
+        assert isinstance(assembler_raw, str)
+        assert len(assembler_raw) > 0
 
     def test_run_crew_output_contains_robot_sections(self):
-        """Generated code has Robot Framework section markers."""
+        """Generated code (tasks[2].output.raw) has Robot Framework section markers."""
         from src.backend.crew_ai.crew import run_crew
-        validation_output, _, _, _, _ = run_crew(
+        _, crew_obj, _, _, _ = run_crew(
             "navigate to google.com and search for python",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-003",
         )
-        assert _is_valid_robot_code(validation_output), (
-            f"Output does not look like Robot Framework code:\n{validation_output[:500]}"
+        assembler_raw = crew_obj.tasks[2].output.raw
+        assert _is_valid_robot_code(assembler_raw), (
+            f"Output does not look like Robot Framework code:\n{assembler_raw[:500]}"
         )
 
     def test_hint_metadata_is_dict(self):
@@ -110,8 +144,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         _, _, _, hint_metadata, _ = run_crew(
             "click the submit button on example.com",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-004",
         )
         assert isinstance(hint_metadata, dict)
@@ -121,8 +155,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.crew import run_crew
         _, _, optimization_metrics, _, _ = run_crew(
             "open the home page of example.com",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-005",
         )
         if optimization_metrics is not None:
@@ -135,8 +169,8 @@ class TestLiveLLMCrewOnline:
         from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
         _, _, _, _, llm_monitor = run_crew(
             "click the submit button on example.com",
-            model_provider="gemini",
-            model_name="gemini-2.0-flash",
+            model_provider=_PROVIDER,
+            model_name=_MODEL,
             workflow_id="live-test-006",
         )
         assert isinstance(llm_monitor, LLMFormattingMonitor)

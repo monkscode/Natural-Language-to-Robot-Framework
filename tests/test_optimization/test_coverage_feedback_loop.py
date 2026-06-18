@@ -15,7 +15,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
+from src.backend.crew_ai.optimization.postgres_execution_memory import (
+    PostgresExecutionMemory,
+)
 from src.backend.crew_ai.optimization.feedback_loop import (
     FeedbackLoop,
     _get_with_retry,
@@ -65,7 +67,7 @@ class TestGetHealthStatusFailed:
     def test_chromadb_init_failed_returns_failed(self, in_memory_em):
         """When ChromaDB sentinel is set, get_health_status should return FAILED."""
         fb = _make_minimal_fb(in_memory_em)
-        in_memory_em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
+        in_memory_em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
         in_memory_em._chroma_failed_at = time.monotonic()
 
         with patch("src.backend.core.config.settings") as mock_settings:

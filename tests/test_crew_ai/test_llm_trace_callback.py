@@ -210,7 +210,7 @@ class TestRegisterLitellmCallback:
         original = litellm.success_callback[:]
         try:
             mock_settings = MagicMock()
-            mock_settings.OBSERVABILITY_BACKEND = "sqlite"
+            mock_settings.OBSERVABILITY_BACKEND = "postgres"
             with patch("src.backend.core.config.settings", mock_settings):
                 _register_litellm_callback()
                 _register_litellm_callback()

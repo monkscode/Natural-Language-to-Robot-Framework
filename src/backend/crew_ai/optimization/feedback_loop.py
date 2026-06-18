@@ -7,7 +7,7 @@ Three classes:
 2. ContradictionDetector — Extensible scanner that flags learned rules whose
    counter-evidence ratio exceeds a configurable threshold. Read-only: never
    modifies rules, only reports.
-3. FeedbackLoop — Orchestrator that connects FailureAnalyzer, ExecutionMemory,
+3. FeedbackLoop — Orchestrator that connects FailureAnalyzer, the execution store,
    all learning engines, and the metrics tracker.  Called after every execution
    and after user feedback.  Non-blocking: all writes go through LearningWriteQueue.
 
@@ -31,7 +31,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
@@ -43,9 +43,11 @@ from src.backend.crew_ai.optimization.learning_config import (
     extract_domain,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
     CodeStructureExtractor,
+)
+from src.backend.crew_ai.optimization.postgres_execution_memory import (
+    PostgresExecutionMemory,
 )
 from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
 from src.backend.crew_ai.optimization.pattern_learning import QueryPatternMatcher
@@ -262,7 +264,7 @@ class LearningMetricsTracker:
         Initialize LearningMetricsTracker.
 
         Args:
-            execution_memory: ExecutionMemory instance. Write methods
+            execution_memory: execution-store instance. Write methods
                               use _writer_conn; reads use read_conn().
         """
         self._em = execution_memory
@@ -674,7 +676,7 @@ class FeedbackLoop:
     1. Parse output.xml (if exists)
     2. Classify failure (if failed)
     3. Build ExecutionRecord
-    4. Store in ExecutionMemory
+    4. Store in the execution store
     5. Route to relevant learning engines
     6. Record learning metrics
     7. Update daily stats
@@ -685,7 +687,7 @@ class FeedbackLoop:
 
     def __init__(
         self,
-        execution_memory: ExecutionMemory = None,
+        execution_memory: PostgresExecutionMemory = None,
         failure_analyzer: FailureAnalyzer = None,
         structural_engine=None,
         keyword_engine=None,
@@ -703,13 +705,15 @@ class FeedbackLoop:
         constructed using shared database connections.  Pass mocks in
         tests for deterministic behaviour.
         """
-        # Core infrastructure
-        self.execution_memory = execution_memory or ExecutionMemory()
+        # Core infrastructure. Phase 4 cutover: the learning store is
+        # PostgreSQL + pgvector (PostgresExecutionMemory); tests inject their
+        # own schema-isolated instance.
+        self.execution_memory = execution_memory or PostgresExecutionMemory()
         self.failure_analyzer = failure_analyzer or FailureAnalyzer()
         self.write_queue = write_queue or LearningWriteQueue()
         self.circuit_breaker = circuit_breaker or LearningCircuitBreaker()
 
-        # Shared ExecutionMemory for all engine + tracker construction
+        # Shared execution store for all engine + tracker construction
         em = self.execution_memory
 
         # Learning engines (lazy import to avoid circular dependencies)
@@ -746,13 +750,12 @@ class FeedbackLoop:
             self.pattern_learner = pattern_learner
         else:
             try:
-                from src.backend.crew_ai.optimization.chroma_store import (
-                    KeywordVectorStore,
+                from src.backend.crew_ai.optimization.keyword_vector_store import (
+                    get_keyword_vector_store,
                 )
-                from src.backend.core.config import settings as app_settings
-                chroma_store = KeywordVectorStore(
-                    persist_directory=app_settings.OPTIMIZATION_CHROMA_DB_PATH,
-                )
+                # Shared process-wide store — run_crew reuses this same instance
+                # instead of opening a second pool per workflow.
+                chroma_store = get_keyword_vector_store()
                 self.pattern_learner = QueryPatternMatcher(
                     chroma_store=chroma_store,
                 )
@@ -797,7 +800,7 @@ class FeedbackLoop:
 
         # Submit the one-time anchor reconcile to the writer thread. Lazy by
         # construction: FeedbackLoop is built lazily and the reconcile runs on
-        # the writer thread, so ExecutionMemory's deferred ONNX load is
+        # the writer thread, so the store's deferred ONNX load is
         # respected (no eager 80 MB model load at process startup).
         self.write_queue.submit(self._run_anchor_reconcile)
 
@@ -836,7 +839,7 @@ class FeedbackLoop:
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("FeedbackLoop._recover_stale_review_sessions")
         try:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             cursor = self.execution_memory._writer_conn.execute(
                 "UPDATE hint_review_sessions "
                 "SET status = 'failed', "
@@ -950,7 +953,10 @@ class FeedbackLoop:
             )
             record = ExecutionRecord(
                 workflow_id=workflow_id,
-                timestamp=datetime.now(),
+                # UTC, tz-aware: stored as ISO text and compared against the
+                # UTC cutoffs the dashboard queries use — local time would skew
+                # every window by the host's UTC offset.
+                timestamp=datetime.now(timezone.utc),
                 user_query=user_query,
                 url=url,
                 domain=extract_domain(url) if url else None,
@@ -1150,10 +1156,17 @@ class FeedbackLoop:
             # `if active_hints:` DB check is the gate. Cost per call is small
             # (~$0.0001 at Gemini 2.5 Flash); the maintenance tax of regex
             # heuristics is not worth the saving.
+            #
+            # Empty text IS gated: the one-click verdicts (P0/N0 fast paths,
+            # e.g. the failure-path Skip) carry no words to judge hints
+            # against, so the LLM call would be pure waste. Code-evidence
+            # conflict detection for those workflows still happens at
+            # execution time via Trigger 1.
             if (
                 self.nl_engine is not None
                 and record is not None
                 and record.robot_code
+                and feedback_text.strip()
             ):
                 from src.backend.crew_ai.optimization.conflict_detection import (
                     fire_conflict_detection,
@@ -1371,12 +1384,12 @@ class FeedbackLoop:
         if not settings.OPTIMIZATION_ENABLED:
             return "DISABLED"
 
-        # FAILED — hard failures. The ChromaDB check is tri-state: ONLY the
+        # FAILED — hard failures. The embedder check is tri-state: ONLY the
         # _CHROMADB_INIT_FAILED sentinel means "failed". `None` means "not yet
         # lazily initialized" — transient, not a fault — so it must not raise
         # a false FAILED in the seconds after a restart.
         if (self.execution_memory._chroma_client
-                is ExecutionMemory._CHROMADB_INIT_FAILED):
+                is self.execution_memory._CHROMADB_INIT_FAILED):
             return "FAILED"
         if not self.circuit_breaker.is_enabled():
             return "FAILED"

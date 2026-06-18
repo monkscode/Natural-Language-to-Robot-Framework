@@ -25,11 +25,22 @@ services:
       - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-latest}
       # Disable ChromaDB telemetry (posthog API version mismatch causes noisy errors)
       - ANONYMIZED_TELEMETRY=False
+      # Auth/users Postgres DSN — in-container host is the 'postgres' service name
+      # (overrides the localhost value in src/backend/.env for the Docker network)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-nlrf}:${POSTGRES_PASSWORD:-nlrf}@postgres:5432/${POSTGRES_DB:-nlrf}
+      # In compose the SPA is the nginx container on :3000 — without this the
+      # post-Google-login redirect lands on the dev-server URL (:5173) from
+      # .env, which is dead in container mode. Override via shell env when
+      # deploying behind a different host. GOOGLE_REDIRECT_URI stays
+      # .env-driven: it must EXACTLY match what is registered with Google.
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env
     depends_on:
       browser-service:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     logging:
@@ -85,6 +96,72 @@ services:
     networks:
       - nlrf-network
 
+  # --- Postgres (auth/users + the learning stack as of Phase 4). The pgvector
+  # image (team-maintained, tracks PG releases) provides the `vector` extension
+  # for the learning embeddings (slice 6); same PG 16, so pgdata is compatible. ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nlrf-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-nlrf}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nlrf}
+      - POSTGRES_DB=${POSTGRES_DB:-nlrf}
+    ports:
+      # Loopback-only (IPv4 AND IPv6): the DB is never exposed on the network
+      # interface. Both binds are required — Windows resolves `localhost` to
+      # ::1 first, and Docker Desktop black-holes unbound IPv6 ports (hangs,
+      # not refused), which stalls every pooled connect by the full timeout.
+      - "127.0.0.1:5432:5432"
+      - "[::1]:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=postgres"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - nlrf-network
+
+  # --- React SPA microservice: nginx serves the build + reverse-proxies the API ---
+  frontend:
+    image: ${FRONTEND_IMAGE_TAG:-monkscode/nlrf:frontend-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: nlrf-frontend
+    ports:
+      - "3000:8080"
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=frontend"
+    healthcheck:
+      # 127.0.0.1 (not localhost): busybox wget prefers ::1, nginx is IPv4-only
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - nlrf-network
+
 networks:
   nlrf-network:
     driver: bridge
+
+volumes:
+  pgdata:

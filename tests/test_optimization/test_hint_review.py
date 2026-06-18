@@ -16,13 +16,12 @@ Depends on: learning_endpoints._build_review_prompt, _run_hint_review
 """
 
 import json
-import sqlite3
 import types
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from src.backend.api.learning_endpoints import _build_review_prompt, _run_hint_review
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
+from src.backend.crew_ai.optimization import pg_compat
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +148,7 @@ class TestRunHintReview:
     """_run_hint_review: globals chunk succeeds, domain chunk fails → pending_review."""
 
     @staticmethod
-    def _insert_test_data(conn: sqlite3.Connection) -> int:
+    def _insert_test_data(conn) -> int:
         """Populate the test DB and return the session_id (always 1)."""
         now = datetime.now(timezone.utc).isoformat()
 
@@ -193,7 +192,7 @@ class TestRunHintReview:
             choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
         )
 
-    def test_chunk_loop_partial_failure(self, tmp_db_path):
+    def test_chunk_loop_partial_failure(self, in_memory_em):
         """Globals chunk succeeds; domain chunk fails on both attempts.
 
         Resulting session status must be 'pending_review' (not 'failed') because
@@ -201,11 +200,9 @@ class TestRunHintReview:
         and the global page status='succeeded'. Recommendations are persisted only
         for the successful chunk.
         """
-        # --- Setup DB ---
-        setup_conn = sqlite3.connect(tmp_db_path)
-        setup_conn.row_factory = sqlite3.Row
-        setup_conn.execute("PRAGMA journal_mode=WAL")
-        SchemaManager.ensure_current(setup_conn)
+        # --- Setup DB (the in_memory_em fixture provides a clean schema) ---
+        dsn = in_memory_em.dsn
+        setup_conn = pg_compat.connect(dsn)
         session_id = self._insert_test_data(setup_conn)
         setup_conn.close()
 
@@ -218,13 +215,10 @@ class TestRunHintReview:
             RuntimeError("LLM network error retry"),
         ]
 
-        # --- Mock _admin_conn to open fresh connections to tmp_db_path ---
+        # --- Mock _admin_conn to open fresh connections to the test schema ---
         def admin_conn_factory():
-            c = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            c.row_factory = sqlite3.Row
-            c.execute("PRAGMA journal_mode=WAL")
-            c.execute("PRAGMA busy_timeout=5000")
-            return c
+            # Mirrors production _admin_conn (pg_compat, default transactions).
+            return pg_compat.connect(dsn)
 
         mock_fb = MagicMock()
 
@@ -241,8 +235,7 @@ class TestRunHintReview:
             _run_hint_review(session_id, mock_fb)
 
         # --- Assert final DB state ---
-        check_conn = sqlite3.connect(tmp_db_path)
-        check_conn.row_factory = sqlite3.Row
+        check_conn = pg_compat.connect(dsn)
         try:
             session = check_conn.execute(
                 "SELECT status FROM hint_review_sessions WHERE id=?", (session_id,)
@@ -290,13 +283,12 @@ class TestApplyReviewSessionReactivateAudit:
     """
 
     @staticmethod
-    def _setup_db(conn: sqlite3.Connection) -> tuple[int, int]:
+    def _setup_db(conn) -> tuple[int, int]:
         """Insert a conflicted disabled hint + approved reactivate recommendation.
 
         Returns (session_id, hint_id).
         """
         now = datetime.now(timezone.utc).isoformat()
-        SchemaManager.ensure_current(conn)
 
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -333,23 +325,19 @@ class TestApplyReviewSessionReactivateAudit:
         conn.commit()
         return 1, 1
 
-    def test_reactivate_after_value_includes_conflict_columns(self, tmp_db_path):
+    def test_reactivate_after_value_includes_conflict_columns(self, in_memory_em):
         """after_value in hint_audit must include conflict_flagged_at and conflict_flag_reason."""
         from src.backend.api.learning_endpoints import apply_review_session
         from unittest.mock import MagicMock, patch
 
-        setup_conn = sqlite3.connect(tmp_db_path)
-        setup_conn.row_factory = sqlite3.Row
-        setup_conn.execute("PRAGMA journal_mode=WAL")
+        dsn = in_memory_em.dsn
+        setup_conn = pg_compat.connect(dsn)
         session_id, hint_id = self._setup_db(setup_conn)
         setup_conn.close()
 
         def admin_conn_factory():
-            c = sqlite3.connect(tmp_db_path, check_same_thread=False)
-            c.row_factory = sqlite3.Row
-            c.execute("PRAGMA journal_mode=WAL")
-            c.execute("PRAGMA busy_timeout=5000")
-            return c
+            # Mirrors production _admin_conn (pg_compat, default transactions).
+            return pg_compat.connect(dsn)
 
         mock_fb = MagicMock()
 
@@ -357,8 +345,7 @@ class TestApplyReviewSessionReactivateAudit:
                    side_effect=admin_conn_factory):
             apply_review_session(session_id, fb=mock_fb)
 
-        check_conn = sqlite3.connect(tmp_db_path)
-        check_conn.row_factory = sqlite3.Row
+        check_conn = pg_compat.connect(dsn)
         try:
             audit_row = check_conn.execute(
                 "SELECT action, after_value FROM hint_audit WHERE hint_id=?",
@@ -392,27 +379,20 @@ class TestApplyReviewSessionReactivateAudit:
 
 _TIMELINE_SQL = (
     "SELECT CASE "
-    "  WHEN EXISTS ("
-    "    SELECT 1 FROM json_each(COALESCE(actually_flagged_hint_ids, flagged_hint_ids)) "
-    "    WHERE CAST(value AS INTEGER) = ?"
-    "  ) THEN 'flagged' "
+    "  WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
+    "       @> to_jsonb(?::int) THEN 'flagged' "
     "  ELSE 'flag_recommended_suppressed' "
     "END AS action "
     "FROM trigger_events "
     "WHERE flagged_hint_ids IS NOT NULL "
-    "  AND flagged_hint_ids != '[]' "
-    "  AND EXISTS ("
-    "    SELECT 1 FROM json_each(flagged_hint_ids) "
-    "    WHERE CAST(value AS INTEGER) = ?"
-    "  )"
+    "  AND flagged_hint_ids <> '[]'::jsonb "
+    "  AND flagged_hint_ids @> to_jsonb(?::int)"
 )
 
 
-def _make_timeline_db() -> tuple:
-    """Return (conn, hint_id) with a fully-migrated in-memory DB and one hint."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    SchemaManager.ensure_current(conn)
+def _make_timeline_db(dsn) -> tuple:
+    """Return (conn, hint_id) on the clean Postgres test schema with one hint."""
+    conn = pg_compat.connect(dsn)
     now = "2026-01-01T00:00:00+00:00"
     conn.execute(
         "INSERT INTO nl_feedback_corrections "
@@ -427,9 +407,9 @@ def _make_timeline_db() -> tuple:
 class TestGetHintTimelineLabels:
     """SQL CASE expression in get_hint correctly labels suppressed vs actual flags."""
 
-    def test_suppressed_flag_labelled_flag_recommended_suppressed(self):
+    def test_suppressed_flag_labelled_flag_recommended_suppressed(self, in_memory_em):
         """Hint in flagged_hint_ids but not in actually_flagged_hint_ids → suppressed."""
-        conn, hint_id = _make_timeline_db()
+        conn, hint_id = _make_timeline_db(in_memory_em.dsn)
         now = "2026-01-01T00:00:00+00:00"
         conn.execute(
             "INSERT INTO trigger_events "
@@ -443,9 +423,9 @@ class TestGetHintTimelineLabels:
         assert rows[0]["action"] == "flag_recommended_suppressed", rows[0]["action"]
         conn.close()
 
-    def test_actually_flagged_labelled_flagged(self):
+    def test_actually_flagged_labelled_flagged(self, in_memory_em):
         """Hint in both flagged_hint_ids and actually_flagged_hint_ids → flagged."""
-        conn, hint_id = _make_timeline_db()
+        conn, hint_id = _make_timeline_db(in_memory_em.dsn)
         now = "2026-01-01T00:00:00+00:00"
         conn.execute(
             "INSERT INTO trigger_events "
@@ -459,9 +439,9 @@ class TestGetHintTimelineLabels:
         assert rows[0]["action"] == "flagged", rows[0]["action"]
         conn.close()
 
-    def test_legacy_null_actually_flagged_falls_back_to_flagged(self):
+    def test_legacy_null_actually_flagged_falls_back_to_flagged(self, in_memory_em):
         """Legacy row: actually_flagged_hint_ids NULL → COALESCE to flagged_hint_ids → flagged."""
-        conn, hint_id = _make_timeline_db()
+        conn, hint_id = _make_timeline_db(in_memory_em.dsn)
         now = "2026-01-01T00:00:00+00:00"
         conn.execute(
             "INSERT INTO trigger_events "
@@ -475,9 +455,9 @@ class TestGetHintTimelineLabels:
         assert rows[0]["action"] == "flagged", rows[0]["action"]
         conn.close()
 
-    def test_hint_not_in_flagged_hint_ids_excluded_from_results(self):
+    def test_hint_not_in_flagged_hint_ids_excluded_from_results(self, in_memory_em):
         """Trigger event for a different hint does not appear in this hint's timeline."""
-        conn, hint_id = _make_timeline_db()
+        conn, hint_id = _make_timeline_db(in_memory_em.dsn)
         now = "2026-01-01T00:00:00+00:00"
         other_id = hint_id + 99
         conn.execute(

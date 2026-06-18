@@ -13,7 +13,6 @@ from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 
 
 # ===================================================================
@@ -29,7 +28,7 @@ def _reset_singleton():
     """
     import src.backend.crew_ai.optimization.learning_registry as lr
     lr._feedback_loop_instance = None
-    lr._feedback_loop_init_attempted = False
+    lr._init_failed_at = None
 
 
 # ===================================================================
@@ -198,8 +197,8 @@ class TestSingleton:
 
         _reset_singleton()
 
-    def test_only_tries_once(self):
-        """After a failed init, get_feedback_loop() does NOT retry."""
+    def test_no_retry_within_cooldown(self):
+        """After a failed init, calls inside the cooldown window do NOT retry."""
         _reset_singleton()
         import src.backend.crew_ai.optimization.learning_registry as lr
 
@@ -208,9 +207,28 @@ class TestSingleton:
             with patch('src.backend.crew_ai.optimization.feedback_loop.FeedbackLoop',
                        mock_cls):
                 lr.get_feedback_loop()  # First call -- fails
-                lr.get_feedback_loop()  # Second call -- should NOT retry
+                lr.get_feedback_loop()  # Second call -- inside cooldown, no retry
                 assert mock_cls.call_count == 1, \
                     f"Expected 1 init attempt, got {mock_cls.call_count}"
+
+        _reset_singleton()
+
+    def test_retries_after_cooldown(self):
+        """A failed init is retried once the cooldown has elapsed — a transient
+        Postgres outage at startup must not disable learning permanently."""
+        _reset_singleton()
+        import src.backend.crew_ai.optimization.learning_registry as lr
+
+        with patch.object(lr.settings, 'OPTIMIZATION_ENABLED', True):
+            mock_fl = MagicMock()
+            mock_cls = MagicMock(side_effect=[RuntimeError("DB down"), mock_fl])
+            with patch('src.backend.crew_ai.optimization.feedback_loop.FeedbackLoop',
+                       mock_cls):
+                assert lr.get_feedback_loop() is None      # fails, starts cooldown
+                # Age the failure past the cooldown window.
+                lr._init_failed_at -= (lr._INIT_RETRY_COOLDOWN_S + 1)
+                assert lr.get_feedback_loop() is mock_fl   # retried and recovered
+                assert mock_cls.call_count == 2
 
         _reset_singleton()
 
@@ -563,9 +581,11 @@ class TestIntegrationSmoke:
 class TestRegression:
 
     def test_day01_import(self):
-        """ExecutionMemory should still import."""
-        from src.backend.crew_ai.optimization.execution_memory import ExecutionMemory
-        assert ExecutionMemory is not None
+        """The execution store should still import."""
+        from src.backend.crew_ai.optimization.postgres_execution_memory import (
+            PostgresExecutionMemory,
+        )
+        assert PostgresExecutionMemory is not None
 
     def test_day02_import(self):
         """FailureAnalyzer should still import."""
@@ -601,11 +621,8 @@ class TestRegression:
         assert SmartKeywordProvider is not None
 
     def test_schema_manager(self, in_memory_db):
-        """SchemaManager should still work with in-memory DB."""
-        # Schema already applied by fixture; verify tables exist
-        tables = in_memory_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-        table_names = [t["name"] for t in tables]
+        """The fixture-applied schema should contain the core tables."""
+        from tests.test_optimization import pg_introspect
+        table_names = pg_introspect.table_names(in_memory_db)
         assert "execution_records" in table_names
         assert "structural_rules" in table_names
