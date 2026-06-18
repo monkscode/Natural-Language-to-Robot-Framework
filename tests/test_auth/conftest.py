@@ -55,6 +55,8 @@ def auth_isolated_schema():
         )
         auth_db._pool = pool  # get_pool() now hands out the isolated pool
         auth_db.init_auth_db()  # creates users in auth_test (first on search_path)
+        from src.backend.auth.org_db import init_org_db
+        init_org_db()  # organizations + org_members in the same isolated schema
         yield
     finally:
         # Reached on setup failures too (anything above raising before yield),
