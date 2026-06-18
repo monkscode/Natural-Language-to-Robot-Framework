@@ -34,14 +34,14 @@ class TestInitObservability:
 
     def test_import_error_returns_false(self):
         """Setting a sys.modules entry to None causes ImportError on import."""
-        with patch("src.backend.core.config.settings", _make_settings("sqlite")):
+        with patch("src.backend.core.config.settings", _make_settings("postgres")):
             with patch.dict(sys.modules, {"traceloop": None, "traceloop.sdk": None}):
                 from src.backend.core.observability import init_observability
                 result = init_observability()
                 assert result is False
 
     def test_generic_exception_returns_false(self):
-        with patch("src.backend.core.config.settings", _make_settings("sqlite")):
+        with patch("src.backend.core.config.settings", _make_settings("postgres")):
             with patch("src.backend.core.observability._get_exporter", return_value=MagicMock()):
                 with patch("traceloop.sdk.Traceloop.init", side_effect=RuntimeError("boom")):
                     from src.backend.core.observability import init_observability
@@ -50,7 +50,7 @@ class TestInitObservability:
 
     def test_litellm_presence_does_not_crash(self):
         """When litellm is already imported (common in tests), no exception raised."""
-        with patch("src.backend.core.config.settings", _make_settings("sqlite")):
+        with patch("src.backend.core.config.settings", _make_settings("postgres")):
             with patch("src.backend.core.observability._get_exporter", return_value=MagicMock()):
                 with patch("traceloop.sdk.Traceloop.init"):
                     import litellm  # noqa: F401 — ensure it's in sys.modules
@@ -59,7 +59,7 @@ class TestInitObservability:
                     assert isinstance(result, bool)
 
     def test_success_returns_true(self):
-        with patch("src.backend.core.config.settings", _make_settings("sqlite")):
+        with patch("src.backend.core.config.settings", _make_settings("postgres")):
             with patch("src.backend.core.observability._get_exporter", return_value=MagicMock()):
                 with patch("traceloop.sdk.Traceloop.init"):
                     from src.backend.core.observability import init_observability
@@ -72,18 +72,18 @@ class TestInitObservability:
 # ---------------------------------------------------------------------------
 
 class TestGetExporter:
-    def test_sqlite_backend_returns_store(self):
+    def test_postgres_backend_returns_store(self):
         from src.backend.core.observability import _get_exporter
         mock_store = MagicMock()
         with patch("src.backend.core.trace_store.get_trace_store", return_value=mock_store):
-            result = _get_exporter("sqlite", "")
+            result = _get_exporter("postgres", "")
             assert result is mock_store
 
-    def test_sqlite_backend_store_none_raises(self):
+    def test_postgres_backend_store_none_raises(self):
         from src.backend.core.observability import _get_exporter
         with patch("src.backend.core.trace_store.get_trace_store", return_value=None):
             with pytest.raises(RuntimeError, match="could not be initialized"):
-                _get_exporter("sqlite", "")
+                _get_exporter("postgres", "")
 
     def test_grafana_backend_returns_otlp_exporter(self):
         from src.backend.core.observability import _get_exporter

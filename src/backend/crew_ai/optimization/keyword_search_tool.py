@@ -12,7 +12,7 @@ from collections import OrderedDict
 from typing import Optional, Type
 from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
-from .chroma_store import KeywordVectorStore
+from .keyword_vector_store import KeywordVectorStore
 
 logger = logging.getLogger(__name__)
 

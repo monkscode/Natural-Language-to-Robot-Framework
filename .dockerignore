@@ -41,6 +41,10 @@ robot_tests/
 # Node
 node_modules/
 coverage/
+**/dist/
+
+# Postgres data volume (runtime, not for build)
+pgdata/
 
 # Docker
 docker-compose.yml

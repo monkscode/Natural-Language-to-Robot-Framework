@@ -14,7 +14,6 @@ import json
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LearningEngine,
     EffectivenessScore,

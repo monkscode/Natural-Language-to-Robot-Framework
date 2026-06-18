@@ -70,10 +70,10 @@ def _insert_hint(conn, text, *, success=0, failure=0):
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, success_count, failure_count, "
         " created_at, last_seen) "
-        "VALUES (?, 'C1', 'global', ?, ?, '2026-01-01', '2026-01-01')",
+        "VALUES (?, 'C1', 'global', ?, ?, '2026-01-01', '2026-01-01') RETURNING id",
         (text, success, failure),
     )
-    return cur.lastrowid
+    return cur.fetchone()["id"]
 
 
 def _hint(conn, hid):
@@ -105,7 +105,7 @@ class TestWriteTriggerEventUsageColumns:
             "SELECT used_hint_ids, unused_hint_ids FROM trigger_events "
             "WHERE workflow_id = 'wf-te'"
         ).fetchone()
-        assert row["used_hint_ids"] == "[1]"
+        assert row["used_hint_ids"] == [1]  # jsonb -> list
         # The NULL trap: None must be SQL NULL, NOT the string "null".
         assert row["unused_hint_ids"] is None
 

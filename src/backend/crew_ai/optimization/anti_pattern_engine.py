@@ -1,7 +1,7 @@
 """
 Anti-Pattern Engine — Learns patterns to AVOID from failed executions.
 
-Stores anti-patterns in the `anti_patterns` table (managed by SchemaManager):
+Stores anti-patterns in the `anti_patterns` table (managed by pg_schema.py):
 - failure_category: From taxonomy (A1, B1, C1, etc.)
 - query_pattern: What kind of query triggered the failure
 - bad_code_snippet: The code that failed
@@ -18,7 +18,7 @@ Key design:
   query-similarity embedding filter (learning_anchors)
 
 Referenced by: Hint injection pipeline (DAY_06+).
-Depends on: learning_config.py (DAY_00), schema_manager.py (DAY_00).
+Depends on: learning_config.py (DAY_00), pg_schema.py (schema DDL).
 """
 
 import logging
@@ -127,6 +127,7 @@ class AntiPatternEngine(LearningEngine):
                 (failure_category, query_pattern, bad_code_snippet, error_message,
                  domain, score, evidence_count, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
+                RETURNING id
             """, (
                 record.failure_category,
                 record.user_query,
@@ -136,7 +137,7 @@ class AntiPatternEngine(LearningEngine):
                 getattr(record, 'domain', None),
                 initial_score,
             ))
-            new_anti_id = cursor.lastrowid
+            new_anti_id = cursor.fetchone()["id"]
         self._em._writer_conn.commit()
 
         # After the SQL commit, embed a newly created anti-pattern's anchor

@@ -4,14 +4,15 @@ Learning Dashboard API endpoints (/api/learning/*).
 Admin curation surface for the Adaptive Learning System.
 Pairs with the /learning frontend SPA (Step 10).
 
-Write design note: admin write endpoints open a fresh SQLite connection
-rather than routing through LearningWriteQueue. This is intentional:
+Write design note: admin write endpoints open a fresh Postgres connection
+(via pg_compat) rather than routing through LearningWriteQueue. This is
+intentional:
   - LearningWriteQueue's "sole writer" invariant targets automated
     pipeline writes (frequent, must not block the workflow thread).
   - Admin writes are synchronous by design (UI needs an immediate
     response) and human-speed (not high-frequency).
-  - SQLite WAL mode + busy_timeout=5000 serializes any momentary
-    contention with the write queue thread safely.
+  - Postgres MVCC handles any momentary contention with the write-queue
+    thread safely — no SQLITE_BUSY, so no WAL/busy_timeout needed.
 
 Referenced by: main.py (router registration, prefix="/api/learning")
 Depends on: execution_memory.py, feedback_loop.py, learning_registry.py
@@ -29,9 +30,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from src.backend.auth.jwt_utils import require_user
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization import pg_compat
+from src.backend.core.config import settings
 from src.backend.crew_ai.optimization.learning_config import (
-    LEARNING_CONFIG,
     MAX_FEEDBACK_TEXT_CHARS,
     _get_conflict_detection_model,
     _get_conflict_detection_completion_kwargs,
@@ -100,20 +103,17 @@ def _require_feedback_loop():
     return fb
 
 
-def _admin_conn() -> sqlite3.Connection:
-    """Open a fresh write-capable connection for admin operations.
+def _admin_conn():
+    """Open a fresh write-capable Postgres connection (via pg_compat) for admin ops.
 
-    Uses WAL + busy_timeout so concurrent pipeline writes from the
-    write queue thread are safely serialized rather than raising errors.
+    Admin writes use their own short-lived connection rather than the
+    LearningWriteQueue: they are synchronous (the UI needs an immediate
+    response) and human-speed. On Postgres, MVCC handles any concurrency
+    with the pipeline's writer thread — no SQLITE_BUSY, so no WAL/busy_timeout
+    needed. SQLite-dialect SQL (`?` placeholders, sqlite3.Row-style access,
+    `last_insert_rowid()`) runs unchanged through the pg_compat adapter.
     """
-    conn = sqlite3.connect(
-        LEARNING_CONFIG["EXECUTION_MEMORY_DB"], check_same_thread=False
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    return pg_compat.connect(settings.DATABASE_URL)
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +160,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
+    """Audit identity. ALWAYS the authenticated user's email when a token is
+    present — in the live app require_admin guards this router, so a verified
+    token always exists and the client-supplied actor is never trusted. The
+    request_actor fallback only engages in tests (bare-router apps without a
+    token, or endpoint functions called directly — where `admin` is the
+    un-resolved Depends sentinel, hence the isinstance check)."""
+    if not isinstance(admin, dict):
+        admin = None
+    return (admin or {}).get("email") or (request_actor or "").strip() or "admin"
+
+
 def _write_hint_audit(
-    conn: sqlite3.Connection,
+    conn,  # pg_compat.CompatConnection (sqlite3-Connection-like)
     hint_id: int,
     action: str,
     actor: str,
@@ -233,11 +245,14 @@ def list_hints(
             params.append(scope)
 
         if domain:
-            conditions.append("domain = ?")
+            # Domains are stored lowercased (extract_domain), but admin-created
+            # hints may predate that — compare case-insensitively on both sides.
+            conditions.append("LOWER(domain) = LOWER(?)")
             params.append(domain)
 
         if search:
-            conditions.append("feedback_text LIKE ?")
+            # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.
+            conditions.append("feedback_text ILIKE ?")
             params.append(f"%{search}%")
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -313,11 +328,8 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
         trigger_rows = conn.execute(
             "SELECT 'trigger_events' AS source, id, "
             "       CASE "
-            "         WHEN EXISTS ("
-            "           SELECT 1 FROM json_each("
-            "             COALESCE(actually_flagged_hint_ids, flagged_hint_ids)"
-            "           ) WHERE CAST(value AS INTEGER) = ?"
-            "         ) THEN 'flagged' "
+            "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
+            "              @> to_jsonb(?::int) THEN 'flagged' "
             "         ELSE 'flag_recommended_suppressed' "
             "       END AS action, "
             "       trigger_type AS actor, reason, "
@@ -325,11 +337,8 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
             "       trigger_type, workflow_id "
             "FROM trigger_events "
             "WHERE flagged_hint_ids IS NOT NULL "
-            "  AND flagged_hint_ids != '[]' "
-            "  AND EXISTS ("
-            "    SELECT 1 FROM json_each(flagged_hint_ids) "
-            "    WHERE CAST(value AS INTEGER) = ?"
-            "  )",
+            "  AND flagged_hint_ids <> '[]'::jsonb "
+            "  AND flagged_hint_ids @> to_jsonb(?::int)",
             (hint_id, hint_id),
         ).fetchall()
 
@@ -349,9 +358,14 @@ def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
 # ---------------------------------------------------------------------------
 
 @router.post("/hints", status_code=201)
-def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
+def create_hint(
+    request: HintCreateRequest,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
@@ -397,7 +411,7 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM nl_feedback_corrections "
-            "WHERE feedback_text = ? AND domain IS ? AND scope = ?",
+            "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ?",
             (text, request.domain, request.scope),
         ).fetchone()
 
@@ -417,12 +431,12 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
             )
             if was_flagged:
                 _write_hint_audit(
-                    conn, existing["id"], "unflag", request.actor,
+                    conn, existing["id"], "unflag", actor,
                     "Admin re-submitted existing hint — implicit unflag",
                     {"conflict_flagged": 1}, {"conflict_flagged": 0},
                 )
             _write_hint_audit(
-                conn, existing["id"], "create", request.actor,
+                conn, existing["id"], "create", actor,
                 "Admin re-submitted existing hint — evidence incremented",
                 None, {"evidence_count": existing["evidence_count"] + 1},
             )
@@ -432,20 +446,32 @@ def create_hint(request: HintCreateRequest, fb=Depends(_require_feedback_loop)):
             ).fetchone()
             return {"hint": _row_to_dict(row), "created": False}
 
-        conn.execute(
-            "INSERT INTO nl_feedback_corrections "
-            "(feedback_text, category, scope, domain, url, original_failure_category, "
-            " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-            " created_via) "
-            "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
-            (
-                text, category, request.scope, request.domain, request.url,
-                request.original_failure_category, anchor, now, now,
-            ),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO nl_feedback_corrections "
+                "(feedback_text, category, scope, domain, url, original_failure_category, "
+                " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
+                " created_via) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
+                (
+                    text, category, request.scope, request.domain, request.url,
+                    request.original_failure_category, anchor, now, now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # BEGIN IMMEDIATE is a no-op on Postgres, so the duplicate check
+            # above no longer holds a write lock: a concurrent identical create
+            # can land between the SELECT and this INSERT. The UNIQUE constraint
+            # is the real guard — surface the loser as a retriable conflict,
+            # not a 500.
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="An identical hint was just created — refresh to see it.",
+            ) from None
         hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _write_hint_audit(
-            conn, hint_id, "create", request.actor, None, None,
+            conn, hint_id, "create", actor, None, None,
             {
                 "feedback_text": text, "scope": request.scope,
                 "domain": request.domain, "url": request.url,
@@ -498,6 +524,7 @@ def patch_hint(
     hint_id: int,
     request: HintPatchRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if request.feedback_text is not None:
         raise HTTPException(
@@ -506,6 +533,7 @@ def patch_hint(
         )
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -571,7 +599,7 @@ def patch_hint(
         # single action verb cannot name all of them, and before/after already
         # records exactly which fields changed. Use a neutral label rather than
         # mislabel a url- or domain-only patch as a category change.
-        _write_hint_audit(conn, hint_id, "patch", request.actor, request.reason, before, after)
+        _write_hint_audit(conn, hint_id, "patch", actor, request.reason, before, after)
         conn.commit()
 
         updated = conn.execute(
@@ -596,9 +624,11 @@ def unflag_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -618,7 +648,7 @@ def unflag_hint(
             (hint_id,),
         )
         _write_hint_audit(
-            conn, hint_id, "unflag", request.actor, request.reason,
+            conn, hint_id, "unflag", actor, request.reason,
             {"conflict_flagged": 1}, {"conflict_flagged": 0},
         )
         conn.commit()
@@ -645,9 +675,11 @@ def retract_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -665,7 +697,7 @@ def retract_hint(
             (_now(), hint_id),
         )
         _write_hint_audit(
-            conn, hint_id, "retract", request.actor, request.reason,
+            conn, hint_id, "retract", actor, request.reason,
             {"is_active": 1}, {"is_active": 0},
         )
         conn.commit()
@@ -692,9 +724,11 @@ def reactivate_hint(
     hint_id: int,
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
 
     conn = _admin_conn()
     try:
@@ -716,7 +750,7 @@ def reactivate_hint(
             (hint_id,),
         )
         _write_hint_audit(
-            conn, hint_id, "reactivate", request.actor, request.reason,
+            conn, hint_id, "reactivate", actor, request.reason,
             {"is_active": 0}, {"is_active": 1, "conflict_flagged": 0},
         )
         conn.commit()
@@ -821,7 +855,8 @@ def get_trigger(trigger_id: int, fb=Depends(_require_feedback_loop)):
         # Resolve hint texts for all active_hint_ids in one query
         hint_texts: dict[int, str] = {}
         try:
-            active_ids = json.loads(row_dict.get("active_hint_ids") or "[]")
+            # active_hint_ids is jsonb → psycopg returns a parsed list (or None).
+            active_ids = row_dict.get("active_hint_ids") or []
         except (ValueError, TypeError):
             active_ids = []
         if active_ids:
@@ -861,7 +896,8 @@ def list_runs(
             where.append("test_status = ?")
             params.append(status)
         if q:
-            where.append("user_query LIKE ?")
+            # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.
+            where.append("user_query ILIKE ?")
             params.append(f"%{q}%")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         total = conn.execute(
@@ -878,9 +914,7 @@ def list_runs(
         for r in rows:
             d = _row_to_dict(r)
             try:
-                d["nl_injected_count"] = len(
-                    json.loads(d.get("injected_hint_ids") or "[]")
-                )
+                d["nl_injected_count"] = len(d.get("injected_hint_ids") or [])
             except (ValueError, TypeError):
                 d["nl_injected_count"] = 0
             runs.append(d)
@@ -947,9 +981,9 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
     original_failure_category (via RELATED_CATEGORIES). Inform-only review signal
     so a harmful never-passing hint is visible without a manual review trigger.
 
-    SQL json_each hybrid: a bounded (LIMIT 2000), 30-day, json_valid-guarded
-    subquery over failing runs, expanded with json_each(injected_hint_ids) and
-    joined to the candidate hints; Python then applies the 4-entry
+    SQL jsonb hybrid: a bounded (LIMIT 2000), 30-day subquery over failing runs,
+    joined to the candidate hints by jsonb containment
+    (injected_hint_ids @> to_jsonb(hint.id), GIN-indexed); Python then applies the 4-entry
     RELATED_CATEGORIES relation so the dict stays the single source of truth.
     Scale caveat: at high volume the row cap binds before 30d → a recent-window
     estimate, not lifetime.
@@ -969,13 +1003,11 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
             SELECT injected_hint_ids, failure_category
             FROM execution_records
             WHERE test_status = 'failed'
-              AND json_valid(injected_hint_ids)
+              AND injected_hint_ids IS NOT NULL
               AND timestamp >= ?
             ORDER BY timestamp DESC
             LIMIT 2000
-        ) er
-        JOIN json_each(er.injected_hint_ids) j
-          ON CAST(j.value AS INTEGER) = hint.id
+        ) er ON er.injected_hint_ids @> to_jsonb(hint.id)
         WHERE hint.id IN ({placeholders})
         """,
         [cutoff_30d] + list(hint_ids),
@@ -1042,7 +1074,7 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                    SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
                    SUM(CASE WHEN status='succeeded'
                              AND COALESCE(actually_flagged_hint_ids,
-                                          flagged_hint_ids) != '[]'
+                                          flagged_hint_ids) <> '[]'::jsonb
                             THEN 1 ELSE 0 END) AS flagged_events
             FROM trigger_events
             WHERE created_at >= ?
@@ -1062,20 +1094,19 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events
             WHERE created_at >= ?
               AND status = 'succeeded'
-              AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) != '[]'
+              AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) <> '[]'::jsonb
         """, (cutoff_30d,)).fetchone()["n"]
 
         reviewed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
               AND te.status = 'succeeded'
-              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
+              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) <> '[]'::jsonb
               AND EXISTS (
                   SELECT 1
-                  FROM hint_audit ha,
-                       json_each(COALESCE(te.actually_flagged_hint_ids,
-                                          te.flagged_hint_ids)) flag
-                  WHERE ha.hint_id = CAST(flag.value AS INTEGER)
+                  FROM hint_audit ha
+                  WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
+                        @> to_jsonb(ha.hint_id)
                     AND ha.created_at > te.created_at
               )
         """, (cutoff_30d,)).fetchone()["n"]
@@ -1084,13 +1115,12 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
               AND te.status = 'succeeded'
-              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) != '[]'
+              AND COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids) <> '[]'::jsonb
               AND EXISTS (
                   SELECT 1
-                  FROM hint_audit ha,
-                       json_each(COALESCE(te.actually_flagged_hint_ids,
-                                          te.flagged_hint_ids)) flag
-                  WHERE ha.hint_id = CAST(flag.value AS INTEGER)
+                  FROM hint_audit ha
+                  WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
+                        @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
                     AND ha.created_at > te.created_at
               )
@@ -1153,8 +1183,8 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
             SELECT COUNT(*) AS n FROM trigger_events
             WHERE created_at >= ?
               AND trigger_type = 'usage_attribution' AND status = 'succeeded'
-              AND (COALESCE(used_hint_ids,'[]') != '[]'
-                   OR COALESCE(unused_hint_ids,'[]') != '[]')
+              AND (COALESCE(used_hint_ids, '[]'::jsonb) <> '[]'::jsonb
+                   OR COALESCE(unused_hint_ids, '[]'::jsonb) <> '[]'::jsonb)
         """, (cutoff_30d,)).fetchone()["n"]
 
         # F6 — state-based retirement-reversal rate. Of hints auto-disabled with
@@ -1218,18 +1248,16 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
                 JOIN (
                     SELECT workflow_id, injected_hint_ids
                     FROM execution_records
-                    WHERE json_valid(injected_hint_ids)
+                    WHERE injected_hint_ids IS NOT NULL
                       AND timestamp >= ?
                     ORDER BY timestamp DESC
                     LIMIT 5000
-                ) er
-                JOIN json_each(er.injected_hint_ids) j
-                  ON CAST(j.value AS INTEGER) = hint.id
+                ) er ON er.injected_hint_ids @> to_jsonb(hint.id)
                 WHERE hint.is_active=1 AND hint.conflict_flagged=0
                   AND hint.applied_count=0
                   AND hint.created_at <= ?
                 GROUP BY hint.id
-                HAVING injections >= ?
+                HAVING COUNT(DISTINCT er.workflow_id) >= ?
                 ORDER BY injections DESC
                 LIMIT 50
                 """,
@@ -1314,8 +1342,9 @@ def _compute_exonerations(trigger_events) -> tuple:
     exoneration_counts: dict = defaultdict(int)
     flag_counts: dict = defaultdict(int)
     for row in trigger_events:
-        active = json.loads(row["active_hint_ids"] or "[]")
-        flagged = json.loads(row["flagged_hint_ids"] or "[]")
+        # active_hint_ids / flagged_hint_ids are jsonb → already parsed lists.
+        active = row["active_hint_ids"] or []
+        flagged = row["flagged_hint_ids"] or []
         flagged_set = set(flagged)
         for hint_id in active:
             if hint_id in flagged_set:
@@ -1947,7 +1976,11 @@ def decide_recommendation(
 
 
 @router.post("/review-hints/sessions/{session_id}/apply")
-def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
+def apply_review_session(
+    session_id: int,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+):
     conn = _admin_conn()
     try:
         # BEGIN IMMEDIATE takes the SQLite write lock before the status check, so
@@ -1999,7 +2032,7 @@ def apply_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
             note = (rec.get("admin_notes") or "").strip()
             llm_reason = rec.get("reason") or ""
             audit_reason = f"{note}  —  [LLM: {llm_reason}]" if note else llm_reason
-            actor = "user1"
+            actor = _audit_actor(admin)
 
             if recommendation == "disable":
                 conn.execute(

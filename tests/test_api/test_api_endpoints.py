@@ -20,6 +20,15 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 
+def _admin_headers() -> dict:
+    """Bearer header with a real admin JWT — require_admin is always strict."""
+    from src.backend.auth.jwt_utils import create_access_token
+    token = create_access_token(
+        {"id": "test-admin", "email": "admin@test.local", "role": "admin", "display_name": "Admin"}
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 @pytest.fixture
 def api_client():
     """FastAPI test client with mocked dependencies."""
@@ -99,7 +108,7 @@ class TestDockerEndpoints:
     def test_rebuild_docker(self, api_client):
         """POST /rebuild-docker-image triggers rebuild."""
         client, _, _ = api_client
-        resp = client.post("/rebuild-docker-image")
+        resp = client.post("/rebuild-docker-image", headers=_admin_headers())
         assert resp.status_code == 200
 
 
@@ -147,7 +156,7 @@ class TestFeedbackEndpoints:
         client, _, mock_fb = api_client
         mock_fb.get_learning_stats.return_value = {"total_records": 10}
 
-        resp = client.get("/api/learning-stats")
+        resp = client.get("/api/learning-stats", headers=_admin_headers())
         assert resp.status_code == 200
 
 

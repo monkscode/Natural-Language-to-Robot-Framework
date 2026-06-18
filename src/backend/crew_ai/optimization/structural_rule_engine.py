@@ -217,10 +217,11 @@ class IntentExtractor:
 
         try:
             self._em._writer_conn.execute("""
-                INSERT OR IGNORE INTO intent_patterns
+                INSERT INTO intent_patterns
                 (intent_name, triggers_json, requires_json, source, score,
                  evidence_count, last_updated, created_at)
                 VALUES (?, ?, ?, 'seed', ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+                ON CONFLICT (intent_name) DO NOTHING
             """, (
                 intent_name,
                 json.dumps(seed_triggers),   # Full list, NOT match["triggered_by"]

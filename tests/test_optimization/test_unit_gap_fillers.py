@@ -16,11 +16,10 @@ Subprocess regression tests removed (pytest discovers all tests).
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
-from src.backend.crew_ai.optimization.schema_manager import SchemaManager
 from src.backend.crew_ai.optimization.learning_config import (
     LEARNING_CONFIG,
     LearningCircuitBreaker,
@@ -28,7 +27,6 @@ from src.backend.crew_ai.optimization.learning_config import (
     EffectivenessScore,
 )
 from src.backend.crew_ai.optimization.execution_memory import (
-    ExecutionMemory,
     ExecutionRecord,
 )
 from src.backend.core.url_utils import extract_domain
@@ -61,22 +59,12 @@ from src.backend.crew_ai.optimization.nl_feedback_engine import (
 # ===================================================================
 
 def create_execution_memory(conn):
-    """Create ExecutionMemory backed by existing connection.
+    """Return the execution store wrapped by the in_memory_db fixture.
 
-    When conn is _EngineCompatConn (from in_memory_db fixture), returns the
-    real ExecutionMemory it wraps so read_conn() works correctly.
+    conn is the _EngineCompatConn from the in_memory_db fixture; the real
+    PostgresExecutionMemory it wraps is returned so read_conn() works correctly.
     """
-    if hasattr(conn, '_em'):
-        return conn._em
-    em = ExecutionMemory.__new__(ExecutionMemory)
-    em.db_path = ":memory:"
-    em._chroma_dir = None
-    em._writer_conn = conn
-    em._chroma_client = ExecutionMemory._CHROMADB_INIT_FAILED
-    em._execution_collection = None
-    em._chroma_failed_at = None
-    em._chroma_last_error = None
-    return em
+    return conn._em
 
 
 class SynchronousWriteQueue:
@@ -238,7 +226,8 @@ def test_em_update_daily_stats_creates_row(in_memory_db):
     conn = in_memory_db
     em = create_execution_memory(conn)
     em.update_daily_stats("passed")
-    today = datetime.now().strftime("%Y-%m-%d")
+    # UTC bucket — matches update_daily_stats (local date differs around midnight)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
     ).fetchone()
@@ -254,7 +243,7 @@ def test_em_update_daily_stats_increments(in_memory_db):
     em.update_daily_stats("passed")
     em.update_daily_stats("failed")
     em.update_daily_stats("passed")
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         "SELECT * FROM learning_stats WHERE stat_date = ?", (today,)
     ).fetchone()
@@ -873,15 +862,14 @@ def test_registry_respects_optimization_disabled():
     Real scenario: Admin disables learning via config to debug issues.
     Registry should respect this without errors.
     """
-    import importlib
     import src.backend.crew_ai.optimization.learning_registry as registry
     # Save and reset module state
     saved_instance = registry._feedback_loop_instance
-    saved_attempted = registry._feedback_loop_init_attempted
+    saved_failed_at = registry._init_failed_at
     try:
         # Reset singleton state
         registry._feedback_loop_instance = None
-        registry._feedback_loop_init_attempted = False
+        registry._init_failed_at = None
         # Temporarily disable optimization
         from src.backend.core.config import settings
         original = settings.OPTIMIZATION_ENABLED
@@ -899,29 +887,31 @@ def test_registry_respects_optimization_disabled():
     finally:
         # Restore module state
         registry._feedback_loop_instance = saved_instance
-        registry._feedback_loop_init_attempted = saved_attempted
+        registry._init_failed_at = saved_failed_at
 
 
 def test_registry_caches_after_first_call():
-    """get_feedback_loop() caches result so init runs only once.
+    """A recent failed init returns None from the cooldown cache — no re-init.
 
-    Real scenario: Multiple API requests hit get_feedback_loop()
-    simultaneously; we must not re-initialize each time.
+    Real scenario: Multiple API requests hit get_feedback_loop() while the
+    learning store is down; only the first attempt (per cooldown window) pays
+    the connection cost.
     """
+    import time
     import src.backend.crew_ai.optimization.learning_registry as registry
     saved_instance = registry._feedback_loop_instance
-    saved_attempted = registry._feedback_loop_init_attempted
+    saved_failed_at = registry._init_failed_at
     try:
         registry._feedback_loop_instance = None
-        registry._feedback_loop_init_attempted = True  # Simulate already attempted
+        registry._init_failed_at = time.monotonic()  # Simulate a fresh failure
         result = registry.get_feedback_loop()
-        # Should return cached None (since instance is None and attempted=True)
+        # Inside the cooldown window: cached None, no re-initialization
         assert result is None, (
             "Should return cached None without reinitializing"
         )
     finally:
         registry._feedback_loop_instance = saved_instance
-        registry._feedback_loop_init_attempted = saved_attempted
+        registry._init_failed_at = saved_failed_at
 
 
 # ---------------------------------------------------------------------------

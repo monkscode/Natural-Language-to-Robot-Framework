@@ -1,0 +1,126 @@
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
+import { useRef } from 'react'
+import { ThemeProvider } from '@/components/theme-provider'
+import { AuthProvider, useAuth } from '@/auth/AuthContext'
+import { RequireAuth } from '@/auth/guards'
+import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar'
+import { AppSidebar } from '@/components/app-sidebar'
+import { AppHeader } from '@/components/app-header'
+import GeneratePage from '@/pages/GeneratePage'
+import HistoryPage from '@/pages/HistoryPage'
+import MetricsPage from '@/pages/MetricsPage'
+import TemplatesPage from '@/pages/TemplatesPage'
+import SettingsPage from '@/pages/SettingsPage'
+import LearningPage from '@/pages/LearningPage'
+import LoginPage from '@/pages/auth/LoginPage'
+import SignupPage from '@/pages/auth/SignupPage'
+import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage'
+import OAuthCallback from '@/auth/OAuthCallback'
+
+/**
+ * Keep-alive page cache.
+ *
+ * Every page is mounted ONCE on first visit and then kept alive (hidden, not
+ * destroyed) for the rest of the tab session, so ALL page state — typed
+ * queries, generated code, fetched lists, filters, open drawers, and even
+ * in-flight generation/execution SSE streams — survives any page switch
+ * exactly as the user left it. No serialization, no per-page persistence
+ * code: the component instances simply never unmount. A hard refresh (F5)
+ * starts clean, and logout unmounts the whole layout (state never leaks
+ * across sessions).
+ *
+ * Admin gating: admin-only paths are never mounted for non-admins; a
+ * non-admin navigating to one is bounced to /generate — the exact behaviour
+ * RequireAdmin had when each route owned its element. The redirect renders
+ * only for the ACTIVE path, so a cached page can never hijack navigation.
+ */
+const PAGES: Array<{ path: string; admin?: boolean; node: JSX.Element }> = [
+  { path: '/generate', node: <GeneratePage /> },
+  { path: '/history', node: <HistoryPage /> },
+  { path: '/metrics', admin: true, node: <MetricsPage /> },
+  { path: '/learning', admin: true, node: <LearningPage /> },
+  { path: '/templates', admin: true, node: <TemplatesPage /> },
+  { path: '/settings', admin: true, node: <SettingsPage /> },
+]
+
+function KeepAlivePages() {
+  const { pathname } = useLocation()
+  const { isAdmin } = useAuth()
+  const visited = useRef(new Set<string>())
+
+  const active = PAGES.find(p => p.path === pathname)
+  if (active && (!active.admin || isAdmin)) visited.current.add(active.path)
+
+  if (active?.admin && !isAdmin) return <Navigate to="/generate" replace />
+
+  // The admin predicate is re-checked on every render, so if a session is
+  // demoted mid-flight (isAdmin flips false), any already-mounted admin page
+  // unmounts immediately instead of lingering hidden and firing now-forbidden
+  // background requests.
+  return (
+    <>
+      {PAGES.filter(p => visited.current.has(p.path) && (!p.admin || isAdmin)).map(p => (
+        <div
+          key={p.path}
+          className={p.path === pathname ? 'flex flex-1 flex-col' : 'hidden'}
+        >
+          {p.node}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/** Full app layout: sidebar + topbar + keep-alive page content */
+function AppLayout() {
+  return (
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset>
+        <AppHeader />
+        {/* Page content — SidebarInset provides the responsive padding offset.
+            KeepAlivePages renders the actual pages; the Outlet only carries
+            the index / catch-all redirects (page routes are element={null}). */}
+        <div className="flex flex-1 flex-col p-6 pt-4 overflow-auto">
+          <KeepAlivePages />
+          <Outlet />
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
+  )
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            {/* Auth routes — no sidebar, public */}
+            <Route path="/login"            element={<LoginPage />} />
+            <Route path="/signup"           element={<SignupPage />} />
+            <Route path="/forgot-password"  element={<ForgotPasswordPage />} />
+            <Route path="/oauth/callback"   element={<OAuthCallback />} />
+
+            {/* Protected app routes — require a valid session. The page
+                routes render null: KeepAlivePages (in AppLayout) owns the
+                page elements so they persist across navigation. */}
+            <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
+              <Route index            element={<Navigate to="/generate" replace />} />
+              {/* Every authenticated user gets Generate + their own History */}
+              <Route path="/generate" element={null} />
+              <Route path="/history"  element={null} />
+              {/* Admin-only pages (gated inside KeepAlivePages) */}
+              <Route path="/metrics"   element={null} />
+              <Route path="/learning"  element={null} />
+              <Route path="/templates" element={null} />
+              <Route path="/settings"  element={null} />
+              {/* catch-all */}
+              <Route path="*"          element={<Navigate to="/generate" replace />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </ThemeProvider>
+  )
+}
