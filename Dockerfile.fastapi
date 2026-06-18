@@ -54,6 +54,11 @@ WORKDIR /build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Opt in to the S3 artifact-storage backend at build time. Default is off, so the
+# image ships without the AWS SDK (boto3 + botocore is ~50-80MB) unless requested:
+#   docker build --build-arg INSTALL_S3=true ...
+ARG INSTALL_S3=false
+
 # Install UV package manager
 RUN pip install --no-cache-dir uv
 
@@ -76,8 +81,10 @@ COPY pyproject.toml /build/pyproject.toml
 # still using an exact lockfile for the install itself (reproducible layer).
 # ChromaDB will use its default ONNX-based embedding function (no pytorch needed).
 RUN --mount=type=cache,target=/root/.cache/uv \
+    set --; \
+    if [ "$INSTALL_S3" = "true" ]; then set -- --extra s3; fi; \
     uv pip compile /build/pyproject.toml \
-        --no-header \
+        --no-header "$@" \
         --output-file /build/requirements-compiled.txt && \
     uv pip install --prefix=/build/install --no-cache \
         -r /build/requirements-compiled.txt
