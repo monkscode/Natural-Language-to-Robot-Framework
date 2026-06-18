@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- Trimmed Robot Framework log.html fixture for report_inliner tests.
+     The screenshot references live inside the embedded window.output JS blob,
+     so their quotes are backslash-escaped (\") exactly as Robot emits them. The
+     failure message holds one <a href> and one <img src> to the same file, so
+     inline_report_screenshots must report exactly two inlined references. -->
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Test Log</title>
+</head>
+<body>
+<div id="report-or-log-link"><a href="report.html">Report</a></div>
+<div id="content"></div>
+<script type="text/javascript">
+window.output = {};
+window.output["strings"] = [];
+window.output["tests"] = [[1,"Login Test","t",[],[],[],[[2,5,0,
+"<a href=\"browser/screenshot/fail-screenshot-1.png\"><img src=\"browser/screenshot/fail-screenshot-1.png\" width=\"800px\" alt=\"screenshot\"></a>"
+]]]];
+</script>
+</body>
+</html>

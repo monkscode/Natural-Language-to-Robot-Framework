@@ -19,7 +19,12 @@ TEST_EXECUTION_TIMEOUT = int(os.getenv('TEST_EXECUTION_TIMEOUT', '1800'))
 
 DOCKERFILE_PATH = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), '..', '..', '..')
-ROBOT_TESTS_DIR = os.path.join(DOCKERFILE_PATH, 'robot_tests')
+
+# The artifact store owns the staging root; docker_service consumes it so there
+# is a single source of truth for the robot_tests/ path. Host-path mount
+# resolution below stays here — that is an execution concern, not storage.
+from src.backend.core.artifact_store import STAGING_ROOT
+ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
 # the host's absolute path for volume mounts, not the container's internal path.

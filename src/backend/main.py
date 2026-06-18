@@ -82,10 +82,6 @@ app.get("/health")(health_check)
 app.get("/api/health")(api_health_check)
 
 # --- Report artifacts (generated Robot Framework reports) ---
-# Same constant Docker execution writes artifacts to.
-from src.backend.services.docker_service import ROBOT_TESTS_DIR
-os.makedirs(ROBOT_TESTS_DIR, exist_ok=True)
-
 # Reports are served by an explicit owner-gated route, not a StaticFiles mount.
 # log.html records every keyword argument (including passwords typed during a
 # test), so each file is authorized per-owner. The route parses one run_id that
@@ -105,6 +101,12 @@ async def startup_event():
             "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and "
             "set it in src/backend/.env (or the container environment)."
         )
+
+    # Construct the artifact store once at startup: this ensures the staging
+    # root exists and fails fast on an invalid backend config (e.g.
+    # ARTIFACT_STORE=s3 with no bucket) instead of on the first report request.
+    from src.backend.core.artifact_store import get_artifact_store
+    get_artifact_store()
 
     logging.info("Application startup complete.")
     _check_learning_health()

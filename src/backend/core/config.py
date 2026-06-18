@@ -40,7 +40,16 @@ class Settings(BaseSettings):
     
     # Robot Framework Library Configuration
     ROBOT_LIBRARY: str = Field(default="selenium", description="Robot Framework library to use: 'selenium' or 'browser'")
-    
+
+    # Artifact storage backend — pluggable, chosen per deployment, exactly like
+    # MODEL_PROVIDER chooses an LLM backend. "local" = on-disk robot_tests/;
+    # "s3" = upload to a bucket after each run (still stages locally for Docker).
+    ARTIFACT_STORE: str = "local"
+    ARTIFACT_S3_BUCKET: str = ""          # required when ARTIFACT_STORE=s3
+    ARTIFACT_S3_PREFIX: str = "runs"
+    ARTIFACT_S3_REGION: str = ""
+    ARTIFACT_S3_ENDPOINT_URL: str = ""    # set for MinIO / S3-compatible; empty = AWS
+
     # Agent Retry Configuration
     MAX_AGENT_ITERATIONS: int = Field(default=3, description="Maximum iterations for agents with delegation enabled (retry attempts)")
 
@@ -192,7 +201,14 @@ class Settings(BaseSettings):
         if v.lower() not in ['selenium', 'browser']:
             raise ValueError(f"ROBOT_LIBRARY must be 'selenium' or 'browser', got '{v}'")
         return v.lower()
-    
+
+    @validator('ARTIFACT_STORE')
+    def validate_artifact_store(cls, v):
+        """Validate that ARTIFACT_STORE is one of the supported backends."""
+        if v.lower() not in ('local', 's3'):
+            raise ValueError(f"ARTIFACT_STORE must be 'local' or 's3', got '{v}'")
+        return v.lower()
+
     @validator('MAX_AGENT_ITERATIONS')
     def validate_max_iterations(cls, v):
         """Validate that MAX_AGENT_ITERATIONS is between 1 and 5."""
