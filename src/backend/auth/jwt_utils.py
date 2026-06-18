@@ -146,7 +146,7 @@ def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
     filesystem path in the body).
 
     run_id is the route's parsed path parameter — NOT re-parsed from the URL.
-    The ownership check and the file lookup (report_endpoints.resolve_report_file)
+    The ownership check and the artifact store lookup (store.serve_artifact)
     therefore key off one identical value, which closes the '//' (empty segment)
     and '..' (parent traversal) parser-disagreement bypass that the old
     middleware + StaticFiles split allowed.

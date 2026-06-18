@@ -18,12 +18,11 @@ ownership rows, so a user cannot open another user's log.html by URL.
 
 Referenced by: main.py (router registration), api/endpoints.py
 (resolve_robot_code for history reruns), frontend HistoryPage.
-Depends on: core/run_registry.py, auth/jwt_utils.py, services/docker_service.py
-(ROBOT_TESTS_DIR).
+Depends on: core/run_registry.py, auth/jwt_utils.py, core/artifact_store.py
+(get_artifact_store).
 """
 
 import logging
-import os
 import uuid
 from typing import Literal, Optional
 
@@ -31,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.backend.auth.jwt_utils import is_validated_admin, require_user
 from src.backend.core.run_registry import get_run_registry
-from src.backend.services.docker_service import ROBOT_TESTS_DIR
+from src.backend.core.artifact_store import get_artifact_store
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +42,12 @@ _REPORT_STATUSES = ("passed", "failed")
 
 def resolve_robot_code(run: dict) -> str | None:
     """Stored code for a run: the test_runs.robot_code column (written at
-    generation/execution time), falling back to the run's on-disk
-    robot_tests/<id>/test.robot for executed runs that predate the column.
-    Callers UUID-validate run_id, so it is safe as a path segment. Legacy
+    generation/execution time), falling back to the run's stored test.robot
+    via the artifact store for executed runs that predate the column. Legacy
     generate-only runs have no recoverable code -> None."""
     if run.get("robot_code"):
         return run["robot_code"]
-    path = os.path.join(ROBOT_TESTS_DIR, run["run_id"], "test.robot")
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
+    return get_artifact_store().read_text(run["run_id"], "test.robot")
 
 
 @router.get("/history")

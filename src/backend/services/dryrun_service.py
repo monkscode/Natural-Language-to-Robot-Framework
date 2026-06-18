@@ -44,9 +44,9 @@ import requests as _requests
 from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
+from src.backend.core.artifact_store import get_artifact_store
 from src.backend.services.docker_service import (
     IMAGE_TAG,
-    ROBOT_TESTS_DIR,
     build_image,
     get_docker_client,
     normalize_docker_mount_source,
@@ -287,7 +287,7 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
     """
     container_name = f"robot-test-dryrun-{run_id}"
     dryrun_filename = "dryrun.robot"
-    dryrun_dir = os.path.join(ROBOT_TESTS_DIR, run_id, "dryrun")
+    dryrun_dir = str(get_artifact_store().run_dir(run_id) / "dryrun")
     os.makedirs(dryrun_dir, exist_ok=True)
     dryrun_filepath = os.path.join(dryrun_dir, dryrun_filename)
     output_xml_path = os.path.join(dryrun_dir, "output.xml")

@@ -8,7 +8,7 @@ Covers the three layers added for the user/admin split:
   back to own-rows.
 - authorize_report_access: /reports/{run_id}/* is served only to the run's
   owner or a validated admin; unattributed/unknown runs are admin-only (fail
-  closed). resolve_report_file keeps traversal inside the run directory.
+  closed). The artifact store keeps traversal inside the run directory.
 
 Plus the History-reuse surface (drawer + "Run again"):
 - robot_code persistence on test_runs (newest-non-NULL-wins).
@@ -366,56 +366,6 @@ class TestReportsOwnership:
 
 
 # ---------------------------------------------------------------------------
-# resolve_report_file — path containment (the file-resolution half of the fix)
-# ---------------------------------------------------------------------------
-
-class TestResolveReportFile:
-    """Pure path-safety unit tests (no DB) for the /reports file resolver."""
-
-    _RID = "11111111-1111-4111-8111-111111111111"
-    _SIBLING = "22222222-2222-4222-8222-222222222222"
-
-    @pytest.fixture
-    def run_root(self, tmp_path, monkeypatch):
-        import src.backend.api.report_endpoints as re_mod
-        monkeypatch.setattr(re_mod, "ROBOT_TESTS_DIR", str(tmp_path))
-        shots = tmp_path / self._RID / "browser" / "screenshot"
-        shots.mkdir(parents=True)
-        (tmp_path / self._RID / "log.html").write_text("ok", encoding="utf-8")
-        (shots / "s.png").write_bytes(b"\x89PNG")
-        # A sibling run the resolver must never reach by traversal.
-        (tmp_path / self._SIBLING).mkdir()
-        (tmp_path / self._SIBLING / "log.html").write_text("SECRET", encoding="utf-8")
-        return tmp_path
-
-    def test_serves_contained_file(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        assert resolve_report_file(self._RID, "log.html") is not None
-        assert resolve_report_file(self._RID, "browser/screenshot/s.png") is not None
-
-    def test_dot_dot_escape_returns_none(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        assert resolve_report_file(self._RID, f"../{self._SIBLING}/log.html") is None
-
-    def test_absolute_file_path_returns_none(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        # os.path.join discards the run root when the second arg is absolute.
-        assert resolve_report_file(self._RID, "/etc/passwd") is None
-
-    def test_non_uuid_run_id_returns_none(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        assert resolve_report_file("not-a-uuid", "log.html") is None
-
-    def test_missing_file_returns_none(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        assert resolve_report_file(self._RID, "nope.html") is None
-
-    def test_directory_returns_none(self, run_root):
-        from src.backend.api.report_endpoints import resolve_report_file
-        assert resolve_report_file(self._RID, "browser") is None
-
-
-# ---------------------------------------------------------------------------
 # /reports route — owner-gated serving + the closed bypass class (end to end)
 # ---------------------------------------------------------------------------
 
@@ -437,7 +387,9 @@ class TestReportRouteServing:
         shots = tmp_path / self._VICTIM / "browser" / "screenshot"
         shots.mkdir(parents=True)
         (shots / "fail-screenshot-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-        monkeypatch.setattr(re_mod, "ROBOT_TESTS_DIR", str(tmp_path))
+        from src.backend.core.artifact_store import LocalArtifactStore
+        monkeypatch.setattr(
+            re_mod, "get_artifact_store", lambda: LocalArtifactStore(tmp_path))
         reg_patch = patch(
             "src.backend.core.run_registry.get_run_registry", return_value=registry
         )
@@ -481,14 +433,14 @@ class TestReportRouteServing:
         assert "hunter2" not in r.text
 
     def test_non_owner_is_403_before_file_resolution(self, report_app):
-        # Auth runs before resolve_report_file, so a non-owner is denied (403)
+        # Auth runs before store.serve_artifact, so a non-owner is denied (403)
         # whether or not the path would resolve — file existence never leaks.
         r = report_app.get("/reports/not-a-uuid/log.html", headers=self._auth(_USER2))
         assert r.status_code == 403
 
     def test_non_uuid_run_id_is_404_past_auth(self, report_app):
-        # Admin clears the ownership gate, so this exercises the route's UUID
-        # guard in resolve_report_file: a non-UUID run id resolves to no file.
+        # Admin clears the ownership gate, so this exercises the store's UUID
+        # guard: a non-UUID run id resolves to no file.
         r = report_app.get("/reports/not-a-uuid/log.html", headers=self._auth(_ADMIN))
         assert r.status_code == 404
 
@@ -519,6 +471,17 @@ class TestReportRouteServing:
         )
         assert r.status_code != 200
         assert "hunter2" not in r.text
+
+    def test_report_response_carries_csp_sandbox(self, report_app):
+        r = report_app.get(f"/reports/{self._VICTIM}/log.html", headers=self._auth(_USER1))
+        assert r.status_code == 200
+        csp = r.headers.get("content-security-policy", "")
+        assert "sandbox" in csp
+        assert "allow-scripts" in csp
+        # The absence of allow-same-origin is what produces the opaque origin.
+        assert "allow-same-origin" not in csp
+        # The existing privacy header must remain.
+        assert r.headers.get("cache-control") == "private"
 
 
 # ---------------------------------------------------------------------------
@@ -824,9 +787,10 @@ class TestRunDetailEndpoint:
         run_dir = tmp_path / _RID_NOCODE
         run_dir.mkdir()
         (run_dir / "test.robot").write_text("*** From Disk ***", encoding="utf-8")
-        with patch(
-            "src.backend.api.history_endpoints.ROBOT_TESTS_DIR", str(tmp_path)
-        ):
+        from src.backend.core.artifact_store import LocalArtifactStore
+        import src.backend.api.history_endpoints as he_mod
+        with patch.object(he_mod, "get_artifact_store",
+                          return_value=LocalArtifactStore(tmp_path)):
             client = _client(detail_seeded, _USER1)
             try:
                 body = client.get(f"/api/history/{_RID_NOCODE}").json()
@@ -835,9 +799,10 @@ class TestRunDetailEndpoint:
         assert body["robot_code"] == "*** From Disk ***"
 
     def test_no_code_anywhere_is_null(self, detail_seeded, tmp_path):
-        with patch(
-            "src.backend.api.history_endpoints.ROBOT_TESTS_DIR", str(tmp_path)
-        ):
+        from src.backend.core.artifact_store import LocalArtifactStore
+        import src.backend.api.history_endpoints as he_mod
+        with patch.object(he_mod, "get_artifact_store",
+                          return_value=LocalArtifactStore(tmp_path)):
             client = _client(detail_seeded, _USER1)
             try:
                 body = client.get(f"/api/history/{_RID_NOCODE}").json()
@@ -938,9 +903,10 @@ class TestRerunEndpoint:
         assert captured["robot_code"] == "*** Code 2 ***"
 
     def test_run_without_stored_code_is_409(self, detail_seeded, tmp_path):
-        with patch(
-            "src.backend.api.history_endpoints.ROBOT_TESTS_DIR", str(tmp_path)
-        ):
+        from src.backend.core.artifact_store import LocalArtifactStore
+        import src.backend.api.history_endpoints as he_mod
+        with patch.object(he_mod, "get_artifact_store",
+                          return_value=LocalArtifactStore(tmp_path)):
             client, captured = _rerun_client(detail_seeded, _USER1)
             try:
                 resp = client.post("/execute-test", json={"rerun_of": _RID_NOCODE})

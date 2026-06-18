@@ -115,7 +115,8 @@ class TestRunDryrunInContainer:
         client, container = self._client()
         run_id = "11111111-1111-1111-1111-111111111111"
 
-        with patch.object(ds, "ROBOT_TESTS_DIR", str(tmp_path)), \
+        from src.backend.core.artifact_store import LocalArtifactStore
+        with patch.object(ds, "get_artifact_store", return_value=LocalArtifactStore(tmp_path)), \
              patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
              patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p):
             # The container "produces" output.xml under {run_id}/dryrun/
@@ -146,7 +147,8 @@ class TestRunDryrunInContainer:
         client.containers.get.return_value = stale
         run_id = "22222222-2222-2222-2222-222222222222"
 
-        with patch.object(ds, "ROBOT_TESTS_DIR", str(tmp_path)), \
+        from src.backend.core.artifact_store import LocalArtifactStore
+        with patch.object(ds, "get_artifact_store", return_value=LocalArtifactStore(tmp_path)), \
              patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
              patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p):
             def _fake_run(**cfg):
@@ -164,7 +166,8 @@ class TestRunDryrunInContainer:
         client, container = self._client()
         run_id = "33333333-3333-3333-3333-333333333333"
         # container.run does NOT create output.xml → infra failure
-        with patch.object(ds, "ROBOT_TESTS_DIR", str(tmp_path)), \
+        from src.backend.core.artifact_store import LocalArtifactStore
+        with patch.object(ds, "get_artifact_store", return_value=LocalArtifactStore(tmp_path)), \
              patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
              patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p):
             with pytest.raises(RuntimeError, match="no output.xml"):

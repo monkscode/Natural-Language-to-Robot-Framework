@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.services.docker_service import ROBOT_TESTS_DIR, get_docker_client, build_image, run_test_in_container
+from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
@@ -21,6 +21,8 @@ from src.backend.core.workflow_metrics import (
     calculate_crewai_cost
 )
 from src.backend.core.run_registry import get_run_registry
+from src.backend.core.artifact_store import get_artifact_store
+from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
 
@@ -974,12 +976,10 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     freed before the background learning step — which may make a 5-30s Trigger 1
     LLM call — runs. Idempotent: the caller's finally releases the slot too.
     """
-    run_dir = os.path.join(ROBOT_TESTS_DIR, run_id)
     test_filename = "test.robot"
-    test_filepath = os.path.join(run_dir, test_filename)
+    test_filepath = str(get_artifact_store().run_dir(run_id, create=True) / test_filename)
 
     def _write_test_file():
-        os.makedirs(run_dir, exist_ok=True)
         with open(test_filepath, "w", encoding="utf-8") as f:
             f.write(robot_code)
 
@@ -1018,6 +1018,21 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # background learning step so a Case B re-run's Trigger 1 LLM call
         # (~5-30s) does not hold concurrency capacity it has no need for.
         release_slot()
+
+        # Inline screenshots BEFORE persist_run so the durable copy (local serve
+        # or S3 upload) is self-contained for the CSP-sandboxed report route.
+        # Wrapped: an inlining failure must never fail a successful run.
+        try:
+            n = await asyncio.to_thread(
+                inline_report_screenshots, get_artifact_store().run_dir(run_id))
+            logging.info("Inlined %d report screenshot reference(s) for %s", n, run_id)
+        except Exception as e:
+            logging.warning("Report screenshot inlining failed for %s: %s", run_id, e)
+
+        # Artifacts are final — make them durable (no-op locally; S3 upload
+        # otherwise). persist_run never raises, so a failed upload cannot turn
+        # a successful run into an error.
+        await asyncio.to_thread(get_artifact_store().persist_run, run_id)
 
         await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
 

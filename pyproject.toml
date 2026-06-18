@@ -67,6 +67,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# S3 artifact-storage backend. Installed ONLY when ARTIFACT_STORE=s3 is used, so
+# a local-only deployment never ships the AWS SDK (boto3 + botocore is ~50-80MB).
+# boto3 is lazy-imported by S3ArtifactStore.
+#   local/dev:  pip install -e '.[s3]'
+#   Docker:     docker build --build-arg INSTALL_S3=true ... (see Dockerfile.fastapi)
+s3 = [
+    "boto3",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
