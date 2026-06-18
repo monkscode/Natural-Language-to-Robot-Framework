@@ -130,6 +130,21 @@ def bind_workflow_context(
 
 
 # ---------------------------------------------------------------------------
+# Log-injection safety
+# ---------------------------------------------------------------------------
+
+def sanitize_for_log(value: object) -> str:
+    """Strip CR/LF from a value before it is logged (CWE-117 log-injection guard).
+
+    Carriage returns and line feeds are what an attacker uses to splice forged
+    entries into a line-oriented log, so removing them is the standard mitigation
+    for any user-controlled value reaching a log call. None/non-str values are
+    coerced via str() so callers never have to guard the type at the call site.
+    """
+    return str(value).replace("\r", "").replace("\n", "")
+
+
+# ---------------------------------------------------------------------------
 # Emojis for different operations
 EMOJI = {
     'start': '🎬',

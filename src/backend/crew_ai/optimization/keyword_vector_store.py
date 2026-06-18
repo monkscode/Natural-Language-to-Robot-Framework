@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 import psycopg
 from psycopg_pool import ConnectionPool
 
+from src.backend.config.logging_config import sanitize_for_log
 from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import embedding
 
@@ -216,7 +217,8 @@ class KeywordVectorStore:
             current = self.get_library_version(library_name)
             if current != stored:
                 logger.info("Version mismatch for %s: %s -> %s, rebuild needed",
-                            library_name, stored, current)
+                            sanitize_for_log(library_name), stored,
+                            sanitize_for_log(current))
                 return True
             return False
         except Exception as e:

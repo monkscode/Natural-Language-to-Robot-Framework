@@ -30,6 +30,7 @@ from src.backend.auth.repository import (
     PasswordTooLong,
     UserRepository,
 )
+from src.backend.config.logging_config import sanitize_for_log
 from src.backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,8 @@ async def register(req: RegisterRequest, response: Response):
         # RegisterRequest already rejects >72-byte passwords (422), but the
         # repo's bcrypt length guard must surface as a user error, never a 500.
         raise HTTPException(status_code=400, detail=str(exc))
-    logger.info("[AUTH] Registered user %s (role=%s)", row["email"], row["role"])
+    logger.info("[AUTH] Registered user %s (role=%s)",
+                sanitize_for_log(row["email"]), row["role"])
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
