@@ -179,13 +179,17 @@ class _FakeRequest:
 
 
 class _StubRegistry:
-    """get_owner stub for the ownership layer under authorize_report_access."""
+    """Stub registry for the ownership layer under authorize_report_access."""
 
-    def __init__(self, owner: str | None):
+    def __init__(self, owner: str | None, org: str | None = None):
         self._owner = owner
+        self._org = org
 
     def get_owner(self, run_id: str) -> str | None:
         return self._owner
+
+    def get_run_owner(self, run_id: str) -> tuple[str | None, str | None]:
+        return (self._owner, self._org)
 
 
 def _allow_ownership(monkeypatch, owner: str = "u-1"):
