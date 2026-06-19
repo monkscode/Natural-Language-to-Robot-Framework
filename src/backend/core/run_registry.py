@@ -231,7 +231,13 @@ class RunRegistry:
 
     def backfill_org_ids(self) -> int:
         """Set org_id on rows that have a user_id but no org_id, from that user's
-        org_admin personal-org membership. Idempotent; returns rows updated."""
+        org_admin personal-org membership. Idempotent; returns rows updated.
+
+        Assumes the Phase-1a invariant of exactly one org_admin membership per
+        user (the personal org), so the join resolves to a single org. When
+        many-to-many org membership lands, this must target the user's personal
+        org explicitly (organizations.kind = 'personal') instead of any
+        org_admin row to stay deterministic."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(

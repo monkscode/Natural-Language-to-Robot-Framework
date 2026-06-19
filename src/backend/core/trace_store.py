@@ -81,6 +81,9 @@ _DB_SCHEMA_PG = (
 
 _SCHEMA_VERSION = 3  # v3 = added org_id for org tenancy
 
+# Cap for the per-exporter workflow_id -> org_id memo (insert_litellm_call).
+_ORG_CACHE_MAX = 512
+
 
 def _ensure_schema(conn) -> None:
     """Create the trace schema if absent (idempotent). Takes a raw psycopg conn."""
@@ -148,6 +151,11 @@ class PostgresSpanExporter(SpanExporter):
         self._pool = ConnectionPool(
             conninfo=self.dsn, min_size=1, max_size=4,
             kwargs={"connect_timeout": PG_CONNECT_TIMEOUT_S}, open=True)
+        # workflow_id -> org_id memo for the per-call insert path. org_id is
+        # write-once-immutable on the run, so a non-None resolution is valid for
+        # the life of the process; only successful resolutions are cached (a NULL
+        # run is re-checked until it gains an org). FIFO-capped to bound memory.
+        self._org_cache: dict[str, str] = {}
         logger.info("[TRACE_STORE] Postgres trace store ready (schema v%d)", _SCHEMA_VERSION)
 
     # ------------------------------------------------------------------
@@ -216,14 +224,23 @@ class PostgresSpanExporter(SpanExporter):
         prompt_text is the JSON-serialized messages list; response_text is the
         first choice content string. Both are None if unavailable.
         """
-        # Resolve org_id from the run registry (lazy import to avoid import cycle).
+        # Resolve org_id from the run registry, memoized per workflow_id: this
+        # callback fires once per LLM call, but a workflow's org is invariant, so
+        # we hit the DB at most once per workflow instead of once per call.
         org_id: str | None = None
         if workflow_id:
-            try:
-                from src.backend.core.run_registry import get_run_registry  # noqa: PLC0415
-                _, org_id = get_run_registry().get_run_owner(workflow_id)
-            except Exception:
-                pass  # unknown run — org_id stays None
+            org_id = self._org_cache.get(workflow_id)
+            if org_id is None:
+                try:
+                    from src.backend.core.run_registry import get_run_registry  # noqa: PLC0415
+                    _, org_id = get_run_registry().get_run_owner(workflow_id)
+                except Exception:
+                    org_id = None  # unknown run — stays None, re-checked next call
+                if org_id is not None:
+                    if len(self._org_cache) >= _ORG_CACHE_MAX:
+                        # Pure optimization — FIFO-evict the oldest entry.
+                        self._org_cache.pop(next(iter(self._org_cache)), None)
+                    self._org_cache[workflow_id] = org_id
 
         now_ns = int(datetime.now(tz=timezone.utc).timestamp() * 1_000_000_000)
         start_ns = now_ns - int(duration_ms * 1_000_000)

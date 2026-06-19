@@ -83,3 +83,29 @@ def test_trace_org_id_from_run_org():
 
     reg.close()
     store.shutdown()
+
+
+def test_insert_org_lookup_memoized_per_workflow():
+    """insert_litellm_call resolves org_id from the registry at most once per
+    workflow_id — repeated calls for the same workflow hit the cache, not the DB."""
+    from unittest.mock import MagicMock, patch
+    from src.backend.core.trace_store import PostgresSpanExporter
+
+    dsn = auth_db.get_pool().conninfo
+    store = PostgresSpanExporter(dsn=dsn)
+    wid = str(uuid.uuid4())
+
+    fake_reg = MagicMock()
+    fake_reg.get_run_owner.return_value = ("u-x", "org-cached")
+    with patch("src.backend.core.run_registry.get_run_registry", return_value=fake_reg):
+        for _ in range(3):
+            store.insert_litellm_call(
+                span_id=uuid.uuid4().hex, trace_id=uuid.uuid4().hex,
+                parent_span_id=None, name="x.litellm", model="m",
+                prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                cost_usd=0.0, duration_ms=1.0, workflow_id=wid,
+            )
+
+    assert fake_reg.get_run_owner.call_count == 1, "org lookup must be memoized per workflow"
+    assert store._org_cache.get(wid) == "org-cached"
+    store.shutdown()
