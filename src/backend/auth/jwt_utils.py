@@ -57,6 +57,8 @@ def create_access_token(user: dict) -> str:
         "email": user.get("email", ""),
         "role": user.get("role", "user"),
         "name": user.get("display_name", ""),
+        "org_id": user.get("org_id"),
+        "org_role": user.get("org_role"),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -76,6 +78,8 @@ def decode_token(token: str) -> dict:
         "email": payload.get("email", ""),
         "role": payload.get("role", "user"),
         "name": payload.get("name", ""),
+        "org_id": payload.get("org_id"),
+        "org_role": payload.get("org_role"),
     }
 
 

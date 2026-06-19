@@ -111,12 +111,16 @@ def _user_public(row: dict) -> dict:
 
 def _token_payload(row: dict) -> dict:
     user = _user_public(row)
+    orgs = _org_repo.get_orgs_for_user(str(row["id"]))
+    primary = orgs[0] if orgs else {}
     token = create_access_token(
         {
             "id": user["id"],
             "email": user["email"],
             "role": user["role"],
             "display_name": user["display_name"],
+            "org_id": primary.get("org_id"),
+            "org_role": primary.get("org_role"),
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}
