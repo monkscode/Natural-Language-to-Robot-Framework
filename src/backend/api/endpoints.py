@@ -244,13 +244,14 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # credits), so only the run's owner — or a validated admin — may submit
     # it. `user` is None only when AUTH_ENFORCED is off (local debugging).
     # Unattributed/unknown runs are admin-only (fail closed).
-    if user is not None and not await asyncio.to_thread(is_validated_admin, user):
-        owner = run_row.get("user_id") if run_row else None
-        if owner != user["user_id"]:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only submit feedback for your own runs",
-            )
+    admin = await asyncio.to_thread(is_validated_admin, user)
+    owner_id = run_row.get("user_id") if run_row else None
+    org_id = run_row.get("org_id") if run_row else None
+    if not caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot submit feedback for this run",
+        )
 
     # Re-run rows never own a learning record (their execution deliberately
     # skipped learning), so feedback applies to the ORIGINAL run the code was
