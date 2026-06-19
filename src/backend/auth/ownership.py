@@ -50,3 +50,15 @@ def caller_can_read(
     if caller.get("org_role") == "org_admin":
         return True
     return owner_id is not None and owner_id == caller_uid
+
+
+def is_dashboard_viewer(caller: dict | None, *, is_platform_admin: bool) -> bool:
+    """May `caller` view an org-level aggregate dashboard (traces/metrics)?
+
+    True for: platform-admin (all orgs), the AUTH_ENFORCED-off escape hatch
+    (caller None), or an org-admin (their own org). Plain org-members get no
+    aggregate dashboard — they see only their own runs via caller_can_read.
+    """
+    if caller is None or is_platform_admin:
+        return True
+    return caller.get("org_role") == "org_admin"

@@ -44,3 +44,26 @@ def test_unattributed_resource_denied_to_non_admin():
     # owner_id None (legacy/unknown run): fail closed for non-platform-admin.
     assert caller_can_read(_OWNER, None, None, is_platform_admin=False) is False
     assert caller_can_read(_OWNER, None, "org-A", is_platform_admin=False) is False
+
+
+# ---------------------------------------------------------------------------
+# is_dashboard_viewer — dashboard gate (Task 9)
+# ---------------------------------------------------------------------------
+
+from src.backend.auth.ownership import is_dashboard_viewer  # noqa: E402
+
+
+def test_dashboard_viewer_platform_admin():
+    assert is_dashboard_viewer({"org_role": "org_member"}, is_platform_admin=True) is True
+
+
+def test_dashboard_viewer_org_admin():
+    assert is_dashboard_viewer({"org_role": "org_admin"}, is_platform_admin=False) is True
+
+
+def test_dashboard_viewer_member_denied():
+    assert is_dashboard_viewer({"org_role": "org_member"}, is_platform_admin=False) is False
+
+
+def test_dashboard_viewer_none_caller_allowed():
+    assert is_dashboard_viewer(None, is_platform_admin=False) is True

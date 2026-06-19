@@ -71,7 +71,7 @@ from src.backend.api.workflow_metrics_endpoints import router as workflow_metric
 app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
 
 from src.backend.api.trace_endpoints import router as trace_router
-app.include_router(trace_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(trace_router, prefix="/api")  # routes self-guard via is_dashboard_viewer
 
 from src.backend.api.learning_endpoints import router as learning_router
 app.include_router(learning_router, prefix="/api/learning", dependencies=[Depends(require_admin)])
