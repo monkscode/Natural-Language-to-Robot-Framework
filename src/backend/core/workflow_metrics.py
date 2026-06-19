@@ -33,6 +33,9 @@ _SCHEMA_DDL = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_workflow_metrics_ts ON workflow_metrics (ts DESC)",
+    # v2: org tenancy column (upgrade path for tables created before this version)
+    "ALTER TABLE workflow_metrics ADD COLUMN IF NOT EXISTS org_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_metrics_org ON workflow_metrics(org_id)",
 )
 
 
@@ -82,19 +85,38 @@ class WorkflowMetricsCollector:
                 logger.warning(f"Skipping invalid metrics row: {e}")
         return out
 
-    def record_workflow(self, metrics: WorkflowMetrics) -> None:
+    def record_workflow(self, metrics: WorkflowMetrics, org_id: str | None = None) -> None:
         """Record a workflow execution's metrics (one jsonb row)."""
         try:
             payload = json.dumps(metrics.to_dict())
             with self._pool.connection() as conn:
                 conn.execute(
-                    "INSERT INTO workflow_metrics (workflow_id, ts, data) "
-                    "VALUES (%s, %s, %s::jsonb)",
-                    (metrics.workflow_id, metrics.timestamp, payload),
+                    "INSERT INTO workflow_metrics (workflow_id, ts, data, org_id) "
+                    "VALUES (%s, %s, %s::jsonb, %s)",
+                    (metrics.workflow_id, metrics.timestamp, payload, org_id),
                 )
             logger.info(f"Recorded metrics for workflow {metrics.workflow_id}")
         except Exception as e:
             logger.error(f"Failed to record workflow metrics: {e}")
+
+    def backfill_org_ids(self) -> int:
+        """Attribute metric rows to their run's org via workflow_id. Idempotent."""
+        try:
+            with self._pool.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE workflow_metrics m SET org_id = r.org_id "
+                    "FROM test_runs r "
+                    "WHERE m.org_id IS NULL AND m.workflow_id = r.run_id "
+                    "  AND r.org_id IS NOT NULL"
+                )
+                n = cur.rowcount
+                conn.commit()
+            if n:
+                logger.info("[WORKFLOW_METRICS] backfilled org_id on %d metric(s)", n)
+            return n
+        except Exception as e:
+            logger.error(f"[WORKFLOW_METRICS] backfill_org_ids failed: {e}")
+            return 0
 
     def get_all_metrics(self, limit: Optional[int] = None) -> List[WorkflowMetrics]:
         """Get all recorded metrics, most-recent first, optionally limited to N."""
