@@ -12,6 +12,7 @@ Depends on: auth/repository.py, auth/jwt_utils.py, auth/google_oauth.py.
 
 import logging
 import re
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -225,7 +226,7 @@ async def google_login():
 
 
 class _RoleUpdate(BaseModel):
-    role: str
+    role: Literal["admin", "user"]
 
 
 @auth_router.post("/admin/users/{user_id}/role")
@@ -234,9 +235,10 @@ def set_user_platform_role(
     body: _RoleUpdate,
     admin: dict = Depends(require_admin),
 ):
-    """Platform-admin grants/revokes another user's platform-admin role."""
-    if body.role not in ("admin", "user"):
-        raise HTTPException(status_code=400, detail="role must be 'admin' or 'user'")
+    """Platform-admin grants/revokes another user's platform-admin role.
+
+    role is validated to {'admin','user'} by the _RoleUpdate model (invalid
+    values are rejected with 422 before this body runs)."""
     if user_id == admin["user_id"] and body.role == "user":
         raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
     row = _repo.set_platform_role(user_id, body.role)

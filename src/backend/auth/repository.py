@@ -108,10 +108,10 @@ class UserRepository:
                 (user_id,),
             ).fetchone()
 
-    def set_platform_role(self, user_id: str, role: str) -> dict:
+    def set_platform_role(self, user_id: str, role: str) -> dict | None:
         """Grant/revoke platform-admin. role in {'admin','user'}. The DB is the
         source of truth for platform-admin (ADMIN_EMAILS only seeds the first one
-        at startup). Returns the updated public row."""
+        at startup). Returns the updated public row, or None if no user matched."""
         if role not in ("admin", "user"):
             raise ValueError(f"invalid platform role: {role!r}")
         with get_pool().connection() as conn:

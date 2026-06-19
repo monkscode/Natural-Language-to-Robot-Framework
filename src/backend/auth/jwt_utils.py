@@ -177,6 +177,8 @@ def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
 
     admin = is_validated_admin(user)
     try:
+        # Lazy import: jwt_utils loads during early app wiring; the registry
+        # opens a DB pool on first use and must not do so at import time.
         from src.backend.core.run_registry import get_run_registry
         owner_id, org_id = get_run_registry().get_run_owner(run_id)
     except Exception as exc:
