@@ -108,29 +108,34 @@ class UserRepository:
                 (user_id,),
             ).fetchone()
 
-    def _sync_role_to_allowlist(self, row: dict) -> dict:
-        """Re-align the stored role with settings.ADMIN_EMAILS at sign-in.
+    def set_platform_role(self, user_id: str, role: str) -> dict:
+        """Grant/revoke platform-admin. role in {'admin','user'}. The DB is the
+        source of truth for platform-admin (ADMIN_EMAILS only seeds the first one
+        at startup). Returns the updated public row."""
+        if role not in ("admin", "user"):
+            raise ValueError(f"invalid platform role: {role!r}")
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "UPDATE users SET role = %s WHERE id = %s "
+                "RETURNING id, email, display_name, role",
+                (role, user_id),
+            ).fetchone()
+            conn.commit()
+        return row
 
-        Roles were previously computed only at signup, so editing ADMIN_EMAILS
-        never affected existing accounts. The allow-list is the single source
-        of truth for roles (there is no other promotion mechanism), so each
-        successful sign-in syncs BOTH ways: added emails are promoted, removed
-        emails are demoted. Returns the (possibly updated) row.
-        """
-        expected = role_for_email(row["email"])
-        if row.get("role") == expected:
+    def _sync_role_to_allowlist(self, row: dict) -> dict:
+        """Promote a signing-in user to platform-admin if their email is in the
+        ADMIN_EMAILS bootstrap seed. PROMOTE-ONLY: the DB is the source of truth
+        for platform-admin, so removing an email from ADMIN_EMAILS no longer
+        demotes — revoke via set_platform_role instead."""
+        if role_for_email(row["email"]) != "admin" or row.get("role") == "admin":
             return row
         with get_pool().connection() as conn:
-            conn.execute(
-                "UPDATE users SET role = %s WHERE id = %s", (expected, row["id"])
-            )
+            conn.execute("UPDATE users SET role = 'admin' WHERE id = %s", (row["id"],))
             conn.commit()
-        logger.info(
-            "[AUTH] Role of %s synced to ADMIN_EMAILS: %s -> %s",
-            row["email"], row.get("role"), expected,
-        )
+        logger.info("[AUTH] Promoted %s to platform-admin (ADMIN_EMAILS seed)", row["email"])
         row = dict(row)
-        row["role"] = expected
+        row["role"] = "admin"
         return row
 
     def verify_credentials(self, email: str, password: str) -> dict | None:

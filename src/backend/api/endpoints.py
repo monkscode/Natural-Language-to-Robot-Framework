@@ -18,6 +18,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
+from src.backend.auth.ownership import caller_can_read
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -76,13 +77,12 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
         raise HTTPException(status_code=400, detail="Invalid rerun_of: must be a UUID")
 
     source = get_run_registry().get_run(source_run_id)
-    is_owner = (
-        source is not None
-        and user is not None
-        and source.get("user_id") is not None
-        and source.get("user_id") == user.get("user_id")
+    admin = is_validated_admin(user)
+    allowed = source is not None and caller_can_read(
+        user, source.get("user_id"), source.get("org_id"), is_platform_admin=admin
     )
-    if source is None or not (is_validated_admin(user) or user is None or is_owner):
+    if source is None or not allowed:
+        # 404, not 403 — don't leak run existence across orgs.
         raise HTTPException(status_code=404, detail="Run not found")
 
     robot_code = resolve_robot_code(source)
@@ -244,13 +244,14 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # credits), so only the run's owner — or a validated admin — may submit
     # it. `user` is None only when AUTH_ENFORCED is off (local debugging).
     # Unattributed/unknown runs are admin-only (fail closed).
-    if user is not None and not await asyncio.to_thread(is_validated_admin, user):
-        owner = run_row.get("user_id") if run_row else None
-        if owner != user["user_id"]:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only submit feedback for your own runs",
-            )
+    admin = await asyncio.to_thread(is_validated_admin, user)
+    owner_id = run_row.get("user_id") if run_row else None
+    org_id = run_row.get("org_id") if run_row else None
+    if not caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot submit feedback for this run",
+        )
 
     # Re-run rows never own a learning record (their execution deliberately
     # skipped learning), so feedback applies to the ORIGINAL run the code was

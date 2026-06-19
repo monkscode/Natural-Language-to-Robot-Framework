@@ -19,8 +19,10 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from src.backend.auth.jwt_utils import is_validated_admin, require_user
+from src.backend.auth.ownership import is_dashboard_viewer
 from src.backend.core.config import settings
 from src.backend.crew_ai.optimization import pg_compat
 
@@ -55,8 +57,13 @@ async def list_traces(
     llm_only: bool = Query(True, description="When true (default), only return LLM call spans (model IS NOT NULL). Set false to include all span types (HTTP, ChromaDB, etc.)"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    user: dict | None = Depends(require_user),
 ):
     """List LLM call traces with optional filtering. Returns metadata only (no prompt/response text)."""
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
             query = (
@@ -71,6 +78,9 @@ async def list_traces(
                 # OTel agent spans (e.g. "Test Automation Planner.agent") have model set
                 # but tokens=0/cost=0 due to the Vertex AI instrumentation bug.
                 query += " AND name LIKE '%.litellm'"
+            if scope_org is not None:
+                query += " AND org_id = ?"
+                params.append(scope_org)
             if workflow_id:
                 query += " AND workflow_id = ?"
                 params.append(workflow_id)
@@ -102,16 +112,24 @@ async def list_traces(
 @router.get("/stats/cost")
 async def get_cost_stats(
     last_days: int = Query(7, ge=1, le=90, description="Cost stats for last N days"),
+    user: dict | None = Depends(require_user),
 ):
     """Aggregate cost and token usage per model for the last N days."""
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
             # tz-aware datetime → psycopg adapts to timestamptz (correct regardless
             # of the server's session TZ); created_at is now timestamptz.
             cutoff = datetime.now(tz=timezone.utc) - timedelta(days=last_days)
 
+            org_clause = " AND org_id = ?" if scope_org is not None else ""
+            org_params = [scope_org] if scope_org is not None else []
+
             row = conn.execute(
-                """SELECT
+                f"""SELECT
                      COUNT(*) as total_llm_calls,
                      SUM(cost_usd) as total_cost,
                      SUM(prompt_tokens) as total_prompt_tokens,
@@ -119,21 +137,21 @@ async def get_cost_stats(
                      AVG(duration_ms) as avg_latency_ms,
                      COUNT(DISTINCT workflow_id) as total_workflows
                    FROM llm_traces
-                   WHERE created_at >= ? AND model IS NOT NULL""",
-                (cutoff,),
+                   WHERE created_at >= ? AND model IS NOT NULL{org_clause}""",
+                [cutoff] + org_params,
             ).fetchone()
 
             model_rows = conn.execute(
-                """SELECT model,
+                f"""SELECT model,
                      COUNT(*) as calls,
                      SUM(cost_usd) as cost,
                      SUM(total_tokens) as tokens,
                      AVG(duration_ms) as avg_latency_ms
                    FROM llm_traces
-                   WHERE created_at >= ? AND model IS NOT NULL
+                   WHERE created_at >= ? AND model IS NOT NULL{org_clause}
                    GROUP BY model
                    ORDER BY cost DESC""",
-                (cutoff,),
+                [cutoff] + org_params,
             ).fetchall()
 
         return {
@@ -159,7 +177,10 @@ async def get_cost_stats(
 
 
 @router.get("/workflow/{workflow_id}")
-async def get_workflow_traces(workflow_id: str):
+async def get_workflow_traces(
+    workflow_id: str,
+    user: dict | None = Depends(require_user),
+):
     """
     Get all LLM calls for a single workflow, ordered by start time.
 
@@ -170,12 +191,22 @@ async def get_workflow_traces(workflow_id: str):
     then fetches ALL spans with that trace_id. This captures child spans even if
     OTel Baggage propagation missed setting workflow_id on them.
     """
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
-            trace_row = conn.execute(
-                "SELECT trace_id FROM llm_traces WHERE workflow_id = ? LIMIT 1",
-                (workflow_id,),
-            ).fetchone()
+            if scope_org is not None:
+                trace_row = conn.execute(
+                    "SELECT trace_id FROM llm_traces WHERE workflow_id = ? AND org_id = ? LIMIT 1",
+                    (workflow_id, scope_org),
+                ).fetchone()
+            else:
+                trace_row = conn.execute(
+                    "SELECT trace_id FROM llm_traces WHERE workflow_id = ? LIMIT 1",
+                    (workflow_id,),
+                ).fetchone()
 
             if not trace_row:
                 return {"workflow_id": workflow_id, "llm_calls": 0, "traces": []}
@@ -218,13 +249,26 @@ async def get_workflow_traces(workflow_id: str):
 
 
 @router.get("/{span_id}")
-async def get_trace_detail(span_id: str):
+async def get_trace_detail(
+    span_id: str,
+    user: dict | None = Depends(require_user),
+):
     """Get full trace detail for one span, including prompt and response text."""
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
-            row = conn.execute(
-                "SELECT * FROM llm_traces WHERE id = ?", (span_id,)
-            ).fetchone()
+            if scope_org is not None:
+                row = conn.execute(
+                    "SELECT * FROM llm_traces WHERE id = ? AND org_id = ?",
+                    (span_id, scope_org),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM llm_traces WHERE id = ?", (span_id,)
+                ).fetchone()
 
         if not row:
             raise HTTPException(status_code=404, detail="Trace not found")

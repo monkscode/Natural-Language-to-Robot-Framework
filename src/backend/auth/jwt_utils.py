@@ -57,6 +57,8 @@ def create_access_token(user: dict) -> str:
         "email": user.get("email", ""),
         "role": user.get("role", "user"),
         "name": user.get("display_name", ""),
+        "org_id": user.get("org_id"),
+        "org_role": user.get("org_role"),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -76,6 +78,8 @@ def decode_token(token: str) -> dict:
         "email": payload.get("email", ""),
         "role": payload.get("role", "user"),
         "name": payload.get("name", ""),
+        "org_id": payload.get("org_id"),
+        "org_role": payload.get("org_role"),
     }
 
 
@@ -171,19 +175,16 @@ def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
             {"detail": exc.detail}, status_code=exc.status_code, headers=_UNAUTH_HEADERS
         )
 
-    if is_validated_admin(user):
-        return None
-
+    admin = is_validated_admin(user)
     try:
-        # Lazy import: jwt_utils loads during early app wiring; the registry
-        # opens a DB pool on first use and must not do so at import time.
         from src.backend.core.run_registry import get_run_registry
-        owner = get_run_registry().get_owner(run_id)
+        owner_id, org_id = get_run_registry().get_run_owner(run_id)
     except Exception as exc:
         logger.warning("[AUTH] report ownership lookup unavailable: %s", exc)
-        owner = None  # fail closed
+        owner_id, org_id = None, None  # fail closed
 
-    if owner is not None and owner == user.get("user_id"):
+    from src.backend.auth.ownership import caller_can_read
+    if caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
         return None
     return JSONResponse(
         {"detail": "You do not have access to this report"}, status_code=403

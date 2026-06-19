@@ -66,12 +66,12 @@ app.include_router(api_router)
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
 
-# Admin-only dashboards (the React Learning/Metrics pages) — JWT + admin role.
+# Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
-app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(workflow_metrics_router, prefix="/api")
 
 from src.backend.api.trace_endpoints import router as trace_router
-app.include_router(trace_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(trace_router, prefix="/api")  # routes self-guard via is_dashboard_viewer
 
 from src.backend.api.learning_endpoints import router as learning_router
 app.include_router(learning_router, prefix="/api/learning", dependencies=[Depends(require_admin)])
@@ -124,6 +124,20 @@ async def startup_event():
             f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
+
+    try:
+        from src.backend.auth.admin_seed import seed_platform_admins
+        seed_platform_admins()
+    except Exception as e:
+        logging.warning(f"[AUTH] platform-admin seed skipped: {e}")
+
+    # Backfill org_id on pre-tenancy data rows (Phase 1b). Best-effort: must
+    # never block boot even if any individual table's backfill fails.
+    try:
+        from src.backend.core.org_backfill import backfill_data_org_ids
+        backfill_data_org_ids()
+    except Exception as e:
+        logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:

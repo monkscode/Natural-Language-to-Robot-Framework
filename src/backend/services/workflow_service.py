@@ -767,7 +767,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
 
             collector = get_workflow_metrics_collector()
-            collector.record_workflow(unified_metrics)
+            _run_org_id: str | None = None
+            try:
+                _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+            except Exception:
+                pass
+            collector.record_workflow(unified_metrics, org_id=_run_org_id)
 
             _safe_delete_temp_metrics(workflow_id)
 
