@@ -216,6 +216,13 @@ async def shutdown_event():
     except Exception as e:
         logging.warning(f"Keyword store shutdown error: {e}")
 
+    # Close the trace-dashboard read pool (no-op if never created).
+    try:
+        from src.backend.api.trace_endpoints import close_read_pool
+        close_read_pool()
+    except Exception as e:
+        logging.warning(f"[TRACE_STORE] read pool shutdown error: {e}")
+
     # Close the auth Postgres pool.
     try:
         close_pool()

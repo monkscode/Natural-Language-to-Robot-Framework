@@ -17,32 +17,93 @@ Depends on: core/trace_store.py (Postgres schema), crew_ai/optimization/pg_compa
 import logging
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from psycopg_pool import ConnectionPool
 
 from src.backend.auth.jwt_utils import is_validated_admin, require_user
 from src.backend.auth.ownership import is_dashboard_viewer
-from src.backend.core.config import settings
+from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import pg_compat
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/traces", tags=["traces"])
 
+# Read-only connection pool for the trace dashboards. These are low-QPS admin
+# endpoints, but opening a brand-new psycopg connection per request (the former
+# behaviour) pays a TCP+auth handshake every time and is unbounded under burst.
+# A small pool recycles a handful of autocommit connections instead. Rows use the
+# pg_compat factory so the endpoints keep their `?` placeholders + dict-style row
+# access unchanged.
+_read_pool: ConnectionPool | None = None
+_read_pool_lock = Lock()
+
+
+def _make_read_pool(dsn: str) -> ConnectionPool:
+    """Build a compat-row, autocommit read pool for the trace store at `dsn`."""
+    return ConnectionPool(
+        conninfo=dsn,
+        min_size=1,
+        max_size=4,
+        kwargs={
+            "row_factory": pg_compat.compat_row,
+            "autocommit": True,  # read-only SELECTs — no transaction to manage
+            "connect_timeout": PG_CONNECT_TIMEOUT_S,
+        },
+        open=True,
+    )
+
+
+def _get_read_pool() -> ConnectionPool:
+    """Lazily create the process-wide read pool (double-checked locking)."""
+    global _read_pool
+    if _read_pool is None:
+        with _read_pool_lock:
+            if _read_pool is None:
+                _read_pool = _make_read_pool(settings.DATABASE_URL)
+    return _read_pool
+
+
+def close_read_pool() -> None:
+    """Close the read pool on shutdown (no-op if never created)."""
+    global _read_pool
+    if _read_pool is not None:
+        _read_pool.close()
+        _read_pool = None
+
+
+class _PooledCompatConnection(pg_compat.CompatConnection):
+    """A pg_compat connection checked out from a pool. close() RETURNS it to the
+    pool instead of closing it, so the endpoints' `with closing(_get_db())`
+    recycles the connection rather than dropping it."""
+
+    def __init__(self, pool: ConnectionPool):
+        self._pool = pool
+        super().__init__(pool.getconn())
+
+    def close(self) -> None:
+        self._pool.putconn(self._real)
+
 
 def _get_db():
-    """Open a connection to the Postgres trace store (SQLite-dialect via pg_compat).
+    """Check out a pooled trace-store connection (SQLite-dialect via pg_compat).
 
     Maps "the llm_traces table does not exist yet" to FileNotFoundError so the
     endpoints' existing graceful-degradation branches fire unchanged (no traces
     have been recorded yet). The endpoint SQL keeps its `?` placeholders and
     sqlite3.Row-style access through the compat adapter.
     """
-    conn = pg_compat.connect(settings.DATABASE_URL, autocommit=True)
+    conn = _PooledCompatConnection(_get_read_pool())
     # to_regclass respects the connection's search_path — an llm_traces table
     # in some other schema (e.g. an isolated test schema) neither hides nor
     # fakes the one this connection would actually query.
-    exists = conn.execute("SELECT to_regclass('llm_traces')").fetchone()[0]
+    try:
+        exists = conn.execute("SELECT to_regclass('llm_traces')").fetchone()[0]
+    except Exception:
+        conn.close()  # return the connection to the pool before propagating
+        raise
     if not exists:
         conn.close()
         raise FileNotFoundError("Trace table not found. No traces have been recorded yet.")
