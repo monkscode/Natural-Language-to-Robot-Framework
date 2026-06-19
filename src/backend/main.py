@@ -66,9 +66,9 @@ app.include_router(api_router)
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
 
-# Admin-only dashboards (the React Learning/Metrics pages) — JWT + admin role.
+# Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
-app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(workflow_metrics_router, prefix="/api")
 
 from src.backend.api.trace_endpoints import router as trace_router
 app.include_router(trace_router, prefix="/api")  # routes self-guard via is_dashboard_viewer

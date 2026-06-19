@@ -118,16 +118,28 @@ class WorkflowMetricsCollector:
             logger.error(f"[WORKFLOW_METRICS] backfill_org_ids failed: {e}")
             return 0
 
-    def get_all_metrics(self, limit: Optional[int] = None) -> List[WorkflowMetrics]:
-        """Get all recorded metrics, most-recent first, optionally limited to N."""
-        sql = "SELECT data FROM workflow_metrics ORDER BY ts DESC"
-        params: tuple = ()
+    def get_all_metrics(
+        self,
+        limit: Optional[int] = None,
+        org_id: str | None = None,
+    ) -> List[WorkflowMetrics]:
+        """Get all recorded metrics, most-recent first, optionally limited to N.
+
+        When org_id is not None only rows belonging to that org are returned.
+        """
+        clauses: List[str] = []
+        params: List[Any] = []
+        if org_id is not None:
+            clauses.append("org_id = %s")
+            params.append(org_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT data FROM workflow_metrics{where} ORDER BY ts DESC"
         if limit:
             sql += " LIMIT %s"
-            params = (limit,)
+            params.append(limit)
         try:
             with self._pool.connection() as conn:
-                rows = conn.execute(sql, params).fetchall()
+                rows = conn.execute(sql, tuple(params)).fetchall()
             return self._rows_to_metrics(rows)
         except Exception as e:
             logger.error(f"Failed to read workflow metrics: {e}")
@@ -136,11 +148,18 @@ class WorkflowMetricsCollector:
     def get_metrics_by_date_range(
         self,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        org_id: str | None = None,
     ) -> List[WorkflowMetrics]:
-        """Get metrics within a date range (native SQL filter), most-recent first."""
+        """Get metrics within a date range (native SQL filter), most-recent first.
+
+        When org_id is not None only rows belonging to that org are returned.
+        """
         clauses: List[str] = []
         params: List[Any] = []
+        if org_id is not None:
+            clauses.append("org_id = %s")
+            params.append(org_id)
         if start_date:
             clauses.append("ts >= %s")
             params.append(start_date)
@@ -156,14 +175,18 @@ class WorkflowMetricsCollector:
         except Exception as e:
             logger.error(f"Failed to read workflow metrics: {e}")
             return []
-    
+
     def get_aggregate_metrics(
         self,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        org_id: str | None = None,
     ) -> Dict[str, Any]:
-        """Get aggregated metrics for a date range."""
-        metrics = self.get_metrics_by_date_range(start_date, end_date)
+        """Get aggregated metrics for a date range.
+
+        When org_id is not None only rows belonging to that org are aggregated.
+        """
+        metrics = self.get_metrics_by_date_range(start_date, end_date, org_id=org_id)
         
         if not metrics:
             return {
