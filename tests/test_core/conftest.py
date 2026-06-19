@@ -5,6 +5,8 @@ isolated `trace_test` schema with a per-test TRUNCATE, mirroring the other
 Postgres test conftests.
 """
 
+from tests.test_auth.conftest import auth_isolated_schema  # noqa: F401
+
 import psycopg
 import pytest
 

@@ -53,6 +53,9 @@ _SCHEMA_DDL = (
     # Upgrade path for tables created before these columns existed.
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS robot_code TEXT",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS rerun_of TEXT",
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS org_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_test_runs_org_created"
+    " ON test_runs (org_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_user_created"
     " ON test_runs (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_created"
@@ -109,8 +112,8 @@ class RunRegistry:
                 conn.execute(
                     """
                     INSERT INTO test_runs
-                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET
                         status     = EXCLUDED.status,
                         updated_at = now(),
@@ -118,7 +121,8 @@ class RunRegistry:
                         user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
                         user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
                         robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
-                        rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of)
+                        rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
+                        org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id)
                     """,
                     (
                         run_id,
@@ -128,6 +132,7 @@ class RunRegistry:
                         robot_code,
                         rerun_of,
                         status,
+                        (user or {}).get("org_id"),
                     ),
                 )
         except Exception as e:
@@ -203,15 +208,42 @@ class RunRegistry:
     def get_owner(self, run_id: str) -> Optional[str]:
         """The user_id that owns run_id, or None (unknown run, unattributed
         legacy run, or storage error — all treated as 'not yours')."""
+        user_id, _ = self.get_run_owner(run_id)
+        return user_id
+
+    def get_run_owner(self, run_id: str) -> Tuple[Optional[str], Optional[str]]:
+        """(user_id, org_id) for the ownership predicate, or (None, None) on
+        unknown run / storage error — both treated as 'not yours'."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT user_id FROM test_runs WHERE run_id = %s", (run_id,)
+                    "SELECT user_id, org_id FROM test_runs WHERE run_id = %s",
+                    (run_id,),
                 ).fetchone()
-            return row["user_id"] if row else None
+            return (row["user_id"], row["org_id"]) if row else (None, None)
         except Exception as e:
-            logger.error(f"[RUN_REGISTRY] get_owner failed for {run_id}: {e}")
-            return None
+            logger.error(f"[RUN_REGISTRY] get_run_owner failed for {run_id}: {e}")
+            return (None, None)
+
+    def backfill_org_ids(self) -> int:
+        """Set org_id on rows that have a user_id but no org_id, from that user's
+        org_admin personal-org membership. Idempotent; returns rows updated."""
+        try:
+            with self._pool.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE test_runs t SET org_id = m.org_id "
+                    "FROM org_members m "
+                    "WHERE t.org_id IS NULL AND t.user_id IS NOT NULL "
+                    "  AND m.user_id = t.user_id::uuid AND m.org_role = 'org_admin'"
+                )
+                n = cur.rowcount
+                conn.commit()
+            if n:
+                logger.info("[RUN_REGISTRY] backfilled org_id on %d run(s)", n)
+            return n
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] backfill_org_ids failed: {e}")
+            return 0
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         """Full row for one run (including robot_code), or None if unknown
@@ -220,7 +252,7 @@ class RunRegistry:
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "SELECT run_id, user_id, user_email, user_query, robot_code, "
-                    "       rerun_of, status, created_at, updated_at "
+                    "       rerun_of, status, org_id, created_at, updated_at "
                     "FROM test_runs WHERE run_id = %s",
                     (run_id,),
                 ).fetchone()
