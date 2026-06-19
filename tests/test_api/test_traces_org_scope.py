@@ -98,6 +98,7 @@ class TestTracesOrgScope:
 
         # Insert a trace row that belongs to org A
         span_id = f"scope-span-{uuid.uuid4().hex[:8]}"
+        workflow_id = str(uuid.uuid4())
         conn = pg_compat.connect(trace_schema, autocommit=True)
         conn.execute(
             "INSERT INTO llm_traces "
@@ -111,7 +112,7 @@ class TestTracesOrgScope:
                 1_000_000, 2_000_000, 100.0, "OK",
                 "gemini/gemini-2.5-flash",
                 10, 5, 15, 0.001,
-                str(uuid.uuid4()),  # workflow_id
+                workflow_id,
                 org_a,
             ),
         )
@@ -124,6 +125,7 @@ class TestTracesOrgScope:
             "org_a": org_a,
             "org_b": b["org_id"],
             "span_id": span_id,
+            "workflow_id": workflow_id,
             "trace_dsn": trace_schema,
         }
 
@@ -194,3 +196,75 @@ class TestTracesOrgScope:
                 headers={"Authorization": f"Bearer {member_tok}"},
             )
         assert resp.status_code == 403
+
+    # -------------------------------------------------------------------------
+    # Per-item cross-org isolation tests (fix for critical cross-org read leak)
+    # -------------------------------------------------------------------------
+
+    def test_org_admin_b_cannot_read_a_workflow_traces(self, client, setup):
+        """Org-admin B gets the empty shape for org A's workflow — no prompt/response leak."""
+        from unittest.mock import patch
+        from src.backend.crew_ai.optimization import pg_compat
+
+        def _test_db():
+            return pg_compat.connect(setup["trace_dsn"], autocommit=True)
+
+        with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_db):
+            resp = client.get(
+                f"/api/admin/traces/workflow/{setup['workflow_id']}",
+                headers={"Authorization": f"Bearer {setup['tok_b']}"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["llm_calls"] == 0, f"B must see 0 calls for A's workflow; got {body}"
+        assert body["traces"] == [], f"B must see empty traces for A's workflow; got {body}"
+
+    def test_org_admin_b_cannot_read_a_span_detail(self, client, setup):
+        """Org-admin B gets 404 for org A's span id — no prompt/response leak."""
+        from unittest.mock import patch
+        from src.backend.crew_ai.optimization import pg_compat
+
+        def _test_db():
+            return pg_compat.connect(setup["trace_dsn"], autocommit=True)
+
+        with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_db):
+            resp = client.get(
+                f"/api/admin/traces/{setup['span_id']}",
+                headers={"Authorization": f"Bearer {setup['tok_b']}"},
+            )
+        assert resp.status_code == 404, f"B must get 404 for A's span; got {resp.status_code} {resp.text}"
+
+    def test_org_admin_a_can_read_own_workflow_traces(self, client, setup):
+        """Org-admin A gets 200 with their trace data via workflow route (positive control)."""
+        from unittest.mock import patch
+        from src.backend.crew_ai.optimization import pg_compat
+
+        def _test_db():
+            return pg_compat.connect(setup["trace_dsn"], autocommit=True)
+
+        with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_db):
+            resp = client.get(
+                f"/api/admin/traces/workflow/{setup['workflow_id']}",
+                headers={"Authorization": f"Bearer {setup['tok_a']}"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["llm_calls"] >= 1, f"A must see their own workflow trace; got {body}"
+        ids = [t["id"] for t in body["traces"]]
+        assert setup["span_id"] in ids, f"A's span not in workflow traces; ids={ids}"
+
+    def test_org_admin_a_can_read_own_span_detail(self, client, setup):
+        """Org-admin A gets 200 with their span detail by id (positive control)."""
+        from unittest.mock import patch
+        from src.backend.crew_ai.optimization import pg_compat
+
+        def _test_db():
+            return pg_compat.connect(setup["trace_dsn"], autocommit=True)
+
+        with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_db):
+            resp = client.get(
+                f"/api/admin/traces/{setup['span_id']}",
+                headers={"Authorization": f"Bearer {setup['tok_a']}"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["id"] == setup["span_id"]

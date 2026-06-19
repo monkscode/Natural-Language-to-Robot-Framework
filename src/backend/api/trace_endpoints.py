@@ -194,12 +194,19 @@ async def get_workflow_traces(
     admin = is_validated_admin(user)
     if not is_dashboard_viewer(user, is_platform_admin=admin):
         raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
-            trace_row = conn.execute(
-                "SELECT trace_id FROM llm_traces WHERE workflow_id = ? LIMIT 1",
-                (workflow_id,),
-            ).fetchone()
+            if scope_org is not None:
+                trace_row = conn.execute(
+                    "SELECT trace_id FROM llm_traces WHERE workflow_id = ? AND org_id = ? LIMIT 1",
+                    (workflow_id, scope_org),
+                ).fetchone()
+            else:
+                trace_row = conn.execute(
+                    "SELECT trace_id FROM llm_traces WHERE workflow_id = ? LIMIT 1",
+                    (workflow_id,),
+                ).fetchone()
 
             if not trace_row:
                 return {"workflow_id": workflow_id, "llm_calls": 0, "traces": []}
@@ -250,11 +257,18 @@ async def get_trace_detail(
     admin = is_validated_admin(user)
     if not is_dashboard_viewer(user, is_platform_admin=admin):
         raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org = None if (admin or user is None) else user.get("org_id")
     try:
         with closing(_get_db()) as conn:
-            row = conn.execute(
-                "SELECT * FROM llm_traces WHERE id = ?", (span_id,)
-            ).fetchone()
+            if scope_org is not None:
+                row = conn.execute(
+                    "SELECT * FROM llm_traces WHERE id = ? AND org_id = ?",
+                    (span_id, scope_org),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM llm_traces WHERE id = ?", (span_id,)
+                ).fetchone()
 
         if not row:
             raise HTTPException(status_code=404, detail="Trace not found")
