@@ -18,6 +18,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
+from src.backend.auth.ownership import caller_can_read
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -76,13 +77,12 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
         raise HTTPException(status_code=400, detail="Invalid rerun_of: must be a UUID")
 
     source = get_run_registry().get_run(source_run_id)
-    is_owner = (
-        source is not None
-        and user is not None
-        and source.get("user_id") is not None
-        and source.get("user_id") == user.get("user_id")
+    admin = is_validated_admin(user)
+    allowed = source is not None and caller_can_read(
+        user, source.get("user_id"), source.get("org_id"), is_platform_admin=admin
     )
-    if source is None or not (is_validated_admin(user) or user is None or is_owner):
+    if source is None or not allowed:
+        # 404, not 403 — don't leak run existence across orgs.
         raise HTTPException(status_code=404, detail="Run not found")
 
     robot_code = resolve_robot_code(source)
