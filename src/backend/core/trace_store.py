@@ -66,16 +66,20 @@ _DB_SCHEMA_PG = (
         cost_usd          DOUBLE PRECISION DEFAULT 0.0,
         workflow_id       TEXT,
         attributes_json   JSONB,
-        created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        org_id            TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_traces_trace_id   ON llm_traces(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_traces_workflow_id ON llm_traces(workflow_id)",
     "CREATE INDEX IF NOT EXISTS idx_traces_created     ON llm_traces(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_traces_model       ON llm_traces(model)",
+    # v3: org tenancy column (upgrade path for tables created before this version)
+    "ALTER TABLE llm_traces ADD COLUMN IF NOT EXISTS org_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_traces_org ON llm_traces(org_id)",
 )
 
-_SCHEMA_VERSION = 2  # v2 = Postgres-native (BIGINT ns, timestamptz, jsonb)
+_SCHEMA_VERSION = 3  # v3 = added org_id for org tenancy
 
 
 def _ensure_schema(conn) -> None:
@@ -114,8 +118,8 @@ _INSERT_SQL = """
     (id, trace_id, parent_span_id, name, start_time_ns, end_time_ns,
      duration_ms, status, model, prompt_text, response_text,
      prompt_tokens, completion_tokens, total_tokens, cost_usd,
-     workflow_id, attributes_json)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+     workflow_id, attributes_json, org_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (id) DO UPDATE SET
         trace_id = EXCLUDED.trace_id, parent_span_id = EXCLUDED.parent_span_id,
         name = EXCLUDED.name, start_time_ns = EXCLUDED.start_time_ns,
@@ -124,7 +128,8 @@ _INSERT_SQL = """
         prompt_text = EXCLUDED.prompt_text, response_text = EXCLUDED.response_text,
         prompt_tokens = EXCLUDED.prompt_tokens, completion_tokens = EXCLUDED.completion_tokens,
         total_tokens = EXCLUDED.total_tokens, cost_usd = EXCLUDED.cost_usd,
-        workflow_id = EXCLUDED.workflow_id, attributes_json = EXCLUDED.attributes_json
+        workflow_id = EXCLUDED.workflow_id, attributes_json = EXCLUDED.attributes_json,
+        org_id = EXCLUDED.org_id
 """
 
 
@@ -190,6 +195,7 @@ class PostgresSpanExporter(SpanExporter):
             None, None, None, 0, 0, 0, 0.0,
             attrs.get("workflow.id"),
             json.dumps({k: str(v) for k, v in attrs.items()}),
+            None,  # org_id — OTel orchestration spans don't carry org context
         )
 
     # ------------------------------------------------------------------
@@ -210,6 +216,15 @@ class PostgresSpanExporter(SpanExporter):
         prompt_text is the JSON-serialized messages list; response_text is the
         first choice content string. Both are None if unavailable.
         """
+        # Resolve org_id from the run registry (lazy import to avoid import cycle).
+        org_id: str | None = None
+        if workflow_id:
+            try:
+                from src.backend.core.run_registry import get_run_registry  # noqa: PLC0415
+                _, org_id = get_run_registry().get_run_owner(workflow_id)
+            except Exception:
+                pass  # unknown run — org_id stays None
+
         now_ns = int(datetime.now(tz=timezone.utc).timestamp() * 1_000_000_000)
         start_ns = now_ns - int(duration_ms * 1_000_000)
         try:
@@ -219,11 +234,30 @@ class PostgresSpanExporter(SpanExporter):
                         span_id, trace_id, parent_span_id, name, start_ns, now_ns,
                         duration_ms, "OK", model, prompt_text, response_text,
                         prompt_tokens, completion_tokens, total_tokens, cost_usd,
-                        workflow_id, json.dumps(extra_attrs or {}),
+                        workflow_id, json.dumps(extra_attrs or {}), org_id,
                     ))
                 conn.commit()
         except Exception:
             logger.exception("[TRACE_STORE] insert_litellm_call failed")
+
+    def backfill_org_ids(self) -> int:
+        """Attribute trace rows to their run's org via workflow_id. Idempotent."""
+        try:
+            with self._pool.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE llm_traces t SET org_id = r.org_id "
+                    "FROM test_runs r "
+                    "WHERE t.org_id IS NULL AND t.workflow_id = r.run_id "
+                    "  AND r.org_id IS NOT NULL"
+                )
+                n = cur.rowcount
+                conn.commit()
+            if n:
+                logger.info("[TRACE_STORE] backfilled org_id on %d trace(s)", n)
+            return n
+        except Exception as e:
+            logger.error(f"[TRACE_STORE] backfill_org_ids failed: {e}")
+            return 0
 
     # ------------------------------------------------------------------
     # Lifecycle
