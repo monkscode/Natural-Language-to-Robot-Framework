@@ -125,6 +125,12 @@ async def startup_event():
             f"Postgres is reachable: {e}"
         )
 
+    try:
+        from src.backend.auth.admin_seed import seed_platform_admins
+        seed_platform_admins()
+    except Exception as e:
+        logging.warning(f"[AUTH] platform-admin seed skipped: {e}")
+
     # Backfill org_id on pre-tenancy data rows (Phase 1b). Best-effort: must
     # never block boot even if any individual table's backfill fails.
     try:
