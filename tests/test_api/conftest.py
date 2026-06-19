@@ -4,7 +4,12 @@ The learning dashboard endpoints became Postgres-only at slice 4.5 (native jsonb
 KPI queries), so these tests run against a real PostgreSQL schema instead of the
 SQLite ExecutionMemory. Mirrors tests/test_optimization/conftest.py: one
 session-scoped PostgresExecutionMemory on an isolated schema, truncated per test.
+
+Re-exports auth_isolated_schema so integration tests in this package (e.g.
+test_history_org_scope.py) can opt in via usefixtures.
 """
+
+from tests.test_auth.conftest import auth_isolated_schema  # noqa: F401
 
 from unittest.mock import patch
 

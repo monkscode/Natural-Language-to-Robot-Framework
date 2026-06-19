@@ -153,6 +153,7 @@ class RunRegistry:
     def list_runs(
         self,
         user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
         status: Optional[str] = None,
@@ -170,6 +171,9 @@ class RunRegistry:
         if user_id is not None:
             clauses.append("user_id = %s")
             params.append(user_id)
+        if org_id is not None:
+            clauses.append("org_id = %s")
+            params.append(org_id)
         if status is not None:
             clauses.append("status = %s")
             params.append(status)
