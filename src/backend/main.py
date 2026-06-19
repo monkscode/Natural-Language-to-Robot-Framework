@@ -125,6 +125,14 @@ async def startup_event():
             f"Postgres is reachable: {e}"
         )
 
+    # Backfill org_id on pre-tenancy data rows (Phase 1b). Best-effort: must
+    # never block boot even if any individual table's backfill fails.
+    try:
+        from src.backend.core.org_backfill import backfill_data_org_ids
+        backfill_data_org_ids()
+    except Exception as e:
+        logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
+
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:
         from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
