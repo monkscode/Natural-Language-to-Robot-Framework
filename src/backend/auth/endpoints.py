@@ -23,6 +23,7 @@ from src.backend.auth.jwt_utils import (
     REPORT_TOKEN_COOKIE,
     create_access_token,
     get_current_user,
+    require_admin,
 )
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import (
@@ -221,6 +222,27 @@ async def google_login():
         httponly=True, samesite="lax", secure=settings.COOKIE_SECURE,
     )
     return resp
+
+
+class _RoleUpdate(BaseModel):
+    role: str
+
+
+@auth_router.post("/admin/users/{user_id}/role")
+def set_user_platform_role(
+    user_id: str,
+    body: _RoleUpdate,
+    admin: dict = Depends(require_admin),
+):
+    """Platform-admin grants/revokes another user's platform-admin role."""
+    if body.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role must be 'admin' or 'user'")
+    if user_id == admin["user_id"] and body.role == "user":
+        raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
+    row = _repo.set_platform_role(user_id, body.role)
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _user_public(row)
 
 
 @auth_router.get("/google/callback")
