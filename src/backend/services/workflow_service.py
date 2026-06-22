@@ -533,7 +533,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
-def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None) -> Generator[Dict[str, Any], None, None]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
     yielding progress updates and the final code.
@@ -607,23 +607,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # AFTER this span closes (R5); their calls are still captured by the
         # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
-            # Resolve the run's org for hint-retrieval scoping (Task 9).
-            # record_start has not fired yet for generate-only flows, so
-            # get_run_owner returns (None, None) and _gen_org_id is None —
-            # graceful degradation to unscoped behaviour. The try/except
-            # mirrors the Task-2 pattern in _process_learning exactly.
-            _gen_org_id: str | None = None
-            try:
-                _, _gen_org_id = get_run_registry().get_run_owner(workflow_id)
-            except Exception:
-                _gen_org_id = None
-
             # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
             # task is now the Assembler — there is no validator verdict). Unused here;
             # delivered code is read from crew_with_results.tasks[2] below.
+            # org_id comes from the authenticated user (threaded down from the SSE
+            # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
                 natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
-                progress_queue=progress_queue, org_id=_gen_org_id)
+                progress_queue=progress_queue, org_id=org_id)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -849,6 +840,7 @@ def run_workflow_in_thread(
     model_provider: str,
     model_name: str,
     releaser: "_SlotReleaser | None" = None,
+    org_id: str | None = None,
 ):
     """Runs the synchronous agentic workflow and puts results in a queue.
 
@@ -860,7 +852,7 @@ def run_workflow_in_thread(
     client has already disconnected and the generator's finally fired first.
     """
     try:
-        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue):
+        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id):
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
@@ -926,7 +918,8 @@ def _capacity_error_sse(stage: str) -> str:
 
 
 def _start_workflow_thread(
-    q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser"
+    q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser",
+    org_id: str | None = None,
 ) -> Thread:
     """Start the workflow thread, pre-decrementing the releaser if start() raises.
 
@@ -936,7 +929,7 @@ def _start_workflow_thread(
     """
     thread = Thread(
         target=run_workflow_in_thread,
-        args=(q, user_query, model_provider, model_name, releaser),
+        args=(q, user_query, model_provider, model_name, releaser, org_id),
     )
     try:
         thread.start()
@@ -1087,7 +1080,8 @@ async def stream_generate_only(
     releaser = _SlotReleaser()
     try:
         q = Queue()
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
+        org_id = user.get("org_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id)
         result_store: dict = {}
         try:
             async for sse in _drain_generation_queue(workflow_thread, q, result_store):
@@ -1215,7 +1209,8 @@ async def stream_generate_and_run(
     run_id = None
     try:
         q = Queue()
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
+        org_id = user.get("org_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id)
 
         result_store: dict = {}
         try:
