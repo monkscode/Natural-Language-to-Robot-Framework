@@ -687,6 +687,71 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         still_missing = sum(1 for d in missing if d[0] not in now_present)
         return {"ran_at": ran_at, "checked": checked, "missing_count": still_missing}
 
+    # -------------------------------------------------------------------
+    # Startup backfill — attribute pre-tenancy org_ids
+    # -------------------------------------------------------------------
+
+    def _backfill_conn(self):
+        """Short-lived dedicated connection for org_id backfill (NOT the writer conn).
+
+        Opens a new pg_compat connection on self.dsn (which already carries the
+        correct search_path in the DSN options), so the backfill UPDATEs land on
+        the same schema as the rest of the store — including the isolated test
+        schema (learning_test) during tests.
+        """
+        return pg_compat.connect(self.dsn, autocommit=True)
+
+    def _exec_backfill(self, conn, sql: str, params=()) -> int:
+        """Execute one backfill UPDATE and return rowcount; log + return 0 on error."""
+        try:
+            cur = conn.execute(sql, params)
+            return cur.rowcount or 0
+        except Exception as e:
+            logger.warning("[LEARNING] backfill stmt failed: %s", e)
+            return 0
+
+    def backfill_org_ids(self, home_org_id: str | None) -> dict[str, int]:
+        """Attribute pre-tenancy learning rows. Idempotent.
+
+        Owner-linked rows map via test_runs.org_id (JOIN on workflow_id /
+        source_workflow_id). Ownerless rows that are still NULL after the
+        owner-linked pass fall back to home_org_id — the oldest personal org —
+        so the current single tenant keeps the learning it already had.
+
+        Runs on a dedicated short-lived connection (NOT the writer conn) with
+        autocommit=True so each UPDATE commits independently. finally: conn.close().
+        """
+        out: dict[str, int] = {}
+        conn = self._backfill_conn()
+        try:
+            owner_linked = {
+                "execution_records":
+                    "UPDATE execution_records e SET org_id = r.org_id FROM test_runs r "
+                    "WHERE e.org_id IS NULL AND e.workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                "execution_embeddings":
+                    "UPDATE execution_embeddings x SET org_id = r.org_id FROM test_runs r "
+                    "WHERE x.org_id IS NULL AND x.workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                "nl_feedback_corrections":
+                    "UPDATE nl_feedback_corrections n SET org_id = r.org_id FROM test_runs r "
+                    "WHERE n.org_id IS NULL AND n.source_workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                "anchors_nl":
+                    "UPDATE learning_anchors a SET org_id = n.org_id FROM nl_feedback_corrections n "
+                    "WHERE a.org_id IS NULL AND a.kind = 'nl' AND a.record_id = n.id AND n.org_id IS NOT NULL",
+                "anchors_anti":
+                    "UPDATE learning_anchors a SET org_id = p.org_id FROM anti_patterns p "
+                    "WHERE a.org_id IS NULL AND a.kind = 'anti' AND a.record_id = p.id AND p.org_id IS NOT NULL",
+            }
+            for key, sql in owner_linked.items():
+                out[key] = self._exec_backfill(conn, sql)
+            if home_org_id:
+                for tbl in ("execution_records", "execution_embeddings",
+                            "nl_feedback_corrections", "anti_patterns", "learning_anchors"):
+                    out[f"{tbl}_home"] = self._exec_backfill(
+                        conn, f"UPDATE {tbl} SET org_id = ? WHERE org_id IS NULL", (home_org_id,))
+        finally:
+            conn.close()
+        return out
+
     def close(self):
         try:
             # Backing attribute, NOT the property — the property would reopen

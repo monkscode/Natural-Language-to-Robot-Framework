@@ -325,6 +325,27 @@ class KeywordVectorStore:
         except Exception:
             return 0
 
+    def backfill_org_ids(self, home_org_id: str | None) -> int:
+        """Attribute pre-tenancy kw_query_patterns rows to the home org. Idempotent.
+
+        Uses a raw psycopg connection from the pool (%s placeholders, not pg_compat).
+        Returns 0 immediately when home_org_id is None or falsy.
+        """
+        if not home_org_id:
+            return 0
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE kw_query_patterns SET org_id = %s WHERE org_id IS NULL",
+                        (home_org_id,))
+                    count = cur.rowcount or 0
+                conn.commit()
+                return count
+        except Exception as e:
+            logger.warning("[KEYWORD_STORE] backfill_org_ids failed: %s", e)
+            return 0
+
     def close(self) -> None:
         try:
             self._pool.close()

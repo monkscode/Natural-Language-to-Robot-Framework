@@ -226,8 +226,17 @@ def test_backfill_aggregator_returns_correct_shape(_shared, monkeypatch):
 
     counts = backfill_data_org_ids()
     assert isinstance(counts, dict)
-    assert set(counts.keys()) == {"test_runs", "llm_traces", "workflow_metrics"}
-    assert all(isinstance(v, int) for v in counts.values())
+    # Phase 1b keys are always present; Phase 1c (Task 11) adds learning +
+    # kw_query_patterns. Use a superset check so adding more tables in future
+    # does not break this assertion.
+    assert {"test_runs", "llm_traces", "workflow_metrics"}.issubset(counts.keys())
+    assert {"learning", "kw_query_patterns"}.issubset(counts.keys())
+    # learning is a dict[str,int]; all other keys are plain ints.
+    for key, val in counts.items():
+        if key == "learning":
+            assert isinstance(val, dict), f"learning value should be dict, got {type(val)}"
+        else:
+            assert isinstance(val, int), f"{key} value should be int, got {type(val)}"
 
 
 def test_backfill_returns_zero_when_already_attributed(_shared):
