@@ -339,10 +339,12 @@ class AntiPatternEngine(LearningEngine):
             return
 
         domain = getattr(record, 'domain', None)
+        org_id = getattr(record, 'org_id', None)
 
-        # Find unresolved anti-patterns for similar queries
+        # Find unresolved anti-patterns for similar queries — scoped to this
+        # org so we never write one org's robot_code into another org's row.
         anti_patterns = self._find_matching_anti_patterns(
-            record.user_query, domain
+            record.user_query, domain, org_id=org_id
         )
 
         updated = False
