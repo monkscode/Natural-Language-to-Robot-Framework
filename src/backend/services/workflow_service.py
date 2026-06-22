@@ -607,12 +607,23 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # AFTER this span closes (R5); their calls are still captured by the
         # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
+            # Resolve the run's org for hint-retrieval scoping (Task 9).
+            # record_start has not fired yet for generate-only flows, so
+            # get_run_owner returns (None, None) and _gen_org_id is None —
+            # graceful degradation to unscoped behaviour. The try/except
+            # mirrors the Task-2 pattern in _process_learning exactly.
+            _gen_org_id: str | None = None
+            try:
+                _, _gen_org_id = get_run_registry().get_run_owner(workflow_id)
+            except Exception:
+                _gen_org_id = None
+
             # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
             # task is now the Assembler — there is no validator verdict). Unused here;
             # delivered code is read from crew_with_results.tasks[2] below.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
                 natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
-                progress_queue=progress_queue)
+                progress_queue=progress_queue, org_id=_gen_org_id)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:

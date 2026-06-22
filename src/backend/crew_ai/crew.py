@@ -107,7 +107,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = "", progress_queue=None):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -252,6 +252,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 metrics=optimization_metrics,
                 execution_memory=learning_em,
                 nl_engine=feedback_loop.nl_engine if feedback_loop is not None else None,
+                org_id=org_id,
             )
             
             # Calculate baseline context size (full context)

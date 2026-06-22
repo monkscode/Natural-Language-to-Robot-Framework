@@ -68,7 +68,7 @@ class MockEngine:
         self.call_count = 0
         self.last_args = None
 
-    def get_hints(self, user_query, url, agent_role):
+    def get_hints(self, user_query, url, agent_role, org_id=None):
         self.call_count += 1
         self.last_args = (user_query, url, agent_role)
         if self._raise:
