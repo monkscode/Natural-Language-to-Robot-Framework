@@ -248,12 +248,18 @@ class AntiPatternEngine(LearningEngine):
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        rows = self._em._writer_conn.execute(
-            "SELECT * FROM anti_patterns WHERE failure_category = ? "
-            "AND (? IS NULL OR org_id = ?) "
-            "ORDER BY score DESC",
-            (category, org_id, org_id)
-        ).fetchall()
+        if org_id is not None:
+            rows = self._em._writer_conn.execute(
+                "SELECT * FROM anti_patterns WHERE failure_category = ? "
+                "AND org_id = ? ORDER BY score DESC",
+                (category, org_id),
+            ).fetchall()
+        else:
+            rows = self._em._writer_conn.execute(
+                "SELECT * FROM anti_patterns WHERE failure_category = ? "
+                "ORDER BY score DESC",
+                (category,),
+            ).fetchall()
 
         query_words = set(user_query.lower().split())
         for row in rows:
