@@ -124,6 +124,7 @@ _PG_TABLES = (
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
     "trigger_events", "hint_audit", "hint_review_sessions", "hint_review_recommendations",
     "hint_review_pages", "hint_workflow_trace", "learning_anchors", "execution_embeddings",
+    "kw_query_patterns",
 )
 
 
@@ -149,6 +150,17 @@ def _pg_test_em(_pg_admin):
     dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_PG_TEST_SCHEMA},public"
     em = PostgresExecutionMemory(dsn=dsn)
     em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
+    # Apply keyword-store DDL so kw_query_patterns exists in the test schema.
+    # KeywordVectorStore is mocked for all tests so its __init__ (which normally
+    # runs _SCHEMA_DDL) never fires — we apply it here instead.
+    import psycopg
+    from src.backend.crew_ai.optimization import keyword_vector_store as _kvs
+    _kv_raw = psycopg.connect(dsn, autocommit=True)
+    try:
+        for _ddl in _kvs._SCHEMA_DDL:
+            _kv_raw.execute(_ddl)
+    finally:
+        _kv_raw.close()
     yield em
     em.close()
     _pg_admin.execute(f"DROP SCHEMA IF EXISTS {_PG_TEST_SCHEMA} CASCADE")

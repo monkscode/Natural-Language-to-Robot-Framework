@@ -53,11 +53,14 @@ _SCHEMA_DDL = (
         user_query TEXT NOT NULL,
         keywords   JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        embedding  vector(384) NOT NULL
+        embedding  vector(384) NOT NULL,
+        org_id     TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_kw_patterns_emb "
     "ON kw_query_patterns USING hnsw (embedding vector_l2_ops)",
+    "ALTER TABLE kw_query_patterns ADD COLUMN IF NOT EXISTS org_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_kw_patterns_org ON kw_query_patterns(org_id)",
     """
     CREATE TABLE IF NOT EXISTS kw_library_version (
         library TEXT PRIMARY KEY,

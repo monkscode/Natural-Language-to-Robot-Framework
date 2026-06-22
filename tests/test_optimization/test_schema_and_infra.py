@@ -33,6 +33,8 @@ class TestSchema:
             "hint_review_sessions", "hint_review_recommendations",
             "hint_review_pages", "hint_workflow_trace",
             "learning_anchors", "execution_embeddings",
+            # keyword store tables (kw_* DDL applied to test schema via conftest)
+            "kw_keywords", "kw_query_patterns", "kw_library_version",
         }
         tables = pg_introspect.table_names(in_memory_db)
         assert expected_tables == tables, (

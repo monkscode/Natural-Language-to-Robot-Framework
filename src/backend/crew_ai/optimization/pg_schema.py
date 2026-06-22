@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Each statement is executed once inside ensure_schema(). Ordered so referenced
 # tables (nl_feedback_corrections, hint_review_sessions) exist before FKs.
@@ -61,6 +61,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         injected_hint_ids     JSONB,
         model_version         TEXT,
         hint_attribution_done INTEGER NOT NULL DEFAULT 1,
+        org_id TEXT,
         CONSTRAINT chk_status CHECK (test_status IN ('passed', 'failed', 'error'))
     )
     """,
@@ -71,6 +72,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_exec_structure ON execution_records(code_structure)",
     # GIN index for jsonb hint-id membership (injected_hint_ids @> to_jsonb(id)) — Tier 1.
     "CREATE INDEX IF NOT EXISTS idx_exec_injected_gin ON execution_records USING GIN (injected_hint_ids)",
+    "CREATE INDEX IF NOT EXISTS idx_exec_org ON execution_records(org_id)",
 
     # --- intent_patterns ---
     """
@@ -138,12 +140,14 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         domain              TEXT,
         score               DOUBLE PRECISION DEFAULT 0.5,
         evidence_count      INTEGER DEFAULT 1,
-        last_seen           TEXT NOT NULL
+        last_seen           TEXT NOT NULL,
+        org_id              TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_anti_category ON anti_patterns(failure_category)",
     "CREATE INDEX IF NOT EXISTS idx_anti_domain ON anti_patterns(domain)",
     "CREATE INDEX IF NOT EXISTS idx_anti_score_evidence ON anti_patterns(score DESC, evidence_count DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_anti_org ON anti_patterns(org_id)",
 
     # --- learning_stats ---
     """
@@ -211,6 +215,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         disabled_at               TEXT,
         anchor_query              TEXT,
         unused_count              INTEGER NOT NULL DEFAULT 0,
+        org_id                    TEXT,
+        is_shared                 INTEGER NOT NULL DEFAULT 0,
         UNIQUE(feedback_text, domain, scope)
     )
     """,
@@ -222,6 +228,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     # Partial index for the hot hint-retrieval filter (active, unflagged) — Tier 1.
     "CREATE INDEX IF NOT EXISTS idx_nlfc_active_unflagged ON nl_feedback_corrections(scope, domain) "
     "WHERE is_active = 1 AND conflict_flagged = 0",
+    "CREATE INDEX IF NOT EXISTS idx_nlfc_org_shared ON nl_feedback_corrections(org_id, is_shared)",
 
     # --- trigger_events (cols consolidated through v13) ---
     """
@@ -361,12 +368,14 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         kind         TEXT NOT NULL,
         record_id    BIGINT NOT NULL,
         anchor_query TEXT NOT NULL,
-        embedding    vector(384) NOT NULL
+        embedding    vector(384) NOT NULL,
+        org_id       TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_anchors_kind_record ON learning_anchors(kind, record_id)",
     "CREATE INDEX IF NOT EXISTS idx_anchors_embedding "
     "ON learning_anchors USING hnsw (embedding vector_cosine_ops)",
+    "CREATE INDEX IF NOT EXISTS idx_anchors_org ON learning_anchors(org_id)",
     # execution_embeddings — per-execution query embeddings (find_similar_executions).
     """
     CREATE TABLE IF NOT EXISTS execution_embeddings (
@@ -376,11 +385,13 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         failure_category TEXT,
         domain           TEXT,
         code_structure   TEXT,
-        embedding        vector(384) NOT NULL
+        embedding        vector(384) NOT NULL,
+        org_id           TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_exec_emb_embedding "
     "ON execution_embeddings USING hnsw (embedding vector_cosine_ops)",
+    "CREATE INDEX IF NOT EXISTS idx_exec_emb_org ON execution_embeddings(org_id)",
 
     # --- SQLite-compat SQL functions (so the engines' SQLite SQL runs as-is) ---
     # NOTE: json_each / json_valid were retired in slice 4.5 — the hint-id array
@@ -438,9 +449,20 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
 # Each entry: (version, description, (statement, ...)).
 # ---------------------------------------------------------------------------
 PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
-    # Example:
-    # (17, "track per-hint cost on execution_records",
-    #  ("ALTER TABLE execution_records ADD COLUMN IF NOT EXISTS hint_cost DOUBLE PRECISION",)),
+    (17, "Phase 1c: org_id on scoped learning tables + is_shared on hints",
+     (
+         "ALTER TABLE execution_records ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE nl_feedback_corrections ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE nl_feedback_corrections ADD COLUMN IF NOT EXISTS is_shared INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE anti_patterns ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE learning_anchors ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE execution_embeddings ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "CREATE INDEX IF NOT EXISTS idx_exec_org ON execution_records(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_nlfc_org_shared ON nl_feedback_corrections(org_id, is_shared)",
+         "CREATE INDEX IF NOT EXISTS idx_anti_org ON anti_patterns(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_anchors_org ON learning_anchors(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_exec_emb_org ON execution_embeddings(org_id)",
+     )),
 )
 
 if PG_MIGRATIONS and SCHEMA_VERSION != max(v for v, _, _ in PG_MIGRATIONS):
