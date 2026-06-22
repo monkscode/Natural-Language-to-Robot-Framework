@@ -212,6 +212,50 @@ class _DashClient:
         self.member_token = member_token
         self._dsn = dsn
 
+    def seed_run(self, org_id: str, workflow_id: str | None = None,
+                with_trace: bool = False) -> str:
+        """Insert an execution_records row scoped to *org_id* and return its workflow_id.
+
+        Uses INSERT ... RETURNING workflow_id (idiomatic Postgres; avoids the fragile
+        last_insert_rowid() pattern).  test_status='passed' satisfies the chk_status
+        constraint.
+
+        with_trace=True also inserts one hint_workflow_trace row for this workflow_id
+        (hint_id=0, no FK constraint on that table).  This is required for the
+        cross-org trace-leak anti-false-green test: without trace data, the existing
+        ``run is None and not trace`` guard would 404 correctly even without the fix,
+        masking the real vulnerability.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from src.backend.crew_ai.optimization import pg_compat
+
+        if workflow_id is None:
+            workflow_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conn = pg_compat.connect(self._dsn)
+        try:
+            row = conn.execute(
+                "INSERT INTO execution_records "
+                "(workflow_id, timestamp, user_query, test_status, org_id) "
+                "VALUES (?, ?, 'seed query', 'passed', ?) "
+                "RETURNING workflow_id",
+                (workflow_id, now, org_id),
+            ).fetchone()
+            if with_trace:
+                # hint_id=0 — no FK constraint on hint_workflow_trace by design.
+                # Exposes the trace without a real hint row.
+                conn.execute(
+                    "INSERT INTO hint_workflow_trace "
+                    "(workflow_id, hint_id, available, injected, created_at) "
+                    "VALUES (?, 0, 1, 1, ?)",
+                    (workflow_id, now),
+                )
+            conn.commit()
+            return row[0]
+        finally:
+            conn.close()
+
     def seed_hint(self, org_id: str, text: str) -> int:
         """Insert a hint scoped to *org_id* and return its id.
 

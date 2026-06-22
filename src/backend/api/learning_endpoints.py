@@ -1065,6 +1065,19 @@ def get_run(
             run = _row_to_dict(conn.execute(
                 "SELECT * FROM execution_records WHERE workflow_id = ?", (workflow_id,)
             ).fetchone())
+        # SCOPED EARLY EXIT: if this org has no execution record for this workflow_id,
+        # return 404 immediately — before running metrics/trace/triggers queries.
+        # hint_workflow_trace and learning_metrics have no org_id column, so they
+        # cannot be org-scoped; serving them to a scoped caller whose execution_record
+        # lookup returned None would leak another org's trace rows (D3 violation).
+        # Platform-admins (scope_org=None) are unaffected: they keep the existing
+        # deduped-run behaviour (a trace-only run with no execution record still
+        # returns 200 for platform admins).
+        if scope_org is not None and run is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No run data for workflow {workflow_id}",
+            )
         metrics = _row_to_dict(conn.execute(
             "SELECT * FROM learning_metrics WHERE workflow_id = ? "
             "ORDER BY timestamp DESC LIMIT 1", (workflow_id,)
