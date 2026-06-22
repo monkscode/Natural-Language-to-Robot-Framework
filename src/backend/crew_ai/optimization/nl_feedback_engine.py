@@ -473,12 +473,12 @@ class NLFeedbackEngine(LearningEngine):
                     "INSERT INTO nl_feedback_corrections "
                     "(feedback_text, category, scope, domain, url, "
                     " original_failure_category, evidence_count, anchor_query, "
-                    " source_workflow_id, created_at, last_seen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) RETURNING id",
+                    " source_workflow_id, org_id, created_at, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) RETURNING id",
                     (
                         feedback_text.strip(), category, scope,
                         domain, url, failure_category,
-                        anchor_query, workflow_id, now, now,
+                        anchor_query, workflow_id, record.org_id, now, now,
                     ),
                 )
                 new_hint_id = cursor.fetchone()["id"]

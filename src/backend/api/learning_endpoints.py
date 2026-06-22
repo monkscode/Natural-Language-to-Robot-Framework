@@ -451,8 +451,8 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
+                " created_via, is_shared) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', 1)",
                 (
                     text, category, request.scope, request.domain, request.url,
                     request.original_failure_category, anchor, now, now,
