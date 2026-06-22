@@ -105,3 +105,133 @@ def api_pg_em(_api_pg_em, _api_pg_admin):
     yield em, dsn
     em.__dict__.clear()
     em.__dict__.update(saved_attrs)
+
+
+# ---------------------------------------------------------------------------
+# Task 10 — learning_api_isolated, promote_client, seeded_hint_id
+# ---------------------------------------------------------------------------
+
+class _PromoteClient:
+    """Thin wrapper: TestClient + admin_token attribute."""
+
+    def __init__(self, client, admin_token: str):
+        self._client = client
+        self.admin_token = admin_token
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+@pytest.fixture
+def learning_api_isolated(api_pg_em):
+    """Inject an isolated FeedbackLoop singleton + patch _admin_conn for Task 10.
+
+    Mirrors the auth_isolated_schema restore-before-close teardown pattern:
+    the module global is restored FIRST so that any in-flight get_feedback_loop()
+    call after teardown starts sees the original (or None) immediately; the
+    isolated mock is not "closed" (it holds no real resources — the underlying
+    PostgresExecutionMemory is managed by the session-scoped _api_pg_em fixture).
+    """
+    from unittest.mock import MagicMock, patch as _patch
+
+    em, dsn = api_pg_em
+
+    mock_fb = MagicMock()
+    mock_fb.execution_memory = em
+    mock_fb.nl_engine = MagicMock()
+    mock_fb.write_queue = MagicMock()
+    mock_fb.metrics_tracker = MagicMock()
+    mock_fb.metrics_tracker.get_effectiveness_report.return_value = {}
+
+    import src.backend.crew_ai.optimization.learning_registry as _lr_mod
+    saved_fb = _lr_mod._feedback_loop_instance
+    _lr_mod._feedback_loop_instance = mock_fb
+
+    def _test_admin_conn():
+        from src.backend.crew_ai.optimization import pg_compat
+        return pg_compat.connect(dsn)
+
+    patcher = _patch(
+        "src.backend.api.learning_endpoints._admin_conn",
+        side_effect=_test_admin_conn,
+    )
+    patcher.start()
+    try:
+        yield mock_fb
+    finally:
+        # Restore-before-close: the singleton must point at the original BEFORE
+        # we stop the patch, so any concurrent get_feedback_loop() doesn't race.
+        _lr_mod._feedback_loop_instance = saved_fb
+        patcher.stop()
+
+
+@pytest.fixture
+def promote_client(learning_api_isolated):
+    """TestClient wired to the learning router with an attached admin_token."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.backend.api.learning_endpoints import router
+    from src.backend.auth.jwt_utils import create_access_token
+
+    token = create_access_token({
+        "id": "00000000-0000-0000-0000-000000000099",
+        "email": "admin@test.local",
+        "role": "admin",
+        "display_name": "Test Admin",
+        "org_id": None,
+        "org_role": None,
+    })
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/learning")
+
+    with TestClient(app) as client:
+        yield _PromoteClient(client, token)
+
+
+@pytest.fixture
+def seeded_hint_id(api_pg_em) -> int:
+    """Insert a hint + its kind='nl' anchor (org_id non-null) into the isolated schema.
+
+    Returns the new hint id.  The anchor has org_id='org-test-1' so the
+    anti-false-green assertion in test_promote_sets_is_shared can verify that
+    promote nulls it (the column starts non-null, must end NULL).
+    """
+    from datetime import datetime, timezone
+    from src.backend.crew_ai.optimization import pg_compat
+
+    _, dsn = api_pg_em
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = pg_compat.connect(dsn)
+    try:
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, evidence_count, anchor_query, "
+            " is_active, conflict_flagged, is_shared, created_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "use xpath locators for stable element selection",
+                "locator", "global", 1, "find element by xpath",
+                1, 0, 0, now, now,
+            ),
+        )
+        hint_id: int = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # Insert anchor with a non-null org_id so the anti-false-green assertion
+        # can detect if the promote endpoint's anchor-null UPDATE is missing.
+        # Embedding is a zero vector (valid 384-dim for schema compliance; not
+        # used by the promote path which only does an UPDATE, not a similarity
+        # search).
+        zero_vec = "[" + ",".join(["0"] * 384) + "]"
+        conn.execute(
+            "INSERT INTO learning_anchors "
+            "(anchor_key, kind, record_id, anchor_query, embedding, org_id) "
+            "VALUES (?, ?, ?, ?, ?::vector, ?)",
+            (f"nl:{hint_id}", "nl", hint_id, "find element by xpath", zero_vec, "org-test-1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return hint_id

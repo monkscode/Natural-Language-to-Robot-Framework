@@ -667,6 +667,70 @@ def unflag_hint(
 
 
 # ---------------------------------------------------------------------------
+# 5b. POST /hints/{id}/promote  (platform-admin cross-org promotion)
+# ---------------------------------------------------------------------------
+
+@router.post("/hints/{hint_id}/promote")
+def promote_hint(
+    hint_id: int,
+    request: ActorReasonRequest,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+):
+    """Platform-admin promotes a hint to be shared across all orgs (is_shared=1).
+
+    Atomically:
+      1. Sets nl_feedback_corrections.is_shared = 1
+      2. Nulls learning_anchors.org_id for kind='nl', record_id=hint_id
+         (privacy-load-bearing: Task 5 retrieval filter is
+         `org_id = ? OR org_id IS NULL` — without this null the promoted hint
+         surfaces as a similarity candidate but is dropped at the anchor stage
+         for every other org)
+      3. Writes a hint_audit 'promote' row
+    Idempotent: already-shared hint returns {"changed": False} without re-writing.
+    404 if the hint does not exist.
+    """
+    if not request.actor.strip():
+        raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
+    conn = _admin_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        if row["is_shared"] == 1:
+            return {"hint": _row_to_dict(row), "changed": False, "note": "already shared"}
+        conn.execute(
+            "UPDATE nl_feedback_corrections SET is_shared = 1 WHERE id = ?", (hint_id,)
+        )
+        # Null the anchor org so the similarity filter matches the promoted hint
+        # for every org (Task 5 filter: org_id = ? OR org_id IS NULL).
+        conn.execute(
+            "UPDATE learning_anchors SET org_id = NULL "
+            "WHERE kind = 'nl' AND record_id = ?",
+            (hint_id,),
+        )
+        _write_hint_audit(
+            conn, hint_id, "promote", actor, request.reason,
+            {"is_shared": 0}, {"is_shared": 1},
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
+        ).fetchone()
+        return {"hint": _row_to_dict(updated), "changed": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("[LEARNING API] promote_hint %d failed: %s", hint_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to promote hint")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # 6. POST /hints/{id}/retract
 # ---------------------------------------------------------------------------
 
