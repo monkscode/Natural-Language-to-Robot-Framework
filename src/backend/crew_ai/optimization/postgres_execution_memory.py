@@ -175,8 +175,9 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             run_count = self._writer_conn.execute(
                 "SELECT COUNT(*) AS n FROM execution_records "
                 "WHERE LOWER(TRIM(user_query)) = ? "
-                "AND COALESCE(domain, '') = ? AND test_status = ?",
-                (normalized_query, domain, record.test_status),
+                "AND COALESCE(domain, '') = ? AND test_status = ? "
+                "AND COALESCE(org_id, '') = ?",
+                (normalized_query, domain, record.test_status, record.org_id or ""),
             ).fetchone()["n"]
 
             if run_count >= self.DEDUPLICATION_THRESHOLD:
@@ -191,6 +192,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         SELECT id FROM execution_records
                         WHERE LOWER(TRIM(user_query)) = ?
                         AND COALESCE(domain, '') = ? AND test_status = ?
+                        AND COALESCE(org_id, '') = ?
                         ORDER BY timestamp DESC LIMIT 1
                     )
                     """,
@@ -199,6 +201,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         record.timestamp.isoformat(), record.model_version,
                         record.total_llm_calls, record.total_cost,
                         normalized_query, domain, record.test_status,
+                        record.org_id or "",
                     ),
                 )
             else:
@@ -209,8 +212,8 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         robot_code, code_structure, test_status, execution_exit_code,
                         execution_duration_ms, failure_category, failed_keyword,
                         error_message, total_llm_calls, total_cost, injected_hint_ids,
-                        model_version, hint_attribution_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        model_version, org_id, hint_attribution_done
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         record.workflow_id, record.timestamp.isoformat(),
@@ -220,6 +223,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         record.failure_category, record.failed_keyword,
                         record.error_message, record.total_llm_calls, record.total_cost,
                         record.injected_hint_ids, record.model_version,
+                        record.org_id,
                     ),
                 )
             self._writer_conn.commit()

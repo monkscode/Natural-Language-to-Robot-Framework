@@ -428,6 +428,12 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 run_id, injected_hint_ids_json,
             )
 
+        try:
+            from src.backend.core.run_registry import get_run_registry
+            _, _run_org_id = get_run_registry().get_run_owner(run_id)
+        except Exception:
+            _run_org_id = None
+
         feedback_loop.process_execution(
             workflow_id=run_id,
             user_query=user_query or "",
@@ -442,6 +448,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
             hint_sources=all_sources,
             injected_hint_ids=injected_hint_ids_json,
             was_holdout=was_holdout,
+            org_id=_run_org_id,
         )
 
         # N3 (F2d): persist the reconciled selection trace on the writer thread.
