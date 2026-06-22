@@ -485,15 +485,16 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             self._writer_conn.execute(
                 "INSERT INTO execution_embeddings "
                 "(workflow_id, user_query, test_status, failure_category, domain, "
-                " code_structure, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                " code_structure, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (workflow_id) DO UPDATE SET "
                 "  user_query = EXCLUDED.user_query, test_status = EXCLUDED.test_status, "
                 "  failure_category = EXCLUDED.failure_category, domain = EXCLUDED.domain, "
-                "  code_structure = EXCLUDED.code_structure, embedding = EXCLUDED.embedding",
+                "  code_structure = EXCLUDED.code_structure, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
                 (record.workflow_id, record.user_query, record.test_status,
                  record.failure_category or "", record.domain or "",
-                 record.code_structure or "", vec),
+                 record.code_structure or "", vec, record.org_id),
             )
             self._writer_conn.commit()
         except Exception as e:
@@ -503,18 +504,22 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             except Exception:
                 pass
 
-    def find_similar_executions(self, user_query: str, top_k: int = 5) -> list:
+    def find_similar_executions(self, user_query: str, top_k: int = 5,
+                                org_id: str | None = None) -> list:
         vec = self._embed(user_query)
         if vec is None:
             return []
+        where = "WHERE org_id = ? " if org_id is not None else ""
+        params = ([vec, org_id, vec, top_k] if org_id is not None
+                  else [vec, vec, top_k])
         try:
             with self.read_conn() as conn:
                 rows = conn.execute(
                     "SELECT workflow_id, test_status, failure_category, domain, "
                     "       code_structure, 1 - (embedding <=> ?::vector) AS similarity "
-                    "FROM execution_embeddings "
+                    f"FROM execution_embeddings {where}"
                     "ORDER BY embedding <=> ?::vector LIMIT ?",
-                    (vec, vec, top_k),
+                    params,
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
@@ -531,12 +536,14 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             self._writer_conn.execute(
                 "INSERT INTO execution_embeddings "
                 "(workflow_id, user_query, test_status, failure_category, domain, "
-                " code_structure, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                " code_structure, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (workflow_id) DO UPDATE SET "
-                "  user_query = EXCLUDED.user_query, embedding = EXCLUDED.embedding",
+                "  user_query = EXCLUDED.user_query, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
                 (wid, text, metadata.get("test_status"), metadata.get("failure_category"),
-                 metadata.get("domain"), metadata.get("code_structure"), vec),
+                 metadata.get("domain"), metadata.get("code_structure"), vec,
+                 metadata.get("org_id")),
             )
             self._writer_conn.commit()
         except Exception as e:
