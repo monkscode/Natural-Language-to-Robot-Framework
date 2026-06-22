@@ -189,6 +189,119 @@ def promote_client(learning_api_isolated):
         yield _PromoteClient(client, token)
 
 
+# ---------------------------------------------------------------------------
+# Task 12 — dash_client (org-scoped read + platform-admin-only telemetry/mutations)
+# ---------------------------------------------------------------------------
+
+_DASH_ORG_A = "org-a-task12"
+_DASH_ORG_B = "org-b-task12"
+_DASH_ORG_A_ADMIN_UID = "00000000-0000-0000-0000-000000000010"
+_DASH_MEMBER_UID = "00000000-0000-0000-0000-000000000012"
+_DASH_PLATFORM_ADMIN_UID = "00000000-0000-0000-0000-000000000099"
+
+
+class _DashClient:
+    """TestClient wrapper: exposes org tokens, seed helper, and org constants."""
+
+    def __init__(self, client, org_a: str, org_b: str,
+                 org_a_admin_token: str, member_token: str, dsn: str):
+        self._client = client
+        self.org_a = org_a
+        self.org_b = org_b
+        self.org_a_admin_token = org_a_admin_token
+        self.member_token = member_token
+        self._dsn = dsn
+
+    def seed_hint(self, org_id: str, text: str) -> int:
+        """Insert a hint scoped to *org_id* and return its id.
+
+        Uses INSERT ... RETURNING id (idiomatic Postgres; avoids the fragile
+        last_insert_rowid() pattern noted in the Task-10 review).  is_shared=0
+        so the org-dimension privacy assertion is not accidentally passed by a
+        shared-hint bypass.
+        """
+        from datetime import datetime, timezone
+        from src.backend.crew_ai.optimization import pg_compat
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = pg_compat.connect(self._dsn)
+        try:
+            row = conn.execute(
+                "INSERT INTO nl_feedback_corrections "
+                "(feedback_text, category, scope, evidence_count, anchor_query, "
+                " is_active, conflict_flagged, is_shared, org_id, created_at, last_seen) "
+                "VALUES (?, 'test', 'global', 1, 'seed anchor', 1, 0, 0, ?, ?, ?) "
+                "RETURNING id",
+                (text, org_id, now, now),
+            ).fetchone()
+            conn.commit()
+            return row[0]
+        finally:
+            conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+@pytest.fixture
+def dash_client(learning_api_isolated, api_pg_em):
+    """TestClient for Task-12 org-scope tests.
+
+    Provides:
+    - org_a / org_b  — org-id strings for seeding
+    - org_a_admin_token — role="user", org_role="org_admin", org_id=org_a
+    - member_token      — role="user", org_role=None, org_id=org_a (no dashboard access)
+    - seed_hint(org_id, text) — inserts a hint with RETURNING id
+
+    Re-patches _admin_repo.get_by_id so require_admin actually rejects
+    non-platform-admin tokens (the autouse _auth_not_enforced fixture makes it
+    always return admin=True for any UID — we need role-aware behaviour here).
+    """
+    from unittest.mock import patch as _patch
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.backend.api.learning_endpoints import router
+    from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.auth import jwt_utils
+
+    _, dsn = api_pg_em
+
+    org_a_admin_token = create_access_token({
+        "id": _DASH_ORG_A_ADMIN_UID,
+        "email": "org-a-admin@test.local",
+        "role": "user",
+        "display_name": "Org A Admin",
+        "org_id": _DASH_ORG_A,
+        "org_role": "org_admin",
+    })
+    member_token = create_access_token({
+        "id": _DASH_MEMBER_UID,
+        "email": "member@test.local",
+        "role": "user",
+        "display_name": "Member",
+        "org_id": _DASH_ORG_A,
+        "org_role": None,
+    })
+
+    def _smart_get_by_id(uid: str):
+        """Return a DB-row-like dict based on whether the UID is a platform admin."""
+        if uid == _DASH_PLATFORM_ADMIN_UID:
+            return {"id": uid, "email": "admin@test.local", "role": "admin", "is_active": True}
+        # org-admins and members are NOT platform admins
+        return {"id": uid, "email": "user@test.local", "role": "user", "is_active": True}
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/learning")
+
+    # Re-patch admin repo so require_admin correctly rejects org-admin tokens.
+    # The autouse _auth_not_enforced fixture patches it to always return admin —
+    # this inner patch overrides it within this fixture's scope.
+    with _patch.object(jwt_utils._admin_repo, "get_by_id", side_effect=_smart_get_by_id):
+        with TestClient(app) as client:
+            yield _DashClient(client, _DASH_ORG_A, _DASH_ORG_B,
+                              org_a_admin_token, member_token, dsn)
+
+
 @pytest.fixture
 def seeded_hint_id(api_pg_em) -> int:
     """Insert a hint + its kind='nl' anchor (org_id non-null) into the isolated schema.
