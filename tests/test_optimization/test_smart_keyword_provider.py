@@ -70,7 +70,7 @@ class MockEngine:
 
     def get_hints(self, user_query, url, agent_role, org_id=None):
         self.call_count += 1
-        self.last_args = (user_query, url, agent_role)
+        self.last_args = (user_query, url, agent_role, org_id)
         if self._raise:
             raise RuntimeError("Engine exploded")
         return self._hints
@@ -424,8 +424,8 @@ class TestGetLearningHints:
         p._keyword_engine = mock_k
         p._anti_pattern_engine = mock_a
         p._get_learning_hints("planner", "query", url="https://demoqa.com")
-        assert mock_s.last_args == ("query", "https://demoqa.com", "planner")
-        assert mock_a.last_args == ("query", "https://demoqa.com", "planner")
+        assert mock_s.last_args == ("query", "https://demoqa.com", "planner", None)
+        assert mock_a.last_args == ("query", "https://demoqa.com", "planner", None)
 
     def test_none_url_becomes_empty_string(self, in_memory_db):
         """When url=None, engines should receive empty string."""

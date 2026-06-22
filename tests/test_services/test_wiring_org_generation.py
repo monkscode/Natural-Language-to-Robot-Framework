@@ -83,10 +83,69 @@ class TestRunAgenticWorkflowOrgPropagation:
         )
 
     def test_none_org_id_forwarded_to_run_crew(self):
-        """Coexistence: no org_id (legacy) → run_crew receives org_id=None."""
+        """Coexistence: no org_id (legacy) → run_crew receives org_id=None as an explicit kwarg."""
         _, mock_run_crew = self._run()
         assert mock_run_crew.called
         _, kwargs = mock_run_crew.call_args
-        assert kwargs.get("org_id") is None, (
-            f"expected org_id=None for legacy caller, got {kwargs.get('org_id')!r}"
+        assert "org_id" in kwargs and kwargs["org_id"] is None, (
+            f"expected org_id=None as explicit kwarg; got call_args={mock_run_crew.call_args!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Wiring: _start_workflow_thread args tuple → run_workflow_in_thread → run_crew
+# ---------------------------------------------------------------------------
+
+class TestStartWorkflowThreadOrgWiring:
+    """_start_workflow_thread positional args-tuple carries org_id to run_crew.
+
+    Regression seam: a future reorder or drop of org_id in the Thread(args=(...))
+    tuple inside _start_workflow_thread would silently break the privacy wiring.
+    The existing TestRunAgenticWorkflowOrgPropagation already covers the inner
+    run_agentic_workflow→run_crew leg; these tests cover the thread boundary so
+    that both seams are independently verified.
+    """
+
+    def _run_via_thread(self, org_id):
+        """Start a real Thread via _start_workflow_thread, join it, return mock_run_crew."""
+        from src.backend.services.workflow_service import _start_workflow_thread, _SlotReleaser
+
+        mock_run_crew = MagicMock(return_value=_make_crew_result())
+        q = Queue()
+        releaser = _SlotReleaser()
+
+        with patch("src.backend.services.workflow_service.run_crew", mock_run_crew), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as ms, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            ms.return_value.read_browser_metrics.return_value = {}
+            thread = _start_workflow_thread(
+                q, "login to app", "gemini", "gemini-2.5-flash", releaser, org_id=org_id
+            )
+            # join() inside the patch context — patches stay active while thread runs
+            thread.join(timeout=30)
+
+        assert not thread.is_alive(), "workflow thread did not finish within 30 s"
+        return mock_run_crew
+
+    def test_org_id_carried_through_thread_args_tuple(self):
+        """org_id='org-test' propagates from _start_workflow_thread args tuple to run_crew."""
+        mock_run_crew = self._run_via_thread("org-test")
+        assert mock_run_crew.called, "run_crew was never called from the workflow thread"
+        _, kwargs = mock_run_crew.call_args
+        assert kwargs.get("org_id") == "org-test", (
+            f"expected org_id='org-test' at run_crew boundary; "
+            f"got org_id={kwargs.get('org_id')!r}"
+        )
+
+    def test_none_org_id_carried_through_thread_args_tuple(self):
+        """Coexistence: org_id=None propagates as an explicit kwarg (not silently dropped)."""
+        mock_run_crew = self._run_via_thread(None)
+        assert mock_run_crew.called, "run_crew was never called from the workflow thread"
+        _, kwargs = mock_run_crew.call_args
+        assert "org_id" in kwargs and kwargs["org_id"] is None, (
+            f"expected org_id=None as explicit kwarg at run_crew boundary; "
+            f"got call_args={mock_run_crew.call_args!r}"
         )
