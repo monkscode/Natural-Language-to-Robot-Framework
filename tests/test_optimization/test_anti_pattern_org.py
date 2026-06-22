@@ -36,6 +36,68 @@ def test_anti_pattern_not_shared_across_orgs(em_vec):
         "org A should see its own anti-pattern"
 
 
+def _seed_anti_null_anchor(em, org_id, query="iterate over all rows in the table"):
+    """Seed an anti-pattern owned by org_id but attach a NULL-org anchor.
+
+    Guard (1): the gated SELECT's ``AND org_id = ?`` clause.
+    Guard (2): filter_by_query_similarity(org_id=X) matches
+               ``(org_id=X OR org_id IS NULL)``.
+
+    Because the anchor's org_id is NULL, guard (2) passes for ANY calling
+    org — the anchor is not a blocker.  Only guard (1) (the SQL clause) can
+    still prevent a cross-org leak.  This helper exists solely to isolate
+    guard (1) in test_anti_pattern_sql_clause_blocks_when_anchor_is_org_less.
+    """
+    em._writer_conn.execute(
+        "INSERT INTO anti_patterns "
+        "(failure_category, query_pattern, bad_code_snippet, error_message, domain, "
+        " org_id, score, evidence_count, last_seen) "
+        "VALUES ('A1', ?, 'Get Text', 'only first row', 'a.test', ?, 0.9, 5, datetime('now'))",
+        (query, org_id),
+    )
+    em._writer_conn.commit()
+    cur = em._writer_conn.execute(
+        "SELECT id FROM anti_patterns WHERE org_id = ? ORDER BY id DESC LIMIT 1",
+        (org_id,),
+    )
+    aid = cur.fetchone()["id"]
+    # org_id=None on the anchor so filter_by_query_similarity passes for every org
+    em.add_anchor("anti", aid, query, org_id=None)
+
+
+def test_anti_pattern_sql_clause_blocks_when_anchor_is_org_less(em_vec):
+    """Guard (1) — the gated SELECT's AND org_id = ? — is independently load-bearing.
+
+    Setup
+    -----
+    Seed an org-A anti-pattern that satisfies the injection gate
+    (score=0.9, evidence=5) but whose learning_anchor has org_id=NULL.
+
+    Why the anchor alone cannot block the leak
+    ------------------------------------------
+    filter_by_query_similarity(org_id="org-B") uses the ChromaDB where-clause
+    ``{$or: [{org_id: org-B}, {org_id: null}]}``.  A NULL-org anchor satisfies
+    the second branch, so the anchor filter PASSES for an org-B caller.
+
+    What MUST block org-B
+    ---------------------
+    Only the ``AND org_id = ?`` added to the SQL SELECT in Task 6:
+        ``SELECT * FROM anti_patterns WHERE score >= ? AND evidence_count >= ?
+          AND org_id = ?``
+    Without that clause the NULL anchor would let org-B see org-A's row.
+    """
+    from src.backend.crew_ai.optimization.anti_pattern_engine import AntiPatternEngine
+    _seed_anti_null_anchor(em_vec, "org-A")
+    engine = AntiPatternEngine(execution_memory=em_vec)
+    q = "iterate over all rows in the table"
+    assert not engine.get_hints(q, "https://a.test", "planner", org_id="org-B"), (
+        "CROSS-ORG LEAK: org-B received org-A's anti-pattern even though only "
+        "the SQL AND org_id = ? clause (guard 1) could block it"
+    )
+    assert engine.get_hints(q, "https://a.test", "planner", org_id="org-A"), \
+        "org-A should see its own anti-pattern"
+
+
 def test_correct_alternative_does_not_cross_orgs(em_vec):
     """Regression: _check_for_correct_alternative must not write org-A's
     robot_code into org-B's anti_pattern row.
