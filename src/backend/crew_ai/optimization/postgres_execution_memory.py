@@ -557,7 +557,8 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         return self.find_similar_executions(query, top_k)
 
     def filter_by_query_similarity(self, user_query, candidate_ids, kind,
-                                   threshold=0.55, score_sink=None) -> set:
+                                   threshold=0.55, score_sink=None,
+                                   org_id: str | None = None) -> set:
         if not user_query or not user_query.strip() or not candidate_ids:
             return set()
         _mark(score_sink, candidate_ids, "no_anchor")
@@ -570,11 +571,20 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 total = conn.execute(
                     "SELECT COUNT(*) AS n FROM learning_anchors"
                 ).fetchone()["n"]
-                rows = conn.execute(
-                    "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
-                    "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
-                    (qvec, kind, list(candidate_ids)),
-                ).fetchall()
+                if org_id is not None:
+                    rows = conn.execute(
+                        "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
+                        "FROM learning_anchors "
+                        "WHERE kind = ? AND record_id = ANY(?) "
+                        "  AND (org_id = ? OR org_id IS NULL)",
+                        (qvec, kind, list(candidate_ids), org_id),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
+                        "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
+                        (qvec, kind, list(candidate_ids)),
+                    ).fetchall()
         except Exception as e:
             logger.warning("[LEARNING] similarity filter query failed (fail-open): %s", e)
             _mark(score_sink, candidate_ids, "fail_open")
@@ -598,7 +608,8 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 score_sink[rid] = {"sim": sim, "outcome": "similarity_below"}
         return survivors
 
-    def add_anchor(self, kind: str, record_id: int, anchor_query: str) -> None:
+    def add_anchor(self, kind: str, record_id: int, anchor_query: str,
+                   org_id: str | None = None) -> None:
         _assert_writer_thread("PostgresExecutionMemory.add_anchor")
         if not anchor_query or not anchor_query.strip():
             return
@@ -608,12 +619,13 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         try:
             self._writer_conn.execute(
                 "INSERT INTO learning_anchors "
-                "(anchor_key, kind, record_id, anchor_query, embedding) "
-                "VALUES (?, ?, ?, ?, ?::vector) "
+                "(anchor_key, kind, record_id, anchor_query, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (anchor_key) DO UPDATE SET "
                 "  kind = EXCLUDED.kind, record_id = EXCLUDED.record_id, "
-                "  anchor_query = EXCLUDED.anchor_query, embedding = EXCLUDED.embedding",
-                (f"{kind}:{record_id}", kind, record_id, anchor_query, vec),
+                "  anchor_query = EXCLUDED.anchor_query, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
+                (f"{kind}:{record_id}", kind, record_id, anchor_query, vec, org_id),
             )
             self._writer_conn.commit()
         except Exception as e:

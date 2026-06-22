@@ -498,7 +498,7 @@ class NLFeedbackEngine(LearningEngine):
             # (the UPSERT branch) keep their original anchor unchanged —
             # single-anchor design.
             if new_hint_id is not None:
-                self._em.add_anchor("nl", new_hint_id, anchor_query)
+                self._em.add_anchor("nl", new_hint_id, anchor_query, org_id=record.org_id)
 
         except Exception as e:
             logger.warning(

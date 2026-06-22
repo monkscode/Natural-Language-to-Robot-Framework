@@ -224,3 +224,24 @@ def tmp_dir():
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# Embedder fixtures (session-scoped, shared by pgvector and org-isolation tests)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def _shared_embedder():
+    """Load the fastembed model once for the whole session (~80 MB ONNX)."""
+    from fastembed import TextEmbedding
+    from src.backend.crew_ai.optimization.postgres_execution_memory import EMBED_MODEL
+    return TextEmbedding(model_name=EMBED_MODEL)
+
+
+@pytest.fixture
+def em_vec(in_memory_em, _shared_embedder):
+    """in_memory_em with the real fastembed embedder ENABLED (pgvector path)."""
+    in_memory_em._chroma_client = _shared_embedder
+    in_memory_em._chroma_failed_at = None
+    in_memory_em._chroma_last_error = None
+    return in_memory_em
+
