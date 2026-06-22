@@ -245,3 +245,33 @@ def em_vec(in_memory_em, _shared_embedder):
     in_memory_em._chroma_last_error = None
     return in_memory_em
 
+
+@pytest.fixture
+def seed_hint(em_vec):
+    """Seed one nl_feedback_corrections hint (+ its anchor) for retrieval tests.
+
+    Uses em_vec (embedder enabled) so add_anchor writes a real pgvector row and
+    filter_by_query_similarity does genuine similarity lookup rather than
+    failing-open. Shared hints (is_shared=1) use an org-less anchor (org_id=None)
+    so they match any calling org; private hints use the owner org's anchor.
+    """
+    import uuid
+
+    def _seed(*, text, domain, anchor, org_id, is_shared=0):
+        wid = str(uuid.uuid4())
+        cur = em_vec._writer_conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, evidence_count, "
+            " anchor_query, source_workflow_id, org_id, is_shared, created_at, last_seen) "
+            "VALUES (?, 'locator', 'domain', ?, NULL, 5, ?, ?, ?, ?, "
+            " datetime('now'), datetime('now')) RETURNING id",
+            (text, domain, anchor, wid, org_id, is_shared),
+        )
+        hid = cur.fetchone()["id"]
+        em_vec._writer_conn.commit()
+        # Shared hints store an org-less anchor so they match every org.
+        em_vec.add_anchor("nl", hid, anchor, org_id=(None if is_shared else org_id))
+        return hid
+
+    return _seed
+

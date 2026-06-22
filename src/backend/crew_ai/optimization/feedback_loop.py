@@ -1183,6 +1183,7 @@ class FeedbackLoop:
                     url=record.url,
                     feedback_text=feedback_text,
                     injected_hint_ids=record.injected_hint_ids,
+                    org_id=record.org_id,
                     prompt_builder=lambda active_hints: _build_conflict_prompt_with_feedback(
                         robot_code=record.robot_code,
                         feedback_text=feedback_text,
