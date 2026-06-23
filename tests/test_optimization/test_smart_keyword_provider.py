@@ -34,7 +34,7 @@ class MockPatternMatcher:
     def __init__(self, predicted=None):
         self._predicted = predicted
 
-    def get_relevant_keywords(self, query):
+    def get_relevant_keywords(self, query, confidence_threshold=0.7, org_id=None):
         return self._predicted
 
 

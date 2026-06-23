@@ -175,7 +175,7 @@ class SmartKeywordProvider:
         self.metrics = metrics
         self._em = execution_memory
         self._nl_engine_shared = nl_engine  # FeedbackLoop's instance, may be None
-        self._org_id = org_id  # Caller's org — scopes NL + anti-pattern reads
+        self._org_id = org_id  # Caller's org — scopes NL + anti-pattern + keyword-pattern reads
 
         # R7 random-holdout: roll the coin once per workflow. When it comes up
         # AND hints are available, _get_learning_hints suppresses them and
@@ -724,7 +724,7 @@ Use keyword_search tool if you need additional keywords.
         # Tier 2: Try pattern learning for keyword prediction
         existing_context = None
         try:
-            predicted_keywords = self.pattern_matcher.get_relevant_keywords(user_query)
+            predicted_keywords = self.pattern_matcher.get_relevant_keywords(user_query, org_id=self._org_id)
 
             if predicted_keywords:
                 logger.info(f"Pattern learning predicted {len(predicted_keywords)} keywords")

@@ -1004,7 +1004,7 @@ class FeedbackLoop:
             if test_status == "passed" and self.pattern_learner is not None:
                 self.write_queue.submit(
                     self.pattern_learner.learn_from_execution,
-                    user_query, robot_code,
+                    user_query, robot_code, record.org_id,
                 )
 
             # Step 5: Record learning metrics (non-blocking)
