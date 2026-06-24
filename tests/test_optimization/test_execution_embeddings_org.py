@@ -9,7 +9,9 @@ from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 
 pytestmark = pytest.mark.integration
 
-# Fake 384-dim vector (all-MiniLM-L6-v2 dim) — avoids requiring fastembed in CI.
+# Fixed 384-dim vector (all-MiniLM-L6-v2 dim). The in_memory_em fixture disables the
+# embedder (_chroma_client = _CHROMADB_INIT_FAILED), so the real _embed returns None;
+# monkeypatching _embed to this constant makes org_id the sole similarity discriminator.
 _FAKE_VEC = "[" + ",".join(["0.01"] * 384) + "]"
 
 

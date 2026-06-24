@@ -36,6 +36,17 @@ def kw_store():
 
     store = KeywordVectorStore(dsn=dsn)
     yield store
+    # Tidy up: this test writes to the shared learning_test schema; remove its rows
+    # so they don't accumulate across runs.
+    cleanup = psycopg.connect(
+        dsn, autocommit=True, connect_timeout=PG_CONNECT_TIMEOUT_S
+    )
+    try:
+        cleanup.execute(
+            "DELETE FROM kw_query_patterns WHERE org_id IN ('org-A', 'org-B')"
+        )
+    finally:
+        cleanup.close()
     store.close()
 
 

@@ -14,7 +14,7 @@ _ORG_TABLES = (
 def _columns(conn, table: str) -> set[str]:
     rows = conn.execute(
         "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name = ?", (table,),
+        "WHERE table_name = ? AND table_schema = 'learning_test'", (table,),
     ).fetchall()
     return {r["column_name"] for r in rows}
 

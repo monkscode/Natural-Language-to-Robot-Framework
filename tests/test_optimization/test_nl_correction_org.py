@@ -22,8 +22,10 @@ def test_learned_correction_carries_org(in_memory_em):
         user_feedback_type="completely_wrong", org_id="org-A",
     )
     # process_feedback returns a triage dict WITHOUT feedback_text.
-    # FeedbackLoop injects feedback_text at line 1200 of feedback_loop.py before
-    # routing to learn_from_feedback — replicate that here so the INSERT is reached.
+    # FeedbackLoop.process_execution injects feedback_text into the triage dict
+    # (Step 4, "Route to engines via learn_from_feedback") before calling
+    # learn_from_feedback — replicate that here so the INSERT is reached. If that
+    # injection point moves, this mirror must move with it.
     insight = engine.process_feedback("admin-add", record.user_feedback, "completely_wrong")
     insight["feedback_text"] = record.user_feedback
 

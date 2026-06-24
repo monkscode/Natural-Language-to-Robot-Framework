@@ -362,18 +362,17 @@ def seeded_hint_id(api_pg_em) -> int:
 
     conn = pg_compat.connect(dsn)
     try:
-        conn.execute(
+        hint_id: int = conn.execute(
             "INSERT INTO nl_feedback_corrections "
             "(feedback_text, category, scope, evidence_count, anchor_query, "
             " is_active, conflict_flagged, is_shared, created_at, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 "use xpath locators for stable element selection",
                 "locator", "global", 1, "find element by xpath",
                 1, 0, 0, now, now,
             ),
-        )
-        hint_id: int = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        ).fetchone()[0]
 
         # Insert anchor with a non-null org_id so the anti-false-green assertion
         # can detect if the promote endpoint's anchor-null UPDATE is missing.
