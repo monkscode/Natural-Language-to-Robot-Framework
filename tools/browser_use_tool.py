@@ -2,6 +2,7 @@ import logging
 import os
 import requests
 import structlog
+import threading
 import time
 from typing import Any, Type, Optional, Dict
 
@@ -28,6 +29,44 @@ def _identity_from_context() -> tuple[str | None, str | None, str | None]:
     """
     ctx = structlog.contextvars.get_contextvars()
     return ctx.get("workflow_id"), ctx.get("org_id"), ctx.get("user_id")
+
+
+# ---------------------------------------------------------------------------
+# Process-global circuit breaker for the FastAPI → browser-service hop.
+# Thread-safe: multiple generation threads share one breaker instance.
+# ---------------------------------------------------------------------------
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN_S = 30
+_breaker_lock = threading.Lock()
+_breaker_state = {"failures": 0, "opened_at": 0.0}
+
+
+def _breaker_reset() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] = 0
+        _breaker_state["opened_at"] = 0.0
+
+
+def _breaker_allow() -> bool:
+    with _breaker_lock:
+        if _breaker_state["opened_at"] == 0.0:
+            return True
+        if time.time() - _breaker_state["opened_at"] >= _BREAKER_COOLDOWN_S:
+            return True  # half-open: allow one probe
+        return False
+
+
+def _breaker_record_failure() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] += 1
+        if _breaker_state["failures"] >= _BREAKER_THRESHOLD:
+            _breaker_state["opened_at"] = time.time()
+
+
+def _breaker_record_success() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] = 0
+        _breaker_state["opened_at"] = 0.0
 
 
 class BrowserUseAPI:
@@ -229,9 +268,20 @@ class BatchBrowserUseTool(BaseTool):
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
 
+        if not _breaker_allow():
+            logger.warning("Browser-use hop circuit breaker OPEN — failing fast")
+            return {
+                "status": "error",
+                "message": "Browser Use Service is unavailable (circuit breaker open)",
+                "success": False,
+                "elements_processed": 0,
+                "results": [],
+            }
+
         # Health check
         logger.info("Performing health check for batch processing...")
         if not self._health_check_with_retry(api_client):
+            _breaker_record_failure()
             return {
                 "status": "error",
                 "message": f"Browser Use Service not available at {api_url}",
@@ -290,6 +340,7 @@ class BatchBrowserUseTool(BaseTool):
             else:
                 logger.error(
                     f"Batch task submission failed: {response.status_code}")
+                _breaker_record_failure()
                 return {
                     "status": "error",
                     "message": f"Task submission failed with status {response.status_code}",
@@ -300,6 +351,7 @@ class BatchBrowserUseTool(BaseTool):
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error submitting batch task: {e}")
+            _breaker_record_failure()
             return {
                 "status": "error",
                 "message": f"Network error: {str(e)}",
@@ -330,6 +382,7 @@ class BatchBrowserUseTool(BaseTool):
                 last_status = current_status
 
             if current_status == "completed":
+                _breaker_record_success()
                 data = status_response.get("data", {})
                 results = data.get("results", {})
 
