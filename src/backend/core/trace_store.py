@@ -132,7 +132,7 @@ _INSERT_SQL = """
         prompt_tokens = EXCLUDED.prompt_tokens, completion_tokens = EXCLUDED.completion_tokens,
         total_tokens = EXCLUDED.total_tokens, cost_usd = EXCLUDED.cost_usd,
         workflow_id = EXCLUDED.workflow_id, attributes_json = EXCLUDED.attributes_json,
-        org_id = EXCLUDED.org_id
+        org_id = COALESCE(llm_traces.org_id, EXCLUDED.org_id)
 """
 
 

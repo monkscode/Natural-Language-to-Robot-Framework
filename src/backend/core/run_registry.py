@@ -244,7 +244,7 @@ class RunRegistry:
                     "UPDATE test_runs t SET org_id = m.org_id "
                     "FROM org_members m "
                     "WHERE t.org_id IS NULL AND t.user_id IS NOT NULL "
-                    "  AND m.user_id = t.user_id::uuid AND m.org_role = 'org_admin'"
+                    "  AND m.user_id::text = t.user_id AND m.org_role = 'org_admin'"
                 )
                 n = cur.rowcount
                 conn.commit()
