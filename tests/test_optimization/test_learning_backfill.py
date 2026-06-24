@@ -35,6 +35,10 @@ def test_backfill_owner_linked_and_home_fallback(in_memory_em):
         assert er["org_id"] == "org-RUN", "owner-linked row not attributed via test_runs"
         assert ap["org_id"] == "org-HOME", "ownerless row not attributed to home org"
 
+        # The returned per-table counts mirror the DB state asserted above.
+        assert counts["execution_records"] == 1, "owner-linked execution_records count should be 1"
+        assert counts["anti_patterns_home"] == 1, "home-fallback anti_patterns count should be 1"
+
         # Idempotent: a second pass changes nothing.
         counts2 = in_memory_em.backfill_org_ids(home_org_id="org-HOME")
         assert sum(counts2.values()) == 0, (

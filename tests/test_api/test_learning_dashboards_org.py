@@ -91,3 +91,29 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
         headers={"Authorization": f"Bearer {dash_client.org_a_admin_token}"},
     )
     assert r.status_code == 404
+
+
+# POST /hints is covered by test_mutation_still_platform_admin_only above; the
+# remaining mutation/curation routes share the identical Depends(require_admin)
+# guard.  Path/body ids need not exist — require_admin 403s before any lookup.
+@pytest.mark.parametrize(
+    "method, path, body",
+    [
+        ("patch", "/api/learning/hints/1", {"actor": "a@e.com"}),
+        ("post", "/api/learning/hints/1/unflag", {"actor": "a@e.com"}),
+        ("post", "/api/learning/hints/1/promote", {"actor": "a@e.com"}),
+        ("post", "/api/learning/hints/1/retract", {"actor": "a@e.com"}),
+        ("post", "/api/learning/hints/1/reactivate", {"actor": "a@e.com"}),
+        ("post", "/api/learning/review-hints/start", None),
+        ("patch", "/api/learning/review-hints/sessions/1/recommendations/1",
+         {"admin_decision": "approved"}),
+        ("post", "/api/learning/review-hints/sessions/1/apply", None),
+    ],
+)
+def test_remaining_mutations_platform_admin_only(dash_client, method, path, body):
+    """Every remaining learning mutation route 403s a non-platform-admin (org-admin token)."""
+    kwargs = {"headers": {"Authorization": f"Bearer {dash_client.org_a_admin_token}"}}
+    if body is not None:
+        kwargs["json"] = body
+    r = getattr(dash_client, method)(path, **kwargs)
+    assert r.status_code == 403, f"{method.upper()} {path} returned {r.status_code}, expected 403"

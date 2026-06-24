@@ -114,3 +114,13 @@ def test_promote_idempotent(promote_client, seeded_hint_id, api_pg_em):
         f"Idempotent re-promote must not add a second audit row, "
         f"got {count_after_second}"
     )
+
+
+def test_promote_blank_actor_400(promote_client, seeded_hint_id):
+    """A blank actor is rejected with 400 (the guard fires before any DB work)."""
+    r = promote_client.post(
+        f"/api/learning/hints/{seeded_hint_id}/promote",
+        json={"actor": "   ", "reason": "no actor"},
+        headers={"Authorization": f"Bearer {promote_client.admin_token}"},
+    )
+    assert r.status_code == 400
