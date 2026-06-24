@@ -479,7 +479,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if not record.user_query:
             return
         vec = self._embed(record.user_query)
-        if vec is None:
+        if not vec:
             return
         try:
             self._writer_conn.execute(
@@ -507,7 +507,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     def find_similar_executions(self, user_query: str, top_k: int = 5,
                                 org_id: str | None = None) -> list:
         vec = self._embed(user_query)
-        if vec is None:
+        if not vec:
             return []
         where = "WHERE org_id = ? " if org_id is not None else ""
         params = ([vec, org_id, vec, top_k] if org_id is not None
@@ -529,7 +529,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     def store_embedding(self, text: str, metadata: dict) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store_embedding")
         vec = self._embed(text)
-        if vec is None:
+        if not vec:
             return
         wid = metadata.get("workflow_id") or str(id(text))
         try:
@@ -563,7 +563,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             return set()
         _mark(score_sink, candidate_ids, "no_anchor")
         qvec = self._embed(user_query)
-        if qvec is None:  # embedder disabled / failed → fail-open
+        if not qvec:  # embedder disabled / failed / empty → fail-open
             _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
         try:
@@ -614,7 +614,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if not anchor_query or not anchor_query.strip():
             return
         vec = self._embed(anchor_query)
-        if vec is None:
+        if not vec:
             return
         try:
             self._writer_conn.execute(

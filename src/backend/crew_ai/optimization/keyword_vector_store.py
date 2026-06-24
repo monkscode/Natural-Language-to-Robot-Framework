@@ -102,7 +102,7 @@ class KeywordVectorStore:
                 continue
             doc = kw.get("doc", "") or ""
             vec = embedding.embed_to_literal(f"{name} {doc}")
-            if vec is None:
+            if not vec:
                 continue
             rows.append((library_name, name, json.dumps(kw.get("args", [])),
                          doc[:500], vec))
@@ -163,7 +163,7 @@ class KeywordVectorStore:
     def search(self, library_name: str, query: str, top_k: int = 3) -> List[Dict]:
         """Semantic search for keywords (L2 distance; similarity = 1/(1+distance))."""
         vec = embedding.embed_to_literal(query)
-        if vec is None:
+        if not vec:
             return []
         try:
             with self._pool.connection() as conn:
@@ -272,7 +272,7 @@ class KeywordVectorStore:
                     org_id: str | None = None) -> Optional[str]:
         """Store one (user_query -> keywords) pattern; returns its id (or None)."""
         vec = embedding.embed_to_literal(user_query)
-        if vec is None:
+        if not vec:
             return None
         pattern_id = f"pattern_{uuid.uuid4().hex}"
         try:
@@ -297,7 +297,7 @@ class KeywordVectorStore:
         When org_id is None the search is unscoped (backward-compatible).
         """
         vec = embedding.embed_to_literal(user_query)
-        if vec is None:
+        if not vec:
             return []
         try:
             with self._pool.connection() as conn:
