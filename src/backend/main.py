@@ -1,6 +1,8 @@
 import os
 import sys
 import logging
+import uuid
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -50,18 +52,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import uuid as _uuid
-import structlog as _structlog
-
 
 @app.middleware("http")
 async def request_id_middleware(request, call_next):
-    request_id = request.headers.get("X-Request-ID") or _uuid.uuid4().hex
-    _structlog.contextvars.bind_contextvars(request_id=request_id)
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    structlog.contextvars.bind_contextvars(request_id=request_id)
     try:
         response = await call_next(request)
     finally:
-        _structlog.contextvars.unbind_contextvars("request_id")
+        structlog.contextvars.unbind_contextvars("request_id")
     response.headers["X-Request-ID"] = request_id
     return response
 
