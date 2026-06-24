@@ -734,12 +734,14 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 "nl_feedback_corrections":
                     "UPDATE nl_feedback_corrections n SET org_id = r.org_id FROM test_runs r "
                     "WHERE n.org_id IS NULL AND n.source_workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                # nl anchors can be owner-linked because nl_feedback_corrections was
+                # just attributed above. anti-pattern anchors have no equivalent path
+                # (anti_patterns carry no workflow->owner link), so both the
+                # anti_patterns rows and their anchors are attributed by the home
+                # fallback below — there is deliberately no "anchors_anti" entry here.
                 "anchors_nl":
                     "UPDATE learning_anchors a SET org_id = n.org_id FROM nl_feedback_corrections n "
                     "WHERE a.org_id IS NULL AND a.kind = 'nl' AND a.record_id = n.id AND n.org_id IS NOT NULL",
-                "anchors_anti":
-                    "UPDATE learning_anchors a SET org_id = p.org_id FROM anti_patterns p "
-                    "WHERE a.org_id IS NULL AND a.kind = 'anti' AND a.record_id = p.id AND p.org_id IS NOT NULL",
             }
             for key, sql in owner_linked.items():
                 out[key] = self._exec_backfill(conn, sql)
