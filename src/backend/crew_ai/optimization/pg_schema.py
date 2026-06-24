@@ -24,8 +24,20 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 17
 
+# The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
+# so that every migration newer than the baseline is applied on top — including
+# on an EXISTING database. It must NOT track SCHEMA_VERSION: stamping the latest
+# version here would pre-record pending migrations and cause them to be skipped,
+# leaving an existing database un-upgraded. Bump this only when migrations are
+# folded back into the baseline DDL (a re-consolidation), not when adding one.
+_BASELINE_VERSION = 16
+
 # Each statement is executed once inside ensure_schema(). Ordered so referenced
 # tables (nl_feedback_corrections, hint_review_sessions) exist before FKs.
+# NOTE: org_id columns appear in the CREATE TABLE bodies for fresh installs, but
+# their indexes (and the ADD COLUMN for already-existing tables) live ONLY in the
+# v17 migration below — a baseline `CREATE INDEX ... (org_id)` would fail on a
+# pre-1c table whose org_id column the migration has not added yet.
 PG_SCHEMA_DDL: tuple[str, ...] = (
     # --- schema_version bookkeeping ---
     """
@@ -72,7 +84,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_exec_structure ON execution_records(code_structure)",
     # GIN index for jsonb hint-id membership (injected_hint_ids @> to_jsonb(id)) — Tier 1.
     "CREATE INDEX IF NOT EXISTS idx_exec_injected_gin ON execution_records USING GIN (injected_hint_ids)",
-    "CREATE INDEX IF NOT EXISTS idx_exec_org ON execution_records(org_id)",
 
     # --- intent_patterns ---
     """
@@ -147,7 +158,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_anti_category ON anti_patterns(failure_category)",
     "CREATE INDEX IF NOT EXISTS idx_anti_domain ON anti_patterns(domain)",
     "CREATE INDEX IF NOT EXISTS idx_anti_score_evidence ON anti_patterns(score DESC, evidence_count DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_anti_org ON anti_patterns(org_id)",
 
     # --- learning_stats ---
     """
@@ -228,7 +238,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     # Partial index for the hot hint-retrieval filter (active, unflagged) — Tier 1.
     "CREATE INDEX IF NOT EXISTS idx_nlfc_active_unflagged ON nl_feedback_corrections(scope, domain) "
     "WHERE is_active = 1 AND conflict_flagged = 0",
-    "CREATE INDEX IF NOT EXISTS idx_nlfc_org_shared ON nl_feedback_corrections(org_id, is_shared)",
 
     # --- trigger_events (cols consolidated through v13) ---
     """
@@ -375,7 +384,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_anchors_kind_record ON learning_anchors(kind, record_id)",
     "CREATE INDEX IF NOT EXISTS idx_anchors_embedding "
     "ON learning_anchors USING hnsw (embedding vector_cosine_ops)",
-    "CREATE INDEX IF NOT EXISTS idx_anchors_org ON learning_anchors(org_id)",
     # execution_embeddings — per-execution query embeddings (find_similar_executions).
     """
     CREATE TABLE IF NOT EXISTS execution_embeddings (
@@ -391,7 +399,6 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_exec_emb_embedding "
     "ON execution_embeddings USING hnsw (embedding vector_cosine_ops)",
-    "CREATE INDEX IF NOT EXISTS idx_exec_emb_org ON execution_embeddings(org_id)",
 
     # --- SQLite-compat SQL functions (so the engines' SQLite SQL runs as-is) ---
     # NOTE: json_each / json_valid were retired in slice 4.5 — the hint-id array
@@ -494,11 +501,13 @@ def ensure_schema(conn) -> int:
         try:
             for ddl in PG_SCHEMA_DDL:
                 cur.execute(ddl)
-            # Record the consolidated baseline version once.
+            # Record the consolidated baseline version once. This is the BASELINE
+            # version, not SCHEMA_VERSION — see _BASELINE_VERSION. Recording the
+            # latest version here would skip the migrations below on an existing DB.
             cur.execute(
                 "INSERT INTO schema_version (version, description, applied_at) "
                 "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
-                (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
+                (_BASELINE_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
             )
             # Apply any migrations this database has not recorded yet, in
             # version order (sorted, so authoring order in the tuple can't
