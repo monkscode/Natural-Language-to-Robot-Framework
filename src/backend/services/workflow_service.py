@@ -533,7 +533,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
-def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None, user_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
     yielding progress updates and the final code.
@@ -563,6 +563,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         model_provider=model_provider,
         model_name=model_name,
         library_type=settings.ROBOT_LIBRARY,
+        org_id=org_id,
+        user_id=user_id,
     )
 
     # Start with welcome message
@@ -606,7 +608,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # auto-captured as child spans by OpenLLMetry. The dryrun gate + repair run
         # AFTER this span closes (R5); their calls are still captured by the
         # authoritative LiteLLM trace callback, just outside this workflow span.
-        with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
+        with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY,
+                                  org_id=org_id, user_id=user_id):
             # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
             # task is now the Assembler — there is no validator verdict). Unused here;
             # delivered code is read from crew_with_results.tasks[2] below.
@@ -841,6 +844,7 @@ def run_workflow_in_thread(
     model_name: str,
     releaser: "_SlotReleaser | None" = None,
     org_id: str | None = None,
+    user_id: str | None = None,
 ):
     """Runs the synchronous agentic workflow and puts results in a queue.
 
@@ -852,7 +856,7 @@ def run_workflow_in_thread(
     client has already disconnected and the generator's finally fired first.
     """
     try:
-        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id):
+        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id, user_id=user_id):
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
@@ -920,6 +924,7 @@ def _capacity_error_sse(stage: str) -> str:
 def _start_workflow_thread(
     q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser",
     org_id: str | None = None,
+    user_id: str | None = None,
 ) -> Thread:
     """Start the workflow thread, pre-decrementing the releaser if start() raises.
 
@@ -930,7 +935,7 @@ def _start_workflow_thread(
     thread = Thread(
         target=run_workflow_in_thread,
         args=(q, user_query, model_provider, model_name, releaser),
-        kwargs={"org_id": org_id},
+        kwargs={"org_id": org_id, "user_id": user_id},
     )
     try:
         thread.start()
@@ -1082,7 +1087,8 @@ async def stream_generate_only(
     try:
         q = Queue()
         org_id = user.get("org_id") if user else None
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id)
+        user_id = user.get("user_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
         result_store: dict = {}
         try:
             async for sse in _drain_generation_queue(workflow_thread, q, result_store):
@@ -1211,7 +1217,8 @@ async def stream_generate_and_run(
     try:
         q = Queue()
         org_id = user.get("org_id") if user else None
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id)
+        user_id = user.get("user_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
 
         result_store: dict = {}
         try:
