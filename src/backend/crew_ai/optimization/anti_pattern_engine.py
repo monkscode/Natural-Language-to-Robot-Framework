@@ -150,7 +150,8 @@ class AntiPatternEngine(LearningEngine):
         # reconcile. Reinforced anti-patterns (the merge branch above) keep
         # their original anchor unchanged — single-anchor design.
         if new_anti_id is not None:
-            self._em.add_anchor("anti", new_anti_id, record.user_query, org_id=record.org_id)
+            self._em.add_anchor("anti", new_anti_id, record.user_query,
+                                org_id=getattr(record, 'org_id', None))
 
     def get_hints(self, user_query: str, url: str,
                   agent_role: str,

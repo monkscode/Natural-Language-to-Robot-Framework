@@ -929,7 +929,8 @@ def _start_workflow_thread(
     """
     thread = Thread(
         target=run_workflow_in_thread,
-        args=(q, user_query, model_provider, model_name, releaser, org_id),
+        args=(q, user_query, model_provider, model_name, releaser),
+        kwargs={"org_id": org_id},
     )
     try:
         thread.start()
