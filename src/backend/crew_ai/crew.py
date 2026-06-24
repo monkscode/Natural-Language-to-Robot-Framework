@@ -371,7 +371,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
     )
-    tasks = RobotTasks(library_context, workflow_id=workflow_id, hint_context=hint_context)
+    tasks = RobotTasks(library_context, hint_context=hint_context)
 
     # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
     # The CrewAI LLM validator agent was removed in favour of a deterministic
