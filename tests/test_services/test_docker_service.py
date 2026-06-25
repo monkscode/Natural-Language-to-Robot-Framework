@@ -113,3 +113,43 @@ class TestCleanupContainers:
         from src.backend.services.docker_service import cleanup_test_containers
         cleanup_test_containers(mock_docker)
         # Should not crash
+
+
+from unittest.mock import MagicMock, patch
+from src.backend.services import docker_service
+
+
+class _Captured(Exception):
+    """Raised after capturing container_config to stop the function early."""
+
+
+def test_run_test_in_container_applies_hardening(tmp_path):
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        raise _Captured()
+
+    client = MagicMock()
+    client.containers.run.side_effect = _capture
+    client.containers.get.side_effect = docker_service.docker.errors.NotFound("none")
+
+    with patch.object(docker_service, "ROBOT_TESTS_DIR", str(tmp_path)), \
+         patch.object(docker_service, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(docker_service, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch("os.path.exists", return_value=True):
+        # run_test_in_container wraps everything in a broad except that re-raises
+        # RuntimeError; our _Captured surfaces as that RuntimeError.
+        try:
+            docker_service.run_test_in_container(client, "r1", "test.robot")
+        except RuntimeError:
+            pass
+
+    assert captured["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in captured["security_opt"]
+    assert captured["mem_limit"] == "2g"
+    assert captured["pids_limit"] == 256
+    # Network kept for the real-website runner (NOT 'none')
+    assert captured.get("network_mode") != "none"
+    # read_only gated off by default
+    assert captured.get("read_only", False) is False

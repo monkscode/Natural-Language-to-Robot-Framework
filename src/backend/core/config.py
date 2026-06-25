@@ -70,6 +70,10 @@ class Settings(BaseSettings):
         default=120,
         description="Seconds to wait for the dryrun container before skipping (graceful degrade).",
     )
+    RUNNER_READ_ONLY_ROOTFS: bool = Field(
+        default=False,
+        description="Phase 4: opt-in read-only rootfs for runner containers; default off until a live run proves headless Chrome tolerates it (validated in a later phase task).",
+    )
 
     # LLM Empty-Response Retry Configuration
     # Some Vertex AI Gemini models (notably gemini-3.5-flash) intermittently
