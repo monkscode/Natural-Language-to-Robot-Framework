@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
+from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
@@ -1016,17 +1016,13 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         return
 
     try:
-        # Offload all blocking Docker I/O to a thread so the event loop
-        # remains free to serve heartbeats and other concurrent requests.
-        # Lambda keeps build_image() generator creation and consumption in
-        # the same worker thread, avoiding cross-thread generator handoff.
-        client = await asyncio.to_thread(get_docker_client)
-        build_events = await asyncio.to_thread(lambda: list(build_image(client)))
-        for event in build_events:
-            yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
+        # Phase 4: execution goes through the socket-holding executor; FastAPI
+        # no longer touches Docker. ensure_image is best-effort progress only.
+        await asyncio.to_thread(runner_exec_client.ensure_image)
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
         logging.info(f"🚀 Executing test: {test_filename}")
-        result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
+        result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
 
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
