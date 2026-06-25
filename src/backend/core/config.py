@@ -138,7 +138,10 @@ class Settings(BaseSettings):
         default="change-me-in-production",
         description="HMAC secret for signing JWT access tokens — MUST be overridden via env in production",
     )
-    JWT_EXPIRY_HOURS: int = Field(default=24, description="Access token lifetime in hours")
+    # Shorter lifetime bounds the blast radius of a stolen token on the stateless
+    # hot path (require_user does not hit the DB). Explicit revocation is via
+    # token_version (logout-all); the DB-backed paths enforce it immediately.
+    JWT_EXPIRY_HOURS: int = Field(default=12, description="Access token lifetime in hours")
     # Comma-separated emails granted the 'admin' role at signup; everyone else
     # is 'user'. Stored as a string (not list) to avoid pydantic env JSON-parsing
     # pitfalls — read via the admin_emails_list property.

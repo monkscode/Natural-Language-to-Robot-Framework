@@ -59,6 +59,9 @@ def create_access_token(user: dict) -> str:
         "name": user.get("display_name", ""),
         "org_id": user.get("org_id"),
         "org_role": user.get("org_role"),
+        # token_version: bumped in the DB to revoke all prior tokens (logout-all
+        # / compromise). Checked on the DB-backed paths (/auth/me, require_admin).
+        "tv": user.get("token_version", 0),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -80,6 +83,7 @@ def decode_token(token: str) -> dict:
         "name": payload.get("name", ""),
         "org_id": payload.get("org_id"),
         "org_role": payload.get("org_role"),
+        "token_version": payload.get("tv", 0),
     }
 
 
@@ -123,7 +127,9 @@ def is_validated_admin(user: dict | None) -> bool:
     except Exception as exc:
         logger.warning("[AUTH] admin re-validation unavailable: %s", exc)
         return False
-    return bool(row and row.get("is_active") and row.get("role") == "admin")
+    if not row or row.get("token_version", 0) != user.get("token_version", 0):
+        return False  # revoked token — fail closed
+    return bool(row.get("is_active") and row.get("role") == "admin")
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +226,8 @@ def require_admin(
         raise HTTPException(503, "Authentication store unavailable")
     if row is None or not row.get("is_active"):
         raise HTTPException(401, "User not found or inactive", headers=_UNAUTH_HEADERS)
+    if row.get("token_version", 0) != user.get("token_version", 0):
+        raise HTTPException(401, "Token revoked", headers=_UNAUTH_HEADERS)
     if row.get("role") != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
     # Current DB state wins over the (possibly stale) token claims.

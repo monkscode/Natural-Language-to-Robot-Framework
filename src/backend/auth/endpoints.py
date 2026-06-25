@@ -124,6 +124,7 @@ def _token_payload(row: dict) -> dict:
             "display_name": user["display_name"],
             "org_id": primary.get("org_id"),
             "org_role": primary.get("org_role"),
+            "token_version": row.get("token_version", 0),
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}
@@ -188,12 +189,27 @@ async def me(user: dict = Depends(get_current_user)):
     row = _repo.get_by_id(user["user_id"])
     if not row or not row.get("is_active"):
         raise HTTPException(status_code=401, detail="User not found or inactive")
+    if row.get("token_version", 0) != user.get("token_version", 0):
+        # token was revoked by a logout-all / password change after it was minted
+        raise HTTPException(status_code=401, detail="Token revoked")
     return _user_public(row)
 
 
 @auth_router.post("/logout")
 async def logout(response: Response):
     """Stateless JWT — the client discards the token; we clear the report cookie."""
+    response.delete_cookie(REPORT_TOKEN_COOKIE, path="/reports")
+    return {"status": "ok"}
+
+
+@auth_router.post("/logout-all")
+async def logout_all(response: Response, user: dict = Depends(get_current_user)):
+    """Revoke every token previously minted for this user by bumping
+    token_version. All existing tokens (this device and any other) fail the
+    token_version check on the DB-backed paths (/auth/me, admin) immediately;
+    stateless hot-path tokens age out within JWT_EXPIRY_HOURS. The caller must
+    log in again to obtain a fresh token."""
+    _repo.bump_token_version(user["user_id"])
     response.delete_cookie(REPORT_TOKEN_COOKIE, path="/reports")
     return {"status": "ok"}
 
