@@ -96,6 +96,11 @@ if [ ! -d "src/frontend-react/node_modules" ]; then
     (cd src/frontend-react && npm install)
 fi
 
+# Phase 4: the socket-holding executor (dev/prod parity — FastAPI no longer
+# touches Docker directly).
+uvicorn src.backend.runner_exec.app:app --host 127.0.0.1 --port 4998 &
+RUNNER_EXEC_PID=$!
+
 # Run the application
 echo "Starting the application..."
 python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
@@ -120,13 +125,13 @@ echo "  Press Ctrl+C to stop everything (Postgres container stays up)."
 echo ""
 
 cleanup() {
-    kill "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+    kill "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
-wait -n "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID"
+wait -n "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID"
 EXIT_CODE=$?
 cleanup
-wait "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+wait "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
 exit "$EXIT_CODE"

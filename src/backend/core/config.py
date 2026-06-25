@@ -74,6 +74,12 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 4: opt-in read-only rootfs for runner containers; default off until a live run proves headless Chrome tolerates it (validated in a later phase task).",
     )
+    # Phase 4: base URL of the socket-holding executor service. localhost for
+    # `./run.sh` dev; compose overrides to the service name.
+    RUNNER_EXEC_URL: str = Field(
+        default="http://localhost:4998",
+        description="Phase 4: base URL of the runner-exec service; localhost for run.sh dev, http://runner-exec:4998 in compose.",
+    )
 
     # LLM Empty-Response Retry Configuration
     # Some Vertex AI Gemini models (notably gemini-3.5-flash) intermittently
