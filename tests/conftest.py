@@ -13,6 +13,23 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _disable_auth_rate_limit():
+    """Disable the auth rate limiter by default so suites that hammer /login or
+    /register aren't throttled. The dedicated rate-limit tests re-enable it."""
+    try:
+        from src.backend.auth.rate_limit import limiter
+    except Exception:
+        yield
+        return
+    saved = limiter.enabled
+    limiter.enabled = False
+    try:
+        yield
+    finally:
+        limiter.enabled = saved
+
+
 @pytest.fixture
 def mock_settings():
     """Patched Settings with test defaults — no real env vars read."""

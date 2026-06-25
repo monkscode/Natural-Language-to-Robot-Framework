@@ -227,3 +227,16 @@ class UserRepository:
                 (user_id,),
             )
             conn.commit()
+
+    def bump_token_version(self, user_id) -> int | None:
+        """Increment token_version, invalidating every previously-minted token for
+        this user (logout-all / compromise response). Returns the new version, or
+        None if no user matched."""
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "UPDATE users SET token_version = token_version + 1 WHERE id = %s "
+                "RETURNING token_version",
+                (user_id,),
+            ).fetchone()
+            conn.commit()
+        return row["token_version"] if row else None

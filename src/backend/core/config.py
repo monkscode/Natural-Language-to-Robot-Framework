@@ -148,7 +148,10 @@ class Settings(BaseSettings):
         default="change-me-in-production",
         description="HMAC secret for signing JWT access tokens — MUST be overridden via env in production",
     )
-    JWT_EXPIRY_HOURS: int = Field(default=24, description="Access token lifetime in hours")
+    # Shorter lifetime bounds the blast radius of a stolen token on the stateless
+    # hot path (require_user does not hit the DB). Explicit revocation is via
+    # token_version (logout-all); the DB-backed paths enforce it immediately.
+    JWT_EXPIRY_HOURS: int = Field(default=12, description="Access token lifetime in hours")
     # Comma-separated emails granted the 'admin' role at signup; everyone else
     # is 'user'. Stored as a string (not list) to avoid pydantic env JSON-parsing
     # pitfalls — read via the admin_emails_list property.
@@ -187,6 +190,23 @@ class Settings(BaseSettings):
         default=False,
         description="Set the Secure flag on auth cookies (enable behind HTTPS in production)",
     )
+    # Deployment posture. 'production' enforces the auth security invariants at
+    # startup (strong JWT secret + Secure cookies); 'development' only warns so
+    # local http dev keeps working. See auth/security_posture.py.
+    ENVIRONMENT: str = Field(
+        default="development",
+        description="Deployment environment: 'development' or 'production'",
+    )
+    # Per-IP rate limit for the unauthenticated auth endpoints (login, register,
+    # forgot-password) — blunts brute-force / credential stuffing. slowapi syntax.
+    AUTH_RATE_LIMIT: str = Field(
+        default="10/minute",
+        description="Per-IP rate limit on the auth endpoints (slowapi syntax, e.g. '10/minute')",
+    )
+    AUTH_RATE_LIMIT_ENABLED: bool = Field(
+        default=True,
+        description="Enable per-IP rate limiting on the auth endpoints",
+    )
 
     @property
     def admin_emails_list(self) -> list[str]:
@@ -217,6 +237,13 @@ class Settings(BaseSettings):
         """Validate that ARTIFACT_STORE is one of the supported backends."""
         if v.lower() not in ('local', 's3'):
             raise ValueError(f"ARTIFACT_STORE must be 'local' or 's3', got '{v}'")
+        return v.lower()
+
+    @validator('ENVIRONMENT')
+    def validate_environment(cls, v):
+        """Validate that ENVIRONMENT is 'development' or 'production'."""
+        if v.lower() not in ('development', 'production'):
+            raise ValueError(f"ENVIRONMENT must be 'development' or 'production', got '{v}'")
         return v.lower()
 
     @validator('MAX_AGENT_ITERATIONS')

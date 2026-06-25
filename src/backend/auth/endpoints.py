@@ -26,6 +26,7 @@ from src.backend.auth.jwt_utils import (
     get_current_user,
     require_admin,
 )
+from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import (
     AccountInactive,
@@ -123,6 +124,7 @@ def _token_payload(row: dict) -> dict:
             "display_name": user["display_name"],
             "org_id": primary.get("org_id"),
             "org_role": primary.get("org_role"),
+            "token_version": row.get("token_version", 0),
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}
@@ -152,7 +154,8 @@ def _set_report_cookie(response: Response, token: str) -> None:
 # --------------------------------------------------------------------------
 
 @auth_router.post("/register", status_code=201)
-async def register(req: RegisterRequest, response: Response):
+@auth_rate_limit()
+async def register(request: Request, req: RegisterRequest, response: Response):
     try:
         row = _repo.create_user(req.email, req.password, req.display_name)
     except EmailAlreadyExists:
@@ -170,7 +173,8 @@ async def register(req: RegisterRequest, response: Response):
 
 
 @auth_router.post("/login")
-async def login(req: LoginRequest, response: Response):
+@auth_rate_limit()
+async def login(request: Request, req: LoginRequest, response: Response):
     row = _repo.verify_credentials(req.email, req.password)
     if not row:
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -185,6 +189,9 @@ async def me(user: dict = Depends(get_current_user)):
     row = _repo.get_by_id(user["user_id"])
     if not row or not row.get("is_active"):
         raise HTTPException(status_code=401, detail="User not found or inactive")
+    if row.get("token_version", 0) != user.get("token_version", 0):
+        # token was revoked by a logout-all / password change after it was minted
+        raise HTTPException(status_code=401, detail="Token revoked")
     return _user_public(row)
 
 
@@ -195,8 +202,21 @@ async def logout(response: Response):
     return {"status": "ok"}
 
 
+@auth_router.post("/logout-all")
+async def logout_all(response: Response, user: dict = Depends(get_current_user)):
+    """Revoke every token previously minted for this user by bumping
+    token_version. All existing tokens (this device and any other) fail the
+    token_version check on the DB-backed paths (/auth/me, admin) immediately;
+    stateless hot-path tokens age out within JWT_EXPIRY_HOURS. The caller must
+    log in again to obtain a fresh token."""
+    _repo.bump_token_version(user["user_id"])
+    response.delete_cookie(REPORT_TOKEN_COOKIE, path="/reports")
+    return {"status": "ok"}
+
+
 @auth_router.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+@auth_rate_limit()
+async def forgot_password(request: Request, req: ForgotPasswordRequest):
     """Stub (no email service yet). Always returns the same message so it never
     reveals whether an email is registered."""
     # The address is deliberately NOT logged: even validated, it is the one

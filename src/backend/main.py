@@ -42,6 +42,15 @@ from src.backend.auth.org_db import init_org_db
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
 
+# Per-IP rate limiting on the auth endpoints (slowapi). The limiter + 429 handler
+# are registered on the app; the limits themselves are applied per-route in
+# auth/endpoints.py. See auth/rate_limit.py.
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from src.backend.auth.rate_limit import limiter as _auth_limiter
+app.state.limiter = _auth_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS — restricted to the SPA origins (dev Vite :5173, nginx container :3000,
 # fastapi :5000). allow_credentials stays on for the Google OAuth state cookie.
 app.add_middleware(
@@ -109,14 +118,12 @@ app.include_router(report_router)
 
 @app.on_event("startup")
 async def startup_event():
-    # Refuse to run with a missing/placeholder JWT secret — every minted token
-    # would be forgeable. .env.example documents how to generate a real one.
-    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
-        raise RuntimeError(
-            "JWT_SECRET_KEY is unset or still the placeholder. Generate one with "
-            "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and "
-            "set it in src/backend/.env (or the container environment)."
-        )
+    # Enforce the auth security posture before serving any request: a missing or
+    # placeholder JWT secret is always fatal, and a production deployment
+    # (ENVIRONMENT=production) additionally requires a strong secret and Secure
+    # cookies. Development only warns. See auth/security_posture.py.
+    from src.backend.auth.security_posture import validate_security_posture
+    validate_security_posture()
 
     # Construct the artifact store once at startup: this ensures the staging
     # root exists and fails fast on an invalid backend config (e.g.

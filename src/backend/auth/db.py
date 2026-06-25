@@ -61,10 +61,16 @@ CREATE TABLE IF NOT EXISTS users (
     auth_provider   TEXT NOT NULL DEFAULT 'password',
     google_sub      TEXT UNIQUE,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    token_version   INTEGER NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login      TIMESTAMPTZ
 )
 """
+
+# Idempotent migration for databases created before token_version existed.
+_TOKEN_VERSION_MIGRATION = (
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0"
+)
 
 _INDEXES_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
@@ -82,6 +88,7 @@ def init_auth_db() -> None:
     pool = get_pool()
     with pool.connection() as conn:
         conn.execute(_USERS_TABLE_DDL)
+        conn.execute(_TOKEN_VERSION_MIGRATION)
         for ddl in _INDEXES_DDL:
             conn.execute(ddl)
         conn.commit()
