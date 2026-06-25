@@ -26,6 +26,7 @@ from src.backend.auth.jwt_utils import (
     get_current_user,
     require_admin,
 )
+from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import (
     AccountInactive,
@@ -152,7 +153,8 @@ def _set_report_cookie(response: Response, token: str) -> None:
 # --------------------------------------------------------------------------
 
 @auth_router.post("/register", status_code=201)
-async def register(req: RegisterRequest, response: Response):
+@auth_rate_limit()
+async def register(request: Request, req: RegisterRequest, response: Response):
     try:
         row = _repo.create_user(req.email, req.password, req.display_name)
     except EmailAlreadyExists:
@@ -170,7 +172,8 @@ async def register(req: RegisterRequest, response: Response):
 
 
 @auth_router.post("/login")
-async def login(req: LoginRequest, response: Response):
+@auth_rate_limit()
+async def login(request: Request, req: LoginRequest, response: Response):
     row = _repo.verify_credentials(req.email, req.password)
     if not row:
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -196,7 +199,8 @@ async def logout(response: Response):
 
 
 @auth_router.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+@auth_rate_limit()
+async def forgot_password(request: Request, req: ForgotPasswordRequest):
     """Stub (no email service yet). Always returns the same message so it never
     reveals whether an email is registered."""
     # The address is deliberately NOT logged: even validated, it is the one

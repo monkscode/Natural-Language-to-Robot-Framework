@@ -42,6 +42,15 @@ from src.backend.auth.org_db import init_org_db
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
 
+# Per-IP rate limiting on the auth endpoints (slowapi). The limiter + 429 handler
+# are registered on the app; the limits themselves are applied per-route in
+# auth/endpoints.py. See auth/rate_limit.py.
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from src.backend.auth.rate_limit import limiter as _auth_limiter
+app.state.limiter = _auth_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS — restricted to the SPA origins (dev Vite :5173, nginx container :3000,
 # fastapi :5000). allow_credentials stays on for the Google OAuth state cookie.
 app.add_middleware(

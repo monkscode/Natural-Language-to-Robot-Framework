@@ -184,6 +184,16 @@ class Settings(BaseSettings):
         default="development",
         description="Deployment environment: 'development' or 'production'",
     )
+    # Per-IP rate limit for the unauthenticated auth endpoints (login, register,
+    # forgot-password) — blunts brute-force / credential stuffing. slowapi syntax.
+    AUTH_RATE_LIMIT: str = Field(
+        default="10/minute",
+        description="Per-IP rate limit on the auth endpoints (slowapi syntax, e.g. '10/minute')",
+    )
+    AUTH_RATE_LIMIT_ENABLED: bool = Field(
+        default=True,
+        description="Enable per-IP rate limiting on the auth endpoints",
+    )
 
     @property
     def admin_emails_list(self) -> list[str]:
