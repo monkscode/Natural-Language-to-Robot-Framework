@@ -50,6 +50,21 @@ def test_breaker_recovers_after_cooldown():
     assert out["test_status"] == "passed"
 
 
+def test_mid_body_connection_drop_trips_breaker():
+    # A connection that drops while the body is being read (ChunkedEncodingError
+    # during resp.json()) is a transport-level failure: it must trip the breaker
+    # like a connect failure, not be treated as a hop-is-up error.
+    with patch.object(rc.requests, "post",
+                      side_effect=requests.exceptions.ChunkedEncodingError("peer reset")):
+        for _ in range(rc._BREAKER_THRESHOLD):
+            with pytest.raises(rc.RunnerExecUnavailable):
+                rc.execute("abc123", "test.robot")
+    # breaker now open — next call fast-fails WITHOUT hitting requests
+    with patch.object(rc.requests, "post", side_effect=AssertionError("should not be called")):
+        with pytest.raises(rc.RunnerExecUnavailable):
+            rc.execute("abc123", "test.robot")
+
+
 def test_malformed_success_body_surfaces_as_unavailable():
     # A 200 whose body will not parse: the hop is UP but returned garbage. It must
     # surface as RunnerExecUnavailable (the documented failure type), not leak a raw

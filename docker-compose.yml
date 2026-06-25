@@ -3,7 +3,14 @@ services:
     image: ${FASTAPI_IMAGE_TAG:-monkscode/nlrf:fastapi-latest}
     container_name: nlrf-fastapi
     ports:
-      - "5000:5000"
+      # Loopback-only (IPv4 AND IPv6): end users reach FastAPI only through the
+      # nginx frontend (:3000), which overwrites X-Real-IP. Keeping the published
+      # port off the network interface stops a remote client from hitting :5000
+      # directly and spoofing X-Real-IP/X-Forwarded-For to bypass the per-IP auth
+      # rate limit. Host-local debugging still works. Same dual-bind rationale as
+      # postgres below (Windows resolves localhost to ::1 first).
+      - "127.0.0.1:5000:5000"
+      - "[::1]:5000:5000"
     volumes:
       # Persistent data volumes
       - ./robot_tests:/app/robot_tests

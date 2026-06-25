@@ -148,6 +148,48 @@ def test_admin_non_uuid_sub_is_401_not_503(_admin_db):
     assert exc.value.status_code == 401
 
 
+# --- require_user re-validates token_version against the DB (revocation) ---
+
+def test_require_user_valid_token_passes(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))
+    with patch.object(jwt_utils._admin_repo, "get_by_id", return_value=_db_row()):
+        assert jwt_utils.require_user(creds)["role"] == "user"
+
+
+def test_require_user_rejects_revoked_token(monkeypatch):
+    """A still-unexpired token whose token_version no longer matches the DB
+    (logout-all / password change) is rejected on the hot path, not just on
+    /auth/me and the admin routes."""
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))  # token carries token_version 0
+    revoked = {**_db_row(), "token_version": 1}  # bumped since the token was minted
+    with patch.object(jwt_utils._admin_repo, "get_by_id", return_value=revoked):
+        with pytest.raises(HTTPException) as exc:
+            jwt_utils.require_user(creds)
+    assert exc.value.status_code == 401
+
+
+def test_require_user_inactive_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))
+    with patch.object(jwt_utils._admin_repo, "get_by_id",
+                      return_value=_db_row(is_active=False)):
+        with pytest.raises(HTTPException) as exc:
+            jwt_utils.require_user(creds)
+    assert exc.value.status_code == 401
+
+
+def test_require_user_fails_closed_when_store_down(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))
+    with patch.object(jwt_utils._admin_repo, "get_by_id",
+                      side_effect=RuntimeError("connection refused")):
+        with pytest.raises(HTTPException) as exc:
+            jwt_utils.require_user(creds)
+    assert exc.value.status_code == 503
+
+
 # --- Token validity is checked regardless of the enforcement flag ---
 
 def test_invalid_token_always_401(monkeypatch):
@@ -193,11 +235,14 @@ class _StubRegistry:
 
 
 def _allow_ownership(monkeypatch, owner: str = "u-1"):
-    """Make the requested run belong to the _token() identity (sub='u-1')."""
+    """Make the requested run belong to the _token() identity (sub='u-1') and
+    stub the per-request user re-validation (token_version / active check) so the
+    report path needs no live DB."""
     monkeypatch.setattr(
         "src.backend.core.run_registry.get_run_registry",
         lambda: _StubRegistry(owner),
     )
+    monkeypatch.setattr(jwt_utils._admin_repo, "get_by_id", lambda uid: _db_row())
 
 
 def test_reports_no_token_enforced_denied(monkeypatch):
@@ -245,3 +290,21 @@ def test_reports_invalid_token_denied_even_when_not_enforced(monkeypatch):
         denied = jwt_utils.authorize_report_access(req, "run-x")
         assert denied is not None
         assert denied.status_code == 401
+
+
+def test_reports_revoked_token_denied(monkeypatch):
+    """A still-unexpired token whose token_version was bumped (logout-all) is
+    denied on the report path too — even for the run's own owner."""
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    monkeypatch.setattr(
+        "src.backend.core.run_registry.get_run_registry",
+        lambda: _StubRegistry("u-1"),  # caller owns the run
+    )
+    monkeypatch.setattr(
+        jwt_utils._admin_repo, "get_by_id",
+        lambda uid: {**_db_row(), "token_version": 5},  # bumped since mint
+    )
+    req = _FakeRequest(authorization=f"Bearer {_token()}")
+    denied = jwt_utils.authorize_report_access(req, "run-x")
+    assert denied is not None
+    assert denied.status_code == 401

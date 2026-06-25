@@ -206,8 +206,8 @@ async def logout(response: Response):
 async def logout_all(response: Response, user: dict = Depends(get_current_user)):
     """Revoke every token previously minted for this user by bumping
     token_version. All existing tokens (this device and any other) fail the
-    token_version check on the DB-backed paths (/auth/me, admin) immediately;
-    stateless hot-path tokens age out within JWT_EXPIRY_HOURS. The caller must
+    token_version re-check on the next request to any authenticated route
+    (require_user / require_admin / report access) immediately. The caller must
     log in again to obtain a fresh token."""
     _repo.bump_token_version(user["user_id"])
     response.delete_cookie(REPORT_TOKEN_COOKIE, path="/reports")

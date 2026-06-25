@@ -82,8 +82,11 @@ def _call(method: str, path: str, *, read_timeout: int, json_body: dict | None =
             resp = requests.post(url, json=json_body, timeout=(_CONNECT_TIMEOUT_S, read_timeout))
         resp.raise_for_status()
         body = resp.json()
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        # Executor unreachable / not answering — trip the breaker.
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError) as e:
+        # Executor unreachable / not answering, or the connection dropped mid-body
+        # (ChunkedEncodingError during resp.json()) — a transport-level failure, so
+        # trip the breaker.
         _breaker_record_failure()
         raise RunnerExecUnavailable(f"runner-exec unreachable: {e}") from e
     except requests.exceptions.HTTPError as e:

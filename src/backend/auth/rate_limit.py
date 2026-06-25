@@ -10,8 +10,12 @@ the counters are shared across replicas.
 
 The client key comes from the proxy-set X-Real-IP / X-Forwarded-For headers (our
 nginx sets them), so the limit is per real client rather than per nginx IP.
-Behind an UNtrusted proxy these headers are spoofable; the trust assumption is
-that the only hop in front of FastAPI is our own nginx, which overwrites them.
+These headers are only trustworthy when the sole hop in front of FastAPI is our
+own nginx (which overwrites them). The compose deployment enforces that by
+publishing FastAPI's port on loopback only (see docker-compose.yml), so a remote
+client cannot reach :5000 directly and spoof the key to bypass the cap — it must
+go through nginx. A horizontally scaled / differently-fronted deployment must
+preserve the same property (or key off the trusted-proxy-resolved peer).
 
 Referenced by: src/backend/main.py (limiter + handler wiring),
 src/backend/auth/endpoints.py (per-route decorators).
