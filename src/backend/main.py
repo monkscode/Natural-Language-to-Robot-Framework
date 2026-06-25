@@ -109,14 +109,12 @@ app.include_router(report_router)
 
 @app.on_event("startup")
 async def startup_event():
-    # Refuse to run with a missing/placeholder JWT secret — every minted token
-    # would be forgeable. .env.example documents how to generate a real one.
-    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
-        raise RuntimeError(
-            "JWT_SECRET_KEY is unset or still the placeholder. Generate one with "
-            "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and "
-            "set it in src/backend/.env (or the container environment)."
-        )
+    # Enforce the auth security posture before serving any request: a missing or
+    # placeholder JWT secret is always fatal, and a production deployment
+    # (ENVIRONMENT=production) additionally requires a strong secret and Secure
+    # cookies. Development only warns. See auth/security_posture.py.
+    from src.backend.auth.security_posture import validate_security_posture
+    validate_security_posture()
 
     # Construct the artifact store once at startup: this ensures the staging
     # root exists and fails fast on an invalid backend config (e.g.

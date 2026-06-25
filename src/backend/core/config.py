@@ -177,6 +177,13 @@ class Settings(BaseSettings):
         default=False,
         description="Set the Secure flag on auth cookies (enable behind HTTPS in production)",
     )
+    # Deployment posture. 'production' enforces the auth security invariants at
+    # startup (strong JWT secret + Secure cookies); 'development' only warns so
+    # local http dev keeps working. See auth/security_posture.py.
+    ENVIRONMENT: str = Field(
+        default="development",
+        description="Deployment environment: 'development' or 'production'",
+    )
 
     @property
     def admin_emails_list(self) -> list[str]:
@@ -207,6 +214,13 @@ class Settings(BaseSettings):
         """Validate that ARTIFACT_STORE is one of the supported backends."""
         if v.lower() not in ('local', 's3'):
             raise ValueError(f"ARTIFACT_STORE must be 'local' or 's3', got '{v}'")
+        return v.lower()
+
+    @validator('ENVIRONMENT')
+    def validate_environment(cls, v):
+        """Validate that ENVIRONMENT is 'development' or 'production'."""
+        if v.lower() not in ('development', 'production'):
+            raise ValueError(f"ENVIRONMENT must be 'development' or 'production', got '{v}'")
         return v.lower()
 
     @validator('MAX_AGENT_ITERATIONS')
