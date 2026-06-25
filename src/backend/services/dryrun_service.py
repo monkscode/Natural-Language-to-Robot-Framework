@@ -47,11 +47,11 @@ from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
 from src.backend.core.artifact_store import get_artifact_store
 from src.backend.services.docker_service import (
     IMAGE_TAG,
-    build_image,
-    get_docker_client,
     normalize_docker_mount_source,
     resolve_host_robot_tests_dir,
 )
+from src.backend.runner_exec import client as runner_exec_client
+from src.backend.runner_exec.client import RunnerExecUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -501,8 +501,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
 
     Flow:
       1. DRYRUN_ENABLED off OR empty/whitespace code → skipped (no container; §8.4).
-      2. Acquire Docker client + ensure the test-runner image (build_image). Any
-         failure → unverified, code unchanged (learn-6 graceful degrade).
+      2. Ensure the test-runner image via the runner-exec hop. Any failure →
+         unverified, code unchanged (learn-6 graceful degrade).
       3. Up to MAX_DRYRUN_FIXES+1 dryruns with a repair between each:
            - pass → passed.
            - fail with attempts left → conservative repair (fault-isolated; §8.3),
@@ -521,23 +521,18 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         logger.info("🔬 DRYRUN: skipping gate (%s) for run_id=%s", reason, run_id)
         return {"code": robot_code, "dryrun_status": "skipped", "repair_usage": repair_usage}
 
-    # learn-6 — Docker client acquire + image ensure. Any failure degrades to
-    # 'unverified' and STILL delivers the code; never raises to the caller.
+    # learn-6 — ensure the runner image via the executor hop. Any failure (incl.
+    # executor unreachable) degrades to 'unverified' and STILL delivers the code.
     try:
-        client = get_docker_client()
-        # Message-only (bar holds at 80) so a cold-host image build/pull — which can
-        # take minutes (R2) — is not a silent freeze. Normally the image is present
-        # and this flashes by.
         _push_progress(progress_queue, "🔬 Preparing verification environment...")
-        for _build_event in build_image(client):
-            pass  # consume the generator to ensure the image is present
+        runner_exec_client.ensure_image()
     except Exception as e:
         logger.warning(
-            "🔬 DRYRUN: Docker unavailable — delivering unverified (non-blocking): %s",
+            "🔬 DRYRUN: executor/image unavailable — delivering unverified: %s",
             e, exc_info=True,
         )
         return {"code": robot_code, "dryrun_status": "unverified",
-                "message": f"Docker unavailable: {e}", "repair_usage": repair_usage}
+                "message": f"Verification unavailable: {e}", "repair_usage": repair_usage}
 
     code = robot_code
     last_result = None
@@ -547,7 +542,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             # repair hold the bar (progress=None) so it never moves backwards.
             _push_progress(progress_queue, "🔬 Verifying generated test...",
                            88 if attempt == 0 else None)
-            last_result = run_dryrun_in_container(client, run_id, code)
+            last_result = runner_exec_client.dryrun(run_id, code)
 
             if last_result["passed"]:
                 logger.info("🔬 DRYRUN: passed for run_id=%s (attempt %d)", run_id, attempt)
