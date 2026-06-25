@@ -10,8 +10,6 @@ services:
       - ./logs:/app/logs
       - ./chroma_db:/app/chroma_db
       - ./data:/app/data
-      # Docker socket for robot test execution (Docker-in-Docker)
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       # Application configuration
       - APP_PORT=5000
