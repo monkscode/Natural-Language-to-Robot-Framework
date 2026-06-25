@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from src.backend.core.config import settings
 from src.backend.services.workflow_service import stream_generate_and_run, stream_generate_only, stream_execute_only
-from src.backend.services.docker_service import get_docker_client, rebuild_image, get_docker_status, cleanup_test_containers
+from src.backend.runner_exec import client as runner_exec_client
+from src.backend.runner_exec.client import RunnerExecUnavailable
 from src.backend.api.history_endpoints import resolve_robot_code
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
@@ -168,47 +169,27 @@ async def generate_and_run_streaming(query: Query, user: dict | None = Depends(r
 @router.post('/rebuild-docker-image', dependencies=[Depends(require_admin)])
 async def rebuild_docker_image_endpoint():
     try:
-        client = get_docker_client()
-        result = rebuild_image(client)
-        return result
-    except ConnectionError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        logging.error(f"Unexpected error during Docker image rebuild: {e}")
+        return await asyncio.to_thread(runner_exec_client.rebuild_image)
+    except RunnerExecUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception:
+        logging.error("Unexpected error during Docker image rebuild", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @router.get('/docker-status', dependencies=[Depends(require_user)])
 async def docker_status_endpoint():
     try:
-        client = get_docker_client()
-        status = get_docker_status(client)
-        return status
-    except ConnectionError as e:
-        logging.error(f"Docker connection error: {e}")
+        return await asyncio.to_thread(runner_exec_client.docker_status)
+    except Exception:
+        logging.error("Docker status unavailable", exc_info=True)
         return {"status": "error", "docker_available": False, "error": "Docker is unavailable."}
-    except Exception as e:
-        logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
-        return {"status": "error", "docker_available": False, "error": "An unexpected error occurred."}
 
 @router.delete('/test/containers/cleanup', dependencies=[Depends(require_admin)])
 async def cleanup_test_containers_endpoint():
-    """
-    Clean up all test-related containers.
-    
-    Note: This endpoint uses the docker_service.cleanup_test_containers() function
-    which specifically targets "robot-test-*" containers. There is also a standalone
-    CLI tool (tools/cleanup_docker_containers.py) that provides more comprehensive
-    cleanup including test-runner-* containers. Both are kept as they serve 
-    different purposes: API endpoint for programmatic cleanup vs manual CLI tool 
-    for comprehensive maintenance.
-    """
     try:
-        client = get_docker_client()
-        result = cleanup_test_containers(client)
-        return result
-        
+        return await asyncio.to_thread(runner_exec_client.cleanup)
     except Exception as e:
-        logging.error(f"Failed to cleanup test containers: {e}")
+        logging.error(f"Failed to cleanup test containers: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to cleanup test containers: {str(e)}")
 
 
