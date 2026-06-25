@@ -24,6 +24,7 @@ from src.backend.services.docker_service import (
     get_docker_status,
     log_docker_operation,
 )
+from src.backend.services import docker_service
 
 
 class TestGetDockerStatus:
@@ -113,10 +114,6 @@ class TestCleanupContainers:
         from src.backend.services.docker_service import cleanup_test_containers
         cleanup_test_containers(mock_docker)
         # Should not crash
-
-
-from unittest.mock import MagicMock, patch
-from src.backend.services import docker_service
 
 
 class _Captured(Exception):

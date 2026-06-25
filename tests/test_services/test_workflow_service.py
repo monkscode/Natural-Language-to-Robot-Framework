@@ -284,8 +284,6 @@ class TestHintMetadataCacheConcurrency:
                     ws._hint_metadata_cache.pop(f"workflow-writer-{i}", None)
 
 
-import asyncio
-from unittest.mock import patch
 from src.backend.services import workflow_service
 
 

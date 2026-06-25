@@ -81,6 +81,7 @@ def _call(method: str, path: str, *, read_timeout: int, json_body: dict | None =
         else:
             resp = requests.post(url, json=json_body, timeout=(_CONNECT_TIMEOUT_S, read_timeout))
         resp.raise_for_status()
+        body = resp.json()
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         # Executor unreachable / not answering — trip the breaker.
         _breaker_record_failure()
@@ -95,10 +96,15 @@ def _call(method: str, path: str, *, read_timeout: int, json_body: dict | None =
         except Exception:  # noqa: BLE001
             detail = (e.response.text or "")[:1000]
         raise RunnerExecUnavailable(f"runner-exec error {e.response.status_code}: {detail}") from e
+    except ValueError as e:
+        # 200 with a malformed/empty body: the hop is UP (do NOT trip the breaker)
+        # but returned garbage. Surface the documented failure type instead of
+        # leaking a raw JSONDecodeError after a phantom success was recorded.
+        raise RunnerExecUnavailable(f"runner-exec invalid response body: {e}") from e
     except requests.exceptions.RequestException as e:
         raise RunnerExecUnavailable(f"runner-exec error: {e}") from e
     _breaker_record_success()
-    return resp.json()
+    return body
 
 
 def ensure_image() -> dict:

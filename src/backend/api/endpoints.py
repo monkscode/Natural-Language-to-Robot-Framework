@@ -189,7 +189,7 @@ async def cleanup_test_containers_endpoint():
     try:
         return await asyncio.to_thread(runner_exec_client.cleanup)
     except Exception as e:
-        logging.error(f"Failed to cleanup test containers: {e}")
+        logging.error(f"Failed to cleanup test containers: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to cleanup test containers: {str(e)}")
 
 

@@ -1,3 +1,10 @@
+"""Tests for the runner-exec executor app: request validation (path-traversal
+rejection) and that each handler proxies to the docker_service/dryrun_service
+primitives with validated args.
+
+Referenced by: (pytest).
+Depends on: src/backend/runner_exec/app.py.
+"""
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 from src.backend.runner_exec.app import app

@@ -1,4 +1,3 @@
-import time
 from unittest.mock import patch, MagicMock
 import requests
 import pytest
@@ -49,3 +48,16 @@ def test_breaker_recovers_after_cooldown():
          patch.object(rc.requests, "post", return_value=_resp({"test_status": "passed"})):
         out = rc.execute("abc123", "test.robot")
     assert out["test_status"] == "passed"
+
+
+def test_malformed_success_body_surfaces_as_unavailable():
+    # A 200 whose body will not parse: the hop is UP but returned garbage. It must
+    # surface as RunnerExecUnavailable (the documented failure type), not leak a raw
+    # JSONDecodeError, and must not record a phantom success before the parse.
+    bad = MagicMock()
+    bad.status_code = 200
+    bad.raise_for_status.return_value = None
+    bad.json.side_effect = ValueError("Expecting value")
+    with patch.object(rc.requests, "post", return_value=bad):
+        with pytest.raises(rc.RunnerExecUnavailable):
+            rc.execute("abc123", "test.robot")

@@ -578,8 +578,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     break
                 code = new_code
     except Exception as e:
-        # run_dryrun_in_container infrastructure failure mid-loop (Docker died,
-        # output.xml missing, timeout, unreadable XML) → graceful degrade.
+        # dryrun hop failure mid-loop (executor unreachable, no output.xml,
+        # timeout, unreadable XML) → graceful degrade.
         logger.warning(
             "🔬 DRYRUN: dryrun execution error — delivering unverified (non-blocking): %s",
             e, exc_info=True,
