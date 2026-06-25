@@ -1017,7 +1017,9 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
 
     try:
         # Phase 4: execution goes through the socket-holding executor; FastAPI
-        # no longer touches Docker. ensure_image is best-effort progress only.
+        # no longer touches Docker. ensure_image is required — if it raises
+        # (executor unreachable / image build failed) the except below converts
+        # it to an execution-error event, since there is no image to run on.
         await asyncio.to_thread(runner_exec_client.ensure_image)
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
