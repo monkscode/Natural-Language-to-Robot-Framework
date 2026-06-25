@@ -324,6 +324,9 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
         "network_mode": "none",
         "mem_limit": "512m",
         "pids_limit": 128,
+        # Phase 4 least-privilege (mirror docker_service); dryrun keeps network 'none'.
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
     }
 
     _force_remove_stale_container(client, container_name)

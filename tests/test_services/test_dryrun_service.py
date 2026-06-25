@@ -389,3 +389,41 @@ class TestExtractAndNormalize:
         raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi" + '"}'
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert not out.endswith('"}')
+
+
+# ---------------------------------------------------------------------------
+# run_dryrun_in_container — security hardening (Phase 4)
+# ---------------------------------------------------------------------------
+
+class _Captured(Exception):
+    pass
+
+
+def test_dryrun_container_is_hardened(tmp_path):
+    captured = {}
+    client = MagicMock()
+
+    def _capture(**kw):
+        captured.update(kw)
+        raise _Captured()
+    client.containers.run.side_effect = _capture
+
+    # run_dryrun_in_container writes the dryrun file via the artifact store BEFORE
+    # containers.run — point it at tmp_path so the write is harmless.
+    store = MagicMock()
+    store.run_dir.return_value = tmp_path
+
+    with patch.object(ds, "get_artifact_store", return_value=store), \
+         patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch.object(ds, "_force_remove_stale_container"):
+        try:
+            ds.run_dryrun_in_container(client, "r1", "*** Test Cases ***\n")
+        except _Captured:
+            pass
+
+    assert captured["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in captured["security_opt"]
+    assert captured["network_mode"] == "none"
+    assert captured["mem_limit"] == "512m"
+    assert captured["pids_limit"] == 128
