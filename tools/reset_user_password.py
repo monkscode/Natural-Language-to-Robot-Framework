@@ -6,6 +6,13 @@ with the exact same function the app uses at registration, so the user can log i
 immediately. Works for password accounts and for Google-SSO-only accounts (it just
 sets a password on them).
 
+The reset also bumps token_version, which revokes every JWT minted before the
+reset (same revocation the /auth/logout-all route uses). This matters when a
+reset is the response to a compromise: without it, a stolen token would keep
+passing the per-request token_version re-check until it expired (up to
+JWT_EXPIRY_HOURS), so resetting the password would not actually lock the
+attacker out.
+
 Run:  venv/Scripts/python.exe -m tools.reset_user_password <email>
 (The new password is prompted — never pass it on the command line, where it
 would land in shell history and process listings.)
@@ -14,10 +21,7 @@ would land in shell history and process listings.)
 import getpass
 import sys
 
-import psycopg
-
-from src.backend.core.config import settings
-from src.backend.auth.repository import MAX_PASSWORD_BYTES, hash_password
+from src.backend.auth.repository import MAX_PASSWORD_BYTES, UserRepository
 
 MIN_LEN = 8
 
@@ -38,19 +42,18 @@ def main() -> None:
         print("refusing: passwords do not match")
         sys.exit(2)
 
-    hashed = hash_password(new_password)
-    with psycopg.connect(settings.DATABASE_URL) as conn:
-        row = conn.execute(
-            "UPDATE users SET hashed_password = %s WHERE email = %s "
-            "RETURNING id, email, role, auth_provider",
-            (hashed, email),
-        ).fetchone()
-        conn.commit()
+    # Go through the repository so the password hashing, the token_version
+    # revocation, and the users-table SQL stay in the one place the app owns
+    # them (repository.py). The token_version bump revokes any token minted
+    # before this reset.
+    row = UserRepository().reset_password(email, new_password)
 
     if row is None:
         print(f"no user found with email {email!r}")
         sys.exit(1)
-    print(f"password reset for {email} (id={row[0]}, role={row[2]}, provider={row[3]})")
+    print(f"password reset for {email} "
+          f"(id={row['id']}, role={row['role']}, provider={row['auth_provider']}); "
+          "all existing sessions revoked")
 
 
 if __name__ == "__main__":

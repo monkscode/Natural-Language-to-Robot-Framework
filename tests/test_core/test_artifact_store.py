@@ -284,6 +284,19 @@ def test_s3_read_text_invalid_rid_returns_none(s3):
     assert store.read_text("not-a-uuid", "x") is None
 
 
+def test_s3_bucket_fallback_key_is_normalized(s3):
+    """A relpath with in-bounds '..' segments must hit the bucket under the same
+    normalized key persist_run uploads (e.g. 'a/b/../log.html' -> 'a/log.html'),
+    not the literal '.../a/b/../log.html' which would never match."""
+    store, _b, client = s3
+    rid = str(uuid.uuid4())
+    store.run_dir(rid, create=True)  # no file on disk -> bucket fallback
+    client.get_object.return_value = {
+        "Body": Mock(read=Mock(return_value=b"from-bucket"))}
+    assert store.read_text(rid, "a/b/../log.html") == "from-bucket"
+    assert client.get_object.call_args.kwargs["Key"] == f"runs/{rid}/a/log.html"
+
+
 # --- serve_artifact ---
 
 def test_s3_serve_staging_first_fileresponse(s3):

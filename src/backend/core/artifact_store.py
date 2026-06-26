@@ -148,6 +148,16 @@ class S3ArtifactStore(ArtifactStore):
     def _key(self, run_id: str, relpath: str) -> str:
         return f"{self.prefix}/{run_id}/{relpath}".lstrip("/")
 
+    def _durable_key(self, run_id: str, target: Path) -> str:
+        """Bucket key for a containment-resolved *target*. Derives the relpath
+        from the resolved path (not the caller's raw relpath) so it matches the
+        normalized key persist_run uploads (path.relative_to(d).as_posix()); a
+        raw relpath like 'a/../b' would otherwise become the literal key
+        '.../a/../b' and miss the uploaded '.../b'."""
+        base_real = os.path.realpath(self.run_dir(run_id))
+        rel = os.path.relpath(os.path.realpath(target), base_real)
+        return self._key(run_id, Path(rel).as_posix())
+
     def persist_run(self, run_id: str) -> None:
         rid = self._valid_run_id(run_id)
         if rid is None:
@@ -196,7 +206,7 @@ class S3ArtifactStore(ArtifactStore):
                 pass
         # bucket fallback (a replica that never ran the test, or cleaned staging).
         try:
-            obj = self._s3.get_object(Bucket=self.bucket, Key=self._key(rid, relpath))
+            obj = self._s3.get_object(Bucket=self.bucket, Key=self._durable_key(rid, target))
             return obj["Body"].read().decode("utf-8")
         except Exception:
             return None
@@ -211,7 +221,7 @@ class S3ArtifactStore(ArtifactStore):
             return None  # escape attempt (also guards the S3 key)
         if target.is_file():
             return FileResponse(str(target), headers={"Cache-Control": "private"})
-        get_kwargs = {"Bucket": self.bucket, "Key": self._key(rid, relpath)}
+        get_kwargs = {"Bucket": self.bucket, "Key": self._durable_key(rid, target)}
         if range_header:
             get_kwargs["Range"] = range_header
         try:

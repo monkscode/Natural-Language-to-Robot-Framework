@@ -1066,6 +1066,12 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         logging.error(f"An error occurred during Docker execution: {e}")
         _safe_evict_hint_metadata(run_id)
         await asyncio.to_thread(_set_run_status, run_id, "error")
+        # Persist whatever artifacts the run produced before erroring (a partial
+        # log.html is still useful). Best-effort: persist_run never raises and
+        # no-ops when there is no staging dir. Without this, an errored run's
+        # report is served only from the originating replica's local staging and
+        # 404s on any other replica in an S3 deployment.
+        await asyncio.to_thread(get_artifact_store().persist_run, run_id)
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
 
 

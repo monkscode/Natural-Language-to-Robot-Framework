@@ -120,3 +120,44 @@ def test_google_only_account_denies_password_login(repo):
     created.append(email)
     r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email, "G User")
     assert r.verify_credentials(email, "any-password-1!") is None
+
+
+def test_reset_password_sets_new_password(repo):
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    r.create_user(email, "OldPw123!")
+    row = r.reset_password(email, "NewPw456!")
+    assert row is not None and row["email"] == email
+    assert r.verify_credentials(email, "NewPw456!") is not None
+    assert r.verify_credentials(email, "OldPw123!") is None
+
+
+def test_reset_password_revokes_existing_tokens(repo):
+    """The reset must bump token_version so tokens minted before it are revoked —
+    the security half of the reset (a compromise response must lock the attacker
+    out immediately, not after the JWT expires)."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    before = r.create_user(email, "OldPw123!")
+    tv_before = r.get_by_id(before["id"])["token_version"]
+    r.reset_password(email, "NewPw456!")
+    assert r.get_by_id(before["id"])["token_version"] == tv_before + 1
+
+
+def test_reset_password_unknown_email_returns_none(repo):
+    r, _created = repo
+    assert r.reset_password(_unique_email(), "Whatever1!") is None
+
+
+def test_reset_password_sets_password_on_google_only_account(repo):
+    """Reset works for a Google-SSO-only account too — it just sets a hash so the
+    user can subsequently password-login."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email, "G User")
+    assert r.verify_credentials(email, "Whatever1!") is None
+    r.reset_password(email, "Whatever1!")
+    assert r.verify_credentials(email, "Whatever1!") is not None
