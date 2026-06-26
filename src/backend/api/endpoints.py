@@ -11,13 +11,15 @@ from pydantic import BaseModel
 
 from src.backend.core.config import settings
 from src.backend.services.workflow_service import stream_generate_and_run, stream_generate_only, stream_execute_only
-from src.backend.services.docker_service import get_docker_client, rebuild_image, get_docker_status, cleanup_test_containers
+from src.backend.runner_exec import client as runner_exec_client
+from src.backend.runner_exec.client import RunnerExecUnavailable
 from src.backend.api.history_endpoints import resolve_robot_code
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
+from src.backend.auth.ownership import caller_can_read
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -76,13 +78,12 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
         raise HTTPException(status_code=400, detail="Invalid rerun_of: must be a UUID")
 
     source = get_run_registry().get_run(source_run_id)
-    is_owner = (
-        source is not None
-        and user is not None
-        and source.get("user_id") is not None
-        and source.get("user_id") == user.get("user_id")
+    admin = is_validated_admin(user)
+    allowed = source is not None and caller_can_read(
+        user, source.get("user_id"), source.get("org_id"), is_platform_admin=admin
     )
-    if source is None or not (is_validated_admin(user) or user is None or is_owner):
+    if source is None or not allowed:
+        # 404, not 403 — don't leak run existence across orgs.
         raise HTTPException(status_code=404, detail="Run not found")
 
     robot_code = resolve_robot_code(source)
@@ -168,47 +169,27 @@ async def generate_and_run_streaming(query: Query, user: dict | None = Depends(r
 @router.post('/rebuild-docker-image', dependencies=[Depends(require_admin)])
 async def rebuild_docker_image_endpoint():
     try:
-        client = get_docker_client()
-        result = rebuild_image(client)
-        return result
-    except ConnectionError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        logging.error(f"Unexpected error during Docker image rebuild: {e}")
+        return await asyncio.to_thread(runner_exec_client.rebuild_image)
+    except RunnerExecUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception:
+        logging.error("Unexpected error during Docker image rebuild", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @router.get('/docker-status', dependencies=[Depends(require_user)])
 async def docker_status_endpoint():
     try:
-        client = get_docker_client()
-        status = get_docker_status(client)
-        return status
-    except ConnectionError as e:
-        logging.error(f"Docker connection error: {e}")
+        return await asyncio.to_thread(runner_exec_client.docker_status)
+    except Exception:
+        logging.error("Docker status unavailable", exc_info=True)
         return {"status": "error", "docker_available": False, "error": "Docker is unavailable."}
-    except Exception as e:
-        logging.error("Unexpected error in /docker-status endpoint", exc_info=True)
-        return {"status": "error", "docker_available": False, "error": "An unexpected error occurred."}
 
 @router.delete('/test/containers/cleanup', dependencies=[Depends(require_admin)])
 async def cleanup_test_containers_endpoint():
-    """
-    Clean up all test-related containers.
-    
-    Note: This endpoint uses the docker_service.cleanup_test_containers() function
-    which specifically targets "robot-test-*" containers. There is also a standalone
-    CLI tool (tools/cleanup_docker_containers.py) that provides more comprehensive
-    cleanup including test-runner-* containers. Both are kept as they serve 
-    different purposes: API endpoint for programmatic cleanup vs manual CLI tool 
-    for comprehensive maintenance.
-    """
     try:
-        client = get_docker_client()
-        result = cleanup_test_containers(client)
-        return result
-        
+        return await asyncio.to_thread(runner_exec_client.cleanup)
     except Exception as e:
-        logging.error(f"Failed to cleanup test containers: {e}")
+        logging.error(f"Failed to cleanup test containers: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to cleanup test containers: {str(e)}")
 
 
@@ -244,13 +225,14 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # credits), so only the run's owner — or a validated admin — may submit
     # it. `user` is None only when AUTH_ENFORCED is off (local debugging).
     # Unattributed/unknown runs are admin-only (fail closed).
-    if user is not None and not await asyncio.to_thread(is_validated_admin, user):
-        owner = run_row.get("user_id") if run_row else None
-        if owner != user["user_id"]:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only submit feedback for your own runs",
-            )
+    admin = await asyncio.to_thread(is_validated_admin, user)
+    owner_id = run_row.get("user_id") if run_row else None
+    org_id = run_row.get("org_id") if run_row else None
+    if not caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot submit feedback for this run",
+        )
 
     # Re-run rows never own a learning record (their execution deliberately
     # skipped learning), so feedback applies to the ORIGINAL run the code was

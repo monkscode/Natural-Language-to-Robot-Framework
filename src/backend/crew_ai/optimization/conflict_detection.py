@@ -87,6 +87,7 @@ def fire_conflict_detection(
     feedback_text: str | None,
     injected_hint_ids: str | None,
     prompt_builder,
+    org_id: str | None = None,
 ) -> None:
     """Shared conflict-detection pipeline: resolve hints → call LLM → flag
     via write queue → write trigger_events telemetry. Non-blocking; all
@@ -117,7 +118,7 @@ def fire_conflict_detection(
     #   '[]'  → known-empty; nothing was injected, skip the LLM call.
     #   else  → fetch only the hints that were actually injected.
     if injected_hint_ids is None:
-        active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url)
+        active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url, org_id=org_id)
         injected_ids = [h["id"] for h in active_hints]
     else:
         try:
@@ -127,7 +128,7 @@ def fire_conflict_detection(
                 "%s malformed injected_hint_ids %r; falling back to domain query",
                 tag, injected_hint_ids,
             )
-            active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url)
+            active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url, org_id=org_id)
             injected_ids = [h["id"] for h in active_hints]
         else:
             if not isinstance(injected_ids, list):
@@ -136,7 +137,7 @@ def fire_conflict_detection(
                     "falling back to domain query",
                     tag, type(injected_ids).__name__, injected_hint_ids,
                 )
-                active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url)
+                active_hints = feedback_loop.nl_engine.get_active_hints_raw(domain, url, org_id=org_id)
                 injected_ids = [h["id"] for h in active_hints]
             elif not injected_ids:
                 # Known-empty: '[]' stored → no hints injected → nothing to judge.

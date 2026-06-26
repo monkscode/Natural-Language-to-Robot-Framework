@@ -70,6 +70,16 @@ class Settings(BaseSettings):
         default=120,
         description="Seconds to wait for the dryrun container before skipping (graceful degrade).",
     )
+    RUNNER_READ_ONLY_ROOTFS: bool = Field(
+        default=False,
+        description="Phase 4: opt-in read-only rootfs for runner containers; default off until a live run proves headless Chrome tolerates it (validated in a later phase task).",
+    )
+    # Phase 4: base URL of the socket-holding executor service. localhost for
+    # `./run.sh` dev; compose overrides to the service name.
+    RUNNER_EXEC_URL: str = Field(
+        default="http://localhost:4998",
+        description="Phase 4: base URL of the runner-exec service; localhost for run.sh dev, http://runner-exec:4998 in compose.",
+    )
 
     # LLM Empty-Response Retry Configuration
     # Some Vertex AI Gemini models (notably gemini-3.5-flash) intermittently
@@ -138,7 +148,11 @@ class Settings(BaseSettings):
         default="change-me-in-production",
         description="HMAC secret for signing JWT access tokens — MUST be overridden via env in production",
     )
-    JWT_EXPIRY_HOURS: int = Field(default=24, description="Access token lifetime in hours")
+    # Shorter lifetime bounds how long a stolen token is usable when the user
+    # never explicitly revokes. Explicit revocation is via token_version
+    # (logout-all), enforced against current DB state on every authenticated
+    # request (require_user / require_admin / report access).
+    JWT_EXPIRY_HOURS: int = Field(default=12, description="Access token lifetime in hours")
     # Comma-separated emails granted the 'admin' role at signup; everyone else
     # is 'user'. Stored as a string (not list) to avoid pydantic env JSON-parsing
     # pitfalls — read via the admin_emails_list property.
@@ -177,6 +191,23 @@ class Settings(BaseSettings):
         default=False,
         description="Set the Secure flag on auth cookies (enable behind HTTPS in production)",
     )
+    # Deployment posture. 'production' enforces the auth security invariants at
+    # startup (strong JWT secret + Secure cookies); 'development' only warns so
+    # local http dev keeps working. See auth/security_posture.py.
+    ENVIRONMENT: str = Field(
+        default="development",
+        description="Deployment environment: 'development' or 'production'",
+    )
+    # Per-IP rate limit for the unauthenticated auth endpoints (login, register,
+    # forgot-password) — blunts brute-force / credential stuffing. slowapi syntax.
+    AUTH_RATE_LIMIT: str = Field(
+        default="10/minute",
+        description="Per-IP rate limit on the auth endpoints (slowapi syntax, e.g. '10/minute')",
+    )
+    AUTH_RATE_LIMIT_ENABLED: bool = Field(
+        default=True,
+        description="Enable per-IP rate limiting on the auth endpoints",
+    )
 
     @property
     def admin_emails_list(self) -> list[str]:
@@ -207,6 +238,13 @@ class Settings(BaseSettings):
         """Validate that ARTIFACT_STORE is one of the supported backends."""
         if v.lower() not in ('local', 's3'):
             raise ValueError(f"ARTIFACT_STORE must be 'local' or 's3', got '{v}'")
+        return v.lower()
+
+    @validator('ENVIRONMENT')
+    def validate_environment(cls, v):
+        """Validate that ENVIRONMENT is 'development' or 'production'."""
+        if v.lower() not in ('development', 'production'):
+            raise ValueError(f"ENVIRONMENT must be 'development' or 'production', got '{v}'")
         return v.lower()
 
     @validator('MAX_AGENT_ITERATIONS')

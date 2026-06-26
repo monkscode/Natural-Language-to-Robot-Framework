@@ -216,6 +216,10 @@ class IntentExtractor:
             return
 
         try:
+            # GLOBAL / cross-org table (no org_id, by Phase 1c design): seed-
+            # derived abstract triggers only (source='seed'). Never write raw
+            # user data (queries/URLs/locators) here - it would inject into every
+            # org. Add org_id + org-scoped reads first if you store org data.
             self._em._writer_conn.execute("""
                 INSERT INTO intent_patterns
                 (intent_name, triggers_json, requires_json, source, score,
@@ -390,6 +394,10 @@ class StructuralRuleEngine(LearningEngine):
         required_keywords = requires.get("keywords", [])
         query_pattern = "|".join(intent.get("triggered_by", []))
 
+        # GLOBAL / cross-org table (no org_id, by Phase 1c design): abstract
+        # intent->structure derived from trigger words, not raw user queries.
+        # Never write org-private data (queries/URLs/locators) here - it injects
+        # into every org. Add org_id + org-scoped reads first if you must.
         self._em._writer_conn.execute("""
             INSERT INTO structural_rules
             (rule_name, query_pattern, required_structure,

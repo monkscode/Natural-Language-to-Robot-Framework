@@ -22,10 +22,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
+
+# The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
+# so that every migration newer than the baseline is applied on top — including
+# on an EXISTING database. It must NOT track SCHEMA_VERSION: stamping the latest
+# version here would pre-record pending migrations and cause them to be skipped,
+# leaving an existing database un-upgraded. Bump this only when migrations are
+# folded back into the baseline DDL (a re-consolidation), not when adding one.
+_BASELINE_VERSION = 16
 
 # Each statement is executed once inside ensure_schema(). Ordered so referenced
 # tables (nl_feedback_corrections, hint_review_sessions) exist before FKs.
+# NOTE: org_id columns appear in the CREATE TABLE bodies for fresh installs, but
+# their indexes (and the ADD COLUMN for already-existing tables) live ONLY in the
+# v17 migration below — a baseline `CREATE INDEX ... (org_id)` would fail on a
+# pre-1c table whose org_id column the migration has not added yet.
 PG_SCHEMA_DDL: tuple[str, ...] = (
     # --- schema_version bookkeeping ---
     """
@@ -61,6 +73,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         injected_hint_ids     JSONB,
         model_version         TEXT,
         hint_attribution_done INTEGER NOT NULL DEFAULT 1,
+        org_id TEXT,
         CONSTRAINT chk_status CHECK (test_status IN ('passed', 'failed', 'error'))
     )
     """,
@@ -138,7 +151,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         domain              TEXT,
         score               DOUBLE PRECISION DEFAULT 0.5,
         evidence_count      INTEGER DEFAULT 1,
-        last_seen           TEXT NOT NULL
+        last_seen           TEXT NOT NULL,
+        org_id              TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_anti_category ON anti_patterns(failure_category)",
@@ -211,6 +225,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         disabled_at               TEXT,
         anchor_query              TEXT,
         unused_count              INTEGER NOT NULL DEFAULT 0,
+        org_id                    TEXT,
+        is_shared                 INTEGER NOT NULL DEFAULT 0,
         UNIQUE(feedback_text, domain, scope)
     )
     """,
@@ -361,7 +377,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         kind         TEXT NOT NULL,
         record_id    BIGINT NOT NULL,
         anchor_query TEXT NOT NULL,
-        embedding    vector(384) NOT NULL
+        embedding    vector(384) NOT NULL,
+        org_id       TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_anchors_kind_record ON learning_anchors(kind, record_id)",
@@ -376,7 +393,8 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         failure_category TEXT,
         domain           TEXT,
         code_structure   TEXT,
-        embedding        vector(384) NOT NULL
+        embedding        vector(384) NOT NULL,
+        org_id           TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_exec_emb_embedding "
@@ -438,9 +456,20 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
 # Each entry: (version, description, (statement, ...)).
 # ---------------------------------------------------------------------------
 PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
-    # Example:
-    # (17, "track per-hint cost on execution_records",
-    #  ("ALTER TABLE execution_records ADD COLUMN IF NOT EXISTS hint_cost DOUBLE PRECISION",)),
+    (17, "Phase 1c: org_id on scoped learning tables + is_shared on hints",
+     (
+         "ALTER TABLE execution_records ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE nl_feedback_corrections ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE nl_feedback_corrections ADD COLUMN IF NOT EXISTS is_shared INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE anti_patterns ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE learning_anchors ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "ALTER TABLE execution_embeddings ADD COLUMN IF NOT EXISTS org_id TEXT",
+         "CREATE INDEX IF NOT EXISTS idx_exec_org ON execution_records(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_nlfc_org_shared ON nl_feedback_corrections(org_id, is_shared)",
+         "CREATE INDEX IF NOT EXISTS idx_anti_org ON anti_patterns(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_anchors_org ON learning_anchors(org_id)",
+         "CREATE INDEX IF NOT EXISTS idx_exec_emb_org ON execution_embeddings(org_id)",
+     )),
 )
 
 if PG_MIGRATIONS and SCHEMA_VERSION != max(v for v, _, _ in PG_MIGRATIONS):
@@ -472,11 +501,13 @@ def ensure_schema(conn) -> int:
         try:
             for ddl in PG_SCHEMA_DDL:
                 cur.execute(ddl)
-            # Record the consolidated baseline version once.
+            # Record the consolidated baseline version once. This is the BASELINE
+            # version, not SCHEMA_VERSION — see _BASELINE_VERSION. Recording the
+            # latest version here would skip the migrations below on an existing DB.
             cur.execute(
                 "INSERT INTO schema_version (version, description, applied_at) "
                 "VALUES (%s, %s, now()::text) ON CONFLICT (version) DO NOTHING",
-                (SCHEMA_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
+                (_BASELINE_VERSION, "Phase 4 consolidated Postgres schema (jsonb hint-id columns, slice 4.5)"),
             )
             # Apply any migrations this database has not recorded yet, in
             # version order (sorted, so authoring order in the tuple can't

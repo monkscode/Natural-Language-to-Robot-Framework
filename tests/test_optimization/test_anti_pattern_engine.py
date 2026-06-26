@@ -25,7 +25,7 @@ class MockRecord:
     def __init__(self, user_query="test query", robot_code=None,
                  test_status="failed", failure_category=None,
                  failed_keyword=None, error_message=None,
-                 domain=None):
+                 domain=None, org_id=None):
         self.user_query = user_query
         self.robot_code = robot_code
         self.test_status = test_status
@@ -33,6 +33,7 @@ class MockRecord:
         self.failed_keyword = failed_keyword
         self.error_message = error_message
         self.domain = domain
+        self.org_id = org_id
 
 
 class _EmCompat:
@@ -64,7 +65,7 @@ class _EmCompat:
         yield self._writer_conn
 
     def filter_by_query_similarity(self, user_query, candidate_ids,
-                                   kind, threshold=0.55):
+                                   kind, threshold=0.55, org_id=None):
         # This unit-test shim has no ChromaDB — mirror the real
         # ExecutionMemory's documented "ChromaDB unavailable" degradation:
         # fail open (score/evidence gating only, no semantic narrowing).
@@ -90,7 +91,8 @@ def _create_test_db() -> "_EmCompat":
             domain TEXT,
             score REAL DEFAULT 0.5,
             evidence_count INTEGER DEFAULT 1,
-            last_seen TEXT
+            last_seen TEXT,
+            org_id TEXT
         )
     """)
     conn.commit()

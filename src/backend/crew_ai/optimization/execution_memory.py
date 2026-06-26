@@ -128,6 +128,11 @@ class ExecutionRecord:
     # original failed run's context).
     model_version: Optional[str] = None
 
+    # Org that owns this execution (Phase 1c). NULL for rows written before
+    # schema v14 or for single-org deployments. The dedup path is scoped on
+    # COALESCE(org_id, '') so a NULL-org row and an org-A row never merge.
+    org_id: Optional[str] = None
+
     # Per-workflow once-guard for pass-time usage attribution (Part 2 / C1).
     # The DB column DEFAULT is 1 (pre-v13 rows read already-attributed — N4);
     # this dataclass default is intentionally 0 and must NOT be unified with the

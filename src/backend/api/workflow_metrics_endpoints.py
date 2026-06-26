@@ -2,12 +2,17 @@
 API endpoints for browser-use workflow metrics monitoring.
 
 Uses shared models from core.models to eliminate code duplication.
+
+Referenced by: main.py (router registration with prefix="/api")
+Depends on: core/workflow_metrics.py, auth/jwt_utils.py, auth/ownership.py
 """
 
 from datetime import datetime, timedelta
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..auth.jwt_utils import require_user
+from .dashboard_scope import authorize_dashboard_read
 from ..core.models import (
     WorkflowMetrics,
     WorkflowMetricsResponse,
@@ -37,11 +42,12 @@ def _parse_date(date_str: Optional[str], param_name: str) -> Optional[datetime]:
 async def get_workflow_metrics(
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of workflows to return"),
     start_date: Optional[str] = Query(None, description="Start date (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
-    end_date: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
+    end_date: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
+    user: dict | None = Depends(require_user),
 ):
     """
     Get workflow metrics with optional date filtering.
-    
+
     Returns metrics for browser-use workflows including:
     - Total elements processed
     - Success rate
@@ -49,22 +55,23 @@ async def get_workflow_metrics(
     - Custom action usage
     - Execution times
     """
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
-        
+
         start_dt = _parse_date(start_date, "start_date")
         end_dt = _parse_date(end_date, "end_date")
-        
-        # Get metrics
+
+        # Get metrics — always pass scope_org so the query is org-filtered
         if start_dt or end_dt:
-            metrics = collector.get_metrics_by_date_range(start_dt, end_dt)
+            metrics = collector.get_metrics_by_date_range(start_dt, end_dt, org_id=scope_org)
             metrics = metrics[:limit]
         else:
-            metrics = collector.get_all_metrics(limit=limit)
-        
+            metrics = collector.get_all_metrics(limit=limit, org_id=scope_org)
+
         # Convert to response model using the helper method
         return [WorkflowMetricsResponse.from_workflow_metrics(m) for m in metrics]
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -75,11 +82,12 @@ async def get_workflow_metrics(
 async def get_aggregate_metrics(
     start_date: Optional[str] = Query(None, description="Start date (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
     end_date: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
-    last_days: Optional[int] = Query(None, ge=1, le=365, description="Get metrics for last N days (alternative to date range)")
+    last_days: Optional[int] = Query(None, ge=1, le=365, description="Get metrics for last N days (alternative to date range)"),
+    user: dict | None = Depends(require_user),
 ):
     """
     Get aggregated workflow metrics for monitoring and analysis.
-    
+
     Returns:
     - Total workflows executed
     - Total elements processed
@@ -88,23 +96,24 @@ async def get_aggregate_metrics(
     - Average cost per element
     - Custom action usage rate
     - Average execution time
-    
+
     Use either date range (start_date/end_date) or last_days parameter.
     """
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
-        
+
         if last_days:
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=last_days)
         else:
             start_dt = _parse_date(start_date, "start_date")
             end_dt = _parse_date(end_date, "end_date")
-        
-        aggregate = collector.get_aggregate_metrics(start_dt, end_dt)
-        
+
+        aggregate = collector.get_aggregate_metrics(start_dt, end_dt, org_id=scope_org)
+
         return AggregateMetricsResponse(**aggregate)
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -140,37 +149,45 @@ async def record_workflow_metrics(request: RecordMetricsRequest):
 
 
 @router.get("/summary")
-async def get_metrics_summary():
+async def get_metrics_summary(
+    user: dict | None = Depends(require_user),
+):
     """
     Get a quick summary of recent workflow metrics.
-    
+
     Returns metrics for:
     - Last 24 hours
     - Last 7 days
     - Last 30 days
     - All time
     """
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
         now = datetime.now()
-        
+
         return {
             "last_24_hours": collector.get_aggregate_metrics(
                 start_date=now - timedelta(hours=24),
-                end_date=now
+                end_date=now,
+                org_id=scope_org,
             ),
             "last_7_days": collector.get_aggregate_metrics(
                 start_date=now - timedelta(days=7),
-                end_date=now
+                end_date=now,
+                org_id=scope_org,
             ),
             "last_30_days": collector.get_aggregate_metrics(
                 start_date=now - timedelta(days=30),
-                end_date=now
+                end_date=now,
+                org_id=scope_org,
             ),
-            "all_time": collector.get_aggregate_metrics(),
-            "timestamp": now.isoformat()
+            "all_time": collector.get_aggregate_metrics(org_id=scope_org),
+            "timestamp": now.isoformat(),
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get metrics summary: {str(e)}")
 

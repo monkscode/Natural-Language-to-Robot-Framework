@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.services.docker_service import get_docker_client, build_image, run_test_in_container
+from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
 from src.backend.core.observability import create_workflow_span
@@ -428,6 +428,12 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 run_id, injected_hint_ids_json,
             )
 
+        try:
+            from src.backend.core.run_registry import get_run_registry
+            _, _run_org_id = get_run_registry().get_run_owner(run_id)
+        except Exception:
+            _run_org_id = None
+
         feedback_loop.process_execution(
             workflow_id=run_id,
             user_query=user_query or "",
@@ -442,6 +448,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
             hint_sources=all_sources,
             injected_hint_ids=injected_hint_ids_json,
             was_holdout=was_holdout,
+            org_id=_run_org_id,
         )
 
         # N3 (F2d): persist the reconciled selection trace on the writer thread.
@@ -526,7 +533,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
 
 
-def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None) -> Generator[Dict[str, Any], None, None]:
+def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None, user_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
     """
     Orchestrates the CrewAI workflow to generate Robot Framework code,
     yielding progress updates and the final code.
@@ -556,6 +563,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         model_provider=model_provider,
         model_name=model_name,
         library_type=settings.ROBOT_LIBRARY,
+        org_id=org_id,
+        user_id=user_id,
     )
 
     # Start with welcome message
@@ -599,13 +608,16 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # auto-captured as child spans by OpenLLMetry. The dryrun gate + repair run
         # AFTER this span closes (R5); their calls are still captured by the
         # authoritative LiteLLM trace callback, just outside this workflow span.
-        with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY):
+        with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY,
+                                  org_id=org_id, user_id=user_id):
             # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
             # task is now the Assembler — there is no validator verdict). Unused here;
             # delivered code is read from crew_with_results.tasks[2] below.
+            # org_id comes from the authenticated user (threaded down from the SSE
+            # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
                 natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
-                progress_queue=progress_queue)
+                progress_queue=progress_queue, org_id=org_id)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -767,7 +779,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
 
             collector = get_workflow_metrics_collector()
-            collector.record_workflow(unified_metrics)
+            # Prefer the org_id threaded into this call. The run row may not be
+            # persisted yet on the stream_generate_only / stream_generate_and_run
+            # paths, so get_run_owner() can return (None, None) and would persist
+            # an authenticated user's metrics as unscoped. Fall back to the
+            # registry only when no org_id was threaded through.
+            _run_org_id: str | None = org_id
+            if _run_org_id is None:
+                try:
+                    _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+                except Exception as e:
+                    logging.debug("[RUN_REGISTRY] org lookup for metrics failed: %s", e)
+            collector.record_workflow(unified_metrics, org_id=_run_org_id)
 
             _safe_delete_temp_metrics(workflow_id)
 
@@ -826,6 +849,8 @@ def run_workflow_in_thread(
     model_provider: str,
     model_name: str,
     releaser: "_SlotReleaser | None" = None,
+    org_id: str | None = None,
+    user_id: str | None = None,
 ):
     """Runs the synchronous agentic workflow and puts results in a queue.
 
@@ -837,7 +862,7 @@ def run_workflow_in_thread(
     client has already disconnected and the generator's finally fired first.
     """
     try:
-        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue):
+        for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id, user_id=user_id):
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
@@ -903,7 +928,9 @@ def _capacity_error_sse(stage: str) -> str:
 
 
 def _start_workflow_thread(
-    q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser"
+    q: Queue, user_query: str, model_provider: str, model_name: str, releaser: "_SlotReleaser",
+    org_id: str | None = None,
+    user_id: str | None = None,
 ) -> Thread:
     """Start the workflow thread, pre-decrementing the releaser if start() raises.
 
@@ -914,6 +941,7 @@ def _start_workflow_thread(
     thread = Thread(
         target=run_workflow_in_thread,
         args=(q, user_query, model_provider, model_name, releaser),
+        kwargs={"org_id": org_id, "user_id": user_id},
     )
     try:
         thread.start()
@@ -994,17 +1022,15 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         return
 
     try:
-        # Offload all blocking Docker I/O to a thread so the event loop
-        # remains free to serve heartbeats and other concurrent requests.
-        # Lambda keeps build_image() generator creation and consumption in
-        # the same worker thread, avoiding cross-thread generator handoff.
-        client = await asyncio.to_thread(get_docker_client)
-        build_events = await asyncio.to_thread(lambda: list(build_image(client)))
-        for event in build_events:
-            yield f"data: {json.dumps({'stage': 'execution', **event})}\n\n"
+        # Phase 4: execution goes through the socket-holding executor; FastAPI
+        # no longer touches Docker. ensure_image is required — if it raises
+        # (executor unreachable / image build failed) the except below converts
+        # it to an execution-error event, since there is no image to run on.
+        await asyncio.to_thread(runner_exec_client.ensure_image)
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
         logging.info(f"🚀 Executing test: {test_filename}")
-        result = await asyncio.to_thread(run_test_in_container, client, run_id, test_filename)
+        result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
 
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
@@ -1064,7 +1090,9 @@ async def stream_generate_only(
     releaser = _SlotReleaser()
     try:
         q = Queue()
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
+        org_id = user.get("org_id") if user else None
+        user_id = user.get("user_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
         result_store: dict = {}
         try:
             async for sse in _drain_generation_queue(workflow_thread, q, result_store):
@@ -1192,7 +1220,9 @@ async def stream_generate_and_run(
     run_id = None
     try:
         q = Queue()
-        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser)
+        org_id = user.get("org_id") if user else None
+        user_id = user.get("user_id") if user else None
+        workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
 
         result_store: dict = {}
         try:

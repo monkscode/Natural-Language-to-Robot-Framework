@@ -505,7 +505,7 @@ class TestWorkflowCompletionPaths:
 
         captured = {}
 
-        def _capture(metrics):
+        def _capture(metrics, **kwargs):
             captured["m"] = metrics
 
         crew_result = _make_run_crew_result()

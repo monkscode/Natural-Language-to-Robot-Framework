@@ -110,6 +110,8 @@ def bind_workflow_context(
     model_provider: str | None = None,
     model_name: str | None = None,
     library_type: str | None = None,
+    org_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """
     Bind workflow context to all subsequent log entries in the current async context.
@@ -125,6 +127,10 @@ def bind_workflow_context(
         ctx["model_name"] = model_name
     if library_type:
         ctx["library_type"] = library_type
+    if org_id:
+        ctx["org_id"] = org_id
+    if user_id:
+        ctx["user_id"] = user_id
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(**ctx)
 

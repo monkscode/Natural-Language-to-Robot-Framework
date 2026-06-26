@@ -97,16 +97,19 @@ def test_google_login_rejects_inactive_account(repo):
 
 
 def test_role_synced_to_allowlist_at_signin(repo, monkeypatch):
-    """Editing ADMIN_EMAILS takes effect at the next sign-in, both directions:
-    an added email is promoted, a removed one is demoted."""
+    """ADMIN_EMAILS promotes at sign-in (promote-only). Removing an email from
+    ADMIN_EMAILS no longer demotes — the DB role is the source of truth; revoke
+    via set_platform_role instead."""
     r, created = repo
     email = _unique_email()
     created.append(email)
     assert r.create_user(email, "S3cretpw!")["role"] == "user"
+    # Adding the email to ADMIN_EMAILS promotes at next sign-in.
     monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
     assert r.verify_credentials(email, "S3cretpw!")["role"] == "admin"
+    # Removing the email from ADMIN_EMAILS does NOT demote — admin stays admin.
     monkeypatch.setattr(settings, "ADMIN_EMAILS", "")
-    assert r.verify_credentials(email, "S3cretpw!")["role"] == "user"
+    assert r.verify_credentials(email, "S3cretpw!")["role"] == "admin"
 
 
 def test_google_only_account_denies_password_login(repo):

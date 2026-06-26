@@ -25,6 +25,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import src.backend.services.dryrun_service as ds
+from src.backend.services import dryrun_service
 
 
 # ---------------------------------------------------------------------------
@@ -190,25 +191,26 @@ class TestValidateAndRepair:
 
     def test_disabled_skips_without_container(self):
         with patch.object(ds, "settings", self._settings(enabled=False)), \
-             patch.object(ds, "get_docker_client") as mock_client:
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
             out = ds.validate_and_repair("rid", "*** Settings ***\n", "gemini", "m", None)
         assert out["dryrun_status"] == "skipped"
         assert out["code"] == "*** Settings ***\n"
         assert out["repair_usage"] == {}
-        mock_client.assert_not_called()  # §8.4 — no container for a skip
+        mock_rc.ensure_image.assert_not_called()  # §8.4 — no executor hop for a skip
 
     @pytest.mark.parametrize("code", ["", "   \n\t  "])
     def test_empty_code_skips_without_container(self, code):
         with patch.object(ds, "settings", self._settings()), \
-             patch.object(ds, "get_docker_client") as mock_client:
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
             out = ds.validate_and_repair("rid", code, "gemini", "m", None)
         assert out["dryrun_status"] == "skipped"
-        mock_client.assert_not_called()
+        mock_rc.ensure_image.assert_not_called()
 
     def test_docker_unavailable_degrades_to_unverified(self):
-        # learn-6: get_docker_client raises ConnectionError → unverified, no raise.
+        # learn-6: ensure_image raises RunnerExecUnavailable → unverified, no raise.
         with patch.object(ds, "settings", self._settings()), \
-             patch.object(ds, "get_docker_client", side_effect=ConnectionError("no docker")):
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.side_effect = ds.RunnerExecUnavailable("no executor")
             out = ds.validate_and_repair("rid", "*** Settings ***\nLibrary  Browser\n", "gemini", "m", None)
         assert out["dryrun_status"] == "unverified"
         assert out["code"] == "*** Settings ***\nLibrary  Browser\n"  # unchanged
@@ -216,30 +218,28 @@ class TestValidateAndRepair:
 
     def test_passed_first_try_no_repair(self):
         with patch.object(ds, "settings", self._settings()), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": True, "errors": "", "exit_code": 0}) as mock_dry, \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code") as mock_repair:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "passed"
-        assert mock_dry.call_count == 1
+        assert mock_rc.dryrun.call_count == 1
         mock_repair.assert_not_called()
 
     def test_repair_loop_bounded_by_max_fixes(self):
         # dryrun fails N+1 times → exactly N repair kickoffs → failed.
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": False, "errors": "bad kw", "exit_code": 1}) as mock_dry, \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
                           side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
                           side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
         assert out["dryrun_status"] == "failed"
-        assert mock_dry.call_count == 3        # MAX_DRYRUN_FIXES + 1
+        assert mock_rc.dryrun.call_count == 3        # MAX_DRYRUN_FIXES + 1
         assert mock_repair.call_count == 2     # exactly MAX_DRYRUN_FIXES
         assert out["dryrun_errors"] == "bad kw"
         # repair usage accumulated across both attempts
@@ -253,71 +253,67 @@ class TestValidateAndRepair:
             {"passed": True, "errors": "", "exit_code": 0},
         ]
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container", side_effect=results) as mock_dry, \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
                           return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})), \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="fixed code"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = results
             out = ds.validate_and_repair("rid", "broken code", "gemini", "m", None)
         assert out["dryrun_status"] == "passed"
         assert out["code"] == "fixed code"
-        assert mock_dry.call_count == 2
+        assert mock_rc.dryrun.call_count == 2
 
     def test_no_progress_short_circuit(self):
         # §8.6: repair returns byte-identical code → loop breaks early.
         with patch.object(ds, "settings", self._settings(max_fixes=3)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": False, "errors": "bad kw", "exit_code": 1}) as mock_dry, \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
                           return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="same code"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "same code", "gemini", "m", None)
         assert out["dryrun_status"] == "failed"
         # 1 dryrun, then repair produced identical code → break before re-dryrunning.
-        assert mock_dry.call_count == 1
+        assert mock_rc.dryrun.call_count == 1
         assert mock_repair.call_count == 1
 
     def test_repair_exception_is_isolated(self):
         # §8.3: a repair crash degrades to failed with the current code, never raises.
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": False, "errors": "bad kw", "exit_code": 1}), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code", side_effect=RuntimeError("LLM down")):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "failed"
         assert out["code"] == "code"  # unchanged — repair never produced new code
 
     def test_dryrun_infra_error_midloop_degrades_to_unverified(self):
         with patch.object(ds, "settings", self._settings()), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container", side_effect=RuntimeError("no output.xml")):
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = RuntimeError("no output.xml")
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "unverified"
 
     def test_learning_system_never_touched(self):
         # learn-5: the gate must never call into the learning system.
         with patch.object(ds, "settings", self._settings()), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": True, "errors": "", "exit_code": 0}), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch("src.backend.crew_ai.optimization.learning_registry.get_feedback_loop") as mock_fl:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
             ds.validate_and_repair("rid", "code", "gemini", "m", None)
         mock_fl.assert_not_called()
 
     def test_progress_pushes_are_guarded_for_none_queue(self):
         # progress_queue=None must not raise (guarded direct put).
         with patch.object(ds, "settings", self._settings(max_fixes=1)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": True, "errors": "", "exit_code": 0}):
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "passed"
 
@@ -325,10 +321,9 @@ class TestValidateAndRepair:
         from queue import Queue
         q = Queue()
         with patch.object(ds, "settings", self._settings(max_fixes=1)), \
-             patch.object(ds, "get_docker_client", return_value=MagicMock()), \
-             patch.object(ds, "build_image", return_value=iter([])), \
-             patch.object(ds, "run_dryrun_in_container",
-                          return_value={"passed": True, "errors": "", "exit_code": 0}):
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
             ds.validate_and_repair("rid", "code", "gemini", "m", q)
         msgs = []
         while not q.empty():
@@ -389,3 +384,68 @@ class TestExtractAndNormalize:
         raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi" + '"}'
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert not out.endswith('"}')
+
+
+# ---------------------------------------------------------------------------
+# run_dryrun_in_container — security hardening (Phase 4)
+# ---------------------------------------------------------------------------
+
+class _Captured(Exception):
+    pass
+
+
+def test_dryrun_container_is_hardened(tmp_path):
+    captured = {}
+    client = MagicMock()
+
+    def _capture(**kw):
+        captured.update(kw)
+        raise _Captured()
+    client.containers.run.side_effect = _capture
+
+    # run_dryrun_in_container writes the dryrun file via the artifact store BEFORE
+    # containers.run — point it at tmp_path so the write is harmless.
+    store = MagicMock()
+    store.run_dir.return_value = tmp_path
+
+    with patch.object(ds, "get_artifact_store", return_value=store), \
+         patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch.object(ds, "_force_remove_stale_container"):
+        try:
+            ds.run_dryrun_in_container(client, "r1", "*** Test Cases ***\n")
+        except _Captured:
+            pass
+
+    assert captured["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in captured["security_opt"]
+    assert captured["network_mode"] == "none"
+    assert captured["mem_limit"] == "512m"
+    assert captured["pids_limit"] == 128
+
+
+# ---------------------------------------------------------------------------
+# validate_and_repair — executor-hop contract (Task 8)
+# ---------------------------------------------------------------------------
+
+def test_validate_and_repair_unverified_when_executor_down(monkeypatch):
+    monkeypatch.setattr(dryrun_service.settings, "DRYRUN_ENABLED", True)
+    with patch("src.backend.services.dryrun_service.runner_exec_client") as rc:
+        rc.ensure_image.side_effect = dryrun_service.RunnerExecUnavailable("down")
+        out = dryrun_service.validate_and_repair(
+            "abc123", "*** Test Cases ***\nT\n    Log    x\n",
+            "gemini", "gemini-2.5-flash", progress_queue=None)
+    assert out["dryrun_status"] == "unverified"
+    assert out["code"].strip().startswith("*** Test Cases ***")
+
+
+def test_validate_and_repair_passes_via_client(monkeypatch):
+    monkeypatch.setattr(dryrun_service.settings, "DRYRUN_ENABLED", True)
+    with patch("src.backend.services.dryrun_service.runner_exec_client") as rc:
+        rc.ensure_image.return_value = {"status": "ready"}
+        rc.dryrun.return_value = {"passed": True}
+        out = dryrun_service.validate_and_repair(
+            "abc123", "*** Test Cases ***\nT\n    Log    x\n",
+            "gemini", "gemini-2.5-flash", progress_queue=None)
+    assert out["dryrun_status"] == "passed"
+    rc.dryrun.assert_called_once()

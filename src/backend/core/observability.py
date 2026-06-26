@@ -99,6 +99,8 @@ def create_workflow_span(
     model_provider: str,
     model_name: str,
     library_type: str = "browser",
+    org_id: str | None = None,
+    user_id: str | None = None,
 ):
     """
     Context manager that wraps the run_crew() call in a parent OTel span.
@@ -118,20 +120,28 @@ def create_workflow_span(
         from opentelemetry import baggage, context, trace
 
         tracer = trace.get_tracer("mark1.workflow")
-        span = tracer.start_span(
-            name="test-generation-workflow",
-            attributes={
-                "workflow.id": workflow_id,
-                "workflow.query": user_query,
-                "workflow.model_provider": model_provider,
-                "workflow.model_name": model_name,
-                "workflow.library_type": library_type,
-            },
-        )
+        attrs = {
+            "workflow.id": workflow_id,
+            "workflow.query": user_query,
+            "workflow.model_provider": model_provider,
+            "workflow.model_name": model_name,
+            "workflow.library_type": library_type,
+        }
+        if org_id:
+            attrs["workflow.org_id"] = org_id
+        if user_id:
+            attrs["workflow.user_id"] = user_id
+        span = tracer.start_span(name="test-generation-workflow", attributes=attrs)
 
         # Set workflow_id as OTel Baggage — propagates to ALL child spans and
         # across service boundaries via HTTP headers (traceparent).
         ctx = baggage.set_baggage("workflow.id", workflow_id)
+        if org_id:
+            ctx = baggage.set_baggage("workflow.org_id", org_id, context=ctx)
+        # user_id stays a local span attribute (above) but is deliberately NOT
+        # put in baggage: baggage propagates via HTTP headers to every downstream
+        # service, and nothing consumes workflow.user_id there — so it would only
+        # leak a raw user identifier across the service boundary for no benefit.
         ctx = trace.set_span_in_context(span, ctx)
 
         @contextlib.contextmanager

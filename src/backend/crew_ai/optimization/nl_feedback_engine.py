@@ -473,12 +473,12 @@ class NLFeedbackEngine(LearningEngine):
                     "INSERT INTO nl_feedback_corrections "
                     "(feedback_text, category, scope, domain, url, "
                     " original_failure_category, evidence_count, anchor_query, "
-                    " source_workflow_id, created_at, last_seen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) RETURNING id",
+                    " source_workflow_id, org_id, created_at, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) RETURNING id",
                     (
                         feedback_text.strip(), category, scope,
                         domain, url, failure_category,
-                        anchor_query, workflow_id, now, now,
+                        anchor_query, workflow_id, record.org_id, now, now,
                     ),
                 )
                 new_hint_id = cursor.fetchone()["id"]
@@ -498,7 +498,7 @@ class NLFeedbackEngine(LearningEngine):
             # (the UPSERT branch) keep their original anchor unchanged —
             # single-anchor design.
             if new_hint_id is not None:
-                self._em.add_anchor("nl", new_hint_id, anchor_query)
+                self._em.add_anchor("nl", new_hint_id, anchor_query, org_id=record.org_id)
 
         except Exception as e:
             logger.warning(
@@ -507,14 +507,16 @@ class NLFeedbackEngine(LearningEngine):
 
     def get_hints(
         self, user_query: str, url: str, agent_role: str,
+        org_id: str | None = None,
     ) -> Optional[List[str]]:
         """Return formatted feedback hints for the current context, or None if none apply."""
-        hints, _ = self.get_hints_with_ids(user_query, url, agent_role)
+        hints, _ = self.get_hints_with_ids(user_query, url, agent_role, org_id=org_id)
         return hints if hints else None
 
     def get_hints_with_ids(
         self, user_query: str, url: str, agent_role: str,
         selection_trace: dict | None = None,
+        org_id: str | None = None,
     ) -> tuple[list[str], list[int]]:
         """Like get_hints() but also returns the DB ids of the selected hints.
 
@@ -539,6 +541,8 @@ class NLFeedbackEngine(LearningEngine):
 
         domain = extract_domain(url) if url else None
 
+        org_filter = " AND (org_id = ? OR is_shared = 1)" if org_id is not None else ""
+        params = (domain, url) if org_id is None else (domain, url, org_id)
         try:
             with self._em.read_conn() as conn:
                 rows = conn.execute(
@@ -548,11 +552,12 @@ class NLFeedbackEngine(LearningEngine):
                     "WHERE is_active = 1 "
                     "AND conflict_flagged = 0 "
                     f"AND ({self._SCOPE_WHERE}) "
+                    f"{org_filter}"
                     "ORDER BY last_seen DESC, "
                     "         evidence_count DESC, "
                     "         success_count DESC "
                     "LIMIT 100",
-                    (domain, url),
+                    params,
                 ).fetchall()
         except Exception as e:
             logger.warning("[LEARNING:NL] get_hints_with_ids query failed: %s", e)
@@ -574,6 +579,7 @@ class NLFeedbackEngine(LearningEngine):
         score_sink = {} if selection_trace is not None else None
         survivors = self._em.filter_by_query_similarity(
             user_query, [r["id"] for r in rows], kind="nl", score_sink=score_sink,
+            org_id=org_id,
         )
         survivor_rows = [r for r in rows if r["id"] in survivors]
         if not survivor_rows:
@@ -653,6 +659,7 @@ class NLFeedbackEngine(LearningEngine):
 
     def get_active_hints_raw(
         self, domain: Optional[str], url: Optional[str],
+        org_id: str | None = None,
     ) -> List[Dict]:
         """Return raw active, unflagged hints in scope with usage metadata.
 
@@ -661,13 +668,18 @@ class NLFeedbackEngine(LearningEngine):
         full metadata block in the conflict-detection prompt.
         Distinct from get_hints() — the LLM conflict-detection triggers need the
         raw text plus hint id to flag specific rows by id.  Returns [] (never None).
+
+        When org_id is set, only the caller's org hints plus is_shared=1 hints
+        are returned (privacy gate).
         """
         if not self._em:
             return []
         try:
+            org_filter = " AND (org_id = ? OR is_shared = 1)" if org_id is not None else ""
+            params = (domain, url) if org_id is None else (domain, url, org_id)
             return self._select_hints(
-                f"is_active = 1 AND conflict_flagged = 0 AND ({self._SCOPE_WHERE})",
-                (domain, url),
+                f"is_active = 1 AND conflict_flagged = 0 AND ({self._SCOPE_WHERE}){org_filter}",
+                params,
             )
         except Exception as e:
             logger.warning("[LEARNING:NL] get_active_hints_raw failed: %s", e)

@@ -29,6 +29,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.backend.auth.jwt_utils import is_validated_admin, require_user
+from src.backend.auth.ownership import caller_can_read
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
 
@@ -69,11 +70,23 @@ def list_history(
     q = q.strip() if q else None
 
     admin = is_validated_admin(user)
-    # user is None only when AUTH_ENFORCED is off — permissive dev scope.
-    scope_user_id = None if (admin or user is None) else user["user_id"]
+    # Platform-admin and dev escape hatch (user is None) see all orgs.
+    # Org-admin sees their whole org (no user_id narrowing within it).
+    # Org-member sees only their own rows within their org.
+    if admin or user is None:
+        scope_org_id = None
+        scope_user_id = None
+    else:
+        scope_org_id = user.get("org_id")
+        # Only widen to whole-org scope for an org_admin with a concrete org.
+        # An org_admin claim without org_id must NOT fall through to
+        # (org_id=None, user_id=None), which list_runs reads as all-org scope.
+        is_org_admin = bool(scope_org_id) and user.get("org_role") == "org_admin"
+        scope_user_id = None if is_org_admin else user["user_id"]
 
     runs, total = get_run_registry().list_runs(
-        user_id=scope_user_id, limit=limit, offset=offset, status=status, q=q
+        user_id=scope_user_id, org_id=scope_org_id,
+        limit=limit, offset=offset, status=status, q=q,
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
@@ -103,13 +116,10 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
 
     run = get_run_registry().get_run(run_id)
     admin = is_validated_admin(user)
-    is_owner = (
-        run is not None
-        and user is not None
-        and run.get("user_id") is not None
-        and run.get("user_id") == user.get("user_id")
+    allowed = run is not None and caller_can_read(
+        user, run.get("user_id"), run.get("org_id"), is_platform_admin=admin
     )
-    if run is None or not (admin or user is None or is_owner):
+    if run is None or not allowed:
         raise HTTPException(status_code=404, detail="Run not found")
 
     run["robot_code"] = resolve_robot_code(run)
