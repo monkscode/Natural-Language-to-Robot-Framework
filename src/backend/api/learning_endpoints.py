@@ -345,36 +345,44 @@ def get_hint(
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
 
-        audit_rows = conn.execute(
-            "SELECT 'hint_audit' AS source, id, action, actor, reason, "
-            "       before_value, after_value, created_at, "
-            "       NULL AS trigger_type, NULL AS workflow_id "
-            "FROM hint_audit WHERE hint_id = ?",
-            (hint_id,),
-        ).fetchall()
+        # The timeline is keyed by hint_id only — hint_audit and trigger_events
+        # carry no org_id, so they cannot be org-scoped in SQL. A shared hint can
+        # be fetched from another org via the is_shared=1 branch above; its audit
+        # trail and trigger rows would then expose the originating org's workflow
+        # ids, trigger reasons and audit actors. Surface the timeline only to
+        # platform-scope callers (scope_org is None) or the hint's own org.
+        timeline: list = []
+        if scope_org is None or row["org_id"] == scope_org:
+            audit_rows = conn.execute(
+                "SELECT 'hint_audit' AS source, id, action, actor, reason, "
+                "       before_value, after_value, created_at, "
+                "       NULL AS trigger_type, NULL AS workflow_id "
+                "FROM hint_audit WHERE hint_id = ?",
+                (hint_id,),
+            ).fetchall()
 
-        trigger_rows = conn.execute(
-            "SELECT 'trigger_events' AS source, id, "
-            "       CASE "
-            "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
-            "              @> to_jsonb(?::int) THEN 'flagged' "
-            "         ELSE 'flag_recommended_suppressed' "
-            "       END AS action, "
-            "       trigger_type AS actor, reason, "
-            "       NULL AS before_value, NULL AS after_value, created_at, "
-            "       trigger_type, workflow_id "
-            "FROM trigger_events "
-            "WHERE flagged_hint_ids IS NOT NULL "
-            "  AND flagged_hint_ids <> '[]'::jsonb "
-            "  AND flagged_hint_ids @> to_jsonb(?::int)",
-            (hint_id, hint_id),
-        ).fetchall()
+            trigger_rows = conn.execute(
+                "SELECT 'trigger_events' AS source, id, "
+                "       CASE "
+                "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
+                "              @> to_jsonb(?::int) THEN 'flagged' "
+                "         ELSE 'flag_recommended_suppressed' "
+                "       END AS action, "
+                "       trigger_type AS actor, reason, "
+                "       NULL AS before_value, NULL AS after_value, created_at, "
+                "       trigger_type, workflow_id "
+                "FROM trigger_events "
+                "WHERE flagged_hint_ids IS NOT NULL "
+                "  AND flagged_hint_ids <> '[]'::jsonb "
+                "  AND flagged_hint_ids @> to_jsonb(?::int)",
+                (hint_id, hint_id),
+            ).fetchall()
 
-        timeline = sorted(
-            [_row_to_dict(r) for r in list(audit_rows) + list(trigger_rows)],
-            key=lambda r: r["created_at"] or "",
-            reverse=True,
-        )
+            timeline = sorted(
+                [_row_to_dict(r) for r in list(audit_rows) + list(trigger_rows)],
+                key=lambda r: r["created_at"] or "",
+                reverse=True,
+            )
 
         return {"hint": _row_to_dict(row), "timeline": timeline}
     finally:

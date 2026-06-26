@@ -214,15 +214,32 @@ def test_backfill_aggregator_returns_correct_shape(_shared, monkeypatch):
     instances — the lazy `from X import fn` inside the function picks up the
     patched symbol from sys.modules at call time.
     """
-    registry, store, collector, admin, _dsn = _shared
+    registry, store, collector, _admin, _dsn = _shared
+    from types import SimpleNamespace
+
     from src.backend.core.org_backfill import backfill_data_org_ids
 
     import src.backend.core.run_registry as rr_mod
     import src.backend.core.trace_store as ts_mod
     import src.backend.core.workflow_metrics as wm_mod
+    import src.backend.crew_ai.optimization.learning_registry as lr_mod
+    import src.backend.crew_ai.optimization.keyword_vector_store as kv_mod
     monkeypatch.setattr(rr_mod, "get_run_registry", lambda: registry)
     monkeypatch.setattr(ts_mod, "get_trace_store", lambda: store)
     monkeypatch.setattr(wm_mod, "get_workflow_metrics_collector", lambda: collector)
+
+    # Without these two patches the aggregator reaches the process-wide learning
+    # singletons (the real DB), so the learning / kw_query_patterns branches fall
+    # into their except-guards instead of being exercised. Stub them so the test
+    # is hermetic and the two keys are produced by the real aggregation path.
+    fake_fb = SimpleNamespace(
+        execution_memory=SimpleNamespace(backfill_org_ids=lambda home: {"anchors_nl": 0})
+    )
+    monkeypatch.setattr(lr_mod, "get_feedback_loop", lambda: fake_fb)
+    monkeypatch.setattr(
+        kv_mod, "get_keyword_vector_store",
+        lambda: SimpleNamespace(backfill_org_ids=lambda home: 0),
+    )
 
     counts = backfill_data_org_ids()
     assert isinstance(counts, dict)

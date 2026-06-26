@@ -779,11 +779,17 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
 
             collector = get_workflow_metrics_collector()
-            _run_org_id: str | None = None
-            try:
-                _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
-            except Exception:
-                pass
+            # Prefer the org_id threaded into this call. The run row may not be
+            # persisted yet on the stream_generate_only / stream_generate_and_run
+            # paths, so get_run_owner() can return (None, None) and would persist
+            # an authenticated user's metrics as unscoped. Fall back to the
+            # registry only when no org_id was threaded through.
+            _run_org_id: str | None = org_id
+            if _run_org_id is None:
+                try:
+                    _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+                except Exception as e:
+                    logging.debug("[RUN_REGISTRY] org lookup for metrics failed: %s", e)
             collector.record_workflow(unified_metrics, org_id=_run_org_id)
 
             _safe_delete_temp_metrics(workflow_id)

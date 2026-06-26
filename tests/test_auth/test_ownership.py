@@ -58,11 +58,26 @@ def test_dashboard_viewer_platform_admin():
 
 
 def test_dashboard_viewer_org_admin():
-    assert is_dashboard_viewer({"org_role": "org_admin"}, is_platform_admin=False) is True
+    assert is_dashboard_viewer(
+        {"org_role": "org_admin", "org_id": "org-A"}, is_platform_admin=False
+    ) is True
+
+
+def test_dashboard_viewer_org_admin_without_org_id_denied():
+    # Fail closed: an org_admin claim with no resolvable org_id would let callers
+    # derive scope_org=None and run unscoped/all-org dashboard queries.
+    assert is_dashboard_viewer(
+        {"org_role": "org_admin", "org_id": None}, is_platform_admin=False
+    ) is False
+    assert is_dashboard_viewer(
+        {"org_role": "org_admin"}, is_platform_admin=False
+    ) is False
 
 
 def test_dashboard_viewer_member_denied():
-    assert is_dashboard_viewer({"org_role": "org_member"}, is_platform_admin=False) is False
+    assert is_dashboard_viewer(
+        {"org_role": "org_member", "org_id": "org-A"}, is_platform_admin=False
+    ) is False
 
 
 def test_dashboard_viewer_none_caller_allowed():

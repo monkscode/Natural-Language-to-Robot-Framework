@@ -271,7 +271,7 @@ class AntiPatternEngine(LearningEngine):
         return None
 
     def _find_matching_anti_patterns(self, user_query: str,
-                                     domain: str = None,
+                                     domain: str | None = None,
                                      org_id: str | None = None) -> List[dict]:
         """
         Find anti-patterns that might apply to this query.

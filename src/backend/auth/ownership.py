@@ -32,7 +32,11 @@ def caller_can_read(
     3. caller has no org_id claim (legacy token) -> allow iff owner_id == caller.user_id.
     4. org-aware: org_id must equal the caller's org_id; within that org, allow iff
        caller is org_admin OR owner_id == caller.user_id.
-    Unattributed resources (owner_id None) are never allowed to non-admins.
+
+    An org_admin sees every row in their own org, including unattributed
+    (owner_id None) legacy rows — the org_id match is the tenant boundary. A
+    plain member never reads an unattributed row: their branch requires
+    owner_id == caller.user_id, which a None owner can never satisfy.
     """
     if caller is None:
         return True
@@ -58,7 +62,11 @@ def is_dashboard_viewer(caller: dict | None, *, is_platform_admin: bool) -> bool
     True for: platform-admin (all orgs), the AUTH_ENFORCED-off escape hatch
     (caller None), or an org-admin (their own org). Plain org-members get no
     aggregate dashboard — they see only their own runs via caller_can_read.
+
+    An org_admin claim without a resolvable org_id is rejected: callers derive
+    the dashboard's org scope from caller["org_id"], so a None org_id would
+    silently widen the query to every org. Fail closed at the gate instead.
     """
     if caller is None or is_platform_admin:
         return True
-    return caller.get("org_role") == "org_admin"
+    return caller.get("org_role") == "org_admin" and caller.get("org_id") is not None

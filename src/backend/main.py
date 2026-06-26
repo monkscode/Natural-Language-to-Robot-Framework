@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import logging
 import uuid
@@ -62,9 +63,21 @@ app.add_middleware(
 )
 
 
+# A client-supplied X-Request-ID is logged into every line and echoed back, so
+# it must be a bounded, safe token — never raw header bytes. Anything outside
+# this charset/length (newlines for log forging, control chars, overlong values)
+# is dropped in favour of a fresh UUID.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
 @app.middleware("http")
 async def request_id_middleware(request, call_next):
-    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    incoming_request_id = request.headers.get("X-Request-ID")
+    request_id = (
+        incoming_request_id
+        if incoming_request_id and _REQUEST_ID_RE.fullmatch(incoming_request_id)
+        else uuid.uuid4().hex
+    )
     structlog.contextvars.bind_contextvars(request_id=request_id)
     try:
         response = await call_next(request)
@@ -153,11 +166,21 @@ async def startup_event():
     except Exception as e:
         logging.warning(f"[AUTH] platform-admin seed skipped: {e}")
 
-    # Backfill org_id on pre-tenancy data rows (Phase 1b). Best-effort: must
-    # never block boot even if any individual table's backfill fails.
+    # Backfill org_id on pre-tenancy data rows (Phase 1b/1c) — a one-time
+    # migration, gated so it does NOT re-run every boot. Re-running is not just
+    # wasteful: after a hint is promoted cross-org it would re-attribute the
+    # promoted hint's anchor and silently un-share it. Best-effort: a DB outage
+    # leaves the marker unset so the next boot retries.
     try:
+        from src.backend.auth.migration_state import (
+            is_migration_done, mark_migration_done,
+        )
         from src.backend.core.org_backfill import backfill_data_org_ids
-        backfill_data_org_ids()
+        if is_migration_done("data_org_id_backfill"):
+            logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
+        else:
+            backfill_data_org_ids()
+            mark_migration_done("data_org_id_backfill")
     except Exception as e:
         logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
 

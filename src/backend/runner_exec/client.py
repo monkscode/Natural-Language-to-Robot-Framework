@@ -30,7 +30,17 @@ _QUICK_READ_TIMEOUT_S = 30           # status/cleanup/ensure-image (rebuild uses
 # container's own wait cap so raising TEST_EXECUTION_TIMEOUT can never make the
 # HTTP read time out first (which would wrongly trip the breaker). +60s margin
 # lets run_test_in_container's own timeout fire and return a structured error.
-_TEST_EXECUTION_TIMEOUT_S = int(os.getenv("TEST_EXECUTION_TIMEOUT", "1800"))
+try:
+    _TEST_EXECUTION_TIMEOUT_S = int(os.getenv("TEST_EXECUTION_TIMEOUT", "1800"))
+except ValueError:
+    # A non-integer env value must not raise at import time — runner_exec.client
+    # is imported by workflow_service/dryrun_service/endpoints, so a bad value
+    # would take down the whole API. Fall back to the default and warn.
+    logger.warning(
+        "Invalid TEST_EXECUTION_TIMEOUT=%r; defaulting to 1800s",
+        os.getenv("TEST_EXECUTION_TIMEOUT"),
+    )
+    _TEST_EXECUTION_TIMEOUT_S = 1800
 _EXECUTE_READ_TIMEOUT_S = _TEST_EXECUTION_TIMEOUT_S + 60
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_S = 30

@@ -107,7 +107,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str = None, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
+def run_crew(query: str, model_provider: str, model_name: str, library_type: str | None = None, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 

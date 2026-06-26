@@ -60,6 +60,16 @@ def init_org_db() -> None:
         conn.commit()
     logger.info("[AUTH] organizations + org_members tables ready")
 
-    # Backfill pre-tenancy users — idempotent, no-op once every user has an org.
-    from src.backend.auth.org_repository import OrgRepository
-    OrgRepository().backfill_personal_orgs()
+    # Provision personal orgs for pre-tenancy users — a one-time migration, gated
+    # so it does not re-scan users on every boot. All user-creation paths
+    # (register, Google callback) provision an org inline, so no org-less user
+    # appears after this runs. Best-effort: an unset marker retries next boot.
+    from src.backend.auth.migration_state import (
+        is_migration_done, mark_migration_done,
+    )
+    if is_migration_done("personal_org_backfill"):
+        logger.info("[AUTH] personal-org backfill already applied; skipping")
+    else:
+        from src.backend.auth.org_repository import OrgRepository
+        OrgRepository().backfill_personal_orgs()
+        mark_migration_done("personal_org_backfill")

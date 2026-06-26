@@ -78,7 +78,11 @@ def list_history(
         scope_user_id = None
     else:
         scope_org_id = user.get("org_id")
-        scope_user_id = None if user.get("org_role") == "org_admin" else user["user_id"]
+        # Only widen to whole-org scope for an org_admin with a concrete org.
+        # An org_admin claim without org_id must NOT fall through to
+        # (org_id=None, user_id=None), which list_runs reads as all-org scope.
+        is_org_admin = bool(scope_org_id) and user.get("org_role") == "org_admin"
+        scope_user_id = None if is_org_admin else user["user_id"]
 
     runs, total = get_run_registry().list_runs(
         user_id=scope_user_id, org_id=scope_org_id,

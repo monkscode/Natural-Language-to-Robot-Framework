@@ -76,3 +76,20 @@ def test_malformed_success_body_surfaces_as_unavailable():
     with patch.object(rc.requests, "post", return_value=bad):
         with pytest.raises(rc.RunnerExecUnavailable):
             rc.execute("abc123", "test.robot")
+
+
+def test_malformed_timeout_env_falls_back_without_raising(monkeypatch):
+    # A non-integer TEST_EXECUTION_TIMEOUT must not raise at import time:
+    # runner_exec.client is imported by workflow_service/dryrun_service/endpoints,
+    # so a bad value would take down the whole API. It falls back to 1800s.
+    import importlib
+
+    monkeypatch.setenv("TEST_EXECUTION_TIMEOUT", "not-an-int")
+    try:
+        reloaded = importlib.reload(rc)
+        assert reloaded._TEST_EXECUTION_TIMEOUT_S == 1800
+        assert reloaded._EXECUTE_READ_TIMEOUT_S == 1860
+    finally:
+        # Restore the module to its default-env state for the rest of the suite.
+        monkeypatch.delenv("TEST_EXECUTION_TIMEOUT", raising=False)
+        importlib.reload(rc)
