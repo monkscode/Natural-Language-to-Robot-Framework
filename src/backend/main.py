@@ -1,6 +1,9 @@
 import os
+import re
 import sys
 import logging
+import uuid
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -35,9 +38,19 @@ from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
+from src.backend.auth.org_db import init_org_db
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
+
+# Per-IP rate limiting on the auth endpoints (slowapi). The limiter + 429 handler
+# are registered on the app; the limits themselves are applied per-route in
+# auth/endpoints.py. See auth/rate_limit.py.
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from src.backend.auth.rate_limit import limiter as _auth_limiter
+app.state.limiter = _auth_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS — restricted to the SPA origins (dev Vite :5173, nginx container :3000,
 # fastapi :5000). allow_credentials stays on for the Google OAuth state cookie.
@@ -48,6 +61,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# A client-supplied X-Request-ID is logged into every line and echoed back, so
+# it must be a bounded, safe token — never raw header bytes. Anything outside
+# this charset/length (newlines for log forging, control chars, overlong values)
+# is dropped in favour of a fresh UUID.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    incoming_request_id = request.headers.get("X-Request-ID")
+    request_id = (
+        incoming_request_id
+        if incoming_request_id and _REQUEST_ID_RE.fullmatch(incoming_request_id)
+        else uuid.uuid4().hex
+    )
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        structlog.contextvars.unbind_contextvars("request_id")
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 
 # --- Global Exception Handler ---
 from src.backend.api.error_handlers import register_error_handlers
@@ -65,15 +103,15 @@ app.include_router(api_router)
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
 
-# Admin-only dashboards (the React Learning/Metrics pages) — JWT + admin role.
+# Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
-app.include_router(workflow_metrics_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(workflow_metrics_router, prefix="/api")
 
 from src.backend.api.trace_endpoints import router as trace_router
-app.include_router(trace_router, prefix="/api", dependencies=[Depends(require_admin)])
+app.include_router(trace_router, prefix="/api")  # routes self-guard via is_dashboard_viewer
 
 from src.backend.api.learning_endpoints import router as learning_router
-app.include_router(learning_router, prefix="/api/learning", dependencies=[Depends(require_admin)])
+app.include_router(learning_router, prefix="/api/learning")  # routes self-guard
 
 # --- Health Check Endpoints ---
 from src.backend.api.health import health_check, api_health_check
@@ -93,14 +131,12 @@ app.include_router(report_router)
 
 @app.on_event("startup")
 async def startup_event():
-    # Refuse to run with a missing/placeholder JWT secret — every minted token
-    # would be forgeable. .env.example documents how to generate a real one.
-    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
-        raise RuntimeError(
-            "JWT_SECRET_KEY is unset or still the placeholder. Generate one with "
-            "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and "
-            "set it in src/backend/.env (or the container environment)."
-        )
+    # Enforce the auth security posture before serving any request: a missing or
+    # placeholder JWT secret is always fatal, and a production deployment
+    # (ENVIRONMENT=production) additionally requires a strong secret and Secure
+    # cookies. Development only warns. See auth/security_posture.py.
+    from src.backend.auth.security_posture import validate_security_posture
+    validate_security_posture()
 
     # Construct the artifact store once at startup: this ensures the staging
     # root exists and fails fast on an invalid backend config (e.g.
@@ -115,10 +151,36 @@ async def startup_event():
     # block the rest of the app from starting (auth fails until Postgres is up).
     try:
         init_auth_db()
+        # Org tenancy lives in the same identity domain and must init AFTER users
+        # (org_members references users). Same best-effort guard.
+        init_org_db()
     except Exception as e:
         logging.warning(
-            f"[AUTH] init_auth_db failed — auth unavailable until Postgres is reachable: {e}"
+            f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
+            f"Postgres is reachable: {e}"
         )
+
+    try:
+        from src.backend.auth.admin_seed import seed_platform_admins
+        seed_platform_admins()
+    except Exception as e:
+        logging.warning(f"[AUTH] platform-admin seed skipped: {e}")
+
+    # Backfill org_id on pre-tenancy data rows (Phase 1b/1c) — a one-time
+    # migration, gated so it does NOT re-run every boot. Re-running is not just
+    # wasteful: after a hint is promoted cross-org it would re-attribute the
+    # promoted hint's anchor and silently un-share it. run_migration_once holds
+    # an advisory lock so concurrent boots can't both run it. Best-effort: a DB
+    # outage leaves the marker unset so the next boot retries.
+    try:
+        from src.backend.auth.migration_state import run_migration_once
+        from src.backend.core.org_backfill import backfill_data_org_ids
+        if run_migration_once("data_org_id_backfill", backfill_data_org_ids):
+            logging.info("[ORG_BACKFILL] data org_id backfill applied")
+        else:
+            logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
+    except Exception as e:
+        logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:
@@ -196,6 +258,13 @@ async def shutdown_event():
         close_keyword_vector_store()
     except Exception as e:
         logging.warning(f"Keyword store shutdown error: {e}")
+
+    # Close the trace-dashboard read pool (no-op if never created).
+    try:
+        from src.backend.api.trace_endpoints import close_read_pool
+        close_read_pool()
+    except Exception as e:
+        logging.warning(f"[TRACE_STORE] read pool shutdown error: {e}")
 
     # Close the auth Postgres pool.
     try:

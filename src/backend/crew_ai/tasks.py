@@ -231,17 +231,15 @@ def identification_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
 
 
 class RobotTasks:
-    def __init__(self, library_context=None, workflow_id: str = "", hint_context: dict = None):
+    def __init__(self, library_context=None, hint_context: dict = None):
         """
         Initialize Robot Framework tasks.
 
         Args:
             library_context: LibraryContext instance (optional, for dynamic library knowledge)
-            workflow_id: Unique workflow identifier for metrics tracking
             hint_context: Dict mapping agent role -> hint text for task-level injection
         """
         self.library_context = library_context
-        self.workflow_id = workflow_id
         self._hint_context = hint_context or {}
 
         # Cache static context - computed once on initialization
@@ -419,15 +417,12 @@ Generated Test
         )
 
     def identify_elements_task(self, agent) -> Task:
-        workflow_id_instruction = f"\n**WORKFLOW ID**: {self.workflow_id}\n⚠️ CRITICAL: You MUST include 'workflow_id': '{self.workflow_id}' in the Action Input dictionary for metrics tracking.\n\n" if self.workflow_id else ""
-        
         return Task(
             description=(
                 "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
                 "Your mission: Find locators for ALL elements in ONE batch operation.\n"
                 "The context will be a JSON object from 'plan_steps_task' with: {\"steps\": [array of test steps]}.\n"
                 "Extract the test steps from the 'steps' key.\n\n"
-                f"{workflow_id_instruction}"
                 "ℹ️ All elements will be found using batch_browser_automation.\n\n"
                 "--- MANDATORY BATCH WORKFLOW ---\n"
                 "\n"
@@ -477,7 +472,7 @@ Generated Test
                 "\n"
                 "```\n"
                 "Action: batch_browser_automation\n"
-                f"Action Input: {{\"elements\": [{{\"id\": \"elem_1\", \"description\": \"username field\", \"action\": \"input\", \"value\": \"bob@example.com\"}}, {{\"id\": \"elem_2\", \"description\": \"password field\", \"action\": \"input\", \"value\": \"password123\"}}, {{\"id\": \"elem_3\", \"description\": \"login button\", \"action\": \"click\"}}], \"url\": \"https://example.com/login\", \"user_query\": \"Login with username and password\", \"workflow_id\": \"{self.workflow_id}\"}}\n"
+                f"Action Input: {{\"elements\": [{{\"id\": \"elem_1\", \"description\": \"username field\", \"action\": \"input\", \"value\": \"bob@example.com\"}}, {{\"id\": \"elem_2\", \"description\": \"password field\", \"action\": \"input\", \"value\": \"password123\"}}, {{\"id\": \"elem_3\", \"description\": \"login button\", \"action\": \"click\"}}], \"url\": \"https://example.com/login\", \"user_query\": \"Login with username and password\"}}\n"
                 "```\n"
                 "\n"
                 "**STEP 6: RECEIVE BATCH RESPONSE**\n"

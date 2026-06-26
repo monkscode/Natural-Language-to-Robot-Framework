@@ -72,7 +72,11 @@ def client(trace_dsn):
     def _test_get_db():
         return pg_compat.connect(trace_dsn, autocommit=True)
 
-    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_get_db):
+    # These tests exercise query/filter behaviour, not authorization (org
+    # scoping is covered by test_traces_org_scope). Pin platform scope so the
+    # dashboard gate doesn't reject the anonymous TestClient calls.
+    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_test_get_db), \
+         patch("src.backend.api.trace_endpoints.authorize_dashboard_read", return_value=None):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 
@@ -85,7 +89,8 @@ def client_no_db():
     def _raise():
         raise FileNotFoundError("Trace table not found. No traces have been recorded yet.")
 
-    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_raise):
+    with patch("src.backend.api.trace_endpoints._get_db", side_effect=_raise), \
+         patch("src.backend.api.trace_endpoints.authorize_dashboard_read", return_value=None):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 

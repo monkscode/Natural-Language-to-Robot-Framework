@@ -42,6 +42,7 @@ from src.backend.api.learning_endpoints import (
     _require_feedback_loop,
     router,
 )
+from src.backend.auth.jwt_utils import require_admin as _require_admin
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,12 @@ def learning_client(db_em):
     app = FastAPI()
     app.include_router(router, prefix="")
     app.dependency_overrides[_require_feedback_loop] = lambda: mock_fb
+    # After Task 12, routes self-guard via require_admin / require_user; override
+    # require_admin here so the coverage tests (which call without tokens) keep
+    # exercising the business logic rather than hitting 401/403.
+    app.dependency_overrides[_require_admin] = lambda: {
+        "role": "admin", "email": "admin@test.local"
+    }
 
     with patch("src.backend.api.learning_endpoints._admin_conn", side_effect=_test_admin_conn):
         with TestClient(app) as client:
@@ -939,13 +946,27 @@ class TestPart2DashboardPanels:
 # GET /health
 # ---------------------------------------------------------------------------
 
+def _health_app_with_admin_bypass():
+    """Return a bare FastAPI app with the learning router and require_admin bypassed.
+
+    After Task 12, /health is gated by require_admin.  Health-specific tests
+    that call without a token (testing DISABLED/FAILED/unknown logic) must
+    override the dep so the auth layer doesn't shadow the business logic.
+    """
+    app = FastAPI()
+    app.include_router(router, prefix="")
+    app.dependency_overrides[_require_admin] = lambda: {
+        "role": "admin", "email": "admin@test.local"
+    }
+    return app
+
+
 class TestGetLearningHealth:
     def test_health_ok_when_fb_returns_ok(self, learning_client):
         _, _, mock_fb, _ = learning_client
         mock_fb.get_health_status.return_value = "OK"
 
-        app = FastAPI()
-        app.include_router(router, prefix="")
+        app = _health_app_with_admin_bypass()
         with patch("src.backend.api.learning_endpoints.get_feedback_loop", return_value=mock_fb):
             with TestClient(app) as c:
                 resp = c.get("/health")
@@ -953,8 +974,7 @@ class TestGetLearningHealth:
         assert resp.json()["status"] == "OK"
 
     def test_health_disabled_when_fb_none_and_opt_disabled(self):
-        app = FastAPI()
-        app.include_router(router, prefix="")
+        app = _health_app_with_admin_bypass()
         with patch("src.backend.api.learning_endpoints.get_feedback_loop", return_value=None), \
              patch("src.backend.core.config.settings") as mock_s:
             mock_s.OPTIMIZATION_ENABLED = False
@@ -964,8 +984,7 @@ class TestGetLearningHealth:
         assert resp.json()["status"] == "DISABLED"
 
     def test_health_failed_when_fb_none_and_opt_enabled(self):
-        app = FastAPI()
-        app.include_router(router, prefix="")
+        app = _health_app_with_admin_bypass()
         with patch("src.backend.api.learning_endpoints.get_feedback_loop", return_value=None), \
              patch("src.backend.core.config.settings") as mock_s:
             mock_s.OPTIMIZATION_ENABLED = True
@@ -978,8 +997,7 @@ class TestGetLearningHealth:
         mock_fb = MagicMock()
         mock_fb.get_health_status.side_effect = RuntimeError("crash")
 
-        app = FastAPI()
-        app.include_router(router, prefix="")
+        app = _health_app_with_admin_bypass()
         with patch("src.backend.api.learning_endpoints.get_feedback_loop", return_value=mock_fb):
             with TestClient(app) as c:
                 resp = c.get("/health")

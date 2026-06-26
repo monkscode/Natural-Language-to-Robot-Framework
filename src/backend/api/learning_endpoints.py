@@ -30,7 +30,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from src.backend.auth.jwt_utils import require_user
+from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
+from src.backend.auth.ownership import is_dashboard_viewer
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization import pg_compat
 from src.backend.core.config import settings
@@ -207,11 +208,22 @@ def list_hints(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     fb=Depends(_require_feedback_loop),
+    user: dict | None = Depends(require_user),
 ):
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+
     conn = fb.execution_memory.get_read_connection()
     try:
         conditions = []
         params: list = []
+
+        # Org scope: non-platform-admins see only their org's hints + shared hints.
+        if scope_org is not None:
+            conditions.append("(org_id = ? OR is_shared = 1)")
+            params.append(scope_org)
 
         if status == "flagged":
             conditions.append("is_active=1 AND conflict_flagged=1")
@@ -308,45 +320,69 @@ def list_hints(
 # ---------------------------------------------------------------------------
 
 @router.get("/hints/{hint_id}")
-def get_hint(hint_id: int, fb=Depends(_require_feedback_loop)):
+def get_hint(
+    hint_id: int,
+    fb=Depends(_require_feedback_loop),
+    user: dict | None = Depends(require_user),
+):
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+
     conn = fb.execution_memory.get_read_connection()
     try:
-        row = conn.execute(
-            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
-        ).fetchone()
+        if scope_org is not None:
+            row = conn.execute(
+                "SELECT * FROM nl_feedback_corrections "
+                "WHERE id = ? AND (org_id = ? OR is_shared = 1)",
+                (hint_id, scope_org),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
+            ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
 
-        audit_rows = conn.execute(
-            "SELECT 'hint_audit' AS source, id, action, actor, reason, "
-            "       before_value, after_value, created_at, "
-            "       NULL AS trigger_type, NULL AS workflow_id "
-            "FROM hint_audit WHERE hint_id = ?",
-            (hint_id,),
-        ).fetchall()
+        # The timeline is keyed by hint_id only — hint_audit and trigger_events
+        # carry no org_id, so they cannot be org-scoped in SQL. A shared hint can
+        # be fetched from another org via the is_shared=1 branch above; its audit
+        # trail and trigger rows would then expose the originating org's workflow
+        # ids, trigger reasons and audit actors. Surface the timeline only to
+        # platform-scope callers (scope_org is None) or the hint's own org.
+        timeline: list = []
+        if scope_org is None or row["org_id"] == scope_org:
+            audit_rows = conn.execute(
+                "SELECT 'hint_audit' AS source, id, action, actor, reason, "
+                "       before_value, after_value, created_at, "
+                "       NULL AS trigger_type, NULL AS workflow_id "
+                "FROM hint_audit WHERE hint_id = ?",
+                (hint_id,),
+            ).fetchall()
 
-        trigger_rows = conn.execute(
-            "SELECT 'trigger_events' AS source, id, "
-            "       CASE "
-            "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
-            "              @> to_jsonb(?::int) THEN 'flagged' "
-            "         ELSE 'flag_recommended_suppressed' "
-            "       END AS action, "
-            "       trigger_type AS actor, reason, "
-            "       NULL AS before_value, NULL AS after_value, created_at, "
-            "       trigger_type, workflow_id "
-            "FROM trigger_events "
-            "WHERE flagged_hint_ids IS NOT NULL "
-            "  AND flagged_hint_ids <> '[]'::jsonb "
-            "  AND flagged_hint_ids @> to_jsonb(?::int)",
-            (hint_id, hint_id),
-        ).fetchall()
+            trigger_rows = conn.execute(
+                "SELECT 'trigger_events' AS source, id, "
+                "       CASE "
+                "         WHEN COALESCE(actually_flagged_hint_ids, flagged_hint_ids) "
+                "              @> to_jsonb(?::int) THEN 'flagged' "
+                "         ELSE 'flag_recommended_suppressed' "
+                "       END AS action, "
+                "       trigger_type AS actor, reason, "
+                "       NULL AS before_value, NULL AS after_value, created_at, "
+                "       trigger_type, workflow_id "
+                "FROM trigger_events "
+                "WHERE flagged_hint_ids IS NOT NULL "
+                "  AND flagged_hint_ids <> '[]'::jsonb "
+                "  AND flagged_hint_ids @> to_jsonb(?::int)",
+                (hint_id, hint_id),
+            ).fetchall()
 
-        timeline = sorted(
-            [_row_to_dict(r) for r in list(audit_rows) + list(trigger_rows)],
-            key=lambda r: r["created_at"] or "",
-            reverse=True,
-        )
+            timeline = sorted(
+                [_row_to_dict(r) for r in list(audit_rows) + list(trigger_rows)],
+                key=lambda r: r["created_at"] or "",
+                reverse=True,
+            )
 
         return {"hint": _row_to_dict(row), "timeline": timeline}
     finally:
@@ -362,6 +398,7 @@ def create_hint(
     request: HintCreateRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -451,8 +488,8 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin')",
+                " created_via, is_shared) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', 1)",
                 (
                     text, category, request.scope, request.domain, request.url,
                     request.original_failure_category, anchor, now, now,
@@ -525,6 +562,7 @@ def patch_hint(
     request: HintPatchRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     if request.feedback_text is not None:
         raise HTTPException(
@@ -625,6 +663,7 @@ def unflag_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -667,6 +706,76 @@ def unflag_hint(
 
 
 # ---------------------------------------------------------------------------
+# 5b. POST /hints/{id}/promote  (platform-admin cross-org promotion)
+# ---------------------------------------------------------------------------
+
+@router.post("/hints/{hint_id}/promote")
+def promote_hint(
+    hint_id: int,
+    request: ActorReasonRequest,
+    fb=Depends(_require_feedback_loop),
+    admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
+):
+    """Platform-admin promotes a hint to be shared across all orgs (is_shared=1).
+
+    Atomically:
+      1. Sets nl_feedback_corrections.is_shared = 1
+      2. Nulls learning_anchors.org_id for kind='nl', record_id=hint_id
+         (privacy-load-bearing: Task 5 retrieval filter is
+         `org_id = ? OR org_id IS NULL` — without this null the promoted hint
+         surfaces as a similarity candidate but is dropped at the anchor stage
+         for every other org)
+      3. Writes a hint_audit 'promote' row
+    Idempotent: already-shared hint returns {"changed": False} without re-writing.
+    404 if the hint does not exist.
+    """
+    if not request.actor.strip():
+        raise HTTPException(status_code=400, detail="actor is required")
+    actor = _audit_actor(admin, request.actor)
+    conn = _admin_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        # Null the anchor org so the similarity filter matches the promoted hint
+        # for every org (Task 5 filter: org_id = ? OR org_id IS NULL). This runs
+        # on BOTH paths: anchor nulling is the load-bearing half of "shared", so
+        # an already-shared hint whose anchor is still org-scoped (a half-applied
+        # promotion) is repaired here instead of being stranded by the early
+        # return below.
+        conn.execute(
+            "UPDATE learning_anchors SET org_id = NULL "
+            "WHERE kind = 'nl' AND record_id = ?",
+            (hint_id,),
+        )
+        if row["is_shared"] == 1:
+            conn.commit()
+            return {"hint": _row_to_dict(row), "changed": False, "note": "already shared"}
+        conn.execute(
+            "UPDATE nl_feedback_corrections SET is_shared = 1 WHERE id = ?", (hint_id,)
+        )
+        _write_hint_audit(
+            conn, hint_id, "promote", actor, request.reason,
+            {"is_shared": 0}, {"is_shared": 1},
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
+        ).fetchone()
+        return {"hint": _row_to_dict(updated), "changed": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("[LEARNING API] promote_hint %d failed: %s", hint_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to promote hint")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # 6. POST /hints/{id}/retract
 # ---------------------------------------------------------------------------
 
@@ -676,6 +785,7 @@ def retract_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -725,6 +835,7 @@ def reactivate_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -780,6 +891,7 @@ def list_triggers(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
 ):
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -833,7 +945,11 @@ def list_triggers(
 # ---------------------------------------------------------------------------
 
 @router.get("/triggers/{trigger_id}")
-def get_trigger(trigger_id: int, fb=Depends(_require_feedback_loop)):
+def get_trigger(
+    trigger_id: int,
+    fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
+):
     conn = fb.execution_memory.get_read_connection()
     try:
         row = conn.execute(
@@ -883,15 +999,25 @@ def list_runs(
     status: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
     fb=Depends(_require_feedback_loop),
+    user: dict | None = Depends(require_user),
 ):
     """Recent test-case runs (execution_records), newest first — the entry point
     for the per-run learning journey. Optional status + user_query-substring
     filters. A failed run has no trigger event, so this (not /triggers) is how a
     failure is found.
     """
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+
     conn = fb.execution_memory.get_read_connection()
     try:
         where, params = [], []
+        # Org scope: non-platform-admins see only their org's execution records.
+        if scope_org is not None:
+            where.append("org_id = ?")
+            params.append(scope_org)
         if status:
             where.append("test_status = ?")
             params.append(status)
@@ -924,7 +1050,11 @@ def list_runs(
 
 
 @router.get("/runs/{workflow_id}")
-def get_run(workflow_id: str, fb=Depends(_require_feedback_loop)):
+def get_run(
+    workflow_id: str,
+    fb=Depends(_require_feedback_loop),
+    user: dict | None = Depends(require_user),
+):
     """Everything the learning system recorded for one test-case run: the
     execution record, its metrics, the per-hint selection->attribution funnel
     (hint_workflow_trace LEFT JOIN the hint row for current text/state), and any
@@ -932,11 +1062,35 @@ def get_run(workflow_id: str, fb=Depends(_require_feedback_loop)):
     deduped run keeps a standalone funnel with run=null (no FK). 404 only when
     nothing at all exists for this workflow_id.
     """
+    admin = is_validated_admin(user)
+    if not is_dashboard_viewer(user, is_platform_admin=admin):
+        raise HTTPException(status_code=403, detail="Org-admin access required")
+    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+
     conn = fb.execution_memory.get_read_connection()
     try:
-        run = _row_to_dict(conn.execute(
-            "SELECT * FROM execution_records WHERE workflow_id = ?", (workflow_id,)
-        ).fetchone())
+        if scope_org is not None:
+            run = _row_to_dict(conn.execute(
+                "SELECT * FROM execution_records WHERE workflow_id = ? AND org_id = ?",
+                (workflow_id, scope_org),
+            ).fetchone())
+        else:
+            run = _row_to_dict(conn.execute(
+                "SELECT * FROM execution_records WHERE workflow_id = ?", (workflow_id,)
+            ).fetchone())
+        # SCOPED EARLY EXIT: if this org has no execution record for this workflow_id,
+        # return 404 immediately — before running metrics/trace/triggers queries.
+        # hint_workflow_trace and learning_metrics have no org_id column, so they
+        # cannot be org-scoped; serving them to a scoped caller whose execution_record
+        # lookup returned None would leak another org's trace rows (D3 violation).
+        # Platform-admins (scope_org=None) are unaffected: they keep the existing
+        # deduped-run behaviour (a trace-only run with no execution record still
+        # returns 200 for platform admins).
+        if scope_org is not None and run is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No run data for workflow {workflow_id}",
+            )
         metrics = _row_to_dict(conn.execute(
             "SELECT * FROM learning_metrics WHERE workflow_id = ? "
             "ORDER BY timestamp DESC LIMIT 1", (workflow_id,)
@@ -1029,7 +1183,10 @@ def _compute_failure_associations(conn, hint_ids: list) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/stats")
-def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
+def get_dashboard_stats(
+    fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
+):
     conn = fb.execution_memory.get_read_connection()
     try:
         cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -1299,7 +1456,9 @@ def get_dashboard_stats(fb=Depends(_require_feedback_loop)):
 # ---------------------------------------------------------------------------
 
 @router.get("/health")
-def get_learning_health():
+def get_learning_health(
+    _platform: dict = Depends(require_admin),
+):
     """Learning-system health status — OK / DEGRADED / FAILED / DISABLED.
 
     Deliberately NOT gated by _require_feedback_loop: that dependency returns
@@ -1839,7 +1998,10 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
 # ---------------------------------------------------------------------------
 
 @router.post("/review-hints/start")
-def start_hint_review(fb=Depends(_require_feedback_loop)):
+def start_hint_review(
+    fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
+):
     # DB check replaces in-memory lock: restart-safe and consistent with DB state.
     # _run_hint_review updates the session to 'pending_review' or 'failed', which
     # clears the pending_llm row and allows future reviews to start.
@@ -1872,7 +2034,10 @@ def start_hint_review(fb=Depends(_require_feedback_loop)):
 
 
 @router.get("/review-hints/sessions")
-def list_review_sessions(fb=Depends(_require_feedback_loop)):
+def list_review_sessions(
+    fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
+):
     conn = fb.execution_memory.get_read_connection()
     try:
         rows = conn.execute(
@@ -1890,7 +2055,11 @@ def list_review_sessions(fb=Depends(_require_feedback_loop)):
 
 
 @router.get("/review-hints/sessions/{session_id}")
-def get_review_session(session_id: int, fb=Depends(_require_feedback_loop)):
+def get_review_session(
+    session_id: int,
+    fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
+):
     conn = fb.execution_memory.get_read_connection()
     try:
         session = conn.execute(
@@ -1928,6 +2097,7 @@ def decide_recommendation(
     rec_id: int,
     request: ReviewDecisionRequest,
     fb=Depends(_require_feedback_loop),
+    _platform: dict = Depends(require_admin),
 ):
     if request.admin_decision not in {"approved", "rejected"}:
         raise HTTPException(
@@ -1980,6 +2150,7 @@ def apply_review_session(
     session_id: int,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
+    _platform: dict = Depends(require_admin),
 ):
     conn = _admin_conn()
     try:

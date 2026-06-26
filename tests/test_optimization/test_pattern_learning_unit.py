@@ -126,7 +126,7 @@ class TestGetRelevantKeywords:
     def test_search_caps_top_k_at_pattern_count(self):
         store = _store_with([{"keywords": ["Click"], "distance": 0.1}], count=2)
         QueryPatternMatcher(store).get_relevant_keywords("q")
-        store.search_patterns.assert_called_once_with("q", top_k=2)
+        store.search_patterns.assert_called_once_with("q", top_k=2, org_id=None)
 
     def test_store_failure_degrades_to_empty(self):
         store = MagicMock()

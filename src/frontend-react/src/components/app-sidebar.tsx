@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   Sidebar,
@@ -15,6 +16,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -26,6 +28,8 @@ import {
   LayoutGrid,
   Settings,
   LogOut,
+  MonitorSmartphone,
+  Loader2,
   ChevronsUpDown,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
@@ -63,7 +67,8 @@ const NAV_WORKSPACE: NavItem[] = [
 /* ── User footer with context menu ── */
 function NavUser() {
   const navigate = useNavigate()
-  const { user, logout } = useAuth()
+  const { user, logout, logoutAll } = useAuth()
+  const [signingOutAll, setSigningOutAll] = useState(false)
 
   const label = user?.display_name?.trim() || user?.email || 'User'
   const initials = label
@@ -76,6 +81,16 @@ function NavUser() {
   function handleLogout() {
     logout()
     navigate('/login', { replace: true })
+  }
+
+  async function handleLogoutAll() {
+    setSigningOutAll(true)
+    try {
+      await logoutAll()
+      navigate('/login', { replace: true })
+    } finally {
+      setSigningOutAll(false)
+    }
   }
 
   return (
@@ -100,7 +115,7 @@ function NavUser() {
             </SidebarMenuButton>
           </DropdownMenuTrigger>
 
-          <DropdownMenuContent side="top" align="end" sideOffset={4} className="w-56 rounded-lg">
+          <DropdownMenuContent side="top" align="end" sideOffset={4} className="w-64 rounded-lg">
             <div className="px-2 py-1.5 border-b mb-1">
               <p className="text-sm font-semibold">{label}</p>
               <p className="text-xs text-muted-foreground">{user?.email}</p>
@@ -108,11 +123,39 @@ function NavUser() {
                 {user?.role}
               </p>
             </div>
+
+            <DropdownMenuItem className="gap-2 py-2" onSelect={handleLogout}>
+              <LogOut className="h-4 w-4 text-muted-foreground" />
+              <div className="grid leading-tight">
+                <span className="text-sm">Sign out</span>
+                <span className="text-[11px] text-muted-foreground">This device only</span>
+              </div>
+            </DropdownMenuItem>
+
+            <DropdownMenuSeparator />
+
             <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onSelect={handleLogout}
+              className="gap-2 py-2 text-destructive focus:text-destructive"
+              disabled={signingOutAll}
+              onSelect={e => {
+                // Keep the menu open while the revoke request is in flight.
+                e.preventDefault()
+                handleLogoutAll()
+              }}
             >
-              <LogOut className="mr-2 h-4 w-4" /> Sign out
+              {signingOutAll ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <MonitorSmartphone className="h-4 w-4" />
+              )}
+              <div className="grid leading-tight">
+                <span className="text-sm">
+                  {signingOutAll ? 'Signing out…' : 'Sign out of all devices'}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  Ends every active session
+                </span>
+              </div>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

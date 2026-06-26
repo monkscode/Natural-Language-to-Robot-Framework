@@ -106,7 +106,8 @@ class AntiPatternEngine(LearningEngine):
 
         # Check for existing anti-pattern with same category + similar query
         existing = self._find_similar_anti_pattern(
-            record.failure_category, record.user_query
+            record.failure_category, record.user_query,
+            org_id=getattr(record, 'org_id', None),
         )
 
         new_anti_id = None
@@ -125,8 +126,8 @@ class AntiPatternEngine(LearningEngine):
             cursor = self._em._writer_conn.execute("""
                 INSERT INTO anti_patterns
                 (failure_category, query_pattern, bad_code_snippet, error_message,
-                 domain, score, evidence_count, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
+                 domain, org_id, score, evidence_count, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
                 RETURNING id
             """, (
                 record.failure_category,
@@ -135,6 +136,7 @@ class AntiPatternEngine(LearningEngine):
                                             getattr(record, 'failed_keyword', None)),
                 record.error_message,
                 getattr(record, 'domain', None),
+                getattr(record, 'org_id', None),
                 initial_score,
             ))
             new_anti_id = cursor.fetchone()["id"]
@@ -148,10 +150,12 @@ class AntiPatternEngine(LearningEngine):
         # reconcile. Reinforced anti-patterns (the merge branch above) keep
         # their original anchor unchanged — single-anchor design.
         if new_anti_id is not None:
-            self._em.add_anchor("anti", new_anti_id, record.user_query)
+            self._em.add_anchor("anti", new_anti_id, record.user_query,
+                                org_id=getattr(record, 'org_id', None))
 
     def get_hints(self, user_query: str, url: str,
-                  agent_role: str) -> Optional[List[str]]:
+                  agent_role: str,
+                  org_id: str | None = None) -> Optional[List[str]]:
         """
         Return anti-pattern warnings relevant to the query.
 
@@ -170,7 +174,7 @@ class AntiPatternEngine(LearningEngine):
         domain = extract_domain(url) if url else None
 
         # Query anti-patterns relevant to this query
-        warnings = self._find_matching_anti_patterns(user_query, domain)
+        warnings = self._find_matching_anti_patterns(user_query, domain, org_id=org_id)
 
         if not warnings:
             return None
@@ -229,7 +233,8 @@ class AntiPatternEngine(LearningEngine):
     # -------------------------------------------------------------------
 
     def _find_similar_anti_pattern(self, category: str,
-                                   user_query: str) -> Optional[dict]:
+                                   user_query: str,
+                                   org_id: str | None = None) -> Optional[dict]:
         """
         Find existing anti-pattern matching category + similar query.
 
@@ -239,14 +244,23 @@ class AntiPatternEngine(LearningEngine):
 
         Called from learn() which already runs on the writer thread, so we
         read from _writer_conn to stay within the same transaction context.
+        When org_id is set, only anti-patterns belonging to that org are
+        considered so cross-org failures never merge.
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        rows = self._em._writer_conn.execute(
-            "SELECT * FROM anti_patterns WHERE failure_category = ? "
-            "ORDER BY score DESC",
-            (category,)
-        ).fetchall()
+        if org_id is not None:
+            rows = self._em._writer_conn.execute(
+                "SELECT * FROM anti_patterns WHERE failure_category = ? "
+                "AND org_id = ? ORDER BY score DESC",
+                (category, org_id),
+            ).fetchall()
+        else:
+            rows = self._em._writer_conn.execute(
+                "SELECT * FROM anti_patterns WHERE failure_category = ? "
+                "ORDER BY score DESC",
+                (category,),
+            ).fetchall()
 
         query_words = set(user_query.lower().split())
         for row in rows:
@@ -257,7 +271,8 @@ class AntiPatternEngine(LearningEngine):
         return None
 
     def _find_matching_anti_patterns(self, user_query: str,
-                                     domain: str = None) -> List[dict]:
+                                     domain: str | None = None,
+                                     org_id: str | None = None) -> List[dict]:
         """
         Find anti-patterns that might apply to this query.
 
@@ -289,6 +304,10 @@ class AntiPatternEngine(LearningEngine):
             sql += " AND (domain = ? OR domain IS NULL)"
             params.append(domain)
 
+        if org_id is not None:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+
         sql += " ORDER BY score DESC LIMIT 10"
 
         with self._em.read_conn() as conn:
@@ -301,6 +320,7 @@ class AntiPatternEngine(LearningEngine):
         # user_query (kind="anti").
         survivors = self._em.filter_by_query_similarity(
             user_query, [row["id"] for row in rows], kind="anti",
+            org_id=org_id,
         )
         return [dict(row) for row in rows if row["id"] in survivors]
 
@@ -326,10 +346,12 @@ class AntiPatternEngine(LearningEngine):
             return
 
         domain = getattr(record, 'domain', None)
+        org_id = getattr(record, 'org_id', None)
 
-        # Find unresolved anti-patterns for similar queries
+        # Find unresolved anti-patterns for similar queries — scoped to this
+        # org so we never write one org's robot_code into another org's row.
         anti_patterns = self._find_matching_anti_patterns(
-            record.user_query, domain
+            record.user_query, domain, org_id=org_id
         )
 
         updated = False

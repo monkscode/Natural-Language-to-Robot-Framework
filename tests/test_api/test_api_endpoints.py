@@ -36,9 +36,7 @@ def api_client():
          patch("src.backend.api.endpoints.stream_generate_only") as mock_gen, \
          patch("src.backend.api.endpoints.stream_execute_only") as mock_exec, \
          patch("src.backend.api.endpoints.stream_generate_and_run") as mock_gen_run, \
-         patch("src.backend.api.endpoints.get_docker_client"), \
-         patch("src.backend.api.endpoints.rebuild_image") as mock_rebuild, \
-         patch("src.backend.api.endpoints.get_docker_status") as mock_docker_status, \
+         patch("src.backend.api.endpoints.runner_exec_client") as mock_rc, \
          patch("src.backend.api.endpoints.get_feedback_loop") as mock_feedback:
 
         mock_settings.MODEL_PROVIDER = "gemini"
@@ -50,8 +48,8 @@ def api_client():
         mock_gen.return_value = iter(["data: test\n\n"])
         mock_exec.return_value = iter(["data: executing\n\n"])
         mock_gen_run.return_value = iter(["data: running\n\n"])
-        mock_docker_status.return_value = {"status": "ready", "image": "robot-test-runner:latest"}
-        mock_rebuild.return_value = {"status": "success", "message": "Docker image 'robot-test-runner:latest' rebuilt successfully."}
+        mock_rc.docker_status.return_value = {"status": "ready", "image": "robot-test-runner:latest"}
+        mock_rc.rebuild_image.return_value = {"status": "success", "message": "Docker image 'robot-test-runner:latest' rebuilt successfully."}
 
         mock_feedback_instance = MagicMock()
         mock_feedback_instance.enabled = True
@@ -110,6 +108,25 @@ class TestDockerEndpoints:
         client, _, _ = api_client
         resp = client.post("/rebuild-docker-image", headers=_admin_headers())
         assert resp.status_code == 200
+
+    def test_docker_status_reports_unavailable_when_executor_down(self, api_client):
+        """GET /docker-status returns docker_available=False when executor is down."""
+        from src.backend.runner_exec.client import RunnerExecUnavailable
+        client, _, _ = api_client
+        with patch("src.backend.api.endpoints.runner_exec_client") as mock_rc:
+            mock_rc.docker_status.side_effect = RunnerExecUnavailable("down")
+            r = client.get("/docker-status")
+        assert r.status_code == 200
+        assert r.json()["docker_available"] is False
+
+    def test_rebuild_proxies_to_executor(self, api_client):
+        """POST /rebuild-docker-image proxies call through runner_exec_client."""
+        client, _, _ = api_client
+        with patch("src.backend.api.endpoints.runner_exec_client") as mock_rc:
+            mock_rc.rebuild_image.return_value = {"status": "success"}
+            r = client.post("/rebuild-docker-image", headers=_admin_headers())
+        assert r.status_code == 200
+        assert r.json()["status"] == "success"
 
 
 class TestFeedbackEndpoints:

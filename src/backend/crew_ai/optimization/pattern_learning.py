@@ -105,13 +105,15 @@ class QueryPatternMatcher:
         logger.debug(f"Extracted {len(keywords)} keywords from code: {keywords}")
         return list(keywords)
 
-    def learn_from_execution(self, user_query: str, generated_code: str):
+    def learn_from_execution(self, user_query: str, generated_code: str,
+                             org_id: str | None = None):
         """
         Extract keywords from generated code and store pattern in ChromaDB.
 
         Args:
             user_query: Original user query
             generated_code: Successfully generated Robot Framework code (passed tests only)
+            org_id: Organisation that owns this pattern (None = unscoped / legacy)
         """
         try:
             used_keywords = self._extract_keywords_from_code(generated_code)
@@ -121,7 +123,8 @@ class QueryPatternMatcher:
                 return
 
             if self.chroma_store:
-                pattern_id = self.chroma_store.add_pattern(user_query, used_keywords)
+                pattern_id = self.chroma_store.add_pattern(
+                    user_query, used_keywords, org_id=org_id)
                 if pattern_id:
                     logger.debug(f"Stored query pattern: {pattern_id}")
 
@@ -130,13 +133,15 @@ class QueryPatternMatcher:
         except Exception as e:
             logger.error(f"Failed to learn from execution: {e}", exc_info=True)
 
-    def get_relevant_keywords(self, user_query: str, confidence_threshold: float = 0.7) -> List[str]:
+    def get_relevant_keywords(self, user_query: str, confidence_threshold: float = 0.7,
+                              org_id: str | None = None) -> List[str]:
         """
         Predict relevant keywords based on similar past queries using ChromaDB.
 
         Args:
             user_query: New user query
             confidence_threshold: Minimum similarity score (0.0-1.0)
+            org_id: Organisation scope for the pattern search (None = unscoped / legacy)
 
         Returns:
             List of predicted keyword names (empty if confidence too low)
@@ -151,7 +156,8 @@ class QueryPatternMatcher:
                 logger.debug("No query patterns yet")
                 return []
 
-            results = self.chroma_store.search_patterns(user_query, top_k=min(5, count))
+            results = self.chroma_store.search_patterns(
+                user_query, top_k=min(5, count), org_id=org_id)
             if not results:
                 return []
 

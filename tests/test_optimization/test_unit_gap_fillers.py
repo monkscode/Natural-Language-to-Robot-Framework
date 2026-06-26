@@ -411,6 +411,7 @@ def test_ape_learn_empty_robot_code(in_memory_db):
         robot_code = ""
         failed_keyword = None
         domain = None
+        org_id = None
 
     ape.learn(FakeRecord())
     # Should work -- may store with empty snippet

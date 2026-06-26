@@ -175,8 +175,9 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             run_count = self._writer_conn.execute(
                 "SELECT COUNT(*) AS n FROM execution_records "
                 "WHERE LOWER(TRIM(user_query)) = ? "
-                "AND COALESCE(domain, '') = ? AND test_status = ?",
-                (normalized_query, domain, record.test_status),
+                "AND COALESCE(domain, '') = ? AND test_status = ? "
+                "AND COALESCE(org_id, '') = ?",
+                (normalized_query, domain, record.test_status, record.org_id or ""),
             ).fetchone()["n"]
 
             if run_count >= self.DEDUPLICATION_THRESHOLD:
@@ -191,6 +192,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         SELECT id FROM execution_records
                         WHERE LOWER(TRIM(user_query)) = ?
                         AND COALESCE(domain, '') = ? AND test_status = ?
+                        AND COALESCE(org_id, '') = ?
                         ORDER BY timestamp DESC LIMIT 1
                     )
                     """,
@@ -199,6 +201,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         record.timestamp.isoformat(), record.model_version,
                         record.total_llm_calls, record.total_cost,
                         normalized_query, domain, record.test_status,
+                        record.org_id or "",
                     ),
                 )
             else:
@@ -209,8 +212,8 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         robot_code, code_structure, test_status, execution_exit_code,
                         execution_duration_ms, failure_category, failed_keyword,
                         error_message, total_llm_calls, total_cost, injected_hint_ids,
-                        model_version, hint_attribution_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        model_version, org_id, hint_attribution_done
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         record.workflow_id, record.timestamp.isoformat(),
@@ -220,6 +223,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         record.failure_category, record.failed_keyword,
                         record.error_message, record.total_llm_calls, record.total_cost,
                         record.injected_hint_ids, record.model_version,
+                        record.org_id,
                     ),
                 )
             self._writer_conn.commit()
@@ -475,21 +479,22 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if not record.user_query:
             return
         vec = self._embed(record.user_query)
-        if vec is None:
+        if not vec:
             return
         try:
             self._writer_conn.execute(
                 "INSERT INTO execution_embeddings "
                 "(workflow_id, user_query, test_status, failure_category, domain, "
-                " code_structure, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                " code_structure, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (workflow_id) DO UPDATE SET "
                 "  user_query = EXCLUDED.user_query, test_status = EXCLUDED.test_status, "
                 "  failure_category = EXCLUDED.failure_category, domain = EXCLUDED.domain, "
-                "  code_structure = EXCLUDED.code_structure, embedding = EXCLUDED.embedding",
+                "  code_structure = EXCLUDED.code_structure, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
                 (record.workflow_id, record.user_query, record.test_status,
                  record.failure_category or "", record.domain or "",
-                 record.code_structure or "", vec),
+                 record.code_structure or "", vec, record.org_id),
             )
             self._writer_conn.commit()
         except Exception as e:
@@ -499,18 +504,22 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             except Exception:
                 pass
 
-    def find_similar_executions(self, user_query: str, top_k: int = 5) -> list:
+    def find_similar_executions(self, user_query: str, top_k: int = 5,
+                                org_id: str | None = None) -> list:
         vec = self._embed(user_query)
-        if vec is None:
+        if not vec:
             return []
+        where = "WHERE org_id = ? " if org_id is not None else ""
+        params = ([vec, org_id, vec, top_k] if org_id is not None
+                  else [vec, vec, top_k])
         try:
             with self.read_conn() as conn:
                 rows = conn.execute(
                     "SELECT workflow_id, test_status, failure_category, domain, "
                     "       code_structure, 1 - (embedding <=> ?::vector) AS similarity "
-                    "FROM execution_embeddings "
+                    f"FROM execution_embeddings {where}"
                     "ORDER BY embedding <=> ?::vector LIMIT ?",
-                    (vec, vec, top_k),
+                    params,
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
@@ -520,19 +529,21 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     def store_embedding(self, text: str, metadata: dict) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store_embedding")
         vec = self._embed(text)
-        if vec is None:
+        if not vec:
             return
         wid = metadata.get("workflow_id") or str(id(text))
         try:
             self._writer_conn.execute(
                 "INSERT INTO execution_embeddings "
                 "(workflow_id, user_query, test_status, failure_category, domain, "
-                " code_structure, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?::vector) "
+                " code_structure, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (workflow_id) DO UPDATE SET "
-                "  user_query = EXCLUDED.user_query, embedding = EXCLUDED.embedding",
+                "  user_query = EXCLUDED.user_query, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
                 (wid, text, metadata.get("test_status"), metadata.get("failure_category"),
-                 metadata.get("domain"), metadata.get("code_structure"), vec),
+                 metadata.get("domain"), metadata.get("code_structure"), vec,
+                 metadata.get("org_id")),
             )
             self._writer_conn.commit()
         except Exception as e:
@@ -546,12 +557,13 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         return self.find_similar_executions(query, top_k)
 
     def filter_by_query_similarity(self, user_query, candidate_ids, kind,
-                                   threshold=0.55, score_sink=None) -> set:
+                                   threshold=0.55, score_sink=None,
+                                   org_id: str | None = None) -> set:
         if not user_query or not user_query.strip() or not candidate_ids:
             return set()
         _mark(score_sink, candidate_ids, "no_anchor")
         qvec = self._embed(user_query)
-        if qvec is None:  # embedder disabled / failed → fail-open
+        if not qvec:  # embedder disabled / failed / empty → fail-open
             _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
         try:
@@ -559,11 +571,20 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 total = conn.execute(
                     "SELECT COUNT(*) AS n FROM learning_anchors"
                 ).fetchone()["n"]
-                rows = conn.execute(
-                    "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
-                    "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
-                    (qvec, kind, list(candidate_ids)),
-                ).fetchall()
+                if org_id is not None:
+                    rows = conn.execute(
+                        "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
+                        "FROM learning_anchors "
+                        "WHERE kind = ? AND record_id = ANY(?) "
+                        "  AND (org_id = ? OR org_id IS NULL)",
+                        (qvec, kind, list(candidate_ids), org_id),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
+                        "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
+                        (qvec, kind, list(candidate_ids)),
+                    ).fetchall()
         except Exception as e:
             logger.warning("[LEARNING] similarity filter query failed (fail-open): %s", e)
             _mark(score_sink, candidate_ids, "fail_open")
@@ -587,22 +608,24 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 score_sink[rid] = {"sim": sim, "outcome": "similarity_below"}
         return survivors
 
-    def add_anchor(self, kind: str, record_id: int, anchor_query: str) -> None:
+    def add_anchor(self, kind: str, record_id: int, anchor_query: str,
+                   org_id: str | None = None) -> None:
         _assert_writer_thread("PostgresExecutionMemory.add_anchor")
         if not anchor_query or not anchor_query.strip():
             return
         vec = self._embed(anchor_query)
-        if vec is None:
+        if not vec:
             return
         try:
             self._writer_conn.execute(
                 "INSERT INTO learning_anchors "
-                "(anchor_key, kind, record_id, anchor_query, embedding) "
-                "VALUES (?, ?, ?, ?, ?::vector) "
+                "(anchor_key, kind, record_id, anchor_query, embedding, org_id) "
+                "VALUES (?, ?, ?, ?, ?::vector, ?) "
                 "ON CONFLICT (anchor_key) DO UPDATE SET "
                 "  kind = EXCLUDED.kind, record_id = EXCLUDED.record_id, "
-                "  anchor_query = EXCLUDED.anchor_query, embedding = EXCLUDED.embedding",
-                (f"{kind}:{record_id}", kind, record_id, anchor_query, vec),
+                "  anchor_query = EXCLUDED.anchor_query, embedding = EXCLUDED.embedding, "
+                "  org_id = EXCLUDED.org_id",
+                (f"{kind}:{record_id}", kind, record_id, anchor_query, vec, org_id),
             )
             self._writer_conn.commit()
         except Exception as e:
@@ -663,6 +686,73 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             return {"ran_at": ran_at, "checked": checked, "missing_count": len(missing)}
         still_missing = sum(1 for d in missing if d[0] not in now_present)
         return {"ran_at": ran_at, "checked": checked, "missing_count": still_missing}
+
+    # -------------------------------------------------------------------
+    # Startup backfill — attribute pre-tenancy org_ids
+    # -------------------------------------------------------------------
+
+    def _backfill_conn(self):
+        """Short-lived dedicated connection for org_id backfill (NOT the writer conn).
+
+        Opens a new pg_compat connection on self.dsn (which already carries the
+        correct search_path in the DSN options), so the backfill UPDATEs land on
+        the same schema as the rest of the store — including the isolated test
+        schema (learning_test) during tests.
+        """
+        return pg_compat.connect(self.dsn, autocommit=True)
+
+    def _exec_backfill(self, conn, sql: str, params=()) -> int:
+        """Execute one backfill UPDATE and return rowcount; log + return 0 on error."""
+        try:
+            cur = conn.execute(sql, params)
+            return cur.rowcount or 0
+        except Exception as e:
+            logger.warning("[LEARNING] backfill stmt failed: %s", e)
+            return 0
+
+    def backfill_org_ids(self, home_org_id: str | None) -> dict[str, int]:
+        """Attribute pre-tenancy learning rows. Idempotent.
+
+        Owner-linked rows map via test_runs.org_id (JOIN on workflow_id /
+        source_workflow_id). Ownerless rows that are still NULL after the
+        owner-linked pass fall back to home_org_id — the oldest personal org —
+        so the current single tenant keeps the learning it already had.
+
+        Runs on a dedicated short-lived connection (NOT the writer conn) with
+        autocommit=True so each UPDATE commits independently. finally: conn.close().
+        """
+        out: dict[str, int] = {}
+        conn = self._backfill_conn()
+        try:
+            owner_linked = {
+                "execution_records":
+                    "UPDATE execution_records e SET org_id = r.org_id FROM test_runs r "
+                    "WHERE e.org_id IS NULL AND e.workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                "execution_embeddings":
+                    "UPDATE execution_embeddings x SET org_id = r.org_id FROM test_runs r "
+                    "WHERE x.org_id IS NULL AND x.workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                "nl_feedback_corrections":
+                    "UPDATE nl_feedback_corrections n SET org_id = r.org_id FROM test_runs r "
+                    "WHERE n.org_id IS NULL AND n.source_workflow_id = r.run_id AND r.org_id IS NOT NULL",
+                # nl anchors can be owner-linked because nl_feedback_corrections was
+                # just attributed above. anti-pattern anchors have no equivalent path
+                # (anti_patterns carry no workflow->owner link), so both the
+                # anti_patterns rows and their anchors are attributed by the home
+                # fallback below — there is deliberately no "anchors_anti" entry here.
+                "anchors_nl":
+                    "UPDATE learning_anchors a SET org_id = n.org_id FROM nl_feedback_corrections n "
+                    "WHERE a.org_id IS NULL AND a.kind = 'nl' AND a.record_id = n.id AND n.org_id IS NOT NULL",
+            }
+            for key, sql in owner_linked.items():
+                out[key] = self._exec_backfill(conn, sql)
+            if home_org_id:
+                for tbl in ("execution_records", "execution_embeddings",
+                            "nl_feedback_corrections", "anti_patterns", "learning_anchors"):
+                    out[f"{tbl}_home"] = self._exec_backfill(
+                        conn, f"UPDATE {tbl} SET org_id = ? WHERE org_id IS NULL", (home_org_id,))
+        finally:
+            conn.close()
+        return out
 
     def close(self):
         try:

@@ -124,6 +124,7 @@ _PG_TABLES = (
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
     "trigger_events", "hint_audit", "hint_review_sessions", "hint_review_recommendations",
     "hint_review_pages", "hint_workflow_trace", "learning_anchors", "execution_embeddings",
+    "kw_query_patterns",
 )
 
 
@@ -149,6 +150,17 @@ def _pg_test_em(_pg_admin):
     dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_PG_TEST_SCHEMA},public"
     em = PostgresExecutionMemory(dsn=dsn)
     em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
+    # Apply keyword-store DDL so kw_query_patterns exists in the test schema.
+    # KeywordVectorStore is mocked for all tests so its __init__ (which normally
+    # runs _SCHEMA_DDL) never fires — we apply it here instead.
+    import psycopg
+    from src.backend.crew_ai.optimization import keyword_vector_store as _kvs
+    _kv_raw = psycopg.connect(dsn, autocommit=True)
+    try:
+        for _ddl in _kvs._SCHEMA_DDL:
+            _kv_raw.execute(_ddl)
+    finally:
+        _kv_raw.close()
     yield em
     em.close()
     _pg_admin.execute(f"DROP SCHEMA IF EXISTS {_PG_TEST_SCHEMA} CASCADE")
@@ -211,4 +223,55 @@ def tmp_dir():
     path = tempfile.mkdtemp(prefix="test_optimization_")
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Embedder fixtures (session-scoped, shared by pgvector and org-isolation tests)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def _shared_embedder():
+    """Load the fastembed model once for the whole session (~80 MB ONNX)."""
+    from fastembed import TextEmbedding
+    from src.backend.crew_ai.optimization.postgres_execution_memory import EMBED_MODEL
+    return TextEmbedding(model_name=EMBED_MODEL)
+
+
+@pytest.fixture
+def em_vec(in_memory_em, _shared_embedder):
+    """in_memory_em with the real fastembed embedder ENABLED (pgvector path)."""
+    in_memory_em._chroma_client = _shared_embedder
+    in_memory_em._chroma_failed_at = None
+    in_memory_em._chroma_last_error = None
+    return in_memory_em
+
+
+@pytest.fixture
+def seed_hint(em_vec):
+    """Seed one nl_feedback_corrections hint (+ its anchor) for retrieval tests.
+
+    Uses em_vec (embedder enabled) so add_anchor writes a real pgvector row and
+    filter_by_query_similarity does genuine similarity lookup rather than
+    failing-open. Shared hints (is_shared=1) use an org-less anchor (org_id=None)
+    so they match any calling org; private hints use the owner org's anchor.
+    """
+    import uuid
+
+    def _seed(*, text, domain, anchor, org_id, is_shared=0):
+        wid = str(uuid.uuid4())
+        cur = em_vec._writer_conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(feedback_text, category, scope, domain, url, evidence_count, "
+            " anchor_query, source_workflow_id, org_id, is_shared, created_at, last_seen) "
+            "VALUES (?, 'locator', 'domain', ?, NULL, 5, ?, ?, ?, ?, "
+            " datetime('now'), datetime('now')) RETURNING id",
+            (text, domain, anchor, wid, org_id, is_shared),
+        )
+        hid = cur.fetchone()["id"]
+        em_vec._writer_conn.commit()
+        # Shared hints store an org-less anchor so they match every org.
+        em_vec.add_anchor("nl", hid, anchor, org_id=(None if is_shared else org_id))
+        return hid
+
+    return _seed
 

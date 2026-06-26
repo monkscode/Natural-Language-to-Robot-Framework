@@ -884,6 +884,7 @@ class FeedbackLoop:
         hint_tokens: int = 0,
         injected_hint_ids: Optional[str] = None,
         was_holdout: bool = False,
+        org_id: str | None = None,
     ) -> None:
         """
         Main entry point — called from workflow_service.py after execution.
@@ -987,6 +988,7 @@ class FeedbackLoop:
                 ),
                 injected_hint_ids=injected_hint_ids,
                 model_version=model_version,
+                org_id=org_id,
             )
 
             # Step 3: Store via write queue (non-blocking)
@@ -1002,7 +1004,7 @@ class FeedbackLoop:
             if test_status == "passed" and self.pattern_learner is not None:
                 self.write_queue.submit(
                     self.pattern_learner.learn_from_execution,
-                    user_query, robot_code,
+                    user_query, robot_code, record.org_id,
                 )
 
             # Step 5: Record learning metrics (non-blocking)
@@ -1181,6 +1183,7 @@ class FeedbackLoop:
                     url=record.url,
                     feedback_text=feedback_text,
                     injected_hint_ids=record.injected_hint_ids,
+                    org_id=record.org_id,
                     prompt_builder=lambda active_hints: _build_conflict_prompt_with_feedback(
                         robot_code=record.robot_code,
                         feedback_text=feedback_text,

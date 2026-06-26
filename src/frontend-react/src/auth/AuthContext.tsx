@@ -26,6 +26,7 @@ interface AuthState {
   signup: (email: string, password: string, displayName: string) => Promise<void>
   loginWithToken: (token: string) => Promise<void>
   logout: () => void
+  logoutAll: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthState | undefined>(undefined)
@@ -91,6 +92,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
+  // Revoke every token for this account (this device and any other) by bumping
+  // the server-side token_version, then clear the local session. The POST must
+  // run while the token is still present (it identifies whose tokens to revoke),
+  // so await it BEFORE clearing.
+  async function logoutAll() {
+    await api('/auth/logout-all', { method: 'POST' }).catch(() => {})
+    clearToken()
+    setUser(null)
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -102,6 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signup,
         loginWithToken,
         logout,
+        logoutAll,
       }}
     >
       {children}

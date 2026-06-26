@@ -176,7 +176,7 @@ class TestFireConflictDetectionLegacyNoneBranch:
             prompt_builder=lambda hints: "prompt",
         )
 
-        fb.nl_engine.get_active_hints_raw.assert_called_once_with("example.com", "https://example.com")
+        fb.nl_engine.get_active_hints_raw.assert_called_once_with("example.com", "https://example.com", org_id=None)
         # LLM was called (hints were non-empty)
         mock_llm.assert_called_once()
 

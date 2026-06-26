@@ -159,3 +159,9 @@ class TestSettingsValidators:
     def test_observability_backend_rejects_invalid(self):
         with pytest.raises(ValidationError):
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
+
+
+def test_runner_exec_url_default():
+    from src.backend.core.config import Settings
+    s = Settings()
+    assert s.RUNNER_EXEC_URL == "http://localhost:4998"

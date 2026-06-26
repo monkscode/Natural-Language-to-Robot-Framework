@@ -6,11 +6,15 @@ header. Three dependencies guard endpoints:
 
 - get_current_user  — STRICT: always requires a valid token (used by /auth/me).
                       Stateless (no DB) — /auth/me re-reads the row itself.
-- require_user       — requires a valid token. Stateless (no DB; hot path).
-                       settings.AUTH_ENFORCED=False is an escape hatch for
-                       local API-only debugging: token-less requests pass
-                       through (returns the user if a token is present, None
-                       if absent).
+- require_user       — requires a valid token (unless AUTH_ENFORCED is off). A
+                       PRESENT token is re-validated against the users table per
+                       request, so a revoked token (logout-all / password change)
+                       is rejected immediately on every authenticated route, not
+                       only on /auth/me and the admin routes. Fails closed when
+                       the auth store is unreachable. settings.AUTH_ENFORCED=False
+                       is an escape hatch for local API-only debugging: token-less
+                       requests pass through (returns the user if a token is
+                       present, None if absent).
 - require_admin      — always strict: valid token + role=='admin' re-validated
                        against the users table per request (revocation and
                        role changes apply immediately). The escape hatch does
@@ -57,6 +61,12 @@ def create_access_token(user: dict) -> str:
         "email": user.get("email", ""),
         "role": user.get("role", "user"),
         "name": user.get("display_name", ""),
+        "org_id": user.get("org_id"),
+        "org_role": user.get("org_role"),
+        # token_version: bumped in the DB to revoke all prior tokens (logout-all
+        # / compromise). Re-checked against current DB state on every
+        # authenticated request (require_user / require_admin / report access).
+        "tv": user.get("token_version", 0),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -76,6 +86,9 @@ def decode_token(token: str) -> dict:
         "email": payload.get("email", ""),
         "role": payload.get("role", "user"),
         "name": payload.get("name", ""),
+        "org_id": payload.get("org_id"),
+        "org_role": payload.get("org_role"),
+        "token_version": payload.get("tv", 0),
     }
 
 
@@ -97,13 +110,52 @@ def get_current_user(
     return user
 
 
+def _revalidate_active_user(user: dict) -> dict:
+    """Re-read the caller's users row and enforce that the token is still valid
+    against current DB state: the row exists, is active, and its token_version
+    matches the token's (revoked by logout-all / password change otherwise).
+
+    Returns the fresh row. Raises 401 for a revoked/inactive/unknown identity and
+    503 when the auth store is unreachable — never admits on error (fail closed).
+    Shared by require_user (hot path), require_admin, and authorize_report_access
+    so the revocation check is identical everywhere.
+    """
+    try:
+        row = _admin_repo.get_by_id(user["user_id"])
+    except psycopg.DataError:
+        # sub is not a valid UUID — not an identity we ever minted.
+        raise HTTPException(401, "Invalid token", headers=_UNAUTH_HEADERS)
+    except Exception as exc:
+        logger.warning("[AUTH] user re-validation unavailable: %s", exc)
+        raise HTTPException(503, "Authentication store unavailable")
+    if row is None or not row.get("is_active"):
+        raise HTTPException(401, "User not found or inactive", headers=_UNAUTH_HEADERS)
+    if row.get("token_version", 0) != user.get("token_version", 0):
+        raise HTTPException(401, "Token revoked", headers=_UNAUTH_HEADERS)
+    return row
+
+
 def require_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> dict | None:
-    """Requires a valid token unless settings.AUTH_ENFORCED is disabled."""
+    """Requires a valid token unless settings.AUTH_ENFORCED is disabled.
+
+    A token-less request returns None (or 401 when AUTH_ENFORCED). A PRESENT
+    token is always re-validated against the users table so a revoked token is
+    rejected immediately on every authenticated route — not just /auth/me and
+    the admin paths. One indexed PK SELECT per request via the pool; these routes
+    already do DB work (history/learning/traces) or run an LLM + a container
+    (generate/execute), so the lookup is negligible. Fails closed (503) if the
+    auth store is unreachable.
+    """
     user = _decode_to_user(credentials)
-    if settings.AUTH_ENFORCED and user is None:
-        raise HTTPException(401, "Not authenticated", headers=_UNAUTH_HEADERS)
+    if user is None:
+        if settings.AUTH_ENFORCED:
+            raise HTTPException(401, "Not authenticated", headers=_UNAUTH_HEADERS)
+        return None
+    # Re-validate against the DB (raises on revoked/inactive/store-down). The
+    # admin decision stays with is_validated_admin, which re-reads independently.
+    _revalidate_active_user(user)
     return user
 
 
@@ -119,7 +171,9 @@ def is_validated_admin(user: dict | None) -> bool:
     except Exception as exc:
         logger.warning("[AUTH] admin re-validation unavailable: %s", exc)
         return False
-    return bool(row and row.get("is_active") and row.get("role") == "admin")
+    if not row or row.get("token_version", 0) != user.get("token_version", 0):
+        return False  # revoked token — fail closed
+    return bool(row.get("is_active") and row.get("role") == "admin")
 
 
 # --------------------------------------------------------------------------
@@ -171,19 +225,31 @@ def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
             {"detail": exc.detail}, status_code=exc.status_code, headers=_UNAUTH_HEADERS
         )
 
-    if is_validated_admin(user):
-        return None
-
+    # Admin claim is re-validated against the users table (role + active +
+    # token_version). is_validated_admin already enforces revocation for admins;
+    # for a non-admin we must still confirm the token was not revoked before it
+    # grants owner access — otherwise a logout-all'd token could still open the
+    # owner's reports (which record typed credentials).
+    admin = is_validated_admin(user)
+    if not admin:
+        try:
+            _revalidate_active_user(user)
+        except HTTPException as exc:
+            return JSONResponse(
+                {"detail": exc.detail}, status_code=exc.status_code,
+                headers=_UNAUTH_HEADERS,
+            )
     try:
         # Lazy import: jwt_utils loads during early app wiring; the registry
         # opens a DB pool on first use and must not do so at import time.
         from src.backend.core.run_registry import get_run_registry
-        owner = get_run_registry().get_owner(run_id)
+        owner_id, org_id = get_run_registry().get_run_owner(run_id)
     except Exception as exc:
         logger.warning("[AUTH] report ownership lookup unavailable: %s", exc)
-        owner = None  # fail closed
+        owner_id, org_id = None, None  # fail closed
 
-    if owner is not None and owner == user.get("user_id"):
+    from src.backend.auth.ownership import caller_can_read
+    if caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
         return None
     return JSONResponse(
         {"detail": "You do not have access to this report"}, status_code=403
@@ -196,10 +262,9 @@ def require_admin(
     """Admin guard: valid token + role=='admin' **re-read from the DB**. The
     AUTH_ENFORCED escape hatch does NOT apply — admin routes are never open.
 
-    Unlike require_user (stateless, on the hot generate path), admin access is
-    re-validated against the users table on every request: deactivating or
-    demoting an admin takes effect immediately instead of riding out the
-    token's remaining lifetime — and a promotion is picked up without
+    Admin access is re-validated against the users table on every request:
+    deactivating or demoting an admin takes effect immediately instead of riding
+    out the token's remaining lifetime — and a promotion is picked up without
     re-login. One primary-key SELECT per request via the pool; every
     admin-guarded route is a DB-backed dashboard anyway. Fails CLOSED when the
     auth store is unreachable (503).
@@ -207,16 +272,7 @@ def require_admin(
     user = _decode_to_user(credentials)
     if user is None:
         raise HTTPException(401, "Not authenticated", headers=_UNAUTH_HEADERS)
-    try:
-        row = _admin_repo.get_by_id(user["user_id"])
-    except psycopg.DataError:
-        # sub is not a valid UUID — not an identity we ever minted.
-        raise HTTPException(401, "Invalid token", headers=_UNAUTH_HEADERS)
-    except Exception as exc:
-        logger.warning("[AUTH] admin re-validation unavailable: %s", exc)
-        raise HTTPException(503, "Authentication store unavailable")
-    if row is None or not row.get("is_active"):
-        raise HTTPException(401, "User not found or inactive", headers=_UNAUTH_HEADERS)
+    row = _revalidate_active_user(user)
     if row.get("role") != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
     # Current DB state wins over the (possibly stale) token claims.

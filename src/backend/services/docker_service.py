@@ -24,6 +24,7 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
 # is a single source of truth for the robot_tests/ path. Host-path mount
 # resolution below stays here — that is an execution concern, not storage.
 from src.backend.core.artifact_store import STAGING_ROOT
+from src.backend.core.config import settings
 ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
@@ -269,7 +270,21 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             "name": f"robot-test-{run_id}",  # Give container a unique name
             "mem_limit": "2g",
             "pids_limit": 256,
+            # Phase 4 least-privilege: drop all caps and block privilege
+            # escalation. Chrome runs with --no-sandbox so it needs no caps.
+            # Network is intentionally kept — the runner drives real websites.
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
         }
+        if settings.RUNNER_READ_ONLY_ROOTFS:
+            # Validated in Task 10. Chrome/Playwright need writable scratch even
+            # with --disable-dev-shm-usage, so a read-only rootfs gets tmpfs for
+            # /tmp. This "/tmp" is a per-container, in-memory tmpfs mount target
+            # (isolated from the host and other containers, wiped on exit), not a
+            # shared host temp dir — see the python:S5443 note in
+            # sonar-project.properties.
+            container_config["read_only"] = True
+            container_config["tmpfs"] = {"/tmp": "size=512m,exec"}
         logging.info(
             f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {normalized_host_robot_tests_dir}:/app/robot_tests")
 

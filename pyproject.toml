@@ -64,6 +64,10 @@ dependencies = [
     # id_token verification against Google's JWKS). Already present transitively;
     # declared here so the built image is guaranteed to include it.
     "authlib",
+    # slowapi adds per-IP rate limiting on the unauthenticated auth endpoints
+    # (login/register/forgot-password) to blunt brute-force / credential stuffing.
+    # In-memory storage (single process); point at Redis if scaled horizontally.
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]

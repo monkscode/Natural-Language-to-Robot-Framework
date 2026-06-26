@@ -106,6 +106,11 @@ class KeywordCorrectionEngine(LearningEngine):
             # Store new correction (correct_keyword may be None if unknown)
             correct = self._infer_correct_keyword(wrong_keyword)
             initial_score = EffectivenessScore.calculate(1, 0)
+            # GLOBAL / cross-org table (no org_id, by Phase 1c design): only the
+            # generic keyword names get injected into other orgs. error_pattern
+            # stores the raw error_message but has NO reader anywhere - keep it so.
+            # Writing org-private data (queries/URLs/locators) here, or adding an
+            # error_pattern reader, leaks across orgs unless you add org_id first.
             self._em._writer_conn.execute(
                 "INSERT INTO keyword_corrections "
                 "(wrong_keyword, correct_keyword, library, error_pattern, "

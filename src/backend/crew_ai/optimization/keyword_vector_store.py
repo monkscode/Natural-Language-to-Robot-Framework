@@ -53,11 +53,14 @@ _SCHEMA_DDL = (
         user_query TEXT NOT NULL,
         keywords   JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        embedding  vector(384) NOT NULL
+        embedding  vector(384) NOT NULL,
+        org_id     TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_kw_patterns_emb "
     "ON kw_query_patterns USING hnsw (embedding vector_l2_ops)",
+    "ALTER TABLE kw_query_patterns ADD COLUMN IF NOT EXISTS org_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_kw_patterns_org ON kw_query_patterns(org_id)",
     """
     CREATE TABLE IF NOT EXISTS kw_library_version (
         library TEXT PRIMARY KEY,
@@ -99,7 +102,7 @@ class KeywordVectorStore:
                 continue
             doc = kw.get("doc", "") or ""
             vec = embedding.embed_to_literal(f"{name} {doc}")
-            if vec is None:
+            if not vec:
                 continue
             rows.append((library_name, name, json.dumps(kw.get("args", [])),
                          doc[:500], vec))
@@ -160,7 +163,7 @@ class KeywordVectorStore:
     def search(self, library_name: str, query: str, top_k: int = 3) -> List[Dict]:
         """Semantic search for keywords (L2 distance; similarity = 1/(1+distance))."""
         vec = embedding.embed_to_literal(query)
-        if vec is None:
+        if not vec:
             return []
         try:
             with self._pool.connection() as conn:
@@ -265,38 +268,51 @@ class KeywordVectorStore:
     # Query patterns (used by QueryPatternMatcher)
     # ------------------------------------------------------------------
 
-    def add_pattern(self, user_query: str, keywords: List[str]) -> Optional[str]:
+    def add_pattern(self, user_query: str, keywords: List[str],
+                    org_id: str | None = None) -> Optional[str]:
         """Store one (user_query -> keywords) pattern; returns its id (or None)."""
         vec = embedding.embed_to_literal(user_query)
-        if vec is None:
+        if not vec:
             return None
         pattern_id = f"pattern_{uuid.uuid4().hex}"
         try:
             with self._pool.connection() as conn:
                 conn.execute(
-                    "INSERT INTO kw_query_patterns (id, user_query, keywords, created_at, embedding) "
-                    "VALUES (%s, %s, %s, %s, %s::vector)",
+                    "INSERT INTO kw_query_patterns "
+                    "(id, user_query, keywords, created_at, embedding, org_id) "
+                    "VALUES (%s, %s, %s, %s, %s::vector, %s)",
                     (pattern_id, user_query, json.dumps(keywords),
-                     datetime.now(timezone.utc), vec))
+                     datetime.now(timezone.utc), vec, org_id))
                 conn.commit()
             return pattern_id
         except Exception as e:
             logger.warning("Failed to store query pattern (non-blocking): %s", e)
             return None
 
-    def search_patterns(self, user_query: str, top_k: int = 5) -> List[Dict]:
-        """Nearest query patterns by L2 distance. Returns [{keywords, distance}]."""
+    def search_patterns(self, user_query: str, top_k: int = 5,
+                        org_id: str | None = None) -> List[Dict]:
+        """Nearest query patterns by L2 distance. Returns [{keywords, distance}].
+
+        When org_id is set only patterns belonging to that org are returned.
+        When org_id is None the search is unscoped (backward-compatible).
+        """
         vec = embedding.embed_to_literal(user_query)
-        if vec is None:
+        if not vec:
             return []
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
+                    where = "WHERE org_id = %s " if org_id is not None else ""
+                    params = (
+                        [vec, org_id, vec, top_k]
+                        if org_id is not None
+                        else [vec, vec, top_k]
+                    )
                     cur.execute(
                         "SELECT keywords, embedding <-> %s::vector AS distance "
-                        "FROM kw_query_patterns "
+                        f"FROM kw_query_patterns {where}"
                         "ORDER BY embedding <-> %s::vector LIMIT %s",
-                        (vec, vec, top_k))
+                        params)
                     return [{"keywords": kw, "distance": float(d)} for kw, d in cur.fetchall()]
         except Exception as e:
             logger.warning("Query-pattern search failed: %s", e)
@@ -307,6 +323,27 @@ class KeywordVectorStore:
             with self._pool.connection() as conn:
                 return conn.execute("SELECT COUNT(*) FROM kw_query_patterns").fetchone()[0]
         except Exception:
+            return 0
+
+    def backfill_org_ids(self, home_org_id: str | None) -> int:
+        """Attribute pre-tenancy kw_query_patterns rows to the home org. Idempotent.
+
+        Uses a raw psycopg connection from the pool (%s placeholders, not pg_compat).
+        Returns 0 immediately when home_org_id is None or falsy.
+        """
+        if not home_org_id:
+            return 0
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE kw_query_patterns SET org_id = %s WHERE org_id IS NULL",
+                        (home_org_id,))
+                    count = cur.rowcount or 0
+                conn.commit()
+                return count
+        except Exception as e:
+            logger.warning("[KEYWORD_STORE] backfill_org_ids failed: %s", e)
             return 0
 
     def close(self) -> None:

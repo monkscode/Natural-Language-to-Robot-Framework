@@ -1,6 +1,8 @@
 import logging
 import os
 import requests
+import structlog
+import threading
 import time
 from typing import Any, Type, Optional, Dict
 
@@ -17,6 +19,54 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", encoding="utf-8"
 )
 logger = logging.getLogger(__name__)
+
+
+def _identity_from_context() -> tuple[str | None, str | None, str | None]:
+    """Read (workflow_id, org_id, user_id) bound by the generation thread.
+
+    Identity is taken from structlog contextvars — bound by bind_workflow_context
+    in the same thread — NEVER from LLM-supplied tool args, which are untrusted.
+    """
+    ctx = structlog.contextvars.get_contextvars()
+    return ctx.get("workflow_id"), ctx.get("org_id"), ctx.get("user_id")
+
+
+# ---------------------------------------------------------------------------
+# Process-global circuit breaker for the FastAPI → browser-service hop.
+# Thread-safe: multiple generation threads share one breaker instance.
+# ---------------------------------------------------------------------------
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN_S = 30
+_breaker_lock = threading.Lock()
+_breaker_state = {"failures": 0, "opened_at": 0.0}
+
+
+def _breaker_reset() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] = 0
+        _breaker_state["opened_at"] = 0.0
+
+
+def _breaker_allow() -> bool:
+    with _breaker_lock:
+        if _breaker_state["opened_at"] == 0.0:
+            return True
+        if time.time() - _breaker_state["opened_at"] >= _BREAKER_COOLDOWN_S:
+            return True  # half-open: allow one probe
+        return False
+
+
+def _breaker_record_failure() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] += 1
+        if _breaker_state["failures"] >= _BREAKER_THRESHOLD:
+            _breaker_state["opened_at"] = time.time()
+
+
+def _breaker_record_success() -> None:
+    with _breaker_lock:
+        _breaker_state["failures"] = 0
+        _breaker_state["opened_at"] = 0.0
 
 
 class BrowserUseAPI:
@@ -143,14 +193,6 @@ class BatchBrowserUseToolInput(BaseModel):
             "Example: 'Search for shoes on Flipkart and get the first product price'"
         )
     )
-    
-    workflow_id: str = Field(
-        default="",
-        description=(
-            "Unique workflow identifier for metrics tracking. "
-            "This is used internally to correlate browser-use metrics with CrewAI metrics."
-        )
-    )
 
 
 class BatchBrowserUseTool(BaseTool):
@@ -178,7 +220,7 @@ class BatchBrowserUseTool(BaseTool):
     )
     args_schema: Type[BaseModel] = BatchBrowserUseToolInput
 
-    def _run(self, elements: list, url: str, user_query: str = "", workflow_id: str = "") -> Dict[str, Any]:
+    def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
         """Execute batch browser automation to find multiple elements in one session."""
 
         # CRITICAL FIX: Handle case where CrewAI/LLM passes malformed input
@@ -201,16 +243,20 @@ class BatchBrowserUseTool(BaseTool):
                 elements = actual_data.get('elements', [])
                 url = actual_data.get('url', url)
                 user_query = actual_data.get('user_query', user_query)
-                workflow_id = actual_data.get('workflow_id', workflow_id)
 
                 logger.info(
                     f"✅ Extracted correct data: {len(elements)} elements, URL: {url}")
+
+        # Identity is sourced from contextvars (bound by the generation thread),
+        # NEVER from LLM-supplied tool args. Fails open to (None, None, None).
+        ctx_workflow_id, org_id, user_id = _identity_from_context()
+        effective_workflow_id = ctx_workflow_id
 
         logger.info(
             f"Starting batch browser automation for {len(elements)} elements")
         logger.info(f"Target URL: {url}")
         logger.info(f"User query context: {user_query[:100]}...")
-        logger.info(f"Workflow ID: {workflow_id}")
+        logger.info(f"Workflow ID: {effective_workflow_id}")
 
         # Configuration
         api_url = os.environ.get(
@@ -222,9 +268,20 @@ class BatchBrowserUseTool(BaseTool):
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
 
+        if not _breaker_allow():
+            logger.warning("Browser-use hop circuit breaker OPEN — failing fast")
+            return {
+                "status": "error",
+                "message": "Browser Use Service is unavailable (circuit breaker open)",
+                "success": False,
+                "elements_processed": 0,
+                "results": [],
+            }
+
         # Health check
         logger.info("Performing health check for batch processing...")
         if not self._health_check_with_retry(api_client):
+            _breaker_record_failure()
             return {
                 "status": "error",
                 "message": f"Browser Use Service not available at {api_url}",
@@ -246,12 +303,17 @@ class BatchBrowserUseTool(BaseTool):
                     "timeout": timeout
                 }
             }
-            
-            # Add parent_workflow_id if provided (to prevent duplicate metrics recording)
-            if workflow_id:
-                payload["parent_workflow_id"] = workflow_id
-                logger.info(f"📎 Including parent_workflow_id: {workflow_id} (will skip duplicate metrics)")
-            
+
+            # Forward identity from contextvars (never LLM-supplied).
+            # parent_workflow_id prevents duplicate metrics recording in browser-service.
+            if effective_workflow_id:
+                payload["parent_workflow_id"] = effective_workflow_id
+                logger.info(f"📎 Including parent_workflow_id: {effective_workflow_id} (will skip duplicate metrics)")
+            if org_id:
+                payload["org_id"] = org_id
+            if user_id:
+                payload["user_id"] = user_id
+
             response = requests.post(
                 f"{api_url}/workflow",
                 json=payload,
@@ -278,6 +340,7 @@ class BatchBrowserUseTool(BaseTool):
             else:
                 logger.error(
                     f"Batch task submission failed: {response.status_code}")
+                _breaker_record_failure()
                 return {
                     "status": "error",
                     "message": f"Task submission failed with status {response.status_code}",
@@ -288,6 +351,7 @@ class BatchBrowserUseTool(BaseTool):
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error submitting batch task: {e}")
+            _breaker_record_failure()
             return {
                 "status": "error",
                 "message": f"Network error: {str(e)}",
@@ -318,6 +382,7 @@ class BatchBrowserUseTool(BaseTool):
                 last_status = current_status
 
             if current_status == "completed":
+                _breaker_record_success()
                 data = status_response.get("data", {})
                 results = data.get("results", {})
 
@@ -334,7 +399,7 @@ class BatchBrowserUseTool(BaseTool):
                 # ============================================
                 # NEW: Store browser-use metrics to temp file
                 # ============================================
-                if workflow_id:
+                if effective_workflow_id:
                     # Debug: Log what we received from browser-use service
                     logger.info("📊 DEBUG: Received summary from browser-use:")
                     logger.info(f"   summary keys: {list(summary.keys())}")
@@ -376,9 +441,9 @@ class BatchBrowserUseTool(BaseTool):
                             browser_metrics['custom_action_usage_count'] += 1
                     
                     temp_storage = get_temp_metrics_storage()
-                    temp_storage.write_browser_metrics(workflow_id, browser_metrics)
-                    
-                    logger.info(f"📊 Browser-use metrics saved to temp file for workflow {workflow_id}")
+                    temp_storage.write_browser_metrics(effective_workflow_id, browser_metrics)
+
+                    logger.info(f"📊 Browser-use metrics saved to temp file for workflow {effective_workflow_id}")
                     logger.info(f"   LLM calls: {browser_metrics['llm_calls']}, Cost: ${browser_metrics['cost']:.4f}")
                 else:
                     logger.warning("⚠️ No workflow_id provided, browser-use metrics not saved to temp file")

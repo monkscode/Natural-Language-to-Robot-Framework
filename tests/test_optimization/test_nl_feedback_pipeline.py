@@ -92,6 +92,7 @@ class FakeRecord:
     failure_category: Optional[str] = None
     user_query: str = "click login button"
     test_status: str = "failed"
+    org_id: Optional[str] = None
 
 
 def create_execution_memory(conn):

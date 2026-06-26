@@ -147,7 +147,8 @@ class SmartKeywordProvider:
                  pruning_threshold: float = 0.8,
                  metrics: Optional[object] = None,
                  execution_memory=None,
-                 nl_engine=None):
+                 nl_engine=None,
+                 org_id: str | None = None):
         """
         Initialize with library context and optimization components.
 
@@ -174,6 +175,7 @@ class SmartKeywordProvider:
         self.metrics = metrics
         self._em = execution_memory
         self._nl_engine_shared = nl_engine  # FeedbackLoop's instance, may be None
+        self._org_id = org_id  # Caller's org — scopes NL + anti-pattern + keyword-pattern reads
 
         # R7 random-holdout: roll the coin once per workflow. When it comes up
         # AND hints are available, _get_learning_hints suppresses them and
@@ -258,7 +260,7 @@ class SmartKeywordProvider:
         # Anti-pattern warnings (planner + assembler)
         try:
             anti_pattern_hints = self._get_anti_pattern_engine().get_hints(
-                user_query, safe_url, agent_role
+                user_query, safe_url, agent_role, org_id=self._org_id
             )
             if anti_pattern_hints:
                 for hint in anti_pattern_hints:
@@ -296,6 +298,7 @@ class SmartKeywordProvider:
                 nl_trace = {} if trace_on else None
                 nl_texts, nl_ids = self._get_nl_feedback_engine().get_hints_with_ids(
                     user_query, safe_url, agent_role, selection_trace=nl_trace,
+                    org_id=self._org_id,
                 )
                 self._nl_hints_cache[cache_key] = (nl_texts, nl_ids, nl_trace)
             if nl_texts:
@@ -721,7 +724,7 @@ Use keyword_search tool if you need additional keywords.
         # Tier 2: Try pattern learning for keyword prediction
         existing_context = None
         try:
-            predicted_keywords = self.pattern_matcher.get_relevant_keywords(user_query)
+            predicted_keywords = self.pattern_matcher.get_relevant_keywords(user_query, org_id=self._org_id)
 
             if predicted_keywords:
                 logger.info(f"Pattern learning predicted {len(predicted_keywords)} keywords")

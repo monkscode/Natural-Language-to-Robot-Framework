@@ -85,7 +85,7 @@ def _run_mapping(tool, element_results):
     with patch.object(BatchBrowserUseTool, "_health_check_with_retry", return_value=True), \
          patch("tools.browser_use_tool.requests.post", return_value=_mock_post_202()), \
          patch.object(BrowserUseAPI, "query_task_status", return_value=_completed_response(element_results)):
-        response = tool._run(elements=elements, url="https://example.com", workflow_id="")
+        response = tool._run(elements=elements, url="https://example.com")
     return response["locator_mapping"]
 
 

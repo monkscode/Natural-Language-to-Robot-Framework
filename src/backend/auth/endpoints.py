@@ -12,6 +12,7 @@ Depends on: auth/repository.py, auth/jwt_utils.py, auth/google_oauth.py.
 
 import logging
 import re
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -23,7 +24,10 @@ from src.backend.auth.jwt_utils import (
     REPORT_TOKEN_COOKIE,
     create_access_token,
     get_current_user,
+    require_admin,
 )
+from src.backend.auth.rate_limit import auth_rate_limit
+from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import (
     AccountInactive,
     EmailAlreadyExists,
@@ -37,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 _repo = UserRepository()
+_org_repo = OrgRepository()
 
 _OAUTH_STATE_COOKIE = "oauth_state"
 _MIN_PASSWORD_LEN = 8
@@ -109,12 +114,17 @@ def _user_public(row: dict) -> dict:
 
 def _token_payload(row: dict) -> dict:
     user = _user_public(row)
+    orgs = _org_repo.get_orgs_for_user(str(row["id"]))
+    primary = orgs[0] if orgs else {}
     token = create_access_token(
         {
             "id": user["id"],
             "email": user["email"],
             "role": user["role"],
             "display_name": user["display_name"],
+            "org_id": primary.get("org_id"),
+            "org_role": primary.get("org_role"),
+            "token_version": row.get("token_version", 0),
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}
@@ -144,7 +154,8 @@ def _set_report_cookie(response: Response, token: str) -> None:
 # --------------------------------------------------------------------------
 
 @auth_router.post("/register", status_code=201)
-async def register(req: RegisterRequest, response: Response):
+@auth_rate_limit()
+async def register(request: Request, req: RegisterRequest, response: Response):
     try:
         row = _repo.create_user(req.email, req.password, req.display_name)
     except EmailAlreadyExists:
@@ -155,13 +166,15 @@ async def register(req: RegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail=str(exc))
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
+    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
 
 
 @auth_router.post("/login")
-async def login(req: LoginRequest, response: Response):
+@auth_rate_limit()
+async def login(request: Request, req: LoginRequest, response: Response):
     row = _repo.verify_credentials(req.email, req.password)
     if not row:
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -176,6 +189,9 @@ async def me(user: dict = Depends(get_current_user)):
     row = _repo.get_by_id(user["user_id"])
     if not row or not row.get("is_active"):
         raise HTTPException(status_code=401, detail="User not found or inactive")
+    if row.get("token_version", 0) != user.get("token_version", 0):
+        # token was revoked by a logout-all / password change after it was minted
+        raise HTTPException(status_code=401, detail="Token revoked")
     return _user_public(row)
 
 
@@ -186,8 +202,21 @@ async def logout(response: Response):
     return {"status": "ok"}
 
 
+@auth_router.post("/logout-all")
+async def logout_all(response: Response, user: dict = Depends(get_current_user)):
+    """Revoke every token previously minted for this user by bumping
+    token_version. All existing tokens (this device and any other) fail the
+    token_version re-check on the next request to any authenticated route
+    (require_user / require_admin / report access) immediately. The caller must
+    log in again to obtain a fresh token."""
+    _repo.bump_token_version(user["user_id"])
+    response.delete_cookie(REPORT_TOKEN_COOKIE, path="/reports")
+    return {"status": "ok"}
+
+
 @auth_router.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+@auth_rate_limit()
+async def forgot_password(request: Request, req: ForgotPasswordRequest):
     """Stub (no email service yet). Always returns the same message so it never
     reveals whether an email is registered."""
     # The address is deliberately NOT logged: even validated, it is the one
@@ -214,6 +243,28 @@ async def google_login():
         httponly=True, samesite="lax", secure=settings.COOKIE_SECURE,
     )
     return resp
+
+
+class _RoleUpdate(BaseModel):
+    role: Literal["admin", "user"]
+
+
+@auth_router.post("/admin/users/{user_id}/role")
+def set_user_platform_role(
+    user_id: str,
+    body: _RoleUpdate,
+    admin: dict = Depends(require_admin),
+):
+    """Platform-admin grants/revokes another user's platform-admin role.
+
+    role is validated to {'admin','user'} by the _RoleUpdate model (invalid
+    values are rejected with 422 before this body runs)."""
+    if user_id == admin["user_id"] and body.role == "user":
+        raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
+    row = _repo.set_platform_role(user_id, body.role)
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _user_public(row)
 
 
 @auth_router.get("/google/callback")
@@ -256,6 +307,7 @@ async def google_callback(request: Request):
         return _error_redirect("email_exists")
     except AccountInactive:
         return _error_redirect("account_disabled")
+    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*

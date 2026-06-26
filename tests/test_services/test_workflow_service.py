@@ -69,13 +69,11 @@ class TestStreamGenerateOnly:
 class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator."""
 
-    @patch("src.backend.services.workflow_service.run_test_in_container")
-    @patch("src.backend.services.workflow_service.build_image")
-    @patch("src.backend.services.workflow_service.get_docker_client")
-    def test_yields_events(self, mock_get_docker, mock_build, mock_run):
+    @patch("src.backend.services.workflow_service.runner_exec_client")
+    def test_yields_events(self, mock_rc):
         """Generator yields execution events."""
-        mock_build.return_value = iter([{"status": "building"}])
-        mock_run.return_value = {"status": "passed", "test_status": "PASS"}
+        mock_rc.ensure_image.return_value = {"status": "ready"}
+        mock_rc.execute.return_value = {"status": "passed", "test_status": "PASS"}
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -87,10 +85,10 @@ class TestStreamExecuteOnly:
         events = asyncio.run(run_gen())
         assert len(events) > 0
 
-    @patch("src.backend.services.workflow_service.get_docker_client")
-    def test_handles_docker_failure(self, mock_get_docker):
-        """Docker failure yields error event."""
-        mock_get_docker.side_effect = Exception("Docker not running")
+    @patch("src.backend.services.workflow_service.runner_exec_client")
+    def test_handles_docker_failure(self, mock_rc):
+        """Executor failure yields error event."""
+        mock_rc.ensure_image.side_effect = Exception("Runner exec not running")
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -284,3 +282,36 @@ class TestHintMetadataCacheConcurrency:
             with ws._hint_metadata_lock:
                 for i in range(1000):
                     ws._hint_metadata_cache.pop(f"workflow-writer-{i}", None)
+
+
+from src.backend.services import workflow_service
+
+
+def test_stream_docker_execution_uses_runner_exec_client(tmp_path):
+    async def _drive():
+        chunks = []
+        gen = workflow_service._stream_docker_execution(
+            run_id="abc123",
+            robot_code="*** Test Cases ***\nT\n    Log    x\n",
+            user_query="q",
+            release_slot=lambda: None,
+        )
+        async for chunk in gen:
+            chunks.append(chunk)
+        return chunks
+
+    with patch("src.backend.services.workflow_service.runner_exec_client") as rc, \
+         patch("src.backend.services.workflow_service.get_artifact_store") as gas, \
+         patch.object(workflow_service, "_set_run_status"), \
+         patch.object(workflow_service, "_process_learning"), \
+         patch.object(workflow_service, "inline_report_screenshots", return_value=0), \
+         patch.object(workflow_service, "_safe_evict_hint_metadata"):
+        gas.return_value.run_dir.return_value = tmp_path
+        gas.return_value.persist_run.return_value = None
+        rc.ensure_image.return_value = {"status": "ready"}
+        rc.execute.return_value = {"status": "complete", "test_status": "passed",
+                                   "result": {"logs": ""}}
+        chunks = asyncio.run(_drive())
+
+    rc.execute.assert_called_once_with("abc123", "test.robot")
+    assert any("passed" in c for c in chunks)

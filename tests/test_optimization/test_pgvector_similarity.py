@@ -8,26 +8,10 @@ execution-embedding round-trips against a live Postgres+pgvector schema.
 
 from datetime import datetime
 
-import pytest
-
 from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 
-
-@pytest.fixture(scope="session")
-def _shared_embedder():
-    """Load the fastembed model once for the whole module (it is ~80MB ONNX)."""
-    from fastembed import TextEmbedding
-    from src.backend.crew_ai.optimization.postgres_execution_memory import EMBED_MODEL
-    return TextEmbedding(model_name=EMBED_MODEL)
-
-
-@pytest.fixture
-def em_vec(in_memory_em, _shared_embedder):
-    """in_memory_em with the embedder ENABLED (real pgvector similarity path)."""
-    in_memory_em._chroma_client = _shared_embedder
-    in_memory_em._chroma_failed_at = None
-    in_memory_em._chroma_last_error = None
-    return in_memory_em
+# em_vec / _shared_embedder are inherited from conftest.py (shared with the
+# org-isolation tests) — do not redefine them here.
 
 
 class TestFilterByQuerySimilarityPgvector:
