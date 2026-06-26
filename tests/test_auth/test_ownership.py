@@ -46,6 +46,14 @@ def test_unattributed_resource_denied_to_non_admin():
     assert caller_can_read(_OWNER, None, "org-A", is_platform_admin=False) is False
 
 
+def test_unattributed_resource_denied_even_to_same_org_admin():
+    # An org_admin sees attributed rows of other members, but an unattributed
+    # row (owner_id None) in their own org stays platform-admin-only — /reports
+    # exposes typed credentials, so the org-admin shortcut must not grant it.
+    assert caller_can_read(_ADMIN_OF_A, None, "org-A", is_platform_admin=False) is False
+    assert caller_can_read(_ADMIN_OF_A, None, "org-A", is_platform_admin=True) is True
+
+
 # ---------------------------------------------------------------------------
 # is_dashboard_viewer — dashboard gate (Task 9)
 # ---------------------------------------------------------------------------

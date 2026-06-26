@@ -30,9 +30,15 @@ class OrgRepository:
         with get_pool().connection() as conn:
             # Serialise per-user so the existence check + insert is atomic.
             conn.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,))
+            # Only a PERSONAL org counts as "already provisioned". A user may
+            # belong to a team org (kind='team') yet still need their own
+            # personal org — keying off any membership would thread the team
+            # org as their personal one.
             existing = conn.execute(
-                "SELECT org_id FROM org_members WHERE user_id = %s "
-                "ORDER BY created_at LIMIT 1",
+                "SELECT m.org_id FROM org_members m "
+                "JOIN organizations o ON o.id = m.org_id "
+                "WHERE m.user_id = %s AND o.kind = 'personal' "
+                "ORDER BY m.created_at LIMIT 1",
                 (user_id,),
             ).fetchone()
             if existing:

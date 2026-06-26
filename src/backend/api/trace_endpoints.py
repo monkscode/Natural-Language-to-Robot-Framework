@@ -23,8 +23,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg_pool import ConnectionPool
 
-from src.backend.auth.jwt_utils import is_validated_admin, require_user
-from src.backend.auth.ownership import is_dashboard_viewer
+from src.backend.auth.jwt_utils import require_user
+from src.backend.api.dashboard_scope import authorize_dashboard_read
 from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 from src.backend.crew_ai.optimization import pg_compat
 
@@ -121,10 +121,7 @@ async def list_traces(
     user: dict | None = Depends(require_user),
 ):
     """List LLM call traces with optional filtering. Returns metadata only (no prompt/response text)."""
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         with closing(_get_db()) as conn:
             query = (
@@ -176,10 +173,7 @@ async def get_cost_stats(
     user: dict | None = Depends(require_user),
 ):
     """Aggregate cost and token usage per model for the last N days."""
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         with closing(_get_db()) as conn:
             # tz-aware datetime → psycopg adapts to timestamptz (correct regardless
@@ -252,10 +246,7 @@ async def get_workflow_traces(
     then fetches ALL spans with that trace_id. This captures child spans even if
     OTel Baggage propagation missed setting workflow_id on them.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         with closing(_get_db()) as conn:
             if scope_org is not None:
@@ -315,10 +306,7 @@ async def get_trace_detail(
     user: dict | None = Depends(require_user),
 ):
     """Get full trace detail for one span, including prompt and response text."""
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         with closing(_get_db()) as conn:
             if scope_org is not None:

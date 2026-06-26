@@ -33,10 +33,10 @@ def caller_can_read(
     4. org-aware: org_id must equal the caller's org_id; within that org, allow iff
        caller is org_admin OR owner_id == caller.user_id.
 
-    An org_admin sees every row in their own org, including unattributed
-    (owner_id None) legacy rows — the org_id match is the tenant boundary. A
-    plain member never reads an unattributed row: their branch requires
-    owner_id == caller.user_id, which a None owner can never satisfy.
+    Unattributed resources (owner_id None) fail closed for every non-platform
+    caller — including a same-org org_admin. /reports exposes typed credentials,
+    so a row no user owns (legacy/unknown run) is readable only by a platform
+    admin (rule 2), never granted by the org-admin shortcut.
     """
     if caller is None:
         return True
@@ -51,9 +51,13 @@ def caller_can_read(
 
     if org_id is None or org_id != caller_org:
         return False
+    # Fail closed before the org-admin shortcut: an unattributed row is
+    # platform-admin-only, not visible to the tenant's own admin.
+    if owner_id is None:
+        return False
     if caller.get("org_role") == "org_admin":
         return True
-    return owner_id is not None and owner_id == caller_uid
+    return owner_id == caller_uid
 
 
 def is_dashboard_viewer(caller: dict | None, *, is_platform_admin: bool) -> bool:

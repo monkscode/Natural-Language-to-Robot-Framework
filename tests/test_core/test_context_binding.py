@@ -27,5 +27,8 @@ def test_create_workflow_span_sets_identity_baggage():
     from opentelemetry import baggage
     with create_workflow_span("wf-3", "login", "gemini", "gemini-2.5-flash",
                               org_id="org-A", user_id="user-1"):
+        # org_id is propagated downstream for scoping; user_id is deliberately
+        # NOT in baggage (it would leak a raw user id across the service
+        # boundary via HTTP headers) — it stays a local span attribute only.
         assert baggage.get_baggage("workflow.org_id") == "org-A"
-        assert baggage.get_baggage("workflow.user_id") == "user-1"
+        assert baggage.get_baggage("workflow.user_id") is None

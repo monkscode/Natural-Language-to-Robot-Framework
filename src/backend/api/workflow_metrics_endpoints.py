@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..auth.jwt_utils import is_validated_admin, require_user
-from ..auth.ownership import is_dashboard_viewer
+from ..auth.jwt_utils import require_user
+from .dashboard_scope import authorize_dashboard_read
 from ..core.models import (
     WorkflowMetrics,
     WorkflowMetricsResponse,
@@ -55,10 +55,7 @@ async def get_workflow_metrics(
     - Custom action usage
     - Execution times
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
 
@@ -102,10 +99,7 @@ async def get_aggregate_metrics(
 
     Use either date range (start_date/end_date) or last_days parameter.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
 
@@ -167,10 +161,7 @@ async def get_metrics_summary(
     - Last 30 days
     - All time
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org = None if (admin or user is None) else user.get("org_id")
+    scope_org = authorize_dashboard_read(user)
     try:
         collector = get_workflow_metrics_collector()
         now = datetime.now()

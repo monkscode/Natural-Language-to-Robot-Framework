@@ -21,12 +21,23 @@ class TestWorkflowMetricsEndpoints:
 
     @pytest.fixture
     def metrics_client(self, mock_collector):
-        """FastAPI test client with mocked metrics collector."""
+        """FastAPI test client with mocked metrics collector.
+
+        The dashboard reads (/, /aggregate, /summary) now reject token-less
+        callers, so override require_user with an org-admin. is_validated_admin
+        short-circuits to False for a non-'admin' role without a DB call, and
+        is_dashboard_viewer admits an org_admin with a concrete org_id.
+        """
         with patch("src.backend.api.workflow_metrics_endpoints.get_workflow_metrics_collector", return_value=mock_collector):
             from src.backend.api.workflow_metrics_endpoints import router
+            from src.backend.auth.jwt_utils import require_user
             app = FastAPI()
             app.include_router(router, prefix="/api")
-            
+            app.dependency_overrides[require_user] = lambda: {
+                "user_id": "u-1", "role": "user",
+                "org_role": "org_admin", "org_id": "test-org",
+            }
+
             with TestClient(app) as client:
                 yield client, mock_collector
 

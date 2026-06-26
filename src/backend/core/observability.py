@@ -138,8 +138,10 @@ def create_workflow_span(
         ctx = baggage.set_baggage("workflow.id", workflow_id)
         if org_id:
             ctx = baggage.set_baggage("workflow.org_id", org_id, context=ctx)
-        if user_id:
-            ctx = baggage.set_baggage("workflow.user_id", user_id, context=ctx)
+        # user_id stays a local span attribute (above) but is deliberately NOT
+        # put in baggage: baggage propagates via HTTP headers to every downstream
+        # service, and nothing consumes workflow.user_id there — so it would only
+        # leak a raw user identifier across the service boundary for no benefit.
         ctx = trace.set_span_in_context(span, ctx)
 
         @contextlib.contextmanager

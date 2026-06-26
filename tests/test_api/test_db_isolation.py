@@ -80,11 +80,17 @@ def test_workflow_metrics_singleton_writes_to_auth_test_not_public(admin_public)
     )
     get_workflow_metrics_collector().record_workflow(metrics, org_id="test-org")
 
-    # Must NOT be in public.workflow_metrics
-    row_public = admin_public.execute(
-        "SELECT workflow_id FROM public.workflow_metrics WHERE workflow_id = %s",
-        (wf_id,),
-    ).fetchone()
+    # Must NOT be in public.workflow_metrics. The table may not even exist in
+    # public — the collector creates it lazily and isolation keeps every write
+    # in auth_test — so an absent public table trivially proves "no leak".
+    # Treat UndefinedTable the same as an empty result.
+    try:
+        row_public = admin_public.execute(
+            "SELECT workflow_id FROM public.workflow_metrics WHERE workflow_id = %s",
+            (wf_id,),
+        ).fetchone()
+    except psycopg.errors.UndefinedTable:
+        row_public = None
     assert row_public is None, (
         f"workflow_id {wf_id} found in public.workflow_metrics — metrics singleton is NOT isolated"
     )

@@ -56,7 +56,10 @@ def validate_security_posture() -> None:
     to log warnings so http dev is unaffected.
     """
     secret = settings.JWT_SECRET_KEY
-    is_prod = settings.ENVIRONMENT == "production"
+    # Normalize before comparing: "Production", "production " or " PRODUCTION"
+    # must all trip the production-only hard failures, not slip past an exact
+    # lowercase match and silently downgrade them to warnings.
+    is_prod = (settings.ENVIRONMENT or "").strip().lower() == "production"
 
     # Always fatal — a forgeable secret is never acceptable, dev or prod.
     if secret in _PLACEHOLDER_SECRETS:

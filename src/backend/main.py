@@ -169,18 +169,16 @@ async def startup_event():
     # Backfill org_id on pre-tenancy data rows (Phase 1b/1c) — a one-time
     # migration, gated so it does NOT re-run every boot. Re-running is not just
     # wasteful: after a hint is promoted cross-org it would re-attribute the
-    # promoted hint's anchor and silently un-share it. Best-effort: a DB outage
-    # leaves the marker unset so the next boot retries.
+    # promoted hint's anchor and silently un-share it. run_migration_once holds
+    # an advisory lock so concurrent boots can't both run it. Best-effort: a DB
+    # outage leaves the marker unset so the next boot retries.
     try:
-        from src.backend.auth.migration_state import (
-            is_migration_done, mark_migration_done,
-        )
+        from src.backend.auth.migration_state import run_migration_once
         from src.backend.core.org_backfill import backfill_data_org_ids
-        if is_migration_done("data_org_id_backfill"):
-            logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
+        if run_migration_once("data_org_id_backfill", backfill_data_org_ids):
+            logging.info("[ORG_BACKFILL] data org_id backfill applied")
         else:
-            backfill_data_org_ids()
-            mark_migration_done("data_org_id_backfill")
+            logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
     except Exception as e:
         logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
 

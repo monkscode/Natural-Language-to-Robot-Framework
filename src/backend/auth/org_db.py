@@ -63,13 +63,15 @@ def init_org_db() -> None:
     # Provision personal orgs for pre-tenancy users — a one-time migration, gated
     # so it does not re-scan users on every boot. All user-creation paths
     # (register, Google callback) provision an org inline, so no org-less user
-    # appears after this runs. Best-effort: an unset marker retries next boot.
-    from src.backend.auth.migration_state import (
-        is_migration_done, mark_migration_done,
-    )
-    if is_migration_done("personal_org_backfill"):
-        logger.info("[AUTH] personal-org backfill already applied; skipping")
-    else:
+    # appears after this runs. run_migration_once holds an advisory lock so
+    # concurrent boots can't both run it. Best-effort: an unset marker retries.
+    from src.backend.auth.migration_state import run_migration_once
+
+    def _provision_personal_orgs() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().backfill_personal_orgs()
-        mark_migration_done("personal_org_backfill")
+
+    if run_migration_once("personal_org_backfill", _provision_personal_orgs):
+        logger.info("[AUTH] personal-org backfill applied")
+    else:
+        logger.info("[AUTH] personal-org backfill already applied; skipping")

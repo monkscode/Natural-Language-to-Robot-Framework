@@ -740,17 +740,22 @@ def promote_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
-        if row["is_shared"] == 1:
-            return {"hint": _row_to_dict(row), "changed": False, "note": "already shared"}
-        conn.execute(
-            "UPDATE nl_feedback_corrections SET is_shared = 1 WHERE id = ?", (hint_id,)
-        )
         # Null the anchor org so the similarity filter matches the promoted hint
-        # for every org (Task 5 filter: org_id = ? OR org_id IS NULL).
+        # for every org (Task 5 filter: org_id = ? OR org_id IS NULL). This runs
+        # on BOTH paths: anchor nulling is the load-bearing half of "shared", so
+        # an already-shared hint whose anchor is still org-scoped (a half-applied
+        # promotion) is repaired here instead of being stranded by the early
+        # return below.
         conn.execute(
             "UPDATE learning_anchors SET org_id = NULL "
             "WHERE kind = 'nl' AND record_id = ?",
             (hint_id,),
+        )
+        if row["is_shared"] == 1:
+            conn.commit()
+            return {"hint": _row_to_dict(row), "changed": False, "note": "already shared"}
+        conn.execute(
+            "UPDATE nl_feedback_corrections SET is_shared = 1 WHERE id = ?", (hint_id,)
         )
         _write_hint_audit(
             conn, hint_id, "promote", actor, request.reason,
