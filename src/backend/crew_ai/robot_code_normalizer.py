@@ -51,11 +51,13 @@ logger = logging.getLogger(__name__)
 # (space after `#` fails the second-char test).
 _BARE_CSS_RE = re.compile(r"^[#.][A-Za-z_]")
 
-# Robot Framework cell boundary: two-or-more spaces, or one-or-more tabs.
-# Possessive quantifiers (\s{2,}+ / \t++) make the match non-backtracking — the
-# input is LLM-generated and could otherwise be coaxed into a pathological
-# whitespace run, and `re` here is applied per line on every generated test.
-_CELL_SPLIT_RE = re.compile(r"(\s{2,}+|\t++)")
+# Robot Framework cell boundary: two-or-more spaces, or one-or-more tabs — RF's
+# actual separator rule. Branches are disjoint character classes (space vs tab)
+# with possessive quantifiers, so the alternation cannot backtrack and has no
+# overlapping match (the old `\s`-based form let a tab match both branches, a
+# polynomial-ReDoS shape on the LLM-generated input this runs over per line).
+# re.split keeps the separators, so every line is rejoined byte-for-byte.
+_CELL_SPLIT_RE = re.compile(r"( {2,}+|\t++)")
 
 # Variable-assignment prefix: a cell that is exactly a scalar/list/dict variable
 # (`${x}`, `@{list}`, `&{dict}`) with an optional trailing `=`. Used to detect
