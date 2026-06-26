@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # Phase 4: base URL of the socket-holding executor service. localhost for
     # `./run.sh` dev; compose overrides to the service name.
     RUNNER_EXEC_URL: str = Field(
-        default="http://localhost:4998",
+        default="http://localhost:4998",  # NOSONAR — internal Docker network, no TLS needed
         description="Phase 4: base URL of the runner-exec service; localhost for run.sh dev, http://runner-exec:4998 in compose.",
     )
 
