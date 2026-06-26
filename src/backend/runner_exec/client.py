@@ -46,7 +46,10 @@ _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_S = 30
 
 _breaker_lock = threading.Lock()
-_breaker_state = {"failures": 0, "opened_at": 0.0}
+# opened_at is None while the breaker is closed, or the time.time() at which it
+# tripped. A None sentinel (not 0.0) keeps the "is it open?" check off float
+# equality, which is unreliable.
+_breaker_state: dict[str, float | int | None] = {"failures": 0, "opened_at": None}
 
 
 class RunnerExecUnavailable(RuntimeError):
@@ -56,14 +59,15 @@ class RunnerExecUnavailable(RuntimeError):
 def _breaker_reset() -> None:
     with _breaker_lock:
         _breaker_state["failures"] = 0
-        _breaker_state["opened_at"] = 0.0
+        _breaker_state["opened_at"] = None
 
 
 def _breaker_allow() -> bool:
     with _breaker_lock:
-        if _breaker_state["opened_at"] == 0.0:
+        opened_at = _breaker_state["opened_at"]
+        if opened_at is None:
             return True
-        if time.time() - _breaker_state["opened_at"] >= _BREAKER_COOLDOWN_S:
+        if time.time() - opened_at >= _BREAKER_COOLDOWN_S:
             return True
         return False
 
@@ -78,7 +82,7 @@ def _breaker_record_failure() -> None:
 def _breaker_record_success() -> None:
     with _breaker_lock:
         _breaker_state["failures"] = 0
-        _breaker_state["opened_at"] = 0.0
+        _breaker_state["opened_at"] = None
 
 
 def _call(method: str, path: str, *, read_timeout: int, json_body: dict | None = None) -> dict:

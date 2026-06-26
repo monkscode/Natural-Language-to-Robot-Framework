@@ -278,7 +278,11 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         }
         if settings.RUNNER_READ_ONLY_ROOTFS:
             # Validated in Task 10. Chrome/Playwright need writable scratch even
-            # with --disable-dev-shm-usage, so a read-only rootfs gets tmpfs for /tmp.
+            # with --disable-dev-shm-usage, so a read-only rootfs gets tmpfs for
+            # /tmp. This "/tmp" is a per-container, in-memory tmpfs mount target
+            # (isolated from the host and other containers, wiped on exit), not a
+            # shared host temp dir — see the python:S5443 note in
+            # sonar-project.properties.
             container_config["read_only"] = True
             container_config["tmpfs"] = {"/tmp": "size=512m,exec"}
         logging.info(
