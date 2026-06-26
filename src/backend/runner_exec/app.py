@@ -55,7 +55,11 @@ def health() -> dict:
         get_docker_client()  # pings the socket
         return {"status": "ok"}
     except Exception as e:  # noqa: BLE001 — health must not raise
-        return {"status": "unavailable", "error": str(e)}
+        # Log the underlying error for ops, but do NOT echo the raw exception
+        # text back in the response — it can carry internal paths/stack detail
+        # (CWE-209). The caller only needs the up/down signal.
+        logger.warning("[RUNNER-EXEC] docker health check failed: %s", e)
+        return {"status": "unavailable"}
 
 
 @app.post("/ensure-image")

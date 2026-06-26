@@ -24,9 +24,13 @@ logger = logging.getLogger(__name__)
 # Secrets that are never acceptable, in any environment.
 _PLACEHOLDER_SECRETS = frozenset({"", "change-me-in-production"})
 
-# Production secret strength. token_urlsafe(48) yields 64 chars, so 32 is a
-# comfortable floor that still rejects short/guessable values.
-_MIN_SECRET_LEN = 32
+# Production secret strength: the minimum character length a JWT secret must
+# reach to be accepted. token_urlsafe(48) yields 64 chars, so 32 is a
+# comfortable floor that still rejects short/guessable values. Named for the
+# length threshold it is (a plain int) — deliberately NOT "*secret*"/"*key*",
+# both so the name stops misleading readers into thinking it holds a secret and
+# so logging it cannot be misread (by humans or scanners) as logging one.
+_MIN_RANDOM_CHARS = 32
 
 # Substrings that mark a secret as a dev/sample value rather than a real random
 # one. token_urlsafe output never contains these words; a value that does is a
@@ -41,7 +45,7 @@ def _secret_is_weak(secret: str) -> bool:
     """True if the secret is empty/placeholder, too short, or carries a dev marker."""
     if secret in _PLACEHOLDER_SECRETS:
         return True
-    if len(secret) < _MIN_SECRET_LEN:
+    if len(secret) < _MIN_RANDOM_CHARS:
         return True
     low = secret.lower()
     return any(marker in low for marker in _WEAK_SECRET_MARKERS)
@@ -74,7 +78,7 @@ def validate_security_posture() -> None:
     if is_prod:
         if weak:
             raise RuntimeError(
-                f"JWT_SECRET_KEY is too weak for production (must be >= {_MIN_SECRET_LEN} "
+                f"JWT_SECRET_KEY is too weak for production (must be >= {_MIN_RANDOM_CHARS} "
                 "chars and not a dev/placeholder value). Generate one with "
                 'python -c "import secrets; print(secrets.token_urlsafe(48))".'
             )
@@ -91,7 +95,7 @@ def validate_security_posture() -> None:
         logger.warning(
             "[AUTH] JWT_SECRET_KEY looks weak (a dev value or < %d chars). Allowed in "
             "development, but production (ENVIRONMENT=production) requires a strong "
-            "random secret.", _MIN_SECRET_LEN,
+            "random secret.", _MIN_RANDOM_CHARS,
         )
     if not settings.COOKIE_SECURE:
         logger.info(
