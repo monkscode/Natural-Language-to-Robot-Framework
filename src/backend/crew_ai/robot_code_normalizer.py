@@ -56,8 +56,9 @@ _BARE_CSS_RE = re.compile(r"^[#.][A-Za-z_]")
 # with possessive quantifiers, so the alternation cannot backtrack and has no
 # overlapping match (the old `\s`-based form let a tab match both branches, a
 # polynomial-ReDoS shape on the LLM-generated input this runs over per line).
-# re.split keeps the separators, so every line is rejoined byte-for-byte.
-_CELL_SPLIT_RE = re.compile(r"( {2,}+|\t++)")
+# `  ++` is two-or-more spaces written without a counted quantifier; re.split
+# keeps the separators, so every line is rejoined byte-for-byte.
+_CELL_SPLIT_RE = re.compile(r"(  ++|\t++)")
 
 # Variable-assignment prefix: a cell that is exactly a scalar/list/dict variable
 # (`${x}`, `@{list}`, `&{dict}`) with an optional trailing `=`. Used to detect
