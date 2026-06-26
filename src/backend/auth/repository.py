@@ -240,3 +240,24 @@ class UserRepository:
             ).fetchone()
             conn.commit()
         return row["token_version"] if row else None
+
+    def reset_password(self, email: str, new_password: str) -> dict | None:
+        """Set a new password for *email* and revoke every token minted before
+        the reset (token_version bump — same revocation as logout-all). Works for
+        password and Google-SSO accounts alike (it just sets a password hash).
+
+        The token_version bump is the security-critical half: when a reset is the
+        response to a compromise, a stolen token must stop working immediately
+        instead of riding out its remaining JWT_EXPIRY_HOURS. Returns the updated
+        public row, or None if no user matched. Raises PasswordTooLong via
+        hash_password when the password exceeds bcrypt's byte limit.
+        """
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "UPDATE users SET hashed_password = %s, "
+                "token_version = token_version + 1 WHERE email = %s "
+                "RETURNING id, email, role, auth_provider",
+                (hash_password(new_password), email.strip().lower()),
+            ).fetchone()
+            conn.commit()
+        return row
