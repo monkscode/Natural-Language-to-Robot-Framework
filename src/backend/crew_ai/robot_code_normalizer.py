@@ -52,12 +52,19 @@ logger = logging.getLogger(__name__)
 _BARE_CSS_RE = re.compile(r"^[#.][A-Za-z_]")
 
 # Robot Framework cell boundary: two-or-more spaces, or one-or-more tabs.
-_CELL_SPLIT_RE = re.compile(r"(\s{2,}|\t+)")
+# Possessive quantifiers (\s{2,}+ / \t++) make the match non-backtracking — the
+# input is LLM-generated and could otherwise be coaxed into a pathological
+# whitespace run, and `re` here is applied per line on every generated test.
+_CELL_SPLIT_RE = re.compile(r"(\s{2,}+|\t++)")
 
 # Variable-assignment prefix: a cell that is exactly a scalar/list/dict variable
 # (`${x}`, `@{list}`, `&{dict}`) with an optional trailing `=`. Used to detect
 # lines of the form `${x}=    Keyword    ...` or `${X}    value` in Variables.
-_ASSIGN_PREFIX_RE = re.compile(r"^[$@&]\{[^}]+\}\s*=?\s*$")
+# Possessive quantifiers ([^}]++ / \s*+) make this non-backtracking: the prior
+# `\s*=?\s*$` tail could take seconds on a long whitespace run that fails the
+# end-anchor (a ReDoS reachable from LLM-generated input); possessive forms run
+# in linear time with an identical matched language (verified by fuzzing).
+_ASSIGN_PREFIX_RE = re.compile(r"^[$@&]\{[^}]++\}\s*+=?\s*+$")
 
 # Setting markers. When these are the first cell of a line, the rest of the line
 # holds literal values, never locators — never rewrite.
