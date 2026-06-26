@@ -22,7 +22,7 @@ try:
     from src.backend.core.config import settings
     _BASE_URL = settings.RUNNER_EXEC_URL
 except Exception:  # pragma: no cover — config may be absent in isolated unit runs
-    _BASE_URL = "http://localhost:4998"
+    _BASE_URL = "http://localhost:4998"  # NOSONAR — internal Docker network, no TLS needed
 
 _CONNECT_TIMEOUT_S = 5
 _QUICK_READ_TIMEOUT_S = 30           # status/cleanup/ensure-image (rebuild uses the long timeout)
