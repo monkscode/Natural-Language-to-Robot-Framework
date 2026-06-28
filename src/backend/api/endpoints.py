@@ -269,6 +269,12 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         )
     text = request.feedback_text or ""
 
+    # Audit identity for an implicit hint unflag comes from the verified token
+    # only (same trust model as _audit_actor), never client input. "unknown" is
+    # reachable only with AUTH_ENFORCED off (local dev) — an unidentified human,
+    # deliberately not a machine actor like 'system'.
+    actor = (user or {}).get("email") or "unknown"
+
     try:
         # process_user_feedback runs a blocking conflict-detection LLM call
         # (up to 30s). Offload it so this async handler does not freeze the
@@ -276,6 +282,7 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         triage = await asyncio.to_thread(
             feedback_loop.process_user_feedback,
             feedback_target_id, text, request.feedback_type,
+            actor=actor,
         )
         return {"status": "success", "triage": triage, "applied_to": feedback_target_id}
     except Exception as e:
