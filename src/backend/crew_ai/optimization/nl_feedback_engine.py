@@ -455,7 +455,7 @@ class NLFeedbackEngine(LearningEngine):
                         "VALUES (?, 'unflag', ?, ?, ?, ?, ?)",
                         (
                             existing["id"],
-                            "user1",
+                            feedback_insight.get("actor") or "unknown",
                             "User re-submitted identical feedback — implicit override of LLM flag",
                             json.dumps({"conflict_flagged": 1}),
                             json.dumps({"conflict_flagged": 0}),

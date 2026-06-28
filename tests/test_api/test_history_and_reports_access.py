@@ -541,6 +541,20 @@ class TestFeedbackOwnership:
         assert resp.status_code == 200
         assert resp.json()["status"] == "success"
 
+    def test_feedback_forwards_submitter_email_as_actor(self, fb_registry):
+        """The handler forwards the authenticated user's email as the actor
+        kwarg, so the NL engine records who implicitly unflagged a hint. Passed
+        as a kwarg so existing positional call_args[0][0] checks stay valid."""
+        client = _feedback_client(fb_registry, _USER1)
+        try:
+            resp = client.post("/api/feedback", json=_FEEDBACK_BODY)
+        finally:
+            _close_feedback(client)
+        assert resp.status_code == 200
+        call = client._mock_fb.process_user_feedback.call_args
+        assert call.kwargs["actor"] == _USER1["email"]
+        assert call[0][0] == "run-owned"
+
     def test_other_user_gets_403(self, fb_registry):
         client = _feedback_client(fb_registry, _USER2)
         try:

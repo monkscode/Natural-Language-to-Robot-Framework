@@ -497,7 +497,8 @@ class TestUpsertHintAuditUnflag:
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def test_upsert_flagged_hint_writes_audit_row(self, in_memory_db):
-        """Re-submitting identical feedback on a flagged hint writes action='unflag'."""
+        """Re-submitting identical feedback on a flagged hint writes action='unflag'
+        and records the submitting user's email as the audit actor."""
         conn = in_memory_db
         hint_id = self._store_hint(conn, conflict_flagged=1)
         engine = NLFeedbackEngine(conn)
@@ -512,6 +513,7 @@ class TestUpsertHintAuditUnflag:
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
             "category": "structural",
+            "actor": "alice@example.com",
         })
 
         audit_rows = conn.execute(
@@ -520,8 +522,34 @@ class TestUpsertHintAuditUnflag:
         ).fetchall()
         assert len(audit_rows) == 1
         assert audit_rows[0]["action"] == "unflag"
-        assert audit_rows[0]["actor"] == "user1"
+        assert audit_rows[0]["actor"] == "alice@example.com"
         assert "implicit override" in audit_rows[0]["reason"]
+
+    def test_upsert_flagged_hint_audit_actor_defaults_to_unknown(self, in_memory_db):
+        """When no actor is supplied (e.g. auth disabled), the unflag audit row
+        records the honest literal 'unknown', never a fabricated name."""
+        conn = in_memory_db
+        hint_id = self._store_hint(conn, conflict_flagged=1)
+        engine = NLFeedbackEngine(conn)
+
+        from unittest.mock import MagicMock
+        record = MagicMock()
+        record.workflow_id = "wf-resubmit-anon"
+        record.domain = "example.com"
+        record.url = None
+        record.failure_category = None
+
+        engine.learn_from_feedback(record, {
+            "feedback_text": "Use data-testid for all selectors",
+            "category": "structural",
+        })
+
+        audit_rows = conn.execute(
+            "SELECT actor FROM hint_audit WHERE hint_id = ?",
+            (hint_id,),
+        ).fetchall()
+        assert len(audit_rows) == 1
+        assert audit_rows[0]["actor"] == "unknown"
 
     def test_upsert_unflagged_hint_writes_no_audit_row(self, in_memory_db):
         """Re-submitting identical feedback on a non-flagged hint does NOT write hint_audit."""
