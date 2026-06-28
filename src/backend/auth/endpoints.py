@@ -260,19 +260,19 @@ def set_user_platform_role(
 
     role is validated to {'admin','user'} by the _RoleUpdate model (invalid
     values are rejected with 422 before this body runs)."""
-    # Capture the role BEFORE the change so the audit floor's detail records the
-    # transition (defaults to 'user' if the row is missing — the update below
-    # then 404s and no detail is set).
-    existing = _repo.get_by_id(user_id)
-    old_role = (existing or {}).get("role", "user")
+    # Self-revoke guard runs before any mutation; it depends only on the caller
+    # and the requested role, not the current one.
     if user_id == admin["user_id"] and body.role == "user":
         raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
+    # set_platform_role captures the prior role atomically (same locked statement
+    # as the update) and returns it as 'old_role', so the audit detail's 'from'
+    # can't go stale under concurrent admin updates to the same user.
     row = _repo.set_platform_role(user_id, body.role)
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
     # Enrichment hook read by the audit floor (main.py request_id_middleware):
     # the floor writes the audit row; this only exposes WHAT changed.
-    request.state.audit_detail = {"from": old_role, "to": body.role}
+    request.state.audit_detail = {"from": row["old_role"], "to": body.role}
     return _user_public(row)
 
 

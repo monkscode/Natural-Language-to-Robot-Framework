@@ -3,6 +3,7 @@ import re
 import sys
 import logging
 import uuid
+from types import SimpleNamespace
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,6 +71,11 @@ app.add_middleware(
 # is dropped in favour of a fresh UUID.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
+# Stand-in handed to the audit floor when the handler raised before producing a
+# response: ServerErrorMiddleware (outside this middleware) will send a 500, so
+# 500 is the status the floor should record for the failed mutation.
+_CRASH_RESPONSE = SimpleNamespace(status_code=500)
+
 
 @app.middleware("http")
 async def request_id_middleware(request, call_next):
@@ -80,14 +86,20 @@ async def request_id_middleware(request, call_next):
         else uuid.uuid4().hex
     )
     structlog.contextvars.bind_contextvars(request_id=request_id)
+    # Audit floor — record every authenticated state-changing request, including
+    # ones whose handler crashes (ServerErrorMiddleware then sends a 500 and
+    # re-raises, so without the except branch a failed mutation leaves no floor
+    # row). record_request fails open internally, so it can never affect the
+    # response, mask the original error, or break the request-id path.
     try:
         response = await call_next(request)
+    except Exception:
+        if request.method in audit_log.MUTATING_METHODS:
+            await audit_log.record_request(request, _CRASH_RESPONSE, request_id)
+        raise
     finally:
         structlog.contextvars.unbind_contextvars("request_id")
     response.headers["X-Request-ID"] = request_id
-    # Audit floor — record every authenticated state-changing request. Isolated:
-    # record_request fails open internally, so it can never affect the response
-    # or the request-id path above.
     if request.method in audit_log.MUTATING_METHODS:
         await audit_log.record_request(request, response, request_id)
     return response

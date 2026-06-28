@@ -21,6 +21,7 @@ Depends on: auth/db.py (shared pool), auth/jwt_utils.py (decode_token).
 import asyncio
 import json
 import logging
+import re
 
 from src.backend.auth.db import get_pool
 from src.backend.auth.jwt_utils import decode_token
@@ -28,6 +29,15 @@ from src.backend.auth.jwt_utils import decode_token
 logger = logging.getLogger(__name__)
 
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# request.url.path is percent-decoded, so a crafted URL can smuggle CR/LF (log
+# forging) or ANSI escapes (terminal injection) into it. Escape control chars
+# before logging — mirrors the X-Request-ID sanitising in main.py.
+_LOG_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_for_log(value: str) -> str:
+    return _LOG_UNSAFE_RE.sub(lambda m: f"\\x{ord(m.group(0)):02x}", value)
 
 # Known service-to-service (machine) endpoints that arrive without a user token.
 # Single source of truth shared with the route-coverage CI test's machine
@@ -166,5 +176,6 @@ async def record_request(request, response, request_id: str | None) -> None:
     except Exception:  # noqa: BLE001 — the floor must never break a user action
         logger.error(
             "[AUDIT] floor write failed: %s %s",
-            request.method, request.url.path, exc_info=True,
+            _safe_for_log(request.method), _safe_for_log(request.url.path),
+            exc_info=True,
         )

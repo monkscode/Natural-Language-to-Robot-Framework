@@ -111,14 +111,23 @@ class UserRepository:
     def set_platform_role(self, user_id: str, role: str) -> dict | None:
         """Grant/revoke platform-admin. role in {'admin','user'}. The DB is the
         source of truth for platform-admin (ADMIN_EMAILS only seeds the first one
-        at startup). Returns the updated public row, or None if no user matched."""
+        at startup). Returns the updated public row plus 'old_role' (the prior
+        role, captured atomically for the audit floor's from/to detail), or None
+        if no user matched."""
         if role not in ("admin", "user"):
             raise ValueError(f"invalid platform role: {role!r}")
         with get_pool().connection() as conn:
+            # Read the prior role under a row lock and update in the same
+            # statement so the captured 'from' can't go stale between a separate
+            # read and write under concurrent admin updates to the same user.
             row = conn.execute(
-                "UPDATE users SET role = %s WHERE id = %s "
-                "RETURNING id, email, display_name, role",
-                (role, user_id),
+                "WITH prev AS ("
+                "  SELECT id, role FROM users WHERE id = %s FOR UPDATE"
+                ") "
+                "UPDATE users u SET role = %s FROM prev WHERE u.id = prev.id "
+                "RETURNING prev.role AS old_role, "
+                "u.id, u.email, u.display_name, u.role",
+                (user_id, role),
             ).fetchone()
             conn.commit()
         return row
