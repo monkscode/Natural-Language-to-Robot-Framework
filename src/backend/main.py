@@ -38,6 +38,7 @@ from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
+from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
 
 # --- FastAPI App ---
@@ -84,6 +85,11 @@ async def request_id_middleware(request, call_next):
     finally:
         structlog.contextvars.unbind_contextvars("request_id")
     response.headers["X-Request-ID"] = request_id
+    # Audit floor — record every authenticated state-changing request. Isolated:
+    # record_request fails open internally, so it can never affect the response
+    # or the request-id path above.
+    if request.method in audit_log.MUTATING_METHODS:
+        await audit_log.record_request(request, response, request_id)
     return response
 
 
@@ -159,6 +165,13 @@ async def startup_event():
             f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
+
+    # Create the audit_log table (shared auth/users pool). Best-effort: a DB
+    # outage must not block startup — the floor fails open until the table exists.
+    try:
+        audit_log.init_audit_log()
+    except Exception as e:
+        logging.warning(f"[AUDIT] init_audit_log skipped — audit floor degraded: {e}")
 
     try:
         from src.backend.auth.admin_seed import seed_platform_admins

@@ -253,17 +253,26 @@ class _RoleUpdate(BaseModel):
 def set_user_platform_role(
     user_id: str,
     body: _RoleUpdate,
+    request: Request,
     admin: dict = Depends(require_admin),
 ):
     """Platform-admin grants/revokes another user's platform-admin role.
 
     role is validated to {'admin','user'} by the _RoleUpdate model (invalid
     values are rejected with 422 before this body runs)."""
+    # Capture the role BEFORE the change so the audit floor's detail records the
+    # transition (defaults to 'user' if the row is missing — the update below
+    # then 404s and no detail is set).
+    existing = _repo.get_by_id(user_id)
+    old_role = (existing or {}).get("role", "user")
     if user_id == admin["user_id"] and body.role == "user":
         raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
     row = _repo.set_platform_role(user_id, body.role)
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
+    # Enrichment hook read by the audit floor (main.py request_id_middleware):
+    # the floor writes the audit row; this only exposes WHAT changed.
+    request.state.audit_detail = {"from": old_role, "to": body.role}
     return _user_public(row)
 
 
