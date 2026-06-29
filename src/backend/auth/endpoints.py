@@ -109,6 +109,7 @@ def _user_public(row: dict) -> dict:
         "email": row["email"],
         "display_name": row.get("display_name", ""),
         "role": row.get("role", "user"),
+        "status": row.get("status", "active"),
     }
 
 
@@ -125,6 +126,7 @@ def _token_payload(row: dict) -> dict:
             "org_id": primary.get("org_id"),
             "org_role": primary.get("org_role"),
             "token_version": row.get("token_version", 0),
+            "status": user["status"],
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}

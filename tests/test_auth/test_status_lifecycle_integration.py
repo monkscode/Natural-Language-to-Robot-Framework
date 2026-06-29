@@ -64,3 +64,15 @@ def test_login_allowed_pending_denied_suspended():
         assert repo.verify_credentials(email, "password123") is None
     finally:
         _cleanup(email)
+
+
+def test_user_public_includes_status():
+    repo = UserRepository()
+    email = _email()
+    try:
+        repo.create_user(email, "password123", "Life")
+        from src.backend.auth.endpoints import _user_public
+        row = repo.get_by_email(email)
+        assert _user_public(row)["status"] == "pending"
+    finally:
+        _cleanup(email)

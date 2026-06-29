@@ -67,6 +67,7 @@ def create_access_token(user: dict) -> str:
         # / compromise). Re-checked against current DB state on every
         # authenticated request (require_user / require_admin / report access).
         "tv": user.get("token_version", 0),
+        "status": user.get("status", "active"),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -89,6 +90,7 @@ def decode_token(token: str) -> dict:
         "org_id": payload.get("org_id"),
         "org_role": payload.get("org_role"),
         "token_version": payload.get("tv", 0),
+        "status": payload.get("status", "active"),
     }
 
 
