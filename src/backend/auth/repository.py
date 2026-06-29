@@ -75,6 +75,33 @@ def role_for_email(email: str) -> str:
 class UserRepository:
     """CRUD for the users table. Stateless — safe to instantiate once and share."""
 
+    _VALID_STATUS = ("pending", "active", "suspended", "rejected")
+
+    def set_status(self, user_id: str, status: str, *, bump_token: bool = False) -> dict | None:
+        """Set a user's lifecycle status. status='active' is authoritative for
+        usability; is_active is written in lockstep as a coarse mirror. Captures
+        the prior status atomically (one locked statement) for the audit from/to.
+        Bumps token_version when bump_token is set (reject/suspend) so live tokens
+        die on the next request. Returns the updated public row plus 'old_status',
+        or None if no user matched."""
+        if status not in self._VALID_STATUS:
+            raise ValueError(f"invalid status: {status!r}")
+        is_active = status == "active"
+        token_expr = "token_version + 1" if bump_token else "token_version"
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "WITH prev AS ("
+                "  SELECT id, status FROM users WHERE id = %s FOR UPDATE"
+                ") "
+                "UPDATE users u SET status = %s, is_active = %s, "
+                f"token_version = {token_expr} FROM prev WHERE u.id = prev.id "
+                "RETURNING prev.status AS old_status, "
+                "u.id, u.email, u.role, u.status",
+                (user_id, status, is_active),
+            ).fetchone()
+            conn.commit()
+        return row
+
     def create_user(self, email: str, password: str, display_name: str = "") -> dict:
         """Insert a password user. Raises EmailAlreadyExists on duplicate email."""
         email = email.strip().lower()

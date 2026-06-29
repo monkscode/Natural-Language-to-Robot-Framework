@@ -26,3 +26,27 @@ def test_new_password_signup_is_pending_and_inactive():
         assert full["is_active"] is False
     finally:
         _cleanup(email)
+
+
+def test_set_status_mirrors_is_active_and_bumps_token():
+    repo = UserRepository()
+    email = _email()
+    try:
+        created = repo.create_user(email, "password123", "Life")
+        uid = str(created["id"])
+
+        approved = repo.set_status(uid, "active")
+        assert approved["old_status"] == "pending"
+        assert approved["status"] == "active"
+        assert repo.get_by_id(uid)["is_active"] is True
+
+        before = repo.get_by_id(uid)["token_version"]
+        suspended = repo.set_status(uid, "suspended", bump_token=True)
+        assert suspended["status"] == "suspended"
+        after = repo.get_by_id(uid)
+        assert after["is_active"] is False
+        assert after["token_version"] == before + 1
+
+        assert repo.set_status(str(uuid.uuid4()), "active") is None
+    finally:
+        _cleanup(email)
