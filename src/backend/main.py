@@ -38,6 +38,7 @@ from fastapi import Depends
 from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
+from src.backend.auth.admin_access_endpoints import admin_access_router
 from src.backend.auth.db import init_auth_db, close_pool
 from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
@@ -113,6 +114,7 @@ register_error_handlers(app)
 # --- API Routers ---
 # Auth routes (public entry points): /auth/register, /auth/login, /auth/me, /auth/google/*
 app.include_router(auth_router)
+app.include_router(admin_access_router)
 
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
