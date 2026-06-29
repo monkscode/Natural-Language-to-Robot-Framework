@@ -15,6 +15,8 @@ export interface User {
   email: string
   display_name: string
   role: 'user' | 'admin'
+  status: 'pending' | 'active' | 'suspended' | 'rejected'
+  org_role?: 'org_admin' | 'org_member' | null
 }
 
 interface AuthState {
@@ -22,6 +24,8 @@ interface AuthState {
   loading: boolean
   isAuthenticated: boolean
   isAdmin: boolean
+  status: User['status'] | null
+  isOrgAdmin: boolean
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string, displayName: string) => Promise<void>
   loginWithToken: (token: string) => Promise<void>
@@ -109,6 +113,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         isAuthenticated: !!user,
         isAdmin: user?.role === 'admin',
+        status: user?.status ?? null,
+        isOrgAdmin: user?.org_role === 'org_admin',
         login,
         signup,
         loginWithToken,
