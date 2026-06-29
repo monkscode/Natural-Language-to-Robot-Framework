@@ -50,3 +50,17 @@ def test_set_status_mirrors_is_active_and_bumps_token():
         assert repo.set_status(str(uuid.uuid4()), "active") is None
     finally:
         _cleanup(email)
+
+
+def test_login_allowed_pending_denied_suspended():
+    repo = UserRepository()
+    email = _email()
+    try:
+        created = repo.create_user(email, "password123", "Life")
+        uid = str(created["id"])
+        # pending can authenticate (to reach the waiting screen)
+        assert repo.verify_credentials(email, "password123") is not None
+        repo.set_status(uid, "suspended", bump_token=True)
+        assert repo.verify_credentials(email, "password123") is None
+    finally:
+        _cleanup(email)

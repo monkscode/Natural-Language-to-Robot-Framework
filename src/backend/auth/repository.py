@@ -178,6 +178,7 @@ class UserRepository:
         row = dict(row)
         row["role"] = "admin"
         row["status"] = "active"
+        row["is_active"] = True
         return row
 
     def verify_credentials(self, email: str, password: str) -> dict | None:
@@ -188,7 +189,8 @@ class UserRepository:
         the role to ADMIN_EMAILS on success.
         """
         user = self.get_by_email(email)
-        if not user or not user.get("is_active") or not user.get("hashed_password"):
+        can_login = user and user.get("status") in ("pending", "active")
+        if not user or not can_login or not user.get("hashed_password"):
             # Burn a bcrypt verify against a throwaway hash so unknown emails,
             # disabled accounts, and google-only accounts (no password hash —
             # verify_password would return instantly) all answer in the same
@@ -219,7 +221,7 @@ class UserRepository:
                 (google_sub,),
             ).fetchone()
             if row:
-                if not row.get("is_active"):
+                if row.get("status") not in ("pending", "active"):
                     raise AccountInactive(email)
                 conn.execute(
                     "UPDATE users SET last_login = now() WHERE id = %s",
@@ -251,7 +253,7 @@ class UserRepository:
                     raced = conn.execute(
                         "SELECT * FROM users WHERE google_sub = %s", (google_sub,)
                     ).fetchone()
-                    if raced and raced.get("is_active"):
+                    if raced and raced.get("status") in ("pending", "active"):
                         return raced
                     raise EmailAlreadyExists(email) from exc
                 conn.commit()
