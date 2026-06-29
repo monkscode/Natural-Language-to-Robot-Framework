@@ -70,6 +70,7 @@ def test_failed_mutating_request_still_writes_floor_row(client, monkeypatch):
     reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"}).json()
     uid = reg["user"]["id"]
     endpoints._repo.set_platform_role(uid, "admin")
+    endpoints._repo.set_status(uid, "active")           # <-- ADD: actor active so the handler is reached
     tok = create_access_token({"id": uid, "email": email, "role": "admin", "display_name": ""})
     target = client.post(
         "/auth/register", json={"email": f"tgt-{uuid.uuid4().hex[:8]}@e.com", "password": "S3cretpw!"}

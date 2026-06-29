@@ -125,25 +125,29 @@ def test_logout_clears_report_cookie(client_and_emails):
 def test_me_rejects_deactivated_user(client_and_emails):
     """A valid, unexpired token must stop working the moment the account is
     disabled — /me re-reads the DB precisely for this."""
+    from src.backend.auth.repository import UserRepository
     client, created = client_and_emails
     email = _unique_email()
     created.append(email)
     reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    uid = reg.json()["user"]["id"]
     token = reg.json()["access_token"]
+    repo = UserRepository()
+    repo.set_status(uid, "active")          # new signups are pending; approve so /me is reachable
     headers = {"Authorization": f"Bearer {token}"}
     assert client.get("/auth/me", headers=headers).status_code == 200
-    from src.backend.auth import db as auth_db
-    with auth_db.get_pool().connection() as conn:
-        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
-        conn.commit()
+    # Suspend writes status='suspended' + is_active=false in lockstep (mirror).
+    repo.set_status(uid, "suspended")
     assert client.get("/auth/me", headers=headers).status_code == 401
 
 
 def test_login_and_me_flow(client_and_emails):
+    from src.backend.auth.repository import UserRepository
     client, created = client_and_emails
     email = _unique_email()
     created.append(email)
-    client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    UserRepository().set_status(reg.json()["user"]["id"], "active")   # reachable /auth/me after login
 
     # wrong password -> 401
     assert client.post("/auth/login", json={"email": email, "password": "nope"}).status_code == 401
@@ -290,7 +294,7 @@ def test_google_callback_disabled_account_rejected(client_and_emails):
     assert "#token=" in _callback_with_profile(client, profile).headers["location"]
     from src.backend.auth import db as auth_db
     with auth_db.get_pool().connection() as conn:
-        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
+        conn.execute("UPDATE users SET status = 'suspended', is_active = FALSE WHERE email = %s", (email,))
         conn.commit()
     resp = _callback_with_profile(client, profile)
     assert "error=account_disabled" in resp.headers["location"]

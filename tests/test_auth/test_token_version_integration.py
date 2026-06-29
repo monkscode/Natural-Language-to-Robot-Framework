@@ -37,9 +37,11 @@ def test_bump_token_version_increments():
 
 def test_logout_all_revokes_existing_token(client):
     email = _unique_email()
-    token = client.post(
+    reg = client.post(
         "/auth/register", json={"email": email, "password": "S3cretpw!"}
-    ).json()["access_token"]
+    ).json()
+    token = reg["access_token"]
+    UserRepository().set_status(reg["user"]["id"], "active")     # reachable /auth/me
     auth = {"Authorization": f"Bearer {token}"}
 
     # The freshly minted token works.

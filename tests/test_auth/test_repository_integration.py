@@ -90,7 +90,7 @@ def test_google_login_rejects_inactive_account(repo):
     sub = f"google-{uuid.uuid4().hex}"
     r.get_or_create_google_user(sub, email, "G User")
     with auth_db.get_pool().connection() as conn:
-        conn.execute("UPDATE users SET is_active = FALSE WHERE email = %s", (email,))
+        conn.execute("UPDATE users SET status = 'suspended', is_active = FALSE WHERE email = %s", (email,))
         conn.commit()
     with pytest.raises(AccountInactive):
         r.get_or_create_google_user(sub, email, "G User")
