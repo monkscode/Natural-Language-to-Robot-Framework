@@ -95,3 +95,57 @@ class OrgRepository:
             }
             for r in rows
         ]
+
+    def create_team_org(self, name: str, owner_user_id: str) -> str:
+        """Create a kind='team' org and seat owner_user_id as its org_admin.
+        Returns the new org id."""
+        with get_pool().connection() as conn:
+            org = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'team') RETURNING id",
+                (name,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) "
+                "VALUES (%s, %s, 'org_admin')",
+                (org["id"], owner_user_id),
+            )
+            conn.commit()
+            return str(org["id"])
+
+    def add_member(self, org_id: str, user_id: str, org_role: str = "org_member") -> None:
+        """Idempotent: add a user to an org, or update their role if already a
+        member."""
+        if org_role not in ("org_admin", "org_member"):
+            raise ValueError(f"invalid org_role: {org_role!r}")
+        with get_pool().connection() as conn:
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (org_id, user_id) DO UPDATE SET org_role = EXCLUDED.org_role",
+                (org_id, user_id, org_role),
+            )
+            conn.commit()
+
+    def set_org_owner(self, org_id: str, user_id: str, org_role: str) -> None:
+        """Promote/demote a member's org_role (org_admin/org_member)."""
+        self.add_member(org_id, user_id, org_role)
+
+    def get_members(self, org_id: str) -> list[dict]:
+        """Members of an org joined to users, oldest first."""
+        with get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT m.user_id, u.email, u.display_name, m.org_role, u.status "
+                "FROM org_members m JOIN users u ON u.id = m.user_id "
+                "WHERE m.org_id = %s ORDER BY m.created_at",
+                (org_id,),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(r["user_id"]),
+                "email": r["email"],
+                "display_name": r["display_name"],
+                "org_role": r["org_role"],
+                "status": r["status"],
+            }
+            for r in rows
+        ]
