@@ -83,9 +83,10 @@ class UserRepository:
             with get_pool().connection() as conn:
                 row = conn.execute(
                     """
-                    INSERT INTO users (email, hashed_password, display_name, role, auth_provider)
-                    VALUES (%s, %s, %s, %s, 'password')
-                    RETURNING id, email, display_name, role
+                    INSERT INTO users (email, hashed_password, display_name, role,
+                                       auth_provider, status, is_active)
+                    VALUES (%s, %s, %s, %s, 'password', 'pending', FALSE)
+                    RETURNING id, email, display_name, role, status
                     """,
                     (email, hash_password(password), display_name, role),
                 ).fetchone()
@@ -140,11 +141,16 @@ class UserRepository:
         if role_for_email(row["email"]) != "admin" or row.get("role") == "admin":
             return row
         with get_pool().connection() as conn:
-            conn.execute("UPDATE users SET role = 'admin' WHERE id = %s", (row["id"],))
+            conn.execute(
+                "UPDATE users SET role = 'admin', status = 'active', is_active = TRUE "
+                "WHERE id = %s",
+                (row["id"],),
+            )
             conn.commit()
         logger.info("[AUTH] Promoted %s to platform-admin (ADMIN_EMAILS seed)", row["email"])
         row = dict(row)
         row["role"] = "admin"
+        row["status"] = "active"
         return row
 
     def verify_credentials(self, email: str, password: str) -> dict | None:
@@ -201,9 +207,10 @@ class UserRepository:
                 try:
                     new_row = conn.execute(
                         """
-                        INSERT INTO users (email, display_name, role, auth_provider, google_sub, last_login)
-                        VALUES (%s, %s, %s, 'google', %s, now())
-                        RETURNING id, email, display_name, role
+                        INSERT INTO users (email, display_name, role, auth_provider,
+                                           google_sub, last_login, status, is_active)
+                        VALUES (%s, %s, %s, 'google', %s, now(), 'pending', FALSE)
+                        RETURNING id, email, display_name, role, status
                         """,
                         (email, display_name, role_for_email(email), google_sub),
                     ).fetchone()
