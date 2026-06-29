@@ -28,6 +28,7 @@ from src.backend.auth.jwt_utils import (
 )
 from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
+from src.backend.auth.provisioning import match_invite_on_signup
 from src.backend.auth.repository import (
     AccountInactive,
     EmailAlreadyExists,
@@ -168,7 +169,7 @@ async def register(request: Request, req: RegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail=str(exc))
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
-    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
+    match_invite_on_signup(str(row["id"]), row["email"])
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
@@ -318,7 +319,7 @@ async def google_callback(request: Request):
         return _error_redirect("email_exists")
     except AccountInactive:
         return _error_redirect("account_disabled")
-    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
+    match_invite_on_signup(str(row["id"]), row["email"])
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*
