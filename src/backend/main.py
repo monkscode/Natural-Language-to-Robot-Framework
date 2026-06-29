@@ -41,6 +41,7 @@ from src.backend.auth.endpoints import auth_router
 from src.backend.auth.db import init_auth_db, close_pool
 from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
+from src.backend.auth.invitations_db import init_invitations_db
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -172,6 +173,7 @@ async def startup_event():
         # Org tenancy lives in the same identity domain and must init AFTER users
         # (org_members references users). Same best-effort guard.
         init_org_db()
+        init_invitations_db()
     except Exception as e:
         logging.warning(
             f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
