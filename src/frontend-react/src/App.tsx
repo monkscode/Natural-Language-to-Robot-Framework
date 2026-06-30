@@ -16,6 +16,7 @@ import LoginPage from '@/pages/auth/LoginPage'
 import SignupPage from '@/pages/auth/SignupPage'
 import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage'
 import OAuthCallback from '@/auth/OAuthCallback'
+import AccessGatePage from '@/pages/AccessGatePage'
 
 /**
  * Keep-alive page cache.
@@ -90,6 +91,12 @@ function AppLayout() {
   )
 }
 
+function GatedLayout() {
+  const { status } = useAuth()
+  if (status !== 'active') return <AccessGatePage />
+  return <AppLayout />
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -105,7 +112,7 @@ export default function App() {
             {/* Protected app routes — require a valid session. The page
                 routes render null: KeepAlivePages (in AppLayout) owns the
                 page elements so they persist across navigation. */}
-            <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
+            <Route element={<RequireAuth><GatedLayout /></RequireAuth>}>
               <Route index            element={<Navigate to="/generate" replace />} />
               {/* Every authenticated user gets Generate + their own History */}
               <Route path="/generate" element={null} />
