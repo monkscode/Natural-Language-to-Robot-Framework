@@ -36,10 +36,39 @@ def _auth_not_enforced():
              jwt_utils._admin_repo, "get_by_id",
              side_effect=lambda uid: {
                  "id": uid, "email": "admin@test.local",
-                 "role": "admin", "is_active": True,
+                 "role": "admin", "is_active": True, "status": "active",
              },
          ):
         yield
+def register_active(client, email: str) -> str:
+    """Register a user then immediately activate + provision them.
+
+    New signups land status='pending' with no org until approval (Task 11
+    moved provisioning to approval-time). This helper reproduces the approved
+    state so the re-login token carries the personal org (org_admin) and the
+    per-request status gate admits the user.
+
+    The /auth/register endpoint calls match_invite_on_signup which queries the
+    invitations table. The auth_isolated_schema fixture creates users /
+    organizations / org_members but not invitations (added later by Task 12).
+    We bootstrap it here idempotently so the register call succeeds inside the
+    isolated schema.
+    """
+    from src.backend.auth.invitations_db import init_invitations_db
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.provisioning import provision_on_approval
+
+    init_invitations_db()  # idempotent — creates table in the current pool's schema
+    r = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    assert r.status_code == 201, r.text
+    uid = r.json()["user"]["id"]
+    UserRepository().set_status(uid, "active")
+    provision_on_approval(uid)
+    lr = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+    assert lr.status_code == 200, lr.text
+    return lr.json()["access_token"]
+
+
 _API_PG_TABLES = (
     "execution_records", "intent_patterns", "structural_rules", "keyword_corrections",
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
@@ -330,9 +359,9 @@ def dash_client(learning_api_isolated, api_pg_em):
     def _smart_get_by_id(uid: str):
         """Return a DB-row-like dict based on whether the UID is a platform admin."""
         if uid == _DASH_PLATFORM_ADMIN_UID:
-            return {"id": uid, "email": "admin@test.local", "role": "admin", "is_active": True}
+            return {"id": uid, "email": "admin@test.local", "role": "admin", "is_active": True, "status": "active"}
         # org-admins and members are NOT platform admins
-        return {"id": uid, "email": "user@test.local", "role": "user", "is_active": True}
+        return {"id": uid, "email": "user@test.local", "role": "user", "is_active": True, "status": "active"}
 
     app = FastAPI()
     app.include_router(router, prefix="/api/learning")

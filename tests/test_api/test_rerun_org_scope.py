@@ -28,9 +28,8 @@ def client():
 
 
 def _register(client, email):
-    r = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
-    assert r.status_code == 201, r.text
-    return r.json()["access_token"]
+    from tests.test_api.conftest import register_active
+    return register_active(client, email)
 
 
 def test_cross_org_rerun_denied(client):
@@ -82,10 +81,12 @@ def test_same_org_admin_peer_can_rerun(client):
 
     # Owner — creates the run.
     owner = users.create_user(f"rro-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(owner["id"]), "active")
     o_org = orgs.ensure_personal_org(str(owner["id"]), owner["email"])
 
     # Peer — different user_id, but same org (simulate org membership).
     peer = users.create_user(f"rrp-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(peer["id"]), "active")
 
     rid = str(uuid.uuid4())
     get_run_registry().record_start(

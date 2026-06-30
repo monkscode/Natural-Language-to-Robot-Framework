@@ -55,9 +55,8 @@ def metrics_schema():
 
 
 def _register(client, email):
-    r = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
-    assert r.status_code == 201, r.text
-    return r.json()["access_token"]
+    from tests.test_api.conftest import register_active
+    return register_active(client, email)
 
 
 def _member_token(org_id: str) -> str:
