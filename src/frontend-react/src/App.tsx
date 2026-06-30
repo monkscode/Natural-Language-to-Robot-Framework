@@ -18,6 +18,7 @@ import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage'
 import OAuthCallback from '@/auth/OAuthCallback'
 import AccessGatePage from '@/pages/AccessGatePage'
 
+import AccessConsolePage from '@/pages/AccessConsolePage'
 /**
  * Keep-alive page cache.
  *
@@ -41,6 +42,7 @@ const PAGES: Array<{ path: string; admin?: boolean; node: JSX.Element }> = [
   { path: '/metrics', admin: true, node: <MetricsPage /> },
   { path: '/learning', admin: true, node: <LearningPage /> },
   { path: '/templates', admin: true, node: <TemplatesPage /> },
+  { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
 ]
 
@@ -123,6 +125,7 @@ export default function App() {
               <Route path="/templates" element={null} />
               <Route path="/settings"  element={null} />
               {/* catch-all */}
+              <Route path="/access" element={null} />
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>

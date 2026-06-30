@@ -31,6 +31,7 @@ import {
   MonitorSmartphone,
   Loader2,
   ChevronsUpDown,
+  ShieldCheck,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 
@@ -58,6 +59,7 @@ const NAV_PLATFORM: NavItem[] = [
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
   { title: 'Learning', url: '/learning', icon: Brain, admin: true },
   { title: 'Templates', url: '/templates', icon: LayoutGrid, admin: true },
+  { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
 ]
 
 const NAV_WORKSPACE: NavItem[] = [
