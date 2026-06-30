@@ -32,6 +32,7 @@ import {
   Loader2,
   ChevronsUpDown,
   ShieldCheck,
+  Users,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 
@@ -51,6 +52,7 @@ interface NavItem {
   url: string
   icon: typeof Zap
   admin: boolean
+  orgAdmin?: boolean
 }
 
 const NAV_PLATFORM: NavItem[] = [
@@ -60,6 +62,7 @@ const NAV_PLATFORM: NavItem[] = [
   { title: 'Learning', url: '/learning', icon: Brain, admin: true },
   { title: 'Templates', url: '/templates', icon: LayoutGrid, admin: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
+  { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]
 
 const NAV_WORKSPACE: NavItem[] = [
@@ -167,13 +170,14 @@ function NavUser() {
 }
 
 /* ── Renders one nav group, hiding admin-only items from regular users ── */
-function NavGroup({ label, items, isAdmin, pathname }: {
+function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
   label: string
   items: NavItem[]
   isAdmin: boolean
+  isOrgAdmin: boolean
   pathname: string
 }) {
-  const visible = items.filter(item => !item.admin || isAdmin)
+  const visible = items.filter(item => (!item.admin || isAdmin) && (!item.orgAdmin || isOrgAdmin))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
@@ -197,7 +201,7 @@ function NavGroup({ label, items, isAdmin, pathname }: {
 /* ── Main sidebar component ── */
 export function AppSidebar() {
   const { pathname } = useLocation()
-  const { isAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin } = useAuth()
 
   return (
     <Sidebar collapsible="icon">
@@ -217,8 +221,8 @@ export function AppSidebar() {
 
       {/* Nav — role-filtered */}
       <SidebarContent>
-        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} pathname={pathname} />
-        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} pathname={pathname} />
+        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
+        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
       </SidebarContent>
 
       {/* User footer */}

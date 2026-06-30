@@ -19,6 +19,7 @@ import OAuthCallback from '@/auth/OAuthCallback'
 import AccessGatePage from '@/pages/AccessGatePage'
 
 import AccessConsolePage from '@/pages/AccessConsolePage'
+import TeamPage from '@/pages/TeamPage'
 /**
  * Keep-alive page cache.
  *
@@ -36,7 +37,7 @@ import AccessConsolePage from '@/pages/AccessConsolePage'
  * RequireAdmin had when each route owned its element. The redirect renders
  * only for the ACTIVE path, so a cached page can never hijack navigation.
  */
-const PAGES: Array<{ path: string; admin?: boolean; node: JSX.Element }> = [
+const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JSX.Element }> = [
   { path: '/generate', node: <GeneratePage /> },
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
@@ -44,17 +45,20 @@ const PAGES: Array<{ path: string; admin?: boolean; node: JSX.Element }> = [
   { path: '/templates', admin: true, node: <TemplatesPage /> },
   { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
+  { path: '/team', orgAdmin: true, node: <TeamPage /> },
 ]
 
 function KeepAlivePages() {
   const { pathname } = useLocation()
-  const { isAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin } = useAuth()
+  const allowed = (p: { admin?: boolean; orgAdmin?: boolean }) =>
+    (!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)
   const visited = useRef(new Set<string>())
 
   const active = PAGES.find(p => p.path === pathname)
-  if (active && (!active.admin || isAdmin)) visited.current.add(active.path)
+  if (active && allowed(active)) visited.current.add(active.path)
 
-  if (active?.admin && !isAdmin) return <Navigate to="/generate" replace />
+  if (active && !allowed(active)) return <Navigate to="/generate" replace />
 
   // The admin predicate is re-checked on every render, so if a session is
   // demoted mid-flight (isAdmin flips false), any already-mounted admin page
@@ -62,7 +66,7 @@ function KeepAlivePages() {
   // background requests.
   return (
     <>
-      {PAGES.filter(p => visited.current.has(p.path) && (!p.admin || isAdmin)).map(p => (
+      {PAGES.filter(p => visited.current.has(p.path) && allowed(p)).map(p => (
         <div
           key={p.path}
           className={p.path === pathname ? 'flex flex-1 flex-col' : 'hidden'}
@@ -126,6 +130,7 @@ export default function App() {
               <Route path="/settings"  element={null} />
               {/* catch-all */}
               <Route path="/access" element={null} />
+              <Route path="/team"   element={null} />
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>
