@@ -478,3 +478,58 @@ def test_reassign_unknown_target_org_returns_400():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, member_email],))
             conn.commit()
+
+
+def test_assign_member_bumps_moved_user_token():
+    """Seating a user in a team org bumps their token_version so their stale
+    (wrong-org) token dies and their next request re-logs-in into the new org."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"abm-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"abm-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        member = repo.create_user(member_email, "password123", "Mem")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        tv_before = repo.get_by_id(str(member["id"]))["token_version"]
+        r = client.post(f"/auth/admin/orgs/{org_id}/members",
+                        json={"user_id": str(member["id"]), "org_role": "org_member"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert repo.get_by_id(str(member["id"]))["token_version"] == tv_before + 1
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_create_org_bumps_owner_token():
+    """Creating a team org moves the owner into it, so their token_version is
+    bumped and their stale token is refreshed on the next request."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"cob-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        tv_before = repo.get_by_id(str(owner["id"]))["token_version"]
+        r = client.post("/auth/admin/orgs",
+                        json={"name": "Newco", "owner_user_id": str(owner["id"])},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 201
+        org_id = r.json()["org_id"]
+        assert repo.get_by_id(str(owner["id"]))["token_version"] == tv_before + 1
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email],))
+            conn.commit()

@@ -151,6 +151,7 @@ def create_org(body: _CreateOrg, request: Request, admin: dict = Depends(require
         org_id = _orgs.create_team_org(body.name, body.owner_user_id)
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation):
         raise HTTPException(400, "Unknown owner_user_id")
+    _repo.bump_token_version(body.owner_user_id)  # owner moved into the new org
     request.state.audit_detail = {"org_id": org_id, "owner": body.owner_user_id}
     return {"org_id": org_id}
 
@@ -191,6 +192,7 @@ def assign_member(org_id: str, body: _AssignMember, request: Request,
         _orgs.add_member(org_id, body.user_id, body.org_role)
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
         raise HTTPException(400, "Unknown org/user or non-team org")
+    _repo.bump_token_version(body.user_id)  # move takes effect immediately
     request.state.audit_detail = {"org_id": org_id, "user_id": body.user_id, "org_role": body.org_role}
     return {"status": "ok"}
 
