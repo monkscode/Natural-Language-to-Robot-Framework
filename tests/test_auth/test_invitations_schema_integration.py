@@ -16,3 +16,7 @@ def test_invitations_table_and_unique_open_index():
             ).fetchall()
         }
     assert {"email", "org_id", "invited_by", "status", "token", "consumed_by"} <= cols
+    with get_pool().connection() as conn:
+        idx = {r["indexname"] for r in conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename='invitations'").fetchall()}
+    assert "uq_open_invite" in idx

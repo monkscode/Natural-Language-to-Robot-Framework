@@ -35,7 +35,7 @@ def test_org_owner_can_invite():
     try:
         r = client.post("/auth/org/invitations", json={"email": invitee},
                         headers={"Authorization": f"Bearer {token}"})
-        assert r.status_code in (200, 201)
+        assert r.status_code == 201
         r2 = client.get("/auth/org/invitations",
                         headers={"Authorization": f"Bearer {token}"})
         assert any(i["email"] == invitee for i in r2.json())

@@ -24,7 +24,7 @@ def test_invited_signup_is_tagged_to_org_on_approval():
         match_invite_on_signup(str(invitee["id"]), invitee_email)   # signup hook
         provision_on_approval(str(invitee["id"]))                   # approval hook
         member_orgs = {o["org_id"] for o in orgs.get_orgs_for_user(str(invitee["id"]))}
-        assert org_id in member_orgs
+        assert member_orgs == {org_id}
     finally:
         with get_pool().connection() as conn:
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",

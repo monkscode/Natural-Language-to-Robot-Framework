@@ -52,7 +52,7 @@ def test_set_status_mirrors_is_active_and_bumps_token():
         _cleanup(email)
 
 
-def test_login_allowed_pending_denied_suspended():
+def test_login_allowed_pending_denied_suspended_and_rejected():
     repo = UserRepository()
     email = _email()
     try:
@@ -61,6 +61,8 @@ def test_login_allowed_pending_denied_suspended():
         # pending can authenticate (to reach the waiting screen)
         assert repo.verify_credentials(email, "password123") is not None
         repo.set_status(uid, "suspended", bump_token=True)
+        assert repo.verify_credentials(email, "password123") is None
+        repo.set_status(uid, "rejected", bump_token=True)
         assert repo.verify_credentials(email, "password123") is None
     finally:
         _cleanup(email)

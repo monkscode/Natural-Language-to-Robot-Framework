@@ -10,7 +10,8 @@ def test_status_column_exists_with_constraint_and_backfill():
     with get_pool().connection() as conn:
         col = conn.execute(
             "SELECT data_type, column_default FROM information_schema.columns "
-            "WHERE table_name='users' AND column_name='status'"
+            "WHERE table_name='users' AND column_name='status' "
+            "AND table_schema = current_schema()"
         ).fetchone()
         assert col is not None
         assert col["column_default"] is not None and "active" in col["column_default"]
