@@ -11,6 +11,7 @@ auth/approval_policy.py, auth/jwt_utils.py (require_admin).
 import logging
 from typing import Literal
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -90,7 +91,10 @@ class _CreateOrg(BaseModel):
 
 @admin_access_router.post("/orgs", status_code=201)
 def create_org(body: _CreateOrg, request: Request, admin: dict = Depends(require_admin)):
-    org_id = _orgs.create_team_org(body.name, body.owner_user_id)
+    try:
+        org_id = _orgs.create_team_org(body.name, body.owner_user_id)
+    except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation):
+        raise HTTPException(400, "Unknown owner_user_id")
     request.state.audit_detail = {"org_id": org_id, "owner": body.owner_user_id}
     return {"org_id": org_id}
 

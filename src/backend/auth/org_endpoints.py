@@ -59,7 +59,7 @@ class _InviteBody(BaseModel):
 @org_router.post("/invitations", status_code=201)
 def create_invitation(body: _InviteBody, request: Request,
                       user: dict | None = Depends(require_user)):
-    org_id, user = _require_team_org_admin(user)
+    org_id, _ = _require_team_org_admin(user)
     try:
         inv = _invites.create(body.email, org_id, user["user_id"])
     except InvitationExists:

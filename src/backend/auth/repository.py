@@ -87,17 +87,17 @@ class UserRepository:
         if status not in self._VALID_STATUS:
             raise ValueError(f"invalid status: {status!r}")
         is_active = status == "active"
-        token_expr = "token_version + 1" if bump_token else "token_version"
+        bump = 1 if bump_token else 0
         with get_pool().connection() as conn:
             row = conn.execute(
                 "WITH prev AS ("
                 "  SELECT id, status FROM users WHERE id = %s FOR UPDATE"
                 ") "
                 "UPDATE users u SET status = %s, is_active = %s, "
-                f"token_version = {token_expr} FROM prev WHERE u.id = prev.id "
+                "token_version = token_version + %s FROM prev WHERE u.id = prev.id "
                 "RETURNING prev.status AS old_status, "
                 "u.id, u.email, u.role, u.status",
-                (user_id, status, is_active),
+                (user_id, status, is_active, bump),
             ).fetchone()
             conn.commit()
         return row
@@ -205,7 +205,7 @@ class UserRepository:
 
     def get_or_create_google_user(
         self, google_sub: str, email: str, display_name: str = ""
-    ) -> dict:
+    ) -> tuple[dict, bool]:
         """Find a user by google_sub; create one if absent.
 
         Lookup is by google_sub ONLY — an email match alone is not proof of
@@ -213,6 +213,10 @@ class UserRepository:
         auto-linked (raises EmailAlreadyExists; the owner signs in with their
         password instead). Disabled accounts raise AccountInactive. Updates
         last_login and syncs the role to ADMIN_EMAILS on success.
+
+        Returns (row, created) where created is True only when a brand-new
+        user row was inserted (not on an existing-user match or a raced
+        concurrent-signup match).
         """
         email = email.strip().lower()
         with get_pool().connection() as conn:
@@ -254,16 +258,16 @@ class UserRepository:
                         "SELECT * FROM users WHERE google_sub = %s", (google_sub,)
                     ).fetchone()
                     if raced and raced.get("status") in ("pending", "active"):
-                        return raced
+                        return raced, False
                     raise EmailAlreadyExists(email) from exc
                 conn.commit()
-                return new_row
+                return new_row, True
         # Existing-user path, AFTER the pool borrow above is released:
         # _sync_role_to_allowlist takes its own connection, and nesting two
         # borrows can deadlock a saturated pool. Sync against the stored email
         # (Google may report a different one than we keep — ownership was
         # proven for the stored row).
-        return self._sync_role_to_allowlist(row)
+        return self._sync_role_to_allowlist(row), False
 
     def touch_last_login(self, user_id) -> None:
         with get_pool().connection() as conn:

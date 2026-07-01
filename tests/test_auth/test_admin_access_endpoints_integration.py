@@ -43,3 +43,22 @@ def test_approve_makes_pending_user_active():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, pending_email],))
             conn.commit()
+
+
+def test_create_org_unknown_owner_returns_400():
+    """A nonexistent owner_user_id is a bad request, not a 500. The FK violation
+    from create_team_org is mapped to a clean 400 (no orphan org left behind —
+    create_team_org's connection context rolls back on the error)."""
+    init_invitations_db()
+    admin_email, token = _admin_token()
+    try:
+        r = client.post(
+            "/auth/admin/orgs",
+            json={"name": "Ghost Org", "owner_user_id": str(uuid.uuid4())},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (admin_email,))
+            conn.commit()

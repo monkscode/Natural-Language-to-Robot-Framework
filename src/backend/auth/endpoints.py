@@ -316,14 +316,20 @@ async def google_callback(request: Request):
         return _error_redirect("email_unverified")
 
     try:
-        row = _repo.get_or_create_google_user(
+        row, created = _repo.get_or_create_google_user(
             google_sub=profile["sub"], email=email, display_name=profile.get("name", ""),
         )
     except EmailAlreadyExists:
         return _error_redirect("email_exists")
     except AccountInactive:
         return _error_redirect("account_disabled")
-    match_invite_on_signup(str(row["id"]), row["email"])
+    # Only a brand-new pending signup may consume an invite. An existing/active
+    # user (or the bootstrapped admin, whom _sync flips to active) must NOT — the
+    # invite→membership link is materialised only at approval of a pending user
+    # (provision_on_approval). Consuming here for an existing user would silently
+    # burn the org-owner's open invite with no membership ever created.
+    if created:
+        match_invite_on_signup(str(row["id"]), row["email"])
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*

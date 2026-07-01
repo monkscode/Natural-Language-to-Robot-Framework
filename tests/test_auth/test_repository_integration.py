@@ -67,10 +67,12 @@ def test_google_user_create_is_idempotent(repo):
     email = _unique_email()
     created.append(email)
     sub = f"google-{uuid.uuid4().hex}"
-    first = r.get_or_create_google_user(sub, email, "G User")
-    second = r.get_or_create_google_user(sub, email, "G User")
+    first, first_created = r.get_or_create_google_user(sub, email, "G User")
+    second, second_created = r.get_or_create_google_user(sub, email, "G User")
     assert first["email"] == email
     assert str(second["id"]) == str(first["id"])
+    assert first_created is True
+    assert second_created is False
 
 
 def test_google_login_never_auto_links_existing_email(repo):

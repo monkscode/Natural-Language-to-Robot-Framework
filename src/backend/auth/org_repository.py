@@ -136,7 +136,7 @@ class OrgRepository:
             rows = conn.execute(
                 "SELECT m.user_id, u.email, u.display_name, m.org_role, u.status "
                 "FROM org_members m JOIN users u ON u.id = m.user_id "
-                "WHERE m.org_id = %s ORDER BY m.created_at",
+                "WHERE m.org_id = %s ORDER BY m.created_at, m.user_id",
                 (org_id,),
             ).fetchall()
         return [

@@ -130,8 +130,9 @@ def test_me_rejects_deactivated_user(client_and_emails):
     email = _unique_email()
     created.append(email)
     reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
-    uid = reg.json()["user"]["id"]
-    token = reg.json()["access_token"]
+    data = reg.json()
+    uid = data["user"]["id"]
+    token = data["access_token"]
     repo = UserRepository()
     repo.set_status(uid, "active")          # new signups are pending; approve so /me is reachable
     headers = {"Authorization": f"Bearer {token}"}
@@ -311,3 +312,48 @@ def test_google_callback_disabled_account_rejected(client_and_emails):
         conn.commit()
     resp = _callback_with_profile(client, profile)
     assert "error=account_disabled" in resp.headers["location"]
+
+
+def test_google_callback_does_not_consume_invite_for_existing_active_user(client_and_emails):
+    """An open invite to an already-active email must survive a Google sign-in.
+
+    match_invite_on_signup must fire ONLY for a brand-new pending signup — an
+    existing/active user consuming the invite would silently burn the
+    org-owner's open invite with no membership ever created (membership only
+    materialises at approval of a pending user via provision_on_approval)."""
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.invitation_repository import InvitationRepository
+    from src.backend.auth.invitations_db import init_invitations_db
+
+    init_invitations_db()
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    sub = f"sub-{email}"
+    profile = {"sub": sub, "email": email, "email_verified": True, "name": "G"}
+
+    # Seed an ACTIVE google user for this email.
+    resp = _callback_with_profile(client, profile)
+    assert "#token=" in resp.headers["location"]
+    repo = UserRepository()
+    user = repo.get_by_email(email)
+    repo.set_status(str(user["id"]), "active")
+
+    # An open invite to that same (now-active) email, from an unrelated team org.
+    owner_email = _unique_email()
+    created.append(owner_email)
+    owner = repo.create_user(owner_email, "S3cretpw!", "Owner")
+    org_id = OrgRepository().create_team_org("Acme", str(owner["id"]))
+    invites = InvitationRepository()
+    invites.create(email, org_id, str(owner["id"]))
+
+    # Drive the callback again for the now-active user.
+    resp = _callback_with_profile(client, profile)
+    assert "#token=" in resp.headers["location"]
+
+    # The invite must remain untouched (still 'open') — before the fix it was
+    # silently consumed with no membership ever created.
+    still_open = invites.find_open_by_email(email)
+    assert still_open is not None
+    assert still_open["status"] == "open"
