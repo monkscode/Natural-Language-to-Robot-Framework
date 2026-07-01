@@ -282,3 +282,30 @@ def test_collapse_all_to_single_org_fixes_double_membership():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([owner_email, member_email],))
             conn.commit()
+
+
+def test_set_org_owner_role_change_keeps_single_membership():
+    """Entry-point matrix's role-change row (single-active-org holds through a role
+    change, not only a move): changing a member's role via set_org_owner updates the
+    role in place and leaves them in EXACTLY that one org."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"sooc-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"sooc-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        member = users.create_user(member_email, "password123", "Mem")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_member")  # member solely in team
+        orgs.set_org_owner(org_id, str(member["id"]), "org_admin")  # role change, same org
+        memberships = orgs.get_orgs_for_user(str(member["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == org_id
+        assert memberships[0]["org_role"] == "org_admin"
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([owner_email, member_email],))
+            conn.commit()

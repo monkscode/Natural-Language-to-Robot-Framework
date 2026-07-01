@@ -259,8 +259,10 @@ class OrgRepository:
                 collapsed_uids.append(uid)
             conn.commit()
         # Bump AFTER the membership transaction commits: bump_token_version borrows
-        # its own pooled connection, so nesting it inside the open conn above could
-        # deadlock a saturated pool.
+        # its own pooled connection, so issuing it inside the open conn above could
+        # deadlock a saturated pool. (When invoked from the startup migration this
+        # method itself runs under run_migration_once's advisory-lock connection; the
+        # borrows here stay sequential and shallow, well under the pool ceiling.)
         from src.backend.auth.repository import UserRepository
         repo = UserRepository()
         for uid in collapsed_uids:
