@@ -155,6 +155,44 @@ def test_me_reachable_for_pending_user(client_and_emails):
     assert resp.json()["status"] == "pending"
 
 
+def test_me_includes_is_org_admin_for_team_org_admin(client_and_emails):
+    """A user who is org_admin of a TEAM org must see is_org_admin=True from
+    /auth/me — the signal that unlocks the org-owner Team page/nav."""
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.invitations_db import init_invitations_db
+    init_invitations_db()  # /auth/register matches invites; table must exist
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    data = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"}).json()
+    uid, token = data["user"]["id"], data["access_token"]
+    UserRepository().set_status(uid, "active")
+    OrgRepository().create_team_org("Acme", uid)  # seats uid as team org_admin
+    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["is_org_admin"] is True
+
+
+def test_me_is_org_admin_false_for_personal_only_user(client_and_emails):
+    """Being org_admin of only a PERSONAL org must NOT count — every user owns
+    their personal org, so this would otherwise be true for everyone."""
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.invitations_db import init_invitations_db
+    init_invitations_db()  # /auth/register matches invites; table must exist
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    data = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"}).json()
+    uid, token = data["user"]["id"], data["access_token"]
+    UserRepository().set_status(uid, "active")
+    OrgRepository().ensure_personal_org(uid, email)  # personal org_admin only
+    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["is_org_admin"] is False
+
+
 def test_login_and_me_flow(client_and_emails):
     from src.backend.auth.repository import UserRepository
     client, created = client_and_emails

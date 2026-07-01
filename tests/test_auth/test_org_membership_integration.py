@@ -25,3 +25,25 @@ def test_create_team_org_and_add_member():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([owner_email, member_email],))
             conn.commit()
+
+
+def test_is_team_admin_true_only_for_team_org_admin():
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"ta-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"tm-{uuid.uuid4().hex[:8]}@x.com"
+    solo_email = f"ts-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        member = users.create_user(member_email, "password123", "Mem")
+        solo = users.create_user(solo_email, "password123", "Solo")
+        orgs.ensure_personal_org(str(solo["id"]), solo_email)  # personal org_admin
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_member")
+        assert orgs.is_team_admin(str(owner["id"])) is True     # team org_admin
+        assert orgs.is_team_admin(str(member["id"])) is False    # team org_member
+        assert orgs.is_team_admin(str(solo["id"])) is False      # personal org_admin only
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([owner_email, member_email, solo_email],))
+            conn.commit()

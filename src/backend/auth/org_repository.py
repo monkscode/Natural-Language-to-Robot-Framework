@@ -148,6 +148,18 @@ class OrgRepository:
         """Promote/demote a member's org_role (org_admin/org_member)."""
         self.add_member(org_id, user_id, org_role)
 
+    def is_team_admin(self, user_id: str) -> bool:
+        """True iff the user is org_admin of at least one TEAM org (personal-org
+        admin does NOT count — every user owns their personal org)."""
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM org_members m JOIN organizations o ON o.id = m.org_id "
+                "WHERE m.user_id = %s AND m.org_role = 'org_admin' AND o.kind = 'team' "
+                "LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
     def get_members(self, org_id: str) -> list[dict]:
         """Members of an org joined to users, oldest first."""
         with get_pool().connection() as conn:

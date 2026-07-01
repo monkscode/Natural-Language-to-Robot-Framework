@@ -116,6 +116,9 @@ def _user_public(row: dict) -> dict:
 
 def _token_payload(row: dict) -> dict:
     user = _user_public(row)
+    # is_org_admin drives the SPA's org-owner Team page/nav. It is a TEAM-org
+    # signal — being admin of one's own personal org does not count.
+    user["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
     orgs = _org_repo.get_orgs_for_user(str(row["id"]))
     primary = orgs[0] if orgs else {}
     token = create_access_token(
@@ -199,7 +202,11 @@ async def me(user: dict = Depends(get_current_user)):
         # suspended/rejected accounts cannot use even the pending-gate seam;
         # token_version alone is not enough since set_status() doesn't bump it.
         raise HTTPException(status_code=401, detail="Account is not active")
-    return _user_public(row)
+    # Enrich with the team-org-admin flag the SPA gates the org-owner UI on.
+    # _user_public itself stays DB-free; only these callers pay the extra query.
+    public = _user_public(row)
+    public["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
+    return public
 
 
 @auth_router.post("/logout")
