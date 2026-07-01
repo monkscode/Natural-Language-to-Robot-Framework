@@ -138,6 +138,32 @@ class OrgRepository:
         ).fetchone()
         return row is not None and row["kind"] == "team"
 
+    def _delete_personal_org_if_empty(self, conn, org_id: str) -> None:
+        """Delete org_id iff it is a personal org with zero remaining members.
+        Personal orgs are 1:1 with a user and meaningless once vacated; team orgs
+        are never auto-deleted. Safe: the only hard FKs to organizations are
+        org_members (none here) and invitations (personal orgs are never invited
+        into), both ON DELETE CASCADE; history/learning org_id is a soft column
+        with no FK, so this can neither be blocked nor cascade user data."""
+        conn.execute(
+            "DELETE FROM organizations o "
+            "WHERE o.id = %s AND o.kind = 'personal' "
+            "AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id)",
+            (org_id,),
+        )
+
+    def _collapse_to_single(self, conn, user_id: str, keep_org_id: str) -> None:
+        """Single-active-org invariant: remove every membership of user_id except
+        the one in keep_org_id, deleting any personal org thereby vacated. Runs in
+        the caller's transaction."""
+        vacated = conn.execute(
+            "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s "
+            "RETURNING org_id",
+            (user_id, keep_org_id),
+        ).fetchall()
+        for row in vacated:
+            self._delete_personal_org_if_empty(conn, str(row["org_id"]))
+
     def _email_for(self, user_id: str) -> str | None:
         """The user's email (used as their personal-org name), or None if absent."""
         with get_pool().connection() as conn:
@@ -147,9 +173,9 @@ class OrgRepository:
         return row["email"] if row else None
 
     def add_member(self, org_id: str, user_id: str, org_role: str = "org_member") -> None:
-        """Idempotent: add a user to a TEAM org, or update their role if already a
-        member. Membership changes apply to team orgs only (Finding #6) — a personal
-        org is 1:1 with its user and never takes an assigned member/owner."""
+        """Move a user into a TEAM org (single-active-org): upsert their membership,
+        then remove every other membership and prune any emptied personal org.
+        Membership changes apply to team orgs only (Finding #6)."""
         if org_role not in ("org_admin", "org_member"):
             raise ValueError(f"invalid org_role: {org_role!r}")
         with get_pool().connection() as conn:
@@ -161,6 +187,7 @@ class OrgRepository:
                 "ON CONFLICT (org_id, user_id) DO UPDATE SET org_role = EXCLUDED.org_role",
                 (org_id, user_id, org_role),
             )
+            self._collapse_to_single(conn, user_id, org_id)
             conn.commit()
 
     def set_org_owner(self, org_id: str, user_id: str, org_role: str) -> None:
