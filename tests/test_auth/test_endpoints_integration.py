@@ -141,6 +141,19 @@ def test_me_rejects_deactivated_user(client_and_emails):
     assert client.get("/auth/me", headers=headers).status_code == 401
 
 
+def test_me_reachable_for_pending_user(client_and_emails):
+    """A freshly-registered (pending) user must be able to call /auth/me so the
+    SPA can render the 'pending approval' gate screen on reload."""
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    token = reg.json()["access_token"]
+    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pending"
+
+
 def test_login_and_me_flow(client_and_emails):
     from src.backend.auth.repository import UserRepository
     client, created = client_and_emails

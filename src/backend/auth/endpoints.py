@@ -190,11 +190,15 @@ async def login(request: Request, req: LoginRequest, response: Response):
 async def me(user: dict = Depends(get_current_user)):
     """Re-read the user from the DB so role/name reflect current state."""
     row = _repo.get_by_id(user["user_id"])
-    if not row or not row.get("is_active"):
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
     if row.get("token_version", 0) != user.get("token_version", 0):
         # token was revoked by a logout-all / password change after it was minted
         raise HTTPException(status_code=401, detail="Token revoked")
+    if row.get("status") not in ("pending", "active"):
+        # suspended/rejected accounts cannot use even the pending-gate seam;
+        # token_version alone is not enough since set_status() doesn't bump it.
+        raise HTTPException(status_code=401, detail="Account is not active")
     return _user_public(row)
 
 
