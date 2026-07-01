@@ -220,3 +220,167 @@ def test_admin_can_suspend_another_user():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, target_email],))
             conn.commit()
+
+
+def test_assign_member_adds_user_to_team_org():
+    """POST /orgs/{id}/members seats a user in a team org (org_member)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"amow-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"amm-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        member = repo.create_user(member_email, "password123", "Mem")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        r = client.post(f"/auth/admin/orgs/{org_id}/members",
+                        json={"user_id": str(member["id"]), "org_role": "org_member"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert str(member["id"]) in {m["user_id"] for m in orgs.get_members(org_id)}
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_assign_member_unknown_user_returns_400():
+    """A nonexistent user_id is a bad request, not a 500 (FK violation → 400)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"auow-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        r = client.post(f"/auth/admin/orgs/{org_id}/members",
+                        json={"user_id": str(uuid.uuid4()), "org_role": "org_member"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = %s", (owner_email,))
+            conn.commit()
+
+
+def test_remove_org_member_provisions_personal_when_orgless():
+    """DELETE removes the membership; if it was the user's LAST org, a personal
+    org is provisioned so they stay usable — exactly one membership afterward."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"rmow-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"rmm-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        member = repo.create_user(member_email, "password123", "Mem")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_member")  # member's ONLY org
+        r = client.delete(f"/auth/admin/orgs/{org_id}/members/{member['id']}",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        remaining = orgs.get_orgs_for_user(str(member["id"]))
+        assert len(remaining) == 1
+        assert remaining[0]["kind"] == "personal"
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_remove_org_member_unknown_returns_404():
+    """No such membership → 404 (not 500)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"r4ow-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        r = client.delete(f"/auth/admin/orgs/{org_id}/members/{uuid.uuid4()}",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 404
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = %s", (owner_email,))
+            conn.commit()
+
+
+def test_reassign_user_moves_and_bumps_token():
+    """POST reassign moves the user between team orgs and bumps token_version so
+    their stale (wrong-org) token dies on the next request."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"rsow-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"rsm-{uuid.uuid4().hex[:8]}@x.com"
+    from_id = to_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        member = repo.create_user(member_email, "password123", "Mem")
+        from_id = orgs.create_team_org("From Co", str(owner["id"]))
+        to_id = orgs.create_team_org("To Co", str(owner["id"]))
+        orgs.add_member(from_id, str(member["id"]), "org_member")
+        tv_before = repo.get_by_id(str(member["id"]))["token_version"]
+        r = client.post(f"/auth/admin/users/{member['id']}/reassign",
+                        json={"from_org_id": from_id, "to_org_id": to_id},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert repo.get_by_id(str(member["id"]))["token_version"] == tv_before + 1
+        assert str(member["id"]) in {m["user_id"] for m in orgs.get_members(to_id)}
+        assert str(member["id"]) not in {m["user_id"] for m in orgs.get_members(from_id)}
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM organizations WHERE id = ANY(%s)",
+                         ([o for o in (from_id, to_id) if o],))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_reassign_forbidden_for_non_admin():
+    """A non-admin cannot reassign — 403 before any mutation."""
+    init_invitations_db()
+    email, token = _active_user_token()
+    try:
+        r = client.post(f"/auth/admin/users/{uuid.uuid4()}/reassign",
+                        json={"from_org_id": str(uuid.uuid4()), "to_org_id": str(uuid.uuid4())},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (email,))
+            conn.commit()
+
+
+def test_reassign_unknown_target_org_returns_400():
+    """An unknown (or non-team) target org is a bad request, not a 500."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, token = _admin_token()
+    member_email = f"ru-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        member = repo.create_user(member_email, "password123", "Mem")
+        r = client.post(f"/auth/admin/users/{member['id']}/reassign",
+                        json={"from_org_id": str(uuid.uuid4()), "to_org_id": str(uuid.uuid4())},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, member_email],))
+            conn.commit()

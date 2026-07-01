@@ -104,6 +104,27 @@ def reactivate(user_id: str, request: Request, admin: dict = Depends(require_adm
     return _transition(user_id, "active", bump=False, admin=admin, request=request)
 
 
+class _Reassign(BaseModel):
+    from_org_id: str
+    to_org_id: str
+    org_role: Literal["org_admin", "org_member"] = "org_member"
+
+
+@admin_access_router.post("/users/{user_id}/reassign")
+def reassign_user(user_id: str, body: _Reassign, request: Request,
+                  admin: dict = Depends(require_admin)):
+    """Move a user from one team org to another. Bumps token_version so the user's
+    stale (wrong-org) token dies and their next request forces a fresh login into
+    a correct-org token."""
+    try:
+        _orgs.reassign_user_org(user_id, body.from_org_id, body.to_org_id, body.org_role)
+    except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
+        raise HTTPException(400, "Invalid ids or non-team target org")
+    _repo.bump_token_version(user_id)  # stale org token dies -> forces fresh login
+    request.state.audit_detail = {"user_id": user_id, "from": body.from_org_id, "to": body.to_org_id}
+    return {"status": "ok"}
+
+
 class _CreateOrg(BaseModel):
     name: str
     owner_user_id: str
@@ -136,6 +157,39 @@ def set_owner(org_id: str, body: _SetOwner, request: Request,
 @admin_access_router.get("/orgs/{org_id}/members")
 def org_members(org_id: str, admin: dict = Depends(require_admin)):
     return _orgs.get_members(org_id)
+
+
+class _AssignMember(BaseModel):
+    user_id: str
+    org_role: Literal["org_admin", "org_member"] = "org_member"
+
+
+@admin_access_router.post("/orgs/{org_id}/members")
+def assign_member(org_id: str, body: _AssignMember, request: Request,
+                  admin: dict = Depends(require_admin)):
+    """Seat a user in a team org. A bad UUID / unknown org-or-user / non-team org
+    is a clean 400, never a 500."""
+    try:
+        _orgs.add_member(org_id, body.user_id, body.org_role)
+    except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
+        raise HTTPException(400, "Unknown org/user or non-team org")
+    request.state.audit_detail = {"org_id": org_id, "user_id": body.user_id, "org_role": body.org_role}
+    return {"status": "ok"}
+
+
+@admin_access_router.delete("/orgs/{org_id}/members/{user_id}")
+def remove_org_member(org_id: str, user_id: str, request: Request,
+                      admin: dict = Depends(require_admin)):
+    """Remove a membership. A non-UUID id is a 400; no such membership is a 404.
+    Removing the user's last org provisions a personal org so they stay usable."""
+    try:
+        removed = _orgs.remove_member(org_id, user_id)
+    except psycopg.errors.InvalidTextRepresentation:
+        raise HTTPException(400, "Invalid org/user id")
+    if not removed:
+        raise HTTPException(404, "No such membership")
+    request.state.audit_detail = {"org_id": org_id, "user_id": user_id}
+    return {"status": "ok"}
 
 
 @admin_access_router.get("/orgs")

@@ -130,12 +130,31 @@ class OrgRepository:
             conn.commit()
             return str(org["id"])
 
+    def _is_team_org(self, conn, org_id: str) -> bool:
+        """True iff org_id exists and is a team org. Membership assignment applies
+        to team orgs only — a personal org is 1:1 with its user."""
+        row = conn.execute(
+            "SELECT kind FROM organizations WHERE id = %s", (org_id,)
+        ).fetchone()
+        return row is not None and row["kind"] == "team"
+
+    def _email_for(self, user_id: str) -> str | None:
+        """The user's email (used as their personal-org name), or None if absent."""
+        with get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT email FROM users WHERE id = %s", (user_id,)
+            ).fetchone()
+        return row["email"] if row else None
+
     def add_member(self, org_id: str, user_id: str, org_role: str = "org_member") -> None:
-        """Idempotent: add a user to an org, or update their role if already a
-        member."""
+        """Idempotent: add a user to a TEAM org, or update their role if already a
+        member. Membership changes apply to team orgs only (Finding #6) — a personal
+        org is 1:1 with its user and never takes an assigned member/owner."""
         if org_role not in ("org_admin", "org_member"):
             raise ValueError(f"invalid org_role: {org_role!r}")
         with get_pool().connection() as conn:
+            if not self._is_team_org(conn, org_id):
+                raise ValueError("membership changes apply to team orgs only")
             conn.execute(
                 "INSERT INTO org_members (org_id, user_id, org_role) "
                 "VALUES (%s, %s, %s) "
@@ -145,8 +164,48 @@ class OrgRepository:
             conn.commit()
 
     def set_org_owner(self, org_id: str, user_id: str, org_role: str) -> None:
-        """Promote/demote a member's org_role (org_admin/org_member)."""
+        """Promote/demote a member's org_role (org_admin/org_member). Team orgs
+        only — delegates to add_member, which enforces the guard."""
         self.add_member(org_id, user_id, org_role)
+
+    def remove_member(self, org_id: str, user_id: str) -> bool:
+        """Remove a membership. Returns True if a row was deleted. If this was the
+        user's last membership, provision a personal org so they stay usable."""
+        with get_pool().connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM org_members WHERE org_id = %s AND user_id = %s RETURNING user_id",
+                (org_id, user_id),
+            ).fetchone()
+            remaining = conn.execute(
+                "SELECT 1 FROM org_members WHERE user_id = %s LIMIT 1", (user_id,)
+            ).fetchone()
+            conn.commit()
+        # ensure_personal_org borrows its own connection — call it only AFTER the
+        # borrow above is released, so a saturated pool can't deadlock on a nested
+        # borrow (mirrors get_or_create_google_user's pattern).
+        if deleted and remaining is None:
+            self.ensure_personal_org(user_id, self._email_for(user_id) or user_id)
+        return deleted is not None
+
+    def reassign_user_org(self, user_id: str, from_org_id: str, to_org_id: str,
+                          org_role: str = "org_member") -> None:
+        """Atomically move a user from one TEAM org to another. Raises ValueError
+        if to_org is not a team org (a personal org is never a move target)."""
+        if org_role not in ("org_admin", "org_member"):
+            raise ValueError(f"invalid org_role: {org_role!r}")
+        with get_pool().connection() as conn:
+            if not self._is_team_org(conn, to_org_id):
+                raise ValueError("target org must be a team org")
+            conn.execute(
+                "DELETE FROM org_members WHERE org_id = %s AND user_id = %s",
+                (from_org_id, user_id),
+            )
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) VALUES (%s, %s, %s) "
+                "ON CONFLICT (org_id, user_id) DO UPDATE SET org_role = EXCLUDED.org_role",
+                (to_org_id, user_id, org_role),
+            )
+            conn.commit()
 
     def is_team_admin(self, user_id: str) -> bool:
         """True iff the user is org_admin of at least one TEAM org (personal-org
