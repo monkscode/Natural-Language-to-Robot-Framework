@@ -30,6 +30,7 @@ export default function OrgsTab() {
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [members, setMembers] = useState<OrgMember[]>([])
+  const [addUserId, setAddUserId] = useState('')
 
   async function load() {
     setError(null)
@@ -78,6 +79,7 @@ export default function OrgsTab() {
       return
     }
     setError(null)
+    setAddUserId('')
     try {
       await loadMembers(orgId)
       setExpanded(orgId)
@@ -99,6 +101,53 @@ export default function OrgsTab() {
       setError(e instanceof ApiError ? e.message : 'Failed to update owner')
     }
   }
+
+  async function addMember(orgId: string, userId: string) {
+    setError(null)
+    try {
+      await api(`/auth/admin/orgs/${orgId}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId, org_role: 'org_member' }),
+      })
+      setAddUserId('')
+      await loadMembers(orgId)
+      await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to add member')
+    }
+  }
+
+  async function removeMember(orgId: string, userId: string) {
+    setError(null)
+    try {
+      await api(`/auth/admin/orgs/${orgId}/members/${userId}`, { method: 'DELETE' })
+      await loadMembers(orgId)
+      await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to remove member')
+    }
+  }
+
+  // Move a member to another TEAM org. The backend bumps their token_version, so
+  // the moved user is forced to re-login into a fresh, correct-org token.
+  async function moveMember(userId: string, fromOrgId: string, toOrgId: string) {
+    setError(null)
+    try {
+      await api(`/auth/admin/users/${userId}/reassign`, {
+        method: 'POST',
+        body: JSON.stringify({ from_org_id: fromOrgId, to_org_id: toOrgId, org_role: 'org_member' }),
+      })
+      await loadMembers(fromOrgId)
+      await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to move member')
+    }
+  }
+
+  // Derived off the currently-expanded org: other team orgs are move targets;
+  // add-candidates are active users not already seated in this org.
+  const otherTeamOrgs = orgs.filter((t) => t.kind === 'team' && t.id !== expanded)
+  const addCandidates = users.filter((u) => !members.some((m) => m.user_id === u.id))
 
   return (
     <div className="flex flex-col gap-5">
@@ -156,15 +205,41 @@ export default function OrgsTab() {
                       </Badge>
                       <span className="text-xs text-muted-foreground">{m.status}</span>
                     </div>
-                    {m.org_role === 'org_member' ? (
-                      <button onClick={() => setOwner(o.id, m.user_id, 'org_admin')}
-                        className="text-xs underline">Make owner</button>
-                    ) : (
-                      <button onClick={() => setOwner(o.id, m.user_id, 'org_member')}
-                        className="text-xs underline">Make member</button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {m.org_role === 'org_member' ? (
+                        <button onClick={() => setOwner(o.id, m.user_id, 'org_admin')}
+                          className="text-xs underline">Make owner</button>
+                      ) : (
+                        <button onClick={() => setOwner(o.id, m.user_id, 'org_member')}
+                          className="text-xs underline">Make member</button>
+                      )}
+                      {otherTeamOrgs.length > 0 && (
+                        <select value="" aria-label="Move to another team org"
+                          onChange={(e) => { if (e.target.value) moveMember(m.user_id, o.id, e.target.value) }}
+                          className="rounded-md border px-1 py-0.5 text-xs">
+                          <option value="">Move to…</option>
+                          {otherTeamOrgs.map((t) => (
+                            <option key={t.id} value={t.id}>{t.name}</option>
+                          ))}
+                        </select>
+                      )}
+                      <button onClick={() => removeMember(o.id, m.user_id)}
+                        className="text-xs text-destructive underline">Remove</button>
+                    </div>
                   </li>
                 ))}
+                <li className="flex items-center gap-2 pt-1">
+                  <select value={addUserId} onChange={(e) => setAddUserId(e.target.value)}
+                    aria-label="Add member"
+                    className="rounded-md border px-2 py-0.5 text-xs">
+                    <option value="">Add member…</option>
+                    {addCandidates.map((u) => (
+                      <option key={u.id} value={u.id}>{u.email}</option>
+                    ))}
+                  </select>
+                  <button disabled={!addUserId} onClick={() => addMember(o.id, addUserId)}
+                    className="text-xs underline disabled:opacity-50">Add</button>
+                </li>
               </ul>
             )}
           </li>
