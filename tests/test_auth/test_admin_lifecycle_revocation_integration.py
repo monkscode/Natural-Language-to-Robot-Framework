@@ -1,6 +1,7 @@
 """Task 14 (M12-2): the admin lifecycle routes' token_version-revocation property.
-reject/suspend bump token_version (killing existing tokens); approve/reactivate do
-not. Plus 404 (unknown id) and 403 (non-admin actor) on the transition routes."""
+reject/suspend/approve bump token_version (killing existing tokens — approve because
+the invitee's pending token is stale once org membership is provisioned, Finding #4);
+reactivate does not. Plus 404 (unknown id) and 403 (non-admin actor) on the routes."""
 import uuid
 
 import pytest
@@ -79,7 +80,7 @@ def test_suspend_bumps_token_version():
             conn.commit()
 
 
-def test_approve_does_not_bump_token_version():
+def test_approve_bumps_token_version():
     init_invitations_db()   # approve -> provision_on_approval SELECTs invitations
     repo = UserRepository()
     admin_email, token = _admin_token()
@@ -89,7 +90,9 @@ def test_approve_does_not_bump_token_version():
         r = client.post(f"/auth/admin/users/{uid}/approve", headers=_hdr(token))
         assert r.status_code == 200
         assert r.json()["status"] == "active"
-        assert _tv(repo, uid) == before          # approve never revokes
+        # approve revokes the stale pending token (org_id=None) so the SPA
+        # re-logs-in into a fresh org-bearing token (Finding #4).
+        assert _tv(repo, uid) == before + 1
         assert repo.get_by_id(uid)["is_active"] is True
     finally:
         with get_pool().connection() as conn:

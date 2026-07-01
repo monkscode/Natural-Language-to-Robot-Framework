@@ -81,7 +81,11 @@ def list_users(admin: dict = Depends(require_admin)):
 
 @admin_access_router.post("/users/{user_id}/approve")
 def approve(user_id: str, request: Request, admin: dict = Depends(require_admin)):
-    result = _transition(user_id, "active", bump=False, admin=admin, request=request)
+    # bump=True: approval materialises org membership, so the invitee's pending
+    # token (minted with org_id=None) is now stale. Bumping token_version revokes
+    # it, forcing the SPA to re-login into a fresh, org-bearing token instead of
+    # carrying org_id=None until a manual re-login (Finding #4).
+    result = _transition(user_id, "active", bump=True, admin=admin, request=request)
     # Intentional and safe: _transition commits the user to active, then provision is called.
     # If provision raises, the user is active but the response is 500; because provision_on_approval
     # is idempotent (ensure_personal_org + add_member ON CONFLICT), an admin retry self-heals.

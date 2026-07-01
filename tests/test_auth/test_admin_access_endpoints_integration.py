@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from src.backend.main import app
 from src.backend.auth.repository import UserRepository
-from src.backend.auth.jwt_utils import create_access_token
+from src.backend.auth.jwt_utils import create_access_token, decode_token
 from src.backend.auth.db import get_pool
 from src.backend.auth.invitations_db import init_invitations_db
 from src.backend.auth.org_repository import OrgRepository
@@ -349,6 +349,43 @@ def test_reassign_user_moves_and_bumps_token():
                          ([o for o in (from_id, to_id) if o],))
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_approve_bumps_token_version_so_stale_pending_token_dies():
+    """After approve, the invitee's pending token (org_id=None) must be rejected on
+    the next request so the SPA re-logs-in into a fresh org-bearing token (Finding
+    #4). A fresh login then carries the provisioned org_id."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, admin_token = _admin_token()
+    pending_email = f"pt-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        pend = repo.create_user(pending_email, "password123", "Pend")  # pending, tv=0
+        full = repo.get_by_id(str(pend["id"]))
+        stale = create_access_token({
+            "id": str(full["id"]), "email": full["email"], "role": "user",
+            "display_name": "Pend", "org_id": None,
+            "token_version": full["token_version"], "status": "pending",
+        })
+        # Sanity: while pending, the gate token is accepted by /auth/me.
+        assert client.get("/auth/me",
+                          headers={"Authorization": f"Bearer {stale}"}).status_code == 200
+        r = client.post(f"/auth/admin/users/{pend['id']}/approve",
+                        headers={"Authorization": f"Bearer {admin_token}"})
+        assert r.status_code == 200
+        # Approve bumped token_version → the stale pending token is now revoked.
+        assert client.get("/auth/me",
+                          headers={"Authorization": f"Bearer {stale}"}).status_code == 401
+        # A fresh login carries the provisioned (non-null) org_id.
+        login = client.post("/auth/login",
+                            json={"email": pending_email, "password": "password123"})
+        assert login.status_code == 200
+        assert decode_token(login.json()["access_token"])["org_id"] is not None
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, pending_email],))
             conn.commit()
 
 
