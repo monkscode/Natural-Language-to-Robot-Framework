@@ -352,6 +352,33 @@ def test_reassign_user_moves_and_bumps_token():
             conn.commit()
 
 
+def test_reactivate_provisions_org_for_never_provisioned_user():
+    """A pending user who is rejected (never provisioned) then reactivated must end
+    up usable with exactly one org membership — reactivate provisions on approval
+    (Finding #3), not just flip status to active."""
+    init_invitations_db()
+    repo = UserRepository()
+    orgs = OrgRepository()
+    admin_email, token = _admin_token()
+    target_email = f"react-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        target = repo.create_user(target_email, "password123", "React")  # pending, no org
+        repo.set_status(str(target["id"]), "rejected")
+        assert orgs.get_orgs_for_user(str(target["id"])) == []  # never provisioned
+        r = client.post(f"/auth/admin/users/{target['id']}/reactivate",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "active"
+        memberships = orgs.get_orgs_for_user(str(target["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["kind"] == "personal"
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, target_email],))
+            conn.commit()
+
+
 def test_reassign_forbidden_for_non_admin():
     """A non-admin cannot reassign — 403 before any mutation."""
     init_invitations_db()

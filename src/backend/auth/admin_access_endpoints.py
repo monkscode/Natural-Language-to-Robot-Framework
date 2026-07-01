@@ -101,7 +101,13 @@ def suspend(user_id: str, request: Request, admin: dict = Depends(require_admin)
 
 @admin_access_router.post("/users/{user_id}/reactivate")
 def reactivate(user_id: str, request: Request, admin: dict = Depends(require_admin)):
-    return _transition(user_id, "active", bump=False, admin=admin, request=request)
+    result = _transition(user_id, "active", bump=False, admin=admin, request=request)
+    # Provision org membership, same as approve: a user rejected while pending was
+    # never provisioned, so reactivating them without this leaves them active with
+    # no org (Finding #3). Idempotent (ensure_personal_org + add_member ON CONFLICT),
+    # so a suspended user who already has an org is unaffected.
+    provision_on_approval(user_id)
+    return result
 
 
 class _Reassign(BaseModel):
