@@ -17,9 +17,9 @@ import SignupPage from '@/pages/auth/SignupPage'
 import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage'
 import OAuthCallback from '@/auth/OAuthCallback'
 import AccessGatePage from '@/pages/AccessGatePage'
-
 import AccessConsolePage from '@/pages/AccessConsolePage'
 import TeamPage from '@/pages/TeamPage'
+
 /**
  * Keep-alive page cache.
  *
@@ -32,10 +32,14 @@ import TeamPage from '@/pages/TeamPage'
  * starts clean, and logout unmounts the whole layout (state never leaks
  * across sessions).
  *
- * Admin gating: admin-only paths are never mounted for non-admins; a
- * non-admin navigating to one is bounced to /generate — the exact behaviour
- * RequireAdmin had when each route owned its element. The redirect renders
- * only for the ACTIVE path, so a cached page can never hijack navigation.
+ * Role gating: each page can require admin (`admin: true`) and/or org-admin
+ * (`orgAdmin: true`) access; a page is only ever mounted when
+ * `(!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)` holds, via the
+ * `allowed(p)` helper below. A user lacking the required role who navigates
+ * to a gated path (e.g. an admin-only page, or the org-admin-only `/team`)
+ * is bounced to /generate — the exact behaviour RequireAdmin had when each
+ * route owned its element. The redirect renders only for the ACTIVE path,
+ * so a cached page can never hijack navigation.
  */
 const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JSX.Element }> = [
   { path: '/generate', node: <GeneratePage /> },
@@ -128,9 +132,9 @@ export default function App() {
               <Route path="/learning"  element={null} />
               <Route path="/templates" element={null} />
               <Route path="/settings"  element={null} />
-              {/* catch-all */}
               <Route path="/access" element={null} />
               <Route path="/team"   element={null} />
+              {/* catch-all */}
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>

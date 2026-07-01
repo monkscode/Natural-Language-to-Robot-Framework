@@ -11,8 +11,13 @@ export default function TeamPage() {
   const [error, setError] = useState<string | null>(null)
 
   async function load() {
-    setMembers(await api<Member[]>('/auth/org/members'))
-    setInvites(await api<Invite[]>('/auth/org/invitations'))
+    setError(null)
+    try {
+      setMembers(await api<Member[]>('/auth/org/members'))
+      setInvites(await api<Invite[]>('/auth/org/invitations'))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load team')
+    }
   }
   useEffect(() => { load() }, [])
 
@@ -28,7 +33,11 @@ export default function TeamPage() {
   }
 
   async function revoke(id: string) {
-    await api(`/auth/org/invitations/${id}`, { method: 'DELETE' })
+    try {
+      await api(`/auth/org/invitations/${id}`, { method: 'DELETE' })
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to revoke invite')
+    }
     await load()
   }
 

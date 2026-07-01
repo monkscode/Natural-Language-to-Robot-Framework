@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 
 interface Pending {
   id: string
@@ -11,9 +11,15 @@ interface Pending {
 export default function AccessConsolePage() {
   const [pending, setPending] = useState<Pending[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   async function load() {
-    setPending(await api<Pending[]>('/auth/admin/pending'))
+    setError(null)
+    try {
+      setPending(await api<Pending[]>('/auth/admin/pending'))
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load pending users')
+    }
   }
   useEffect(() => { load() }, [])
 
@@ -22,6 +28,8 @@ export default function AccessConsolePage() {
     try {
       await api(`/auth/admin/users/${id}/${action}`, { method: 'POST' })
       await load()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Action failed')
     } finally {
       setBusy(null)
     }
@@ -30,6 +38,7 @@ export default function AccessConsolePage() {
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-lg font-semibold">Access — pending approvals</h1>
+      {error && <p className="text-xs text-destructive">{error}</p>}
       {pending.length === 0 && (
         <p className="text-sm text-muted-foreground">No one is waiting for approval.</p>
       )}
