@@ -198,3 +198,44 @@ def test_create_team_org_moves_owner_out_of_personal_org():
                 conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
             conn.execute("DELETE FROM users WHERE email = %s", (owner_email,))
             conn.commit()
+
+
+def test_reassign_collapses_to_target_even_with_stray_membership():
+    """reassign must leave the user in EXACTLY the target org — even if they had a
+    membership other than from_org (e.g. a stray personal org). Hardens the move so
+    a wrong/stale from_org_id can't leave a second membership behind."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"rcs-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"rcs-m-{uuid.uuid4().hex[:8]}@x.com"
+    from_id = to_id = personal_id = None
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        member = users.create_user(member_email, "password123", "Mem")
+        from_id = orgs.create_team_org("From Co", str(owner["id"]))
+        to_id = orgs.create_team_org("To Co", str(owner["id"]))
+        # Seat member in from_id, then hand-insert a stray personal membership so the
+        # user has TWO memberships that are not to_id (add_member would collapse, so
+        # build the pre-state directly).
+        personal_id = orgs.ensure_personal_org(str(member["id"]), member_email)
+        with get_pool().connection() as conn:
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) VALUES (%s, %s, 'org_member')",
+                (from_id, str(member["id"])),
+            )
+            conn.commit()
+        assert len(orgs.get_orgs_for_user(str(member["id"]))) == 2  # from + personal
+        orgs.reassign_user_org(str(member["id"]), from_id, to_id)
+        memberships = orgs.get_orgs_for_user(str(member["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == to_id
+        with get_pool().connection() as conn:
+            gone = conn.execute("SELECT 1 FROM organizations WHERE id = %s",
+                                (personal_id,)).fetchone()
+        assert gone is None  # stray personal org pruned
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM organizations WHERE id = ANY(%s)",
+                         ([o for o in (from_id, to_id) if o],))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([owner_email, member_email],))
+            conn.commit()

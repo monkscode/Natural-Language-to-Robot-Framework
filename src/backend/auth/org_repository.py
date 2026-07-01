@@ -217,22 +217,21 @@ class OrgRepository:
 
     def reassign_user_org(self, user_id: str, from_org_id: str, to_org_id: str,
                           org_role: str = "org_member") -> None:
-        """Atomically move a user from one TEAM org to another. Raises ValueError
-        if to_org is not a team org (a personal org is never a move target)."""
+        """Atomically move a user so they are in EXACTLY to_org_id (single-active-org).
+        Raises ValueError if to_org is not a team org (a personal org is never a move
+        target). from_org_id is advisory — the collapse removes every other membership,
+        so a stale from_org_id cannot leave a second membership behind."""
         if org_role not in ("org_admin", "org_member"):
             raise ValueError(f"invalid org_role: {org_role!r}")
         with get_pool().connection() as conn:
             if not self._is_team_org(conn, to_org_id):
                 raise ValueError("target org must be a team org")
             conn.execute(
-                "DELETE FROM org_members WHERE org_id = %s AND user_id = %s",
-                (from_org_id, user_id),
-            )
-            conn.execute(
                 "INSERT INTO org_members (org_id, user_id, org_role) VALUES (%s, %s, %s) "
                 "ON CONFLICT (org_id, user_id) DO UPDATE SET org_role = EXCLUDED.org_role",
                 (to_org_id, user_id, org_role),
             )
+            self._collapse_to_single(conn, user_id, to_org_id)
             conn.commit()
 
     def is_team_admin(self, user_id: str) -> bool:
