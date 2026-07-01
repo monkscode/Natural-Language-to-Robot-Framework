@@ -62,6 +62,16 @@ def list_pending(admin: dict = Depends(require_admin)):
     ]
 
 
+@admin_access_router.get("/users")
+def list_users(admin: dict = Depends(require_admin)):
+    """Every user (all statuses) for the Members tab. Read-only: no audit_detail."""
+    return [
+        {"id": str(r["id"]), "email": r["email"], "display_name": r["display_name"],
+         "role": r["role"], "status": r["status"]}
+        for r in _repo.list_users()
+    ]
+
+
 @admin_access_router.post("/users/{user_id}/approve")
 def approve(user_id: str, request: Request, admin: dict = Depends(require_admin)):
     result = _transition(user_id, "active", bump=False, admin=admin, request=request)

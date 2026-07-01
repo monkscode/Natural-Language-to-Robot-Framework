@@ -102,6 +102,16 @@ class UserRepository:
             conn.commit()
         return row
 
+    def list_users(self) -> list[dict]:
+        """Every user for the admin Members tab: id, email, display_name, role,
+        status, ordered deterministically by (created_at, id). One indexed
+        SELECT — no pagination (alpha scale; pagination is future work)."""
+        with get_pool().connection() as conn:
+            return conn.execute(
+                "SELECT id, email, display_name, role, status FROM users "
+                "ORDER BY created_at, id",
+            ).fetchall()
+
     def create_user(self, email: str, password: str, display_name: str = "") -> dict:
         """Insert a password user. Raises EmailAlreadyExists on duplicate email."""
         email = email.strip().lower()
