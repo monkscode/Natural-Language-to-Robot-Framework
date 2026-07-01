@@ -129,3 +129,9 @@ def set_owner(org_id: str, body: _SetOwner, request: Request,
 @admin_access_router.get("/orgs/{org_id}/members")
 def org_members(org_id: str, admin: dict = Depends(require_admin)):
     return _orgs.get_members(org_id)
+
+
+@admin_access_router.get("/orgs")
+def list_orgs(admin: dict = Depends(require_admin)):
+    """Every org with member count for the Orgs tab. Read-only: no audit_detail."""
+    return _orgs.list_orgs()

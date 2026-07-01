@@ -117,3 +117,45 @@ def test_list_users_forbidden_for_non_admin():
         with get_pool().connection() as conn:
             conn.execute("DELETE FROM users WHERE email = %s", (email,))
             conn.commit()
+
+
+def test_list_orgs_returns_member_counts():
+    init_invitations_db()
+    repo = UserRepository()
+    orgs = OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"own-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Own")
+        org_id = orgs.create_team_org("Acme QA", str(owner["id"]))
+        r = client.get("/auth/admin/orgs",
+                       headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        by_id = {row["id"]: row for row in r.json()}
+        assert org_id in by_id
+        assert by_id[org_id]["name"] == "Acme QA"
+        assert by_id[org_id]["kind"] == "team"
+        assert by_id[org_id]["member_count"] == 1
+        assert set(by_id[org_id].keys()) == {"id", "name", "kind", "member_count"}
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM org_members WHERE org_id = %s", (org_id,))
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email],))
+            conn.commit()
+
+
+def test_list_orgs_forbidden_for_non_admin():
+    init_invitations_db()
+    email, token = _active_user_token()
+    try:
+        r = client.get("/auth/admin/orgs",
+                       headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (email,))
+            conn.commit()

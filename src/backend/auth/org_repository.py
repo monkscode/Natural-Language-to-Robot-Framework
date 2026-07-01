@@ -96,6 +96,24 @@ class OrgRepository:
             for r in rows
         ]
 
+    def list_orgs(self) -> list[dict]:
+        """Every org with its member count for the admin Orgs tab, ordered by
+        (created_at, id). Single SELECT: LEFT JOIN org_members + COUNT + GROUP BY
+        (no N+1). GROUP BY the PK lets Postgres order by created_at safely."""
+        with get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT o.id, o.name, o.kind, COUNT(m.user_id) AS member_count "
+                "FROM organizations o "
+                "LEFT JOIN org_members m ON m.org_id = o.id "
+                "GROUP BY o.id "
+                "ORDER BY o.created_at, o.id",
+            ).fetchall()
+        return [
+            {"id": str(r["id"]), "name": r["name"], "kind": r["kind"],
+             "member_count": r["member_count"]}
+            for r in rows
+        ]
+
     def create_team_org(self, name: str, owner_user_id: str) -> str:
         """Create a kind='team' org and seat owner_user_id as its org_admin.
         Returns the new org id."""
