@@ -11,6 +11,7 @@ auth/org_repository.py, auth/db.py.
 """
 import logging
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
@@ -78,7 +79,11 @@ def list_invitations(user: dict | None = Depends(require_user)):
 def revoke_invitation(invitation_id: str, request: Request,
                       user: dict | None = Depends(require_user)):
     org_id, _ = _require_team_org_admin(user)
-    row = _invites.revoke(invitation_id, org_id)
+    try:
+        row = _invites.revoke(invitation_id, org_id)
+    except psycopg.errors.InvalidTextRepresentation:
+        # A non-UUID invitation id is a client error (400), never a 500 (Finding #5).
+        raise HTTPException(400, "Invalid invitation id")
     if row is None:
         raise HTTPException(404, "No open invitation with that id in your org")
     request.state.audit_detail = {"invitation_id": invitation_id, "org_id": org_id}

@@ -44,7 +44,12 @@ def _transition(user_id: str, status: str, *, bump: bool, admin: dict, request: 
     # harmless (they keep the account usable) and stay allowed.
     if user_id == admin["user_id"] and status in ("suspended", "rejected"):
         raise HTTPException(400, "You cannot suspend or reject your own account")
-    row = _repo.set_status(user_id, status, bump_token=bump)
+    try:
+        row = _repo.set_status(user_id, status, bump_token=bump)
+    except psycopg.errors.InvalidTextRepresentation:
+        # A non-UUID path id must not reach SQL as an invalid uuid literal — a
+        # malformed id is a client error (400), never a 500 (Finding #5).
+        raise HTTPException(400, "Invalid user id")
     if row is None:
         raise HTTPException(404, "User not found")
     request.state.audit_detail = {"from": row["old_status"], "to": status}
@@ -166,7 +171,10 @@ def set_owner(org_id: str, body: _SetOwner, request: Request,
 
 @admin_access_router.get("/orgs/{org_id}/members")
 def org_members(org_id: str, admin: dict = Depends(require_admin)):
-    return _orgs.get_members(org_id)
+    try:
+        return _orgs.get_members(org_id)
+    except psycopg.errors.InvalidTextRepresentation:
+        raise HTTPException(400, "Invalid org id")
 
 
 class _AssignMember(BaseModel):

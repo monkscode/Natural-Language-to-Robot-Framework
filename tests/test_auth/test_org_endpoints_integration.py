@@ -27,6 +27,21 @@ def _owner_with_team():
     return email, org_id, token
 
 
+def test_revoke_invitation_malformed_id_returns_400():
+    """A non-UUID invitation id on revoke is a clean 400, never a 500 — the raw
+    path id must not reach SQL as an invalid uuid literal (Finding #5)."""
+    init_invitations_db()
+    email, org_id, token = _owner_with_team()
+    try:
+        r = client.delete("/auth/org/invitations/not-a-uuid",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (email,))
+            conn.commit()
+
+
 def test_org_owner_can_invite():
     init_invitations_db()
     email, org_id, token = _owner_with_team()

@@ -416,6 +416,36 @@ def test_reactivate_provisions_org_for_never_provisioned_user():
             conn.commit()
 
 
+@pytest.mark.parametrize("verb", ["approve", "reject", "suspend", "reactivate"])
+def test_transition_malformed_id_returns_400(verb):
+    """A non-UUID user id on a lifecycle route is a clean 400, never a 500 — the
+    raw path id must not reach SQL as an invalid uuid literal (Finding #5)."""
+    init_invitations_db()
+    admin_email, token = _admin_token()
+    try:
+        r = client.post(f"/auth/admin/users/not-a-uuid/{verb}",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (admin_email,))
+            conn.commit()
+
+
+def test_org_members_malformed_id_returns_400():
+    """A non-UUID org id on GET members is a clean 400, never a 500 (Finding #5)."""
+    init_invitations_db()
+    admin_email, token = _admin_token()
+    try:
+        r = client.get("/auth/admin/orgs/not-a-uuid/members",
+                       headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (admin_email,))
+            conn.commit()
+
+
 def test_reassign_forbidden_for_non_admin():
     """A non-admin cannot reassign — 403 before any mutation."""
     init_invitations_db()
