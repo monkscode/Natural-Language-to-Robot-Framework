@@ -234,6 +234,39 @@ class OrgRepository:
             self._collapse_to_single(conn, user_id, to_org_id)
             conn.commit()
 
+    def collapse_all_to_single_org(self) -> int:
+        """One-time cleanup: reduce every user with more than one membership to a
+        single active org. Keep the most recently joined TEAM org if the user is in
+        any team org (reflects the latest assignment intent), else their personal
+        org; delete the rest and prune vacated personal orgs. Bumps token_version
+        for each collapsed user so their stale token refreshes. Returns the number
+        of users collapsed. Idempotent: a no-op once everyone is single-org."""
+        collapsed_uids: list[str] = []
+        with get_pool().connection() as conn:
+            multi = conn.execute(
+                "SELECT user_id FROM org_members GROUP BY user_id HAVING COUNT(*) > 1"
+            ).fetchall()
+            for row in multi:
+                uid = str(row["user_id"])
+                keeper = conn.execute(
+                    "SELECT m.org_id FROM org_members m "
+                    "JOIN organizations o ON o.id = m.org_id "
+                    "WHERE m.user_id = %s "
+                    "ORDER BY (o.kind = 'team') DESC, m.created_at DESC LIMIT 1",
+                    (uid,),
+                ).fetchone()
+                self._collapse_to_single(conn, uid, str(keeper["org_id"]))
+                collapsed_uids.append(uid)
+            conn.commit()
+        # Bump AFTER the membership transaction commits: bump_token_version borrows
+        # its own pooled connection, so nesting it inside the open conn above could
+        # deadlock a saturated pool.
+        from src.backend.auth.repository import UserRepository
+        repo = UserRepository()
+        for uid in collapsed_uids:
+            repo.bump_token_version(uid)
+        return len(collapsed_uids)
+
     def is_team_admin(self, user_id: str) -> bool:
         """True iff the user is org_admin of at least one TEAM org (personal-org
         admin does NOT count — every user owns their personal org)."""
