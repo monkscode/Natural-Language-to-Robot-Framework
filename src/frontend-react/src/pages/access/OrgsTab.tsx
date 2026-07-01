@@ -11,6 +11,7 @@ interface Org {
 interface UserOption {
   id: string
   email: string
+  status: 'pending' | 'active' | 'suspended' | 'rejected'
 }
 interface OrgMember {
   user_id: string
@@ -34,7 +35,10 @@ export default function OrgsTab() {
     setError(null)
     try {
       setOrgs(await api<Org[]>('/auth/admin/orgs'))
-      setUsers(await api<UserOption[]>('/auth/admin/users'))
+      // Only active users can be seated as an org owner (a suspended/rejected
+      // or not-yet-approved user shouldn't own an org).
+      const candidates = await api<UserOption[]>('/auth/admin/users')
+      setUsers(candidates.filter((u) => u.status === 'active'))
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load orgs')
     }
