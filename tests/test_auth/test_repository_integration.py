@@ -163,3 +163,47 @@ def test_reset_password_sets_password_on_google_only_account(repo):
     assert r.verify_credentials(email, "Whatever1!") is None
     r.reset_password(email, "Whatever1!")
     assert r.verify_credentials(email, "Whatever1!") is not None
+
+
+def test_admin_email_signup_is_active_immediately(repo, monkeypatch):
+    """An ADMIN_EMAILS address that self-registers must land active+admin — the
+    owner can never be stuck pending (parent spec §Bootstrap)."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    row = r.create_user(email, "S3cretpw!")
+    full = r.get_by_id(str(row["id"]))
+    assert full["role"] == "admin"
+    assert full["status"] == "active"
+    assert full["is_active"] is True
+
+
+def test_sync_activates_already_admin_but_pending_row(repo, monkeypatch):
+    """A user who is role=admin but somehow still pending is normalised to active
+    on their next sign-in (defence in depth for any legacy/raced row)."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    r.create_user(email, "S3cretpw!")  # created as user/pending
+    with auth_db.get_pool().connection() as conn:
+        conn.execute("UPDATE users SET role='admin', status='pending', is_active=FALSE WHERE email=%s", (email,))
+        conn.commit()
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    r.verify_credentials(email, "S3cretpw!")
+    full = r.get_by_email(email)
+    assert full["status"] == "active" and full["is_active"] is True
+
+
+def test_google_admin_email_signup_is_active_immediately(repo, monkeypatch):
+    """An allowlisted Google signup must also land active+admin, not pending."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    row, was_created = r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email, "G Admin")
+    assert was_created is True
+    full = r.get_by_id(str(row["id"]))
+    assert full["role"] == "admin"
+    assert full["status"] == "active"
+    assert full["is_active"] is True

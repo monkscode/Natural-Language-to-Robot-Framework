@@ -116,16 +116,20 @@ class UserRepository:
         """Insert a password user. Raises EmailAlreadyExists on duplicate email."""
         email = email.strip().lower()
         role = role_for_email(email)
+        # Allowlisted (owner) signups are usable immediately; everyone else lands
+        # pending until approved. status='active' is authoritative; is_active mirrors it.
+        is_admin = role == "admin"
+        status = "active" if is_admin else "pending"
         try:
             with get_pool().connection() as conn:
                 row = conn.execute(
                     """
                     INSERT INTO users (email, hashed_password, display_name, role,
                                        auth_provider, status, is_active)
-                    VALUES (%s, %s, %s, %s, 'password', 'pending', FALSE)
+                    VALUES (%s, %s, %s, %s, 'password', %s, %s)
                     RETURNING id, email, display_name, role, status
                     """,
-                    (email, hash_password(password), display_name, role),
+                    (email, hash_password(password), display_name, role, status, is_admin),
                 ).fetchone()
                 conn.commit()
                 return row
@@ -171,12 +175,15 @@ class UserRepository:
         return row
 
     def _sync_role_to_allowlist(self, row: dict) -> dict:
-        """Promote a signing-in user to platform-admin if their email is in the
-        ADMIN_EMAILS bootstrap seed. PROMOTE-ONLY: the DB is the source of truth
-        for platform-admin, so removing an email from ADMIN_EMAILS no longer
-        demotes — revoke via set_platform_role instead."""
-        if role_for_email(row["email"]) != "admin" or row.get("role") == "admin":
+        """Promote an allowlisted signer-in to platform-admin AND force them active.
+        PROMOTE-ONLY on role (removing an email never demotes; the DB is the source
+        of truth for platform-admin — revoke via set_platform_role). Also self-heals
+        any admin row still marked non-active, so the owner can never be stuck
+        pending (defence in depth for a legacy/raced bootstrap row)."""
+        if role_for_email(row["email"]) != "admin":
             return row
+        if row.get("role") == "admin" and row.get("status") == "active":
+            return row  # already fully bootstrapped — no write
         with get_pool().connection() as conn:
             conn.execute(
                 "UPDATE users SET role = 'admin', status = 'active', is_active = TRUE "
@@ -184,7 +191,7 @@ class UserRepository:
                 (row["id"],),
             )
             conn.commit()
-        logger.info("[AUTH] Promoted %s to platform-admin (ADMIN_EMAILS seed)", row["email"])
+        logger.info("[AUTH] normalised %s to active platform-admin (ADMIN_EMAILS seed)", row["email"])
         row = dict(row)
         row["role"] = "admin"
         row["status"] = "active"
@@ -247,15 +254,20 @@ class UserRepository:
                     "SELECT 1 FROM users WHERE email = %s", (email,)
                 ).fetchone():
                     raise EmailAlreadyExists(email)
+                # Allowlisted (owner) Google signups are usable immediately; everyone
+                # else lands pending until approved. Mirror is_active off status.
+                role = role_for_email(email)
+                is_admin = role == "admin"
+                status = "active" if is_admin else "pending"
                 try:
                     new_row = conn.execute(
                         """
                         INSERT INTO users (email, display_name, role, auth_provider,
                                            google_sub, last_login, status, is_active)
-                        VALUES (%s, %s, %s, 'google', %s, now(), 'pending', FALSE)
+                        VALUES (%s, %s, %s, 'google', %s, now(), %s, %s)
                         RETURNING id, email, display_name, role, status
                         """,
-                        (email, display_name, role_for_email(email), google_sub),
+                        (email, display_name, role, google_sub, status, is_admin),
                     ).fetchone()
                 except psycopg.errors.UniqueViolation as exc:
                     conn.rollback()

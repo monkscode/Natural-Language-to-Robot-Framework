@@ -18,15 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 def seed_platform_admins() -> int:
-    """Promote allow-listed users to platform-admin. Idempotent, promote-only.
-    Returns the number of users newly promoted."""
+    """Promote allow-listed users to platform-admin AND force them active, so the
+    owner can never be stuck pending after a fresh deploy (parent spec §Bootstrap).
+    Idempotent, promote-only on role. Returns the number of rows changed (newly
+    promoted or newly activated)."""
     emails = [e.strip().lower() for e in settings.admin_emails_list if e.strip()]
     if not emails:
         return 0
     with get_pool().connection() as conn:
         cur = conn.execute(
-            "UPDATE users SET role = 'admin' "
-            "WHERE lower(email) = ANY(%s) AND role <> 'admin'",
+            "UPDATE users SET role = 'admin', status = 'active', is_active = TRUE "
+            "WHERE lower(email) = ANY(%s) AND (role <> 'admin' OR status <> 'active')",
             (emails,),
         )
         n = cur.rowcount
