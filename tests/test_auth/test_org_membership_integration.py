@@ -172,3 +172,29 @@ def test_add_member_moves_user_out_of_personal_org():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([owner_email, member_email],))
             conn.commit()
+
+
+def test_create_team_org_moves_owner_out_of_personal_org():
+    """Seating an owner in a new team org moves them out of their personal org
+    (single-active-org): the owner ends up solely in the team, personal deleted."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"cto-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        personal_id = orgs.ensure_personal_org(str(owner["id"]), owner_email)
+        org_id = orgs.create_team_org("Globex", str(owner["id"]))
+        memberships = orgs.get_orgs_for_user(str(owner["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == org_id
+        assert memberships[0]["org_role"] == "org_admin"
+        with get_pool().connection() as conn:
+            gone = conn.execute("SELECT 1 FROM organizations WHERE id = %s",
+                                (personal_id,)).fetchone()
+        assert gone is None
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = %s", (owner_email,))
+            conn.commit()

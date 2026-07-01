@@ -115,8 +115,8 @@ class OrgRepository:
         ]
 
     def create_team_org(self, name: str, owner_user_id: str) -> str:
-        """Create a kind='team' org and seat owner_user_id as its org_admin.
-        Returns the new org id."""
+        """Create a kind='team' org and seat owner_user_id as its org_admin, moving
+        the owner out of any prior org (single-active-org). Returns the new org id."""
         with get_pool().connection() as conn:
             org = conn.execute(
                 "INSERT INTO organizations (name, kind) VALUES (%s, 'team') RETURNING id",
@@ -127,6 +127,7 @@ class OrgRepository:
                 "VALUES (%s, %s, 'org_admin')",
                 (org["id"], owner_user_id),
             )
+            self._collapse_to_single(conn, owner_user_id, str(org["id"]))
             conn.commit()
             return str(org["id"])
 
