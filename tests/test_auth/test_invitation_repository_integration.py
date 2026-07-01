@@ -1,4 +1,3 @@
-# tests/test_auth/test_invitation_repository_integration.py
 import uuid
 import pytest
 from src.backend.auth.repository import UserRepository

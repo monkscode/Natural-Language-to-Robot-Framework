@@ -1,4 +1,3 @@
-# src/backend/auth/invitations_db.py
 """Invitations schema bootstrap: org-owner invites matched at signup by email.
 
 An invitation is a pre-authorization record. When the invited email self-

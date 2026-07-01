@@ -1,4 +1,3 @@
-# tests/test_auth/test_org_endpoints_integration.py
 import uuid
 import pytest
 from fastapi.testclient import TestClient

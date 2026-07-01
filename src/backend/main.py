@@ -180,7 +180,7 @@ async def startup_event():
         init_invitations_db()
     except Exception as e:
         logging.warning(
-            f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
+            f"[AUTH] auth store init (users/orgs/invitations) failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
 

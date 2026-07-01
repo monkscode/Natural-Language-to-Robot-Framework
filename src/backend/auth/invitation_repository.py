@@ -1,4 +1,3 @@
-# src/backend/auth/invitation_repository.py
 """InvitationRepository — all SQL for the invitations table.
 
 Stateless; borrows short-lived pooled connections, mirroring UserRepository.

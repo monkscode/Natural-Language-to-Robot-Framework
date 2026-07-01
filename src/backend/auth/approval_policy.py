@@ -1,4 +1,3 @@
-# src/backend/auth/approval_policy.py
 """The single approver-authority predicate (spec §Extensibility seam).
 
 Pure function mirroring auth/ownership.py: callers pass decoded claims, never a

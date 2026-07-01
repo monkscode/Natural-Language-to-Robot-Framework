@@ -90,6 +90,9 @@ def decode_token(token: str) -> dict:
         "org_id": payload.get("org_id"),
         "org_role": payload.get("org_role"),
         "token_version": payload.get("tv", 0),
+        # "active" is the most-permissive default: pre-feature tokens minted before
+        # status existed decode as active so they keep working; per-request DB re-validation
+        # is the real gate (require_user calls _revalidate_active_user).
         "status": payload.get("status", "active"),
     }
 

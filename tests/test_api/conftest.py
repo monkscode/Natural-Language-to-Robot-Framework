@@ -40,6 +40,8 @@ def _auth_not_enforced():
              },
          ):
         yield
+
+
 def register_active(client, email: str) -> str:
     """Register a user then immediately activate + provision them.
 

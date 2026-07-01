@@ -1,4 +1,3 @@
-# src/backend/auth/provisioning.py
 """Signup-time invite matching and approval-time org provisioning.
 
 Two hooks keep org membership honest: a pending user gets NO membership, so a

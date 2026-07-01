@@ -1,4 +1,3 @@
-# tests/test_auth/test_approval_policy.py
 """Unit (pure): only the platform owner may approve, today. The seam exists so
 delegation can be widened later without touching call sites."""
 from src.backend.auth.approval_policy import can_approve
