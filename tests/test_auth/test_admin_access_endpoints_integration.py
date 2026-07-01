@@ -159,3 +159,64 @@ def test_list_orgs_forbidden_for_non_admin():
         with get_pool().connection() as conn:
             conn.execute("DELETE FROM users WHERE email = %s", (email,))
             conn.commit()
+
+
+def test_admin_cannot_suspend_self():
+    """An admin must not be able to suspend their own account — suspend denies
+    login and bumps token_version, so self-suspend is an irreversible-from-the-UI
+    lockout. Guarded with a 400 (mirrors the self-demote guard on /role)."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, token = _admin_token()
+    admin_id = str(repo.get_by_email(admin_email)["id"])
+    try:
+        r = client.post(f"/auth/admin/users/{admin_id}/suspend",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+        # The account must be untouched — still active, no token bump.
+        row = repo.get_by_id(admin_id)
+        assert row["status"] == "active"
+        assert row["token_version"] == 0
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (admin_email,))
+            conn.commit()
+
+
+def test_admin_cannot_reject_self():
+    """Same lockout guard for self-reject (also denies login + bumps token)."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, token = _admin_token()
+    admin_id = str(repo.get_by_email(admin_email)["id"])
+    try:
+        r = client.post(f"/auth/admin/users/{admin_id}/reject",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+        row = repo.get_by_id(admin_id)
+        assert row["status"] == "active"
+        assert row["token_version"] == 0
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = %s", (admin_email,))
+            conn.commit()
+
+
+def test_admin_can_suspend_another_user():
+    """Positive control: the self-guard must not block suspending OTHER users."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, token = _admin_token()
+    target_email = f"tgt-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        target = repo.create_user(target_email, "password123", "Tgt")
+        repo.set_status(str(target["id"]), "active")
+        r = client.post(f"/auth/admin/users/{target['id']}/suspend",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert repo.get_by_id(str(target["id"]))["status"] == "suspended"
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, target_email],))
+            conn.commit()

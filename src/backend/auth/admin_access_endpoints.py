@@ -37,6 +37,13 @@ def _public(row: dict) -> dict:
 def _transition(user_id: str, status: str, *, bump: bool, admin: dict, request: Request) -> dict:
     if not can_approve(admin):
         raise HTTPException(403, "Not permitted to manage this user")
+    # Self-lockout guard: an admin may not suspend or reject their OWN account.
+    # Both statuses deny login and bump token_version, so a self-transition locks
+    # the admin out of the very console needed to undo it. Mirrors the self-demote
+    # guard on POST /auth/admin/users/{id}/role. Approve/reactivate to self are
+    # harmless (they keep the account usable) and stay allowed.
+    if user_id == admin["user_id"] and status in ("suspended", "rejected"):
+        raise HTTPException(400, "You cannot suspend or reject your own account")
     row = _repo.set_status(user_id, status, bump_token=bump)
     if row is None:
         raise HTTPException(404, "User not found")

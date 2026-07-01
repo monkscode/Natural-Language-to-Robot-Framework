@@ -65,7 +65,8 @@ export default function MembersTab() {
             </div>
             <div className="flex gap-2">
               {u.status === 'active' && (
-                <button disabled={busy === u.id}
+                <button disabled={busy === u.id || u.id === user?.id}
+                  title={u.id === user?.id ? 'You cannot suspend your own account' : undefined}
                   onClick={() => mutate(u.id, `/auth/admin/users/${u.id}/suspend`)}
                   className="rounded-md border px-3 py-1 text-sm disabled:opacity-50">
                   Suspend
