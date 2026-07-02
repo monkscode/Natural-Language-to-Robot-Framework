@@ -33,12 +33,13 @@ export default function TeamPage() {
   }
 
   async function revoke(id: string) {
+    setError(null)
     try {
       await api(`/auth/org/invitations/${id}`, { method: 'DELETE' })
+      await load()
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to revoke invite')
     }
-    await load()
   }
 
   return (

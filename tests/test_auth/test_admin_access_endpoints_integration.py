@@ -233,6 +233,7 @@ def test_assign_member_adds_user_to_team_org():
     try:
         owner = repo.create_user(owner_email, "password123", "Ow")
         member = repo.create_user(member_email, "password123", "Mem")
+        repo.set_status(str(member["id"]), "active")  # only active users may be seated
         org_id = orgs.create_team_org("Acme", str(owner["id"]))
         r = client.post(f"/auth/admin/orgs/{org_id}/members",
                         json={"user_id": str(member["id"]), "org_role": "org_member"},
@@ -267,6 +268,53 @@ def test_assign_member_unknown_user_returns_400():
             if org_id:
                 conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
             conn.execute("DELETE FROM users WHERE email = %s", (owner_email,))
+            conn.commit()
+
+
+def test_assign_member_rejects_inactive_user():
+    """A pending/suspended/rejected user cannot be seated into an org — they can
+    never hold a token, so the membership would be inert litter (Findings #2/#7)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"iaow-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"iam-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        member = repo.create_user(member_email, "password123", "Mem")  # stays pending
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        r = client.post(f"/auth/admin/orgs/{org_id}/members",
+                        json={"user_id": str(member["id"]), "org_role": "org_member"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+        assert str(member["id"]) not in {m["user_id"] for m in orgs.get_members(org_id)}
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_create_org_rejects_inactive_owner():
+    """A team org cannot be created with a pending/suspended owner (Findings #2/#7)."""
+    init_invitations_db()
+    repo = UserRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"ico-{uuid.uuid4().hex[:8]}@x.com"
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")  # stays pending
+        r = client.post("/auth/admin/orgs",
+                        json={"name": "Newco", "owner_user_id": str(owner["id"])},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email],))
             conn.commit()
 
 
@@ -492,6 +540,7 @@ def test_assign_member_bumps_moved_user_token():
     try:
         owner = repo.create_user(owner_email, "password123", "Ow")
         member = repo.create_user(member_email, "password123", "Mem")
+        repo.set_status(str(member["id"]), "active")  # only active users may be seated
         org_id = orgs.create_team_org("Acme", str(owner["id"]))
         tv_before = repo.get_by_id(str(member["id"]))["token_version"]
         r = client.post(f"/auth/admin/orgs/{org_id}/members",

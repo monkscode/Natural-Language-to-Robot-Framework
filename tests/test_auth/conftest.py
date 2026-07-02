@@ -86,6 +86,8 @@ def auth_isolated_schema():
         auth_db.init_auth_db()  # creates users in auth_test
         from src.backend.auth.org_db import init_org_db
         init_org_db()  # organizations + org_members in the same isolated schema
+        from src.backend.auth.invitations_db import init_invitations_db
+        init_invitations_db()  # invitations table (register -> match_invite_on_signup)
 
         # Build isolated data-plane singletons pointing at the same isolated DSN
         # so both direct-construction (test_core) and TestClient(app) (test_api)

@@ -42,14 +42,19 @@ class InvitationRepository:
                 (email.strip().lower(),),
             ).fetchone()
 
-    def consume(self, invitation_id: str, user_id: str) -> None:
+    def consume(self, invitation_id: str, user_id: str) -> bool:
+        """Consume an OPEN invite. Returns True if a row was actually matched and
+        updated; False if the invite was already consumed/revoked or gone (the
+        UPDATE's status='open' guard matched nothing). The caller uses this to
+        avoid recording a match on a zero-row no-op."""
         with get_pool().connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE invitations SET status = 'consumed', consumed_by = %s, "
                 "consumed_at = now() WHERE id = %s AND status = 'open'",
                 (user_id, invitation_id),
             )
             conn.commit()
+        return cur.rowcount > 0
 
     def find_consumed_by_user(self, user_id: str) -> dict | None:
         """The org-tagging invite a user consumed at signup (for approval-time

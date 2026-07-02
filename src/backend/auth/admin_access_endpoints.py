@@ -34,6 +34,24 @@ def _public(row: dict) -> dict:
             "role": row.get("role", "user"), "status": row["status"]}
 
 
+def _require_active_user(user_id: str) -> None:
+    """A user must be ACTIVE before receiving org ownership or membership. An
+    inactive account (pending/suspended/rejected) can never hold a token, so
+    seating it would only write inert org_members litter that springs to life if
+    the account is later reactivated. Admins reactivate first, then assign. Guards
+    both the owner seat (create_org) and member/owner assignment (assign_member,
+    set_owner). The approval flow is unaffected: provision_on_approval runs only
+    AFTER _transition commits the user to active."""
+    try:
+        row = _repo.get_by_id(user_id)
+    except psycopg.errors.InvalidTextRepresentation:
+        raise HTTPException(400, "Invalid user id")
+    if row is None:
+        raise HTTPException(400, "Unknown user")
+    if row.get("status") != "active":
+        raise HTTPException(400, "User must be active before joining an org")
+
+
 def _transition(user_id: str, status: str, *, bump: bool, admin: dict, request: Request) -> dict:
     if not can_approve(admin):
         raise HTTPException(403, "Not permitted to manage this user")
@@ -147,6 +165,7 @@ class _CreateOrg(BaseModel):
 
 @admin_access_router.post("/orgs", status_code=201)
 def create_org(body: _CreateOrg, request: Request, admin: dict = Depends(require_admin)):
+    _require_active_user(body.owner_user_id)  # no inactive owner
     try:
         org_id = _orgs.create_team_org(body.name, body.owner_user_id)
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation):
@@ -164,7 +183,12 @@ class _SetOwner(BaseModel):
 @admin_access_router.post("/orgs/{org_id}/owner")
 def set_owner(org_id: str, body: _SetOwner, request: Request,
               admin: dict = Depends(require_admin)):
-    _orgs.set_org_owner(org_id, body.user_id, body.org_role)
+    _require_active_user(body.user_id)  # no inactive owner
+    try:
+        _orgs.set_org_owner(org_id, body.user_id, body.org_role)
+    except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
+        # Bad UUID / unknown org-or-user / non-team org is a clean 400, not a 500.
+        raise HTTPException(400, "Unknown org/user or non-team org")
     request.state.audit_detail = {"org_id": org_id, "user_id": body.user_id,
                                   "org_role": body.org_role}
     return {"status": "ok"}
@@ -188,6 +212,7 @@ def assign_member(org_id: str, body: _AssignMember, request: Request,
                   admin: dict = Depends(require_admin)):
     """Seat a user in a team org. A bad UUID / unknown org-or-user / non-team org
     is a clean 400, never a 500."""
+    _require_active_user(body.user_id)  # no inactive member
     try:
         _orgs.add_member(org_id, body.user_id, body.org_role)
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):

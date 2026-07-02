@@ -23,8 +23,9 @@ def match_invite_on_signup(user_id: str, email: str) -> None:
     """If an open invite matches this email, consume it (records consumed_by).
     No membership is created yet — that happens at approval."""
     inv = _invites.find_open_by_email(email)
-    if inv is not None:
-        _invites.consume(str(inv["id"]), user_id)
+    # Only record a match when consume() actually updated an open row — a raced
+    # concurrent consume between the lookup and the UPDATE returns False (no-op).
+    if inv is not None and _invites.consume(str(inv["id"]), user_id):
         logger.info("[AUTH] signup matched invite to org %s", inv["org_id"])
 
 
