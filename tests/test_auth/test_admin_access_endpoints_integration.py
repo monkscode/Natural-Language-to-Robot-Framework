@@ -368,6 +368,62 @@ def test_remove_org_member_unknown_returns_404():
             conn.commit()
 
 
+def test_set_owner_promotes_active_member():
+    """POST /orgs/{id}/owner sets an active member's org_role in a team org."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"sow-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"som-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        member = repo.create_user(member_email, "password123", "Mem")
+        repo.set_status(str(member["id"]), "active")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_member")
+        r = client.post(f"/auth/admin/orgs/{org_id}/owner",
+                        json={"user_id": str(member["id"]), "org_role": "org_admin"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert any(m["user_id"] == str(member["id"]) and m["org_role"] == "org_admin"
+                   for m in orgs.get_members(org_id))
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_set_owner_rejects_inactive_user():
+    """A pending/suspended user cannot be made org owner (Findings #2/#7)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"sowi-{uuid.uuid4().hex[:8]}@x.com"
+    target_email = f"sowt-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        target = repo.create_user(target_email, "password123", "Tg")  # stays pending
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        r = client.post(f"/auth/admin/orgs/{org_id}/owner",
+                        json={"user_id": str(target["id"]), "org_role": "org_admin"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, target_email],))
+            conn.commit()
+
+
 def test_reassign_user_moves_and_bumps_token():
     """POST reassign moves the user between team orgs and bumps token_version so
     their stale (wrong-org) token dies on the next request."""
