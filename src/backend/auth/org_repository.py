@@ -12,6 +12,7 @@ Depends on: auth/db.py (pool).
 import logging
 
 from src.backend.auth.db import get_pool
+from src.backend.config.logging_config import sanitize_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,9 @@ class OrgRepository:
                 (org["id"], user_id),
             )
             conn.commit()
-            logger.info("[AUTH] provisioned personal org for user %s", user_id)
+            # user_id reaches this log from an HTTP path param (e.g. admin remove
+            # member), so scrub CR/LF before logging (Sonar S5145 / CWE-117).
+            logger.info("[AUTH] provisioned personal org for user %s", sanitize_for_log(user_id))
             return str(org["id"])
 
     def backfill_personal_orgs(self) -> int:
@@ -197,9 +200,15 @@ class OrgRepository:
         self.add_member(org_id, user_id, org_role)
 
     def remove_member(self, org_id: str, user_id: str) -> bool:
-        """Remove a membership. Returns True if a row was deleted. If this was the
-        user's last membership, provision a personal org so they stay usable."""
+        """Remove a membership from a TEAM org. Returns True if a row was deleted.
+        If this was the user's last membership, provision a personal org so they
+        stay usable. Team orgs only (mirrors add_member / reassign_user_org): a
+        personal org is 1:1 with its user, and removing its sole membership would
+        orphan the org row and churn a replacement personal org — so a personal
+        (or unknown) org raises ValueError."""
         with get_pool().connection() as conn:
+            if not self._is_team_org(conn, org_id):
+                raise ValueError("membership changes apply to team orgs only")
             deleted = conn.execute(
                 "DELETE FROM org_members WHERE org_id = %s AND user_id = %s RETURNING user_id",
                 (org_id, user_id),
@@ -257,16 +266,19 @@ class OrgRepository:
                 ).fetchone()
                 self._collapse_to_single(conn, uid, str(keeper["org_id"]))
                 collapsed_uids.append(uid)
+            # Bump token_version in the SAME transaction as the membership cleanup so
+            # the two commit atomically: a crash between the two can never leave a
+            # collapsed user holding a live token that still carries a now-removed
+            # org_id. Executing on THIS conn (not a fresh UserRepository borrow) keeps
+            # the method single-connection, so the nested-borrow deadlock the previous
+            # post-commit loop guarded against cannot arise. (SQL mirrors
+            # UserRepository.bump_token_version.)
+            for uid in collapsed_uids:
+                conn.execute(
+                    "UPDATE users SET token_version = token_version + 1 WHERE id = %s",
+                    (uid,),
+                )
             conn.commit()
-        # Bump AFTER the membership transaction commits: bump_token_version borrows
-        # its own pooled connection, so issuing it inside the open conn above could
-        # deadlock a saturated pool. (When invoked from the startup migration this
-        # method itself runs under run_migration_once's advisory-lock connection; the
-        # borrows here stay sequential and shallow, well under the pool ceiling.)
-        from src.backend.auth.repository import UserRepository
-        repo = UserRepository()
-        for uid in collapsed_uids:
-            repo.bump_token_version(uid)
         return len(collapsed_uids)
 
     def is_team_admin(self, user_id: str) -> bool:

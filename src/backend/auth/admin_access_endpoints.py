@@ -149,6 +149,7 @@ def reassign_user(user_id: str, body: _Reassign, request: Request,
     """Move a user from one team org to another. Bumps token_version so the user's
     stale (wrong-org) token dies and their next request forces a fresh login into
     a correct-org token."""
+    _require_active_user(user_id)  # no inactive assignee (mirrors create_org/set_owner/assign_member)
     try:
         _orgs.reassign_user_org(user_id, body.from_org_id, body.to_org_id, body.org_role)
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
@@ -234,6 +235,9 @@ def remove_org_member(org_id: str, user_id: str, request: Request,
         removed = _orgs.remove_member(org_id, user_id)
     except psycopg.errors.InvalidTextRepresentation:
         raise HTTPException(400, "Invalid org/user id")
+    except ValueError:
+        # Personal or unknown org — membership changes apply to team orgs only.
+        raise HTTPException(400, "Membership changes apply to team orgs only")
     if not removed:
         raise HTTPException(404, "No such membership")
     # Removal is a move (team -> fresh personal): the user's live token still

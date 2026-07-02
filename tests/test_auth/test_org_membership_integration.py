@@ -143,6 +143,30 @@ def test_add_member_rejects_non_team_org():
             conn.commit()
 
 
+def test_remove_member_rejects_non_team_org():
+    """Finding #4: remove_member applies to TEAM orgs only. Targeting a personal
+    org raises ValueError rather than deleting its sole membership and churning a
+    replacement personal org — the personal membership is left untouched."""
+    users, orgs = UserRepository(), OrgRepository()
+    solo_email = f"rmt-{uuid.uuid4().hex[:8]}@x.com"
+    personal_id = None
+    try:
+        solo = users.create_user(solo_email, "password123", "Solo")
+        personal_id = orgs.ensure_personal_org(str(solo["id"]), solo_email)
+        with pytest.raises(ValueError):
+            orgs.remove_member(personal_id, str(solo["id"]))
+        memberships = orgs.get_orgs_for_user(str(solo["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == personal_id  # unchanged, not churned
+    finally:
+        with get_pool().connection() as conn:
+            if personal_id:
+                conn.execute("DELETE FROM org_members WHERE org_id = %s", (personal_id,))
+                conn.execute("DELETE FROM organizations WHERE id = %s", (personal_id,))
+            conn.execute("DELETE FROM users WHERE email = %s", (solo_email,))
+            conn.commit()
+
+
 def test_add_member_moves_user_out_of_personal_org():
     """Single-active-org: assigning a user (who has a personal org) to a team org
     MOVES them — they end up solely in the team and the emptied personal org is

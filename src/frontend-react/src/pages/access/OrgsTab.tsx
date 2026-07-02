@@ -72,6 +72,13 @@ export default function OrgsTab() {
     setMembers(await api<OrgMember[]>(`/auth/admin/orgs/${orgId}/members`))
   }
 
+  // Shared post-mutation refresh: re-pull the affected org's members and the org
+  // list (member counts / add-candidates) after a successful member action.
+  async function refreshOrg(orgId: string) {
+    await loadMembers(orgId)
+    await load()
+  }
+
   async function toggleMembers(orgId: string) {
     if (expanded === orgId) {
       setExpanded(null)
@@ -95,8 +102,7 @@ export default function OrgsTab() {
         method: 'POST',
         body: JSON.stringify({ user_id: userId, org_role: orgRole }),
       })
-      await loadMembers(orgId)
-      await load()
+      await refreshOrg(orgId)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to update owner')
     }
@@ -110,8 +116,7 @@ export default function OrgsTab() {
         body: JSON.stringify({ user_id: userId, org_role: 'org_member' }),
       })
       setAddUserId('')
-      await loadMembers(orgId)
-      await load()
+      await refreshOrg(orgId)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to add member')
     }
@@ -121,8 +126,7 @@ export default function OrgsTab() {
     setError(null)
     try {
       await api(`/auth/admin/orgs/${orgId}/members/${userId}`, { method: 'DELETE' })
-      await loadMembers(orgId)
-      await load()
+      await refreshOrg(orgId)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to remove member')
     }
@@ -137,8 +141,7 @@ export default function OrgsTab() {
         method: 'POST',
         body: JSON.stringify({ from_org_id: fromOrgId, to_org_id: toOrgId, org_role: 'org_member' }),
       })
-      await loadMembers(fromOrgId)
-      await load()
+      await refreshOrg(fromOrgId)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to move member')
     }

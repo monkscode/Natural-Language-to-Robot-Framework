@@ -18,17 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 def seed_platform_admins() -> int:
-    """Promote allow-listed users to platform-admin AND force them active, so the
-    owner can never be stuck pending after a fresh deploy (parent spec §Bootstrap).
-    Idempotent, promote-only on role. Returns the number of rows changed (newly
-    promoted or newly activated)."""
+    """Promote allow-listed users to platform-admin, and force a PENDING one active
+    so the owner can never be stuck pending after a fresh deploy (parent spec
+    §Bootstrap). A suspended/rejected allow-listed admin is left disabled — seeding
+    must never resurrect an account an owner deliberately turned off; only the role
+    is promoted, the status is preserved. Idempotent, promote-only on role. Returns
+    the number of rows changed."""
     emails = [e.strip().lower() for e in settings.admin_emails_list if e.strip()]
     if not emails:
         return 0
     with get_pool().connection() as conn:
+        # Activation is gated to pending rows only (bootstrap the owner); role is
+        # promoted regardless of status. The WHERE fires when either half has work
+        # to do, so the row count still reflects real changes and stays idempotent.
         cur = conn.execute(
-            "UPDATE users SET role = 'admin', status = 'active', is_active = TRUE "
-            "WHERE lower(email) = ANY(%s) AND (role <> 'admin' OR status <> 'active')",
+            "UPDATE users SET role = 'admin', "
+            "status = CASE WHEN status = 'pending' THEN 'active' ELSE status END, "
+            "is_active = CASE WHEN status = 'pending' THEN TRUE ELSE is_active END "
+            "WHERE lower(email) = ANY(%s) AND (role <> 'admin' OR status = 'pending')",
             (emails,),
         )
         n = cur.rowcount

@@ -64,3 +64,51 @@ def test_seed_promotes_and_activates_plain_user(monkeypatch):
         assert full["is_active"] is True
     finally:
         _cleanup(email)
+
+
+def test_seed_does_not_reactivate_suspended_admin(monkeypatch):
+    """A suspended allow-listed admin must stay suspended after seeding — the seed
+    bootstraps a PENDING owner to active, but never resurrects an account an owner
+    deliberately turned off (Finding #3)."""
+    repo = UserRepository()
+    email = _email()
+    try:
+        repo.create_user(email, "password123", "Seed")
+        with auth_db.get_pool().connection() as conn:
+            conn.execute(
+                "UPDATE users SET role='admin', status='suspended', is_active=FALSE WHERE email=%s",
+                (email,),
+            )
+            conn.commit()
+        monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+        seed_platform_admins()
+        full = repo.get_by_email(email)
+        assert full["role"] == "admin"        # role preserved
+        assert full["status"] == "suspended"  # NOT reactivated
+        assert full["is_active"] is False
+    finally:
+        _cleanup(email)
+
+
+def test_seed_promotes_suspended_user_role_but_keeps_suspended(monkeypatch):
+    """A suspended NON-admin in ADMIN_EMAILS is promoted to admin role, but its
+    disabled status is preserved — role promotion must not smuggle in a
+    reactivation (Finding #3)."""
+    repo = UserRepository()
+    email = _email()
+    try:
+        repo.create_user(email, "password123", "Seed")
+        with auth_db.get_pool().connection() as conn:
+            conn.execute(
+                "UPDATE users SET status='suspended', is_active=FALSE WHERE email=%s",
+                (email,),
+            )
+            conn.commit()
+        monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+        seed_platform_admins()
+        full = repo.get_by_email(email)
+        assert full["role"] == "admin"        # role promoted
+        assert full["status"] == "suspended"  # status untouched
+        assert full["is_active"] is False
+    finally:
+        _cleanup(email)
