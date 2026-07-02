@@ -132,15 +132,26 @@ class TestWorkflowApiEndpoints:
         assert lines_seen >= 1
 
     def test_execute_endpoint_exists(self):
-        """POST /execute-test is reachable (may return error without valid code, but not 404)."""
+        """POST /execute-test is registered (not 404) — WITHOUT persisting a run.
+
+        Reachability must not leave a history row in the dev DB. An empty body is
+        rejected at endpoint validation ("Robot code not provided", 400) BEFORE
+        record_start runs, so this proves the route exists without triggering a
+        real execution or a test_runs row. (Earlier this posted dummy robot_code,
+        which — when the backend ran with AUTH_ENFORCED off — created an
+        ownerless, queryless 'error' run that polluted History.)
+        """
         resp = requests.post(
             f"{SERVICE_URL}/execute-test",
-            json={"robot_code": "*** Test Cases ***\nDummy\n    Log    hello"},
+            json={},  # no robot_code -> 400 before any persistence; no history row
             headers=_auth_headers(),
             timeout=10,
         )
-        # Anything except 404 — the endpoint exists
+        # A client-side rejection (400 empty body / 401 auth) proves the route is
+        # registered and that nothing reached execution. Must not be 404, and must
+        # not be a 2xx (which would mean a run actually started).
         assert resp.status_code != 404
+        assert 400 <= resp.status_code < 500
 
 
 class TestHintMetadataCache:

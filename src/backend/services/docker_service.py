@@ -58,9 +58,21 @@ def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
                     logging.info(
                         f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect ({container_ref}): {source}")
                     return source
+        except docker.errors.NotFound:
+            # Expected miss: this candidate name isn't a running container (e.g.
+            # the machine HOSTNAME under `run.sh` dev, which is not a container at
+            # all). Not an error — we try the next candidate and fall back to
+            # HOST_ROBOT_TESTS_DIR if none match. DEBUG so it stops printing a
+            # false-alarm WARNING on every run.
+            logging.debug(
+                f"🐳 DOCKER SERVICE: container inspect miss for '{container_ref}' "
+                "(not a container); trying next candidate")
         except docker.errors.DockerException as e:
+            # A real Docker problem (daemon unreachable, permission denied, etc.) —
+            # keep this at WARNING; it may explain a downstream mount failure.
             logging.warning(
-            f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {type(e).__name__}: {e}")
+                "⚠️  DOCKER SERVICE: Docker error resolving mount source via container "
+                f"inspect ({container_ref}): {type(e).__name__}: {e}")
 
     logging.info(
         f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")

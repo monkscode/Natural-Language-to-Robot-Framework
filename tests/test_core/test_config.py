@@ -161,7 +161,16 @@ class TestSettingsValidators:
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
 
 
-def test_runner_exec_url_default():
+def test_local_service_urls_use_ipv4_loopback():
+    """Local service hops must default to 127.0.0.1, never localhost.
+
+    On Windows `localhost` resolves to IPv6 ::1 first; these services bind IPv4
+    only, so a `localhost` default adds a ~2s connect stall per hop (execute
+    makes two hops -> ~4s). Guard against a well-meaning revert to `localhost`.
+    """
     from src.backend.core.config import Settings
     s = Settings()
-    assert s.RUNNER_EXEC_URL == "http://localhost:4998"
+    assert s.RUNNER_EXEC_URL == "http://127.0.0.1:4998"
+    assert s.BROWSER_USE_SERVICE_URL == "http://127.0.0.1:4999"
+    assert "localhost" not in s.RUNNER_EXEC_URL
+    assert "localhost" not in s.BROWSER_USE_SERVICE_URL
