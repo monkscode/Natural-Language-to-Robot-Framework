@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     
     # Service Configuration
     APP_PORT: int = Field(default=5000, description="Port for FastAPI service")
-    BROWSER_USE_SERVICE_URL: str = Field(default="http://localhost:4999", description="URL for BrowserUse service")
+    # 127.0.0.1, NOT localhost: on Windows `localhost` resolves to IPv6 ::1 first
+    # and the service binds IPv4 only, so every call stalls ~2s before the IPv4
+    # fallback. Compose overrides this to the service name (browser-service:4999).
+    BROWSER_USE_SERVICE_URL: str = Field(default="http://127.0.0.1:4999", description="URL for BrowserUse service")
     
     # Browser Configuration
     BROWSER_HEADLESS: bool = Field(default=True, description="Run browser in headless mode (no UI) for BrowserUse service")
@@ -74,11 +77,14 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 4: opt-in read-only rootfs for runner containers; default off until a live run proves headless Chrome tolerates it (validated in a later phase task).",
     )
-    # Phase 4: base URL of the socket-holding executor service. localhost for
+    # Phase 4: base URL of the socket-holding executor service. 127.0.0.1 for
     # `./run.sh` dev; compose overrides to the service name.
+    # 127.0.0.1, NOT localhost: on Windows `localhost` resolves to IPv6 ::1 first
+    # and the service binds IPv4 only, so every hop stalls ~2s before the IPv4
+    # fallback (execute makes two hops → ~4s). Compose overrides to runner-exec:4998.
     RUNNER_EXEC_URL: str = Field(
-        default="http://localhost:4998",  # NOSONAR — internal Docker network, no TLS needed
-        description="Phase 4: base URL of the runner-exec service; localhost for run.sh dev, http://runner-exec:4998 in compose.",
+        default="http://127.0.0.1:4998",  # NOSONAR — internal Docker network, no TLS needed
+        description="Phase 4: base URL of the runner-exec service; 127.0.0.1 for run.sh dev, http://runner-exec:4998 in compose.",
     )
 
     # LLM Empty-Response Retry Configuration

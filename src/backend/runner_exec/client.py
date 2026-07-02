@@ -22,7 +22,9 @@ try:
     from src.backend.core.config import settings
     _BASE_URL = settings.RUNNER_EXEC_URL
 except Exception:  # pragma: no cover — config may be absent in isolated unit runs
-    _BASE_URL = "http://localhost:4998"  # NOSONAR — internal Docker network, no TLS needed
+    # 127.0.0.1, NOT localhost — localhost resolves to IPv6 ::1 first on Windows
+    # and this service binds IPv4 only, adding a ~2s connect stall per hop.
+    _BASE_URL = "http://127.0.0.1:4998"  # NOSONAR — internal Docker network, no TLS needed
 
 _CONNECT_TIMEOUT_S = 5
 _QUICK_READ_TIMEOUT_S = 30           # status/cleanup/ensure-image (rebuild uses the long timeout)
