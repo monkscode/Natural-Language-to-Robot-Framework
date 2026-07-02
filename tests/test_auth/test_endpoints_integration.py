@@ -395,3 +395,57 @@ def test_google_callback_does_not_consume_invite_for_existing_active_user(client
     still_open = invites.find_open_by_email(email)
     assert still_open is not None
     assert still_open["status"] == "open"
+
+
+def test_allowlisted_admin_signup_gets_personal_org(client_and_emails, monkeypatch):
+    """An ADMIN_EMAILS signup lands instantly active and never passes through the
+    Approve step — the only other place orgs are provisioned — so register itself
+    must provision the personal org. The first token must already carry it."""
+    from src.backend.core.config import settings
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.jwt_utils import decode_token
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    resp = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    assert resp.status_code == 201
+    assert resp.json()["user"]["role"] == "admin"
+    memberships = OrgRepository().get_orgs_for_user(resp.json()["user"]["id"])
+    assert len(memberships) == 1
+    assert memberships[0]["kind"] == "personal"
+    assert decode_token(resp.json()["access_token"])["org_id"] == memberships[0]["org_id"]
+
+
+def test_non_admin_signup_still_gets_no_org_until_approval(client_and_emails):
+    """The signup-time provisioning applies ONLY to instantly-active (allowlisted)
+    accounts; a normal signup stays pending and org-less until Approve."""
+    from src.backend.auth.org_repository import OrgRepository
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    resp = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    assert resp.status_code == 201
+    assert resp.json()["user"]["status"] == "pending"
+    assert OrgRepository().get_orgs_for_user(resp.json()["user"]["id"]) == []
+
+
+def test_allowlisted_admin_google_signup_gets_personal_org(client_and_emails, monkeypatch):
+    """Same hole on the Google path: an allowlisted Google signup is instantly
+    active, so the callback must provision the personal org."""
+    from src.backend.core.config import settings
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.invitations_db import init_invitations_db
+    init_invitations_db()
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    profile = {"sub": f"sub-{email}", "email": email, "email_verified": True, "name": "G Adm"}
+    resp = _callback_with_profile(client, profile)
+    assert "#token=" in resp.headers["location"]
+    user = UserRepository().get_by_email(email)
+    memberships = OrgRepository().get_orgs_for_user(str(user["id"]))
+    assert len(memberships) == 1
+    assert memberships[0]["kind"] == "personal"

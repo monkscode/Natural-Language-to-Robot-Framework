@@ -28,7 +28,7 @@ from src.backend.auth.jwt_utils import (
 )
 from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
-from src.backend.auth.provisioning import match_invite_on_signup
+from src.backend.auth.provisioning import match_invite_on_signup, provision_on_approval
 from src.backend.auth.repository import (
     AccountInactive,
     EmailAlreadyExists,
@@ -173,6 +173,13 @@ async def register(request: Request, req: RegisterRequest, response: Response):
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
     match_invite_on_signup(str(row["id"]), row["email"])
+    # An allowlisted (ADMIN_EMAILS) signup lands instantly active and never
+    # passes through the Approve step — the only other place org membership is
+    # materialised — so provision here, BEFORE the token is minted, so the first
+    # token already carries the org. No-op for pending signups (they get their
+    # org at approval) and for anyone who already has a membership.
+    if row.get("status") == "active":
+        provision_on_approval(str(row["id"]))
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
@@ -337,6 +344,10 @@ async def google_callback(request: Request):
     # burn the org-owner's open invite with no membership ever created.
     if created:
         match_invite_on_signup(str(row["id"]), row["email"])
+        # Same as /register: an allowlisted Google signup is instantly active and
+        # skips Approve, so provision its org now (no-op for pending signups).
+        if row.get("status") == "active":
+            provision_on_approval(str(row["id"]))
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*
