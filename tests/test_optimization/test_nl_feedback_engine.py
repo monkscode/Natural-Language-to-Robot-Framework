@@ -509,6 +509,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
+        record.org_id = None  # dedup key includes org; seeded hint is org-less
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -538,6 +539,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
+        record.org_id = None  # dedup key includes org; seeded hint is org-less
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -563,6 +565,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
+        record.org_id = None  # dedup key includes org; seeded hint is org-less
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -574,6 +577,13 @@ class TestUpsertHintAuditUnflag:
             (hint_id,),
         ).fetchall()
         assert len(audit_rows) == 0
+        # Guard against passing for the wrong reason (e.g. the store failing
+        # entirely): the resubmission must actually have reinforced the hint.
+        row = conn.execute(
+            "SELECT evidence_count FROM nl_feedback_corrections WHERE id = ?",
+            (hint_id,),
+        ).fetchone()
+        assert row["evidence_count"] == 2
 
 
 # ===================================================================

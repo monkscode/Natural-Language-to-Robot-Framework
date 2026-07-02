@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
 # so that every migration newer than the baseline is applied on top — including
@@ -226,10 +226,13 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         anchor_query              TEXT,
         unused_count              INTEGER NOT NULL DEFAULT 0,
         org_id                    TEXT,
-        is_shared                 INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(feedback_text, domain, scope)
+        is_shared                 INTEGER NOT NULL DEFAULT 0
     )
     """,
+    # Dedup uniqueness lives in the v18 migration (org-aware, mirrors the
+    # engine's dedup keys), NOT here — a baseline unique index on org_id would
+    # fail on a pre-1c table whose org_id column the v17 migration has not
+    # added yet (same reasoning as the v17 org indexes).
     "CREATE INDEX IF NOT EXISTS idx_nlfc_domain ON nl_feedback_corrections(domain)",
     "CREATE INDEX IF NOT EXISTS idx_nlfc_scope ON nl_feedback_corrections(scope)",
     "CREATE INDEX IF NOT EXISTS idx_nlfc_active ON nl_feedback_corrections(is_active)",
@@ -469,6 +472,31 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          "CREATE INDEX IF NOT EXISTS idx_anti_org ON anti_patterns(org_id)",
          "CREATE INDEX IF NOT EXISTS idx_anchors_org ON learning_anchors(org_id)",
          "CREATE INDEX IF NOT EXISTS idx_exec_emb_org ON execution_embeddings(org_id)",
+     )),
+    (18, "Org-aware hint dedup uniqueness (replaces org-blind UNIQUE constraint)",
+     (
+         # The inline UNIQUE(feedback_text, domain, scope) was org-blind: a
+         # second org's identical feedback could never get its own row (the
+         # engine's org-scoped dedup finds no match, then the INSERT dies on
+         # the constraint and the hint is silently dropped). Replace it with
+         # unique indexes that mirror the engine's actual dedup keys:
+         #   non-url scopes: (text, domain, scope, org)
+         #   url scope:      (text, domain, url, scope, org)  — the url column
+         #     is part of the engine's dedup key for url-scoped hints, which
+         #     the old constraint contradicted (second page's identical hint
+         #     was silently dropped).
+         # COALESCE(org_id,'') keeps legacy/global NULL-org rows deduping
+         # among themselves (btree NULLs are otherwise always distinct).
+         # domain/url stay plain columns: NULL-distinct matches the old
+         # constraint's behaviour, so index creation cannot fail on legacy rows.
+         "ALTER TABLE nl_feedback_corrections "
+         "DROP CONSTRAINT IF EXISTS nl_feedback_corrections_feedback_text_domain_scope_key",
+         "CREATE UNIQUE INDEX IF NOT EXISTS uq_nlfc_dedup_general "
+         "ON nl_feedback_corrections (feedback_text, domain, scope, COALESCE(org_id, '')) "
+         "WHERE scope <> 'url'",
+         "CREATE UNIQUE INDEX IF NOT EXISTS uq_nlfc_dedup_url "
+         "ON nl_feedback_corrections (feedback_text, domain, url, scope, COALESCE(org_id, '')) "
+         "WHERE scope = 'url'",
      )),
 )
 

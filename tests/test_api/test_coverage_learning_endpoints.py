@@ -108,7 +108,8 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
                  scope="global", domain=None, url=None, evidence=1,
                  anchor_query="test query", is_active=1, conflict_flagged=0,
                  applied_count=0, success_count=0, failure_count=0,
-                 original_failure_category=None, disabled_at=None) -> int:
+                 original_failure_category=None, disabled_at=None,
+                 is_shared=0, org_id=None) -> int:
     """Helper: insert a hint directly and return its id."""
     conn = _pg_conn(db_path)
     conn.row_factory = sqlite3.Row
@@ -118,11 +119,12 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, domain, url, original_failure_category, "
         " evidence_count, anchor_query, applied_count, success_count, failure_count, "
-        " is_active, conflict_flagged, disabled_at, created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " is_active, conflict_flagged, disabled_at, created_at, last_seen, "
+        " is_shared, org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (feedback_text, category, scope, domain, url, original_failure_category,
          evidence, anchor_query, applied_count, success_count, failure_count,
-         is_active, conflict_flagged, disabled_at, now, now),
+         is_active, conflict_flagged, disabled_at, now, now, is_shared, org_id),
     )
     conn.commit()
     hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -446,10 +448,12 @@ class TestCreateHint:
 
     def test_duplicate_hint_increments_evidence(self, learning_client):
         client, _, _, db_path = learning_client
-        # Pre-insert the matching row directly so it's committed before the POST
+        # Pre-insert the matching row directly so it's committed before the POST.
+        # Admin creates are global (is_shared=1) and dedup only against global
+        # rows, so the seeded duplicate must itself be shared.
         _insert_hint(db_path,
                      feedback_text="Use xpath for stable selectors",
-                     scope="global", domain=None, evidence=1)
+                     scope="global", domain=None, evidence=1, is_shared=1)
         payload = self._valid_payload()  # same text + scope + domain
         resp = client.post("/hints", json=payload)
         # Route decorator always returns 201; created=False signals the duplicate path
@@ -461,7 +465,7 @@ class TestCreateHint:
     def test_duplicate_flagged_hint_clears_flag_and_logs_audit(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
-                               conflict_flagged=1, scope="global")
+                               conflict_flagged=1, scope="global", is_shared=1)
 
         payload = self._valid_payload()  # same text + scope → matches existing
         resp = client.post("/hints", json=payload)
@@ -493,6 +497,40 @@ class TestCreateHint:
         resp = client.post("/hints", json=payload)
         assert resp.status_code == 201
         assert resp.json()["hint"]["category"] == "timing"
+
+    def test_org_private_hint_does_not_capture_admin_global_create(self, learning_client):
+        """An org-private hint with identical text must NOT absorb an admin's
+        global create: the admin intends a hint for every org, so a new shared
+        row must be created and the org's private row left untouched."""
+        client, _, _, db_path = learning_client
+        org_hint_id = _insert_hint(
+            db_path, feedback_text="Dismiss the cookie banner first",
+            scope="domain", domain="shop.test", evidence=1,
+            is_shared=0, org_id="org-A",
+        )
+
+        resp = client.post("/hints", json=self._valid_payload(
+            feedback_text="Dismiss the cookie banner first",
+            scope="domain", domain="shop.test",
+        ))
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["created"] is True, (
+            "admin global create was deduped into an org-private hint — "
+            "the intended shared hint was never created"
+        )
+        assert data["hint"]["is_shared"] == 1
+        assert data["hint"]["id"] != org_hint_id
+
+        conn = _pg_conn(db_path)
+        org_row = conn.execute(
+            "SELECT evidence_count, is_shared, org_id FROM nl_feedback_corrections "
+            "WHERE id = ?", (org_hint_id,),
+        ).fetchone()
+        conn.close()
+        assert org_row[0] == 1, "org hint's evidence must not be bumped by admin create"
+        assert org_row[1] == 0, "org hint must stay private"
+        assert org_row[2] == "org-A"
 
 
 # ---------------------------------------------------------------------------
