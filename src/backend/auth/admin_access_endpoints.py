@@ -110,8 +110,8 @@ def approve(user_id: str, request: Request, admin: dict = Depends(require_admin)
     # carrying org_id=None until a manual re-login (Finding #4).
     result = _transition(user_id, "active", bump=True, admin=admin, request=request)
     # Intentional and safe: _transition commits the user to active, then provision is called.
-    # If provision raises, the user is active but the response is 500; because provision_on_approval
-    # is idempotent (ensure_personal_org + add_member ON CONFLICT), an admin retry self-heals.
+    # If provision raises, the user is active but the response is 500; provision_on_approval
+    # runs only for a membership-less user, so an admin retry self-heals.
     provision_on_approval(user_id)
     return result
 
@@ -131,8 +131,8 @@ def reactivate(user_id: str, request: Request, admin: dict = Depends(require_adm
     result = _transition(user_id, "active", bump=False, admin=admin, request=request)
     # Provision org membership, same as approve: a user rejected while pending was
     # never provisioned, so reactivating them without this leaves them active with
-    # no org (Finding #3). Idempotent (ensure_personal_org + add_member ON CONFLICT),
-    # so a suspended user who already has an org is unaffected.
+    # no org (Finding #3). provision_on_approval is a no-op for a user who still
+    # has a membership, so a suspended user's org and org_role are untouched.
     provision_on_approval(user_id)
     return result
 
@@ -189,6 +189,9 @@ def set_owner(org_id: str, body: _SetOwner, request: Request,
     except (psycopg.errors.ForeignKeyViolation, psycopg.errors.InvalidTextRepresentation, ValueError):
         # Bad UUID / unknown org-or-user / non-team org is a clean 400, not a 500.
         raise HTTPException(400, "Unknown org/user or non-team org")
+    # History scope is read from the token's org_role claim, so a demotion must
+    # kill the live token immediately — not at JWT expiry.
+    _repo.bump_token_version(body.user_id)
     request.state.audit_detail = {"org_id": org_id, "user_id": body.user_id,
                                   "org_role": body.org_role}
     return {"status": "ok"}
@@ -233,6 +236,9 @@ def remove_org_member(org_id: str, user_id: str, request: Request,
         raise HTTPException(400, "Invalid org/user id")
     if not removed:
         raise HTTPException(404, "No such membership")
+    # Removal is a move (team -> fresh personal): the user's live token still
+    # carries the removed org_id, so bump to revoke it immediately.
+    _repo.bump_token_version(user_id)
     request.state.audit_detail = {"org_id": org_id, "user_id": user_id}
     return {"status": "ok"}
 

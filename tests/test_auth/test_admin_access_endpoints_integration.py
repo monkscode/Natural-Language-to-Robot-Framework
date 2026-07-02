@@ -638,3 +638,147 @@ def test_create_org_bumps_owner_token():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, owner_email],))
             conn.commit()
+
+
+def test_reactivate_preserves_membership_of_previously_invited_user():
+    """Suspend→reactivate must NOT replay the consumed invite. An invitee who was
+    approved into a team org and later promoted to org_admin keeps exactly that
+    membership and role after a suspend/reactivate cycle — reactivate provisions
+    only a user who has NO membership at all."""
+    init_invitations_db()
+    from src.backend.auth.invitation_repository import InvitationRepository
+    from src.backend.auth.provisioning import match_invite_on_signup
+    repo, orgs, invites = UserRepository(), OrgRepository(), InvitationRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"rpi-o-{uuid.uuid4().hex[:8]}@x.com"
+    invitee_email = f"rpi-i-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        invites.create(invitee_email, org_id, str(owner["id"]))
+        invitee = repo.create_user(invitee_email, "password123", "Inv")  # pending
+        match_invite_on_signup(str(invitee["id"]), invitee_email)
+        r = client.post(f"/auth/admin/users/{invitee['id']}/approve",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200  # approved into Acme as org_member
+        # Later promoted to org owner.
+        r = client.post(f"/auth/admin/orgs/{org_id}/owner",
+                        json={"user_id": str(invitee["id"]), "org_role": "org_admin"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        # Suspend, then reactivate.
+        assert client.post(f"/auth/admin/users/{invitee['id']}/suspend",
+                           headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        assert client.post(f"/auth/admin/users/{invitee['id']}/reactivate",
+                           headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        memberships = orgs.get_orgs_for_user(str(invitee["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == org_id
+        assert memberships[0]["org_role"] == "org_admin"  # NOT demoted by invite replay
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, invitee_email],))
+            conn.commit()
+
+
+def test_reactivate_does_not_recreate_personal_org_for_team_member():
+    """Suspend→reactivate of a cold-signup user who was since moved into a team
+    org must NOT re-provision a personal org — that would leave TWO memberships
+    and break the single-active-org invariant."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"rnp-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"rnp-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        member = repo.create_user(member_email, "password123", "Mem")  # pending, no invite
+        r = client.post(f"/auth/admin/users/{member['id']}/approve",
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200  # cold approval -> personal org
+        orgs.add_member(org_id, str(member["id"]), "org_member")  # move: personal pruned
+        assert client.post(f"/auth/admin/users/{member['id']}/suspend",
+                           headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        assert client.post(f"/auth/admin/users/{member['id']}/reactivate",
+                           headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        memberships = orgs.get_orgs_for_user(str(member["id"]))
+        assert len(memberships) == 1
+        assert memberships[0]["org_id"] == org_id
+        assert memberships[0]["kind"] == "team"  # no stray personal org re-created
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_remove_org_member_bumps_token_version():
+    """Removal is a move (team -> fresh personal), so the removed user's live
+    token — which still carries the team org_id — must die immediately, not at
+    JWT expiry (single-active-org spec: any move bumps token_version)."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"rbt-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"rbt-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        member = repo.create_user(member_email, "password123", "Mem")
+        repo.set_status(str(member["id"]), "active")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_member")
+        tv_before = repo.get_by_id(str(member["id"]))["token_version"]
+        r = client.delete(f"/auth/admin/orgs/{org_id}/members/{member['id']}",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert repo.get_by_id(str(member["id"]))["token_version"] == tv_before + 1
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()
+
+
+def test_set_owner_demotion_bumps_token_version():
+    """Demoting an org_admin narrows their access (whole-org -> own rows), and
+    history scope is read from the token's org_role claim — so the change must
+    revoke their live token, not wait for JWT expiry."""
+    init_invitations_db()
+    repo, orgs = UserRepository(), OrgRepository()
+    admin_email, token = _admin_token()
+    owner_email = f"sdb-o-{uuid.uuid4().hex[:8]}@x.com"
+    member_email = f"sdb-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        owner = repo.create_user(owner_email, "password123", "Ow")
+        repo.set_status(str(owner["id"]), "active")
+        member = repo.create_user(member_email, "password123", "Mem")
+        repo.set_status(str(member["id"]), "active")
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(member["id"]), "org_admin")
+        tv_before = repo.get_by_id(str(member["id"]))["token_version"]
+        r = client.post(f"/auth/admin/orgs/{org_id}/owner",
+                        json={"user_id": str(member["id"]), "org_role": "org_member"},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+        assert repo.get_by_id(str(member["id"]))["token_version"] == tv_before + 1
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, owner_email, member_email],))
+            conn.commit()

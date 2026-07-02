@@ -31,7 +31,17 @@ def match_invite_on_signup(user_id: str, email: str) -> None:
 
 def provision_on_approval(user_id: str) -> None:
     """Materialise org membership when the owner approves. Invitee -> member of
-    the team org that invited them; cold signup -> their own personal org."""
+    the team org that invited them; cold signup -> their own personal org.
+
+    Provisions ONLY a user with no membership at all. Reactivate reuses this
+    hook, and a suspended user usually still has their membership — replaying
+    the consumed invite would demote a since-promoted org_admin back to
+    org_member (add_member's upsert) or yank a since-moved user back into the
+    invite org (collapse), and the cold branch would re-create a personal org
+    next to a team membership, breaking single-active-org. A retry after a
+    failed provision still works: the user has zero memberships then."""
+    if _orgs.get_orgs_for_user(user_id):
+        return
     inv = _invites.find_consumed_by_user(user_id)
     if inv is not None:
         _orgs.add_member(str(inv["org_id"]), user_id, "org_member")
