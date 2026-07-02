@@ -42,13 +42,16 @@ def test_owner_allowed_other_org_denied():
 
     # Owner — creates the run
     owner = users.create_user(f"ro-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(owner["id"]), "active")
     o_org = orgs.ensure_personal_org(str(owner["id"]), owner["email"])
 
     # Same-org org_admin — different user, same org_id (simulate org member)
     peer = users.create_user(f"rp-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(peer["id"]), "active")
 
     # Stranger — different org entirely
     stranger = users.create_user(f"rs-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(stranger["id"]), "active")
     s_org = orgs.ensure_personal_org(str(stranger["id"]), stranger["email"])
 
     rid = str(uuid.uuid4())

@@ -38,9 +38,12 @@ from fastapi import Depends
 from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
+from src.backend.auth.admin_access_endpoints import admin_access_router
+from src.backend.auth.org_endpoints import org_router
 from src.backend.auth.db import init_auth_db, close_pool
 from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
+from src.backend.auth.invitations_db import init_invitations_db
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -112,6 +115,8 @@ register_error_handlers(app)
 # --- API Routers ---
 # Auth routes (public entry points): /auth/register, /auth/login, /auth/me, /auth/google/*
 app.include_router(auth_router)
+app.include_router(admin_access_router)
+app.include_router(org_router)
 
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
@@ -172,9 +177,10 @@ async def startup_event():
         # Org tenancy lives in the same identity domain and must init AFTER users
         # (org_members references users). Same best-effort guard.
         init_org_db()
+        init_invitations_db()
     except Exception as e:
         logging.warning(
-            f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
+            f"[AUTH] auth store init (users/orgs/invitations) failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
 

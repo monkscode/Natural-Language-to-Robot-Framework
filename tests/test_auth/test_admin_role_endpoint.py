@@ -24,6 +24,7 @@ def _make_admin(client, email):
     reg = _register(client, email)
     uid = reg["user"]["id"]
     UserRepository().set_platform_role(uid, "admin")
+    UserRepository().set_status(uid, "active")          # <-- ADD: actor must be active to pass the guard
     tok = create_access_token({"id": uid, "email": email, "role": "admin", "display_name": ""})
     return uid, tok
 
@@ -39,7 +40,9 @@ def test_platform_admin_can_promote(client):
 
 
 def test_non_admin_forbidden(client):
+    from src.backend.auth.repository import UserRepository
     target = _register(client, f"nt-{uuid.uuid4().hex[:8]}@e.com")
+    UserRepository().set_status(target["user"]["id"], "active")   # <-- active, still a plain user
     user_tok = target["access_token"]  # plain user
     other = _register(client, f"no-{uuid.uuid4().hex[:8]}@e.com")["user"]["id"]
     r = client.post(f"/auth/admin/users/{other}/role", json={"role": "admin"},

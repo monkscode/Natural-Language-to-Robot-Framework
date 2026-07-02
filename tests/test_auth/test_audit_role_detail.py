@@ -28,6 +28,7 @@ def _make_admin(client, email):
     reg = _register(client, email)
     uid = reg["user"]["id"]
     UserRepository().set_platform_role(uid, "admin")
+    UserRepository().set_status(uid, "active")          # <-- ADD
     tok = create_access_token({"id": uid, "email": email, "role": "admin", "display_name": ""})
     return uid, tok, email
 

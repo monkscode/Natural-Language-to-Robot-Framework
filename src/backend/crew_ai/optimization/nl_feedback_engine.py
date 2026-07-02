@@ -401,20 +401,26 @@ class NLFeedbackEngine(LearningEngine):
             # Upsert: increment evidence if exists, else insert.
             # URL-scoped hints include url in the dedup key so identical feedback
             # on two different pages under the same domain creates separate rows.
+            # org_id is part of the dedup key: hints are org-private, so another
+            # org's identical text must create that org's own row — matching
+            # cross-org would let one tenant's feedback strengthen, reactivate,
+            # or unflag another tenant's hint (and silently drop its own).
             if scope == "url":
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "
                     "FROM nl_feedback_corrections "
                     "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
-                    "AND url IS NOT DISTINCT FROM ? AND scope = ?",
-                    (feedback_text.strip(), domain, url, scope),
+                    "AND url IS NOT DISTINCT FROM ? AND scope = ? "
+                    "AND org_id IS NOT DISTINCT FROM ?",
+                    (feedback_text.strip(), domain, url, scope, record.org_id),
                 ).fetchone()
             else:
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "
                     "FROM nl_feedback_corrections "
-                    "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ?",
-                    (feedback_text.strip(), domain, scope),
+                    "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
+                    "AND org_id IS NOT DISTINCT FROM ?",
+                    (feedback_text.strip(), domain, scope, record.org_id),
                 ).fetchone()
 
             new_hint_id = None

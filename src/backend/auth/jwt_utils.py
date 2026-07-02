@@ -67,6 +67,7 @@ def create_access_token(user: dict) -> str:
         # / compromise). Re-checked against current DB state on every
         # authenticated request (require_user / require_admin / report access).
         "tv": user.get("token_version", 0),
+        "status": user.get("status", "active"),
         "iat": now,
         "exp": now + timedelta(hours=settings.JWT_EXPIRY_HOURS),
     }
@@ -89,6 +90,10 @@ def decode_token(token: str) -> dict:
         "org_id": payload.get("org_id"),
         "org_role": payload.get("org_role"),
         "token_version": payload.get("tv", 0),
+        # "active" is the most-permissive default: pre-feature tokens minted before
+        # status existed decode as active so they keep working; per-request DB re-validation
+        # is the real gate (require_user calls _revalidate_active_user).
+        "status": payload.get("status", "active"),
     }
 
 
@@ -128,7 +133,7 @@ def _revalidate_active_user(user: dict) -> dict:
     except Exception as exc:
         logger.warning("[AUTH] user re-validation unavailable: %s", exc)
         raise HTTPException(503, "Authentication store unavailable")
-    if row is None or not row.get("is_active"):
+    if row is None or row.get("status") != "active":
         raise HTTPException(401, "User not found or inactive", headers=_UNAUTH_HEADERS)
     if row.get("token_version", 0) != user.get("token_version", 0):
         raise HTTPException(401, "Token revoked", headers=_UNAUTH_HEADERS)
@@ -173,7 +178,7 @@ def is_validated_admin(user: dict | None) -> bool:
         return False
     if not row or row.get("token_version", 0) != user.get("token_version", 0):
         return False  # revoked token — fail closed
-    return bool(row.get("is_active") and row.get("role") == "admin")
+    return bool(row.get("status") == "active" and row.get("role") == "admin")
 
 
 # --------------------------------------------------------------------------

@@ -75,3 +75,20 @@ def init_org_db() -> None:
         logger.info("[AUTH] personal-org backfill applied")
     else:
         logger.info("[AUTH] personal-org backfill already applied; skipping")
+
+    # Collapse any pre-existing multi-org memberships to a single active org — a
+    # one-time migration gated by the same advisory lock so concurrent boots can't
+    # double-run it and it doesn't re-scan on every boot. Runs after the personal-org
+    # backfill so no org-less user is left behind. Note: run_migration_once holds an
+    # advisory-lock connection open across this call, and collapse_all_to_single_org
+    # borrows its own pooled connections underneath it — so the migration nests pooled
+    # borrows. Safe because the depth is small and sequential (lock conn + one
+    # membership conn + one bump conn) and stays well under the pool ceiling.
+    def _collapse_single_org() -> None:
+        from src.backend.auth.org_repository import OrgRepository
+        OrgRepository().collapse_all_to_single_org()
+
+    if run_migration_once("collapse_to_single_org", _collapse_single_org):
+        logger.info("[AUTH] single-active-org collapse applied")
+    else:
+        logger.info("[AUTH] single-active-org collapse already applied; skipping")

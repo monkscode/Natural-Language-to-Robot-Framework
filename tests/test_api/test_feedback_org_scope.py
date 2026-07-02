@@ -31,9 +31,8 @@ def client():
 
 
 def _register(client, email):
-    r = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
-    assert r.status_code == 201, r.text
-    return r.json()["access_token"]
+    from tests.test_api.conftest import register_active
+    return register_active(client, email)
 
 
 def test_feedback_denied_across_orgs(client):
@@ -74,19 +73,23 @@ def test_same_org_admin_peer_can_submit_feedback(client):
     (invalid feedback_type passed the gate) or 200/disabled means gate passed.
     A 403 means the old user_id check is still in effect (RED).
     """
-    from src.backend.auth.jwt_utils import decode_token, create_access_token
+    from src.backend.auth.endpoints import _token_payload
     from src.backend.auth.repository import UserRepository
     from src.backend.auth.org_repository import OrgRepository
     from src.backend.core.run_registry import get_run_registry
 
     users, orgs = UserRepository(), OrgRepository()
 
-    # Owner — creates the run.
+    # Owner and peer are BOTH real, active org_admins of the same TEAM org — the
+    # peer's membership is provisioned through the store, not a hand-crafted claim,
+    # so the authz path runs against real state end to end.
     owner = users.create_user(f"fbo-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
-    o_org = orgs.ensure_personal_org(str(owner["id"]), owner["email"])
-
-    # Peer — different user_id, but same org (simulate org membership).
+    users.set_status(str(owner["id"]), "active")
     peer = users.create_user(f"fbp-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    users.set_status(str(peer["id"]), "active")
+
+    o_org = orgs.create_team_org("Feedback QA", str(owner["id"]))  # seats owner as org_admin
+    orgs.add_member(o_org, str(peer["id"]), "org_admin")           # peer: real org_admin
 
     rid = str(uuid.uuid4())
     get_run_registry().record_start(
@@ -96,15 +99,9 @@ def test_same_org_admin_peer_can_submit_feedback(client):
         "failed",
     )
 
-    # Peer token: same org_id as owner, org_role=org_admin.
-    peer_tok = create_access_token({
-        "id": str(peer["id"]),
-        "email": peer["email"],
-        "role": "user",
-        "display_name": "",
-        "org_id": o_org,
-        "org_role": "org_admin",
-    })
+    # Peer token derived from real membership via the production token builder,
+    # which reads org_id/org_role from get_orgs_for_user (not a forged claim).
+    peer_tok = _token_payload(users.get_by_id(str(peer["id"])))["access_token"]
 
     resp = client.post(
         "/api/feedback",

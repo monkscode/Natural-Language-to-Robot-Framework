@@ -101,7 +101,8 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
     [
         ("patch", "/api/learning/hints/1", {"actor": "a@e.com"}),
         ("post", "/api/learning/hints/1/unflag", {"actor": "a@e.com"}),
-        ("post", "/api/learning/hints/1/promote", {"actor": "a@e.com"}),
+        # /promote was removed outright (cross-org sharing disabled) — its
+        # 404-for-everyone behaviour is pinned by test_learning_promote.py.
         ("post", "/api/learning/hints/1/retract", {"actor": "a@e.com"}),
         ("post", "/api/learning/hints/1/reactivate", {"actor": "a@e.com"}),
         ("post", "/api/learning/review-hints/start", None),

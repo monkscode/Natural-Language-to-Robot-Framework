@@ -15,6 +15,10 @@ export interface User {
   email: string
   display_name: string
   role: 'user' | 'admin'
+  status: 'pending' | 'active' | 'suspended' | 'rejected'
+  // True iff the user is org_admin of a TEAM org — the signal that unlocks the
+  // org-owner Team page/nav. Personal-org admin (everyone) does NOT set this.
+  is_org_admin?: boolean
 }
 
 interface AuthState {
@@ -22,6 +26,8 @@ interface AuthState {
   loading: boolean
   isAuthenticated: boolean
   isAdmin: boolean
+  status: User['status'] | null
+  isOrgAdmin: boolean
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string, displayName: string) => Promise<void>
   loginWithToken: (token: string) => Promise<void>
@@ -109,6 +115,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         isAuthenticated: !!user,
         isAdmin: user?.role === 'admin',
+        status: user?.status ?? null,
+        isOrgAdmin: user?.is_org_admin ?? false,
         login,
         signup,
         loginWithToken,

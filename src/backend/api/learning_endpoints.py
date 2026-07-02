@@ -446,9 +446,14 @@ def create_hint(
         # UNIQUE-constraint 500. Mirrors start_hint_review (same TOCTOU pattern).
         # Readers are never blocked — WAL allows concurrent reads throughout.
         conn.execute("BEGIN IMMEDIATE")
+        # Admin creates are global (is_shared=1), so dedup ONLY against global
+        # rows. Matching an org-private hint here would silently turn "create a
+        # hint for every org" into an evidence bump on one tenant's private row
+        # — the shared hint the admin intended would never exist.
         existing = conn.execute(
             "SELECT * FROM nl_feedback_corrections "
-            "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ?",
+            "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
+            "AND is_shared = 1",
             (text, request.domain, request.scope),
         ).fetchone()
 
@@ -706,73 +711,14 @@ def unflag_hint(
 
 
 # ---------------------------------------------------------------------------
-# 5b. POST /hints/{id}/promote  (platform-admin cross-org promotion)
+# 5b. POST /hints/{id}/promote — REMOVED (2026-07-02 access-control review).
+# Promotion flipped an org-learned hint to is_shared=1 and nulled its anchor
+# org, injecting it into every org whose runs match the hint's domain. Hints
+# learned on one customer's site must never reach another customer, so the
+# route was deleted to make that guarantee structural. Global hints are
+# exclusively admin-CREATED (POST /hints — generic, non-site-specific guidance);
+# test_learning_promote.py pins the removal.
 # ---------------------------------------------------------------------------
-
-@router.post("/hints/{hint_id}/promote")
-def promote_hint(
-    hint_id: int,
-    request: ActorReasonRequest,
-    fb=Depends(_require_feedback_loop),
-    admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
-):
-    """Platform-admin promotes a hint to be shared across all orgs (is_shared=1).
-
-    Atomically:
-      1. Sets nl_feedback_corrections.is_shared = 1
-      2. Nulls learning_anchors.org_id for kind='nl', record_id=hint_id
-         (privacy-load-bearing: Task 5 retrieval filter is
-         `org_id = ? OR org_id IS NULL` — without this null the promoted hint
-         surfaces as a similarity candidate but is dropped at the anchor stage
-         for every other org)
-      3. Writes a hint_audit 'promote' row
-    Idempotent: already-shared hint returns {"changed": False} without re-writing.
-    404 if the hint does not exist.
-    """
-    if not request.actor.strip():
-        raise HTTPException(status_code=400, detail="actor is required")
-    actor = _audit_actor(admin, request.actor)
-    conn = _admin_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
-        # Null the anchor org so the similarity filter matches the promoted hint
-        # for every org (Task 5 filter: org_id = ? OR org_id IS NULL). This runs
-        # on BOTH paths: anchor nulling is the load-bearing half of "shared", so
-        # an already-shared hint whose anchor is still org-scoped (a half-applied
-        # promotion) is repaired here instead of being stranded by the early
-        # return below.
-        conn.execute(
-            "UPDATE learning_anchors SET org_id = NULL "
-            "WHERE kind = 'nl' AND record_id = ?",
-            (hint_id,),
-        )
-        if row["is_shared"] == 1:
-            conn.commit()
-            return {"hint": _row_to_dict(row), "changed": False, "note": "already shared"}
-        conn.execute(
-            "UPDATE nl_feedback_corrections SET is_shared = 1 WHERE id = ?", (hint_id,)
-        )
-        _write_hint_audit(
-            conn, hint_id, "promote", actor, request.reason,
-            {"is_shared": 0}, {"is_shared": 1},
-        )
-        conn.commit()
-        updated = conn.execute(
-            "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
-        ).fetchone()
-        return {"hint": _row_to_dict(updated), "changed": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("[LEARNING API] promote_hint %d failed: %s", hint_id, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to promote hint")
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
