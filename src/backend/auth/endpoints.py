@@ -120,6 +120,18 @@ def _token_payload(row: dict) -> dict:
     # signal — being admin of one's own personal org does not count.
     user["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
     orgs = _org_repo.get_orgs_for_user(str(row["id"]))
+    if not orgs and user["status"] == "active":
+        # Self-heal: an ACTIVE user must never mint an org-less token — org_id
+        # None means UNSCOPED learning reads (every org's hints injected into
+        # their runs) and unattributed writes. The state is reachable outside
+        # the approve flow: _sync_role_to_allowlist force-flips a pending
+        # allowlisted user to active at login without provisioning, and the
+        # Google callback's existing-user branch never provisions. Minting is
+        # the one choke point every login path funnels through, so heal here.
+        # No-op for pending signups (they get their org at approval) and for
+        # anyone already provisioned.
+        provision_on_approval(str(row["id"]))
+        orgs = _org_repo.get_orgs_for_user(str(row["id"]))
     primary = orgs[0] if orgs else {}
     token = create_access_token(
         {

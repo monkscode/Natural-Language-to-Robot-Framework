@@ -216,6 +216,91 @@ def test_login_and_me_flow(client_and_emails):
     assert me.json()["email"] == email
 
 
+def test_login_self_heals_org_for_active_membershipless_user(client_and_emails):
+    """An active user with zero memberships must never mint an org-less token.
+
+    The state is reachable outside the approve flow: a pending signup's email is
+    added to ADMIN_EMAILS and _sync_role_to_allowlist force-flips them active at
+    login WITHOUT provisioning. An org-less token would run workflows unscoped —
+    hints from every org injected, learning writes unattributed. Login must
+    self-heal by provisioning the personal org before minting."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.repository import UserRepository
+
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    uid = reg.json()["user"]["id"]
+    # Pending signup: no membership yet, token carries org_id=None (by design).
+    assert decode_token(reg.json()["access_token"])["org_id"] is None
+    # Flip to active OUTSIDE approve (the _sync/allowlist path — no provisioning).
+    UserRepository().set_status(uid, "active")
+    assert OrgRepository().get_orgs_for_user(uid) == []
+
+    login = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+    assert login.status_code == 200
+
+    orgs = OrgRepository().get_orgs_for_user(uid)
+    assert len(orgs) == 1, (
+        "login must provision a personal org for an active membership-less user"
+    )
+    claims = decode_token(login.json()["access_token"])
+    assert claims["org_id"] == str(orgs[0]["org_id"]), (
+        f"active user's token must carry the org claim, got {claims['org_id']!r}"
+    )
+
+
+def test_register_pending_user_still_gets_no_org(client_and_emails):
+    """The self-heal must NOT provision pending signups — they get their org at
+    approval (invite org or personal), and a rejected user must leave no litter."""
+    from src.backend.auth.org_repository import OrgRepository
+
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
+    uid = reg.json()["user"]["id"]
+    assert reg.json()["user"]["status"] == "pending"
+    assert OrgRepository().get_orgs_for_user(uid) == [], (
+        "pending signup must not be provisioned at registration"
+    )
+
+
+def test_google_callback_self_heals_org_for_existing_active_user(client_and_emails):
+    """The Google callback's existing-user branch (created=False) skips inline
+    provisioning; for an active membership-less user (e.g. bootstrapped admin,
+    or a pending user force-flipped by the allowlist) the token mint must
+    self-heal the missing org exactly like password login."""
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.repository import UserRepository
+
+    client, created = client_and_emails
+    email = _unique_email()
+    created.append(email)
+    profile = {"sub": f"g-{email}", "email": email, "email_verified": True}
+
+    # First callback creates the user (pending cold signup — no org by design).
+    resp = _callback_with_profile(client, profile)
+    assert resp.status_code in (302, 307)
+    uid = str(UserRepository().get_by_email(email)["id"])
+    assert OrgRepository().get_orgs_for_user(uid) == []
+
+    UserRepository().set_status(uid, "active")  # flip outside approve — no org
+
+    # Second callback: existing-user branch (created=False) for an active user.
+    resp = _callback_with_profile(client, profile)
+    assert resp.status_code in (302, 307)
+    assert "error" not in resp.headers["location"]
+
+    orgs = OrgRepository().get_orgs_for_user(uid)
+    assert len(orgs) == 1, (
+        "google callback must provision a personal org for an existing active "
+        "membership-less user before minting the token"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Google SSO flow — google_oauth is patched at the endpoints' reference, so no
 # real Google round-trip happens; the user rows land in the isolated schema.
