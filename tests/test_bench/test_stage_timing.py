@@ -1,13 +1,19 @@
 """Stage-duration mapping from client-timestamped SSE events.
 
-The bench runner records (client_time, parsed_event) for every SSE `data:` line
-of a /generate-and-run stream. bench_lib.stage_durations maps those onto the
-fixed progress checkpoints pushed by progress_events.py / workflow_service.py:
+The bench runner records (client_time, parsed_event) for every SSE `data:`
+line of a /generate-and-run stream. Observed reality of the live stream (see
+Task-2 Decision Log): the task-COMPLETION checkpoints (20/60/80) are
+unreliable — CrewAI fires the next task's start event before the completion
+push, and the forward-only progress guard then discards the completion. The
+reliable anchors are the stage STARTS (5 plan, 22 identify, 62 assemble), the
+dryrun-gate start message ("🔬 Preparing verification environment...", no
+progress value), and the terminal progress 100. So:
 
-    plan     = t(progress 20) - t(progress 5)
-    identify = t(progress 60) - t(progress 22)
-    assemble = t(progress 80) - t(progress 62)
-    dryrun   = t(progress 100) - t(progress 80)
+    plan     = t(progress 22)  - t(progress 5)
+    identify = t(progress 62)  - t(progress 22)
+    assemble = t(dryrun-start message) - t(progress 62)
+               fallback: t(progress 100) - t(progress 62)  [gate skipped]
+    dryrun   = t(progress 100) - t(dryrun-start message); None when gate absent
     exec     = t(last execution event) - t(first execution event)
 
 Precision is +/-1s (the SSE drain loop sleeps 1s between polls) — accepted in
@@ -36,24 +42,26 @@ def _exec(message="", status="running", **extra):
 
 
 def _full_timeline():
-    """A realistic generate-and-run stream with one dryrun repair."""
+    """Mirrors a real captured /generate-and-run stream (one dryrun repair).
+
+    Note: NO 20/60/80 completion events — the live stream drops them.
+    """
     return [
-        (0.0, _gen(5, "🧠 Analyzing your test requirements...")),
-        (1.0, _gen(8, "📋 Breaking down test into steps...")),
-        (4.0, _gen(20, "✅ Test steps planned successfully")),
-        (5.0, _gen(22, "🔍 Scanning webpage for interactive elements...")),
-        (12.0, _gen(30, "🌐 Navigating to website and detecting elements...")),
-        (30.0, _gen(55, "📍 Found 12 elements on the page")),
-        (35.0, _gen(60, "✅ All page elements identified")),
-        (36.0, _gen(62, "⚡ Writing test automation code...")),
-        (38.0, _gen(65, "💻 Generating test script...")),
-        (50.0, _gen(80, "✅ Test code assembled")),
-        (51.0, _gen(None, "🔬 Preparing verification environment...")),
-        (52.0, _gen(88, "🔬 Verifying generated test...")),
+        (0.0, _gen(0, "🎬 Starting test generation...")),
+        (0.5, _gen(3, "🧠 Initializing AI agents...")),
+        (1.0, _gen(5, "🧠 Analyzing your test requirements...")),
+        (2.0, _gen(8, "📋 Breaking down test into steps...")),
+        (3.0, _gen(22, "🔍 Scanning webpage for interactive elements...")),
+        (5.0, _gen(30, "🌐 Navigating to website and detecting elements...")),
+        (35.0, _gen(55, "📍 Found 2 elements on the page")),
+        (39.0, _gen(62, "⚡ Writing test automation code...")),
+        (40.0, _gen(65, "💻 Generating test script...")),
+        (41.0, _gen(None, "🔬 Preparing verification environment...")),
+        (42.0, _gen(88, "🔬 Verifying generated test...")),
         (55.0, _gen(92, "🔧 Fixing test code...")),
         (58.0, _gen(None, "🔬 Verifying generated test...")),
-        (60.0, _gen(100, "✅ Test generation complete")),
-        (61.0, _gen(None, "✅ Test generation complete.", status="complete",
+        (60.0, _gen(100, "🎉 Test generation complete")),
+        (61.0, _gen(None, "🎉 Test generation complete.", status="complete",
                     robot_code="*** Test Cases ***", workflow_id="wf-123")),
         (62.0, _exec("Preparing execution environment...")),
         (90.0, _exec("", status="success", test_status="passed")),
@@ -63,35 +71,48 @@ def _full_timeline():
 class TestStageDurations:
     def test_full_timeline_maps_all_stages(self):
         d = stage_durations(_full_timeline())
-        assert d["plan_s"] == 4.0
-        assert d["identify_s"] == 30.0
-        assert d["assemble_s"] == 14.0
-        assert d["dryrun_s"] == 10.0
-        assert d["exec_s"] == 28.0
+        assert d["plan_s"] == 2.0       # t(22)=3.0 - t(5)=1.0
+        assert d["identify_s"] == 36.0  # t(62)=39.0 - t(22)=3.0
+        assert d["assemble_s"] == 2.0   # t(dryrun-start)=41.0 - t(62)=39.0
+        assert d["dryrun_s"] == 19.0    # t(100)=60.0 - t(dryrun-start)=41.0
+        assert d["exec_s"] == 28.0      # 90.0 - 62.0
 
     def test_total_is_first_to_last_event(self):
         d = stage_durations(_full_timeline())
         assert d["total_s"] == 90.0
 
+    def test_gate_skipped_assemble_falls_back_to_100(self):
+        # DRYRUN_ENABLED=false: no dryrun messages at all; 100 right after 65.
+        events = [
+            (1.0, _gen(5, "🧠 Analyzing your test requirements...")),
+            (3.0, _gen(22, "🔍 Scanning webpage for interactive elements...")),
+            (39.0, _gen(62, "⚡ Writing test automation code...")),
+            (45.0, _gen(100, "🎉 Test generation complete")),
+        ]
+        d = stage_durations(events)
+        assert d["assemble_s"] == 6.0
+        assert d["dryrun_s"] is None
+
     def test_missing_execution_stage_yields_none(self):
         gen_only = [(t, e) for t, e in _full_timeline() if e["stage"] == "generation"]
         d = stage_durations(gen_only)
         assert d["exec_s"] is None
-        assert d["plan_s"] == 4.0
+        assert d["plan_s"] == 2.0
 
-    def test_missing_checkpoint_yields_none_for_that_stage_only(self):
-        # Drop the progress-62 event: assemble start unknown.
+    def test_missing_checkpoint_yields_none_for_dependent_stages_only(self):
+        # Drop the progress-62 event: identify end + assemble start unknown.
         events = [(t, e) for t, e in _full_timeline() if e.get("progress") != 62]
         d = stage_durations(events)
+        assert d["identify_s"] is None
         assert d["assemble_s"] is None
-        assert d["plan_s"] == 4.0
-        assert d["dryrun_s"] == 10.0
+        assert d["plan_s"] == 2.0
+        assert d["dryrun_s"] == 19.0
 
     def test_first_occurrence_of_a_checkpoint_wins(self):
-        # A duplicate progress-20 later must not move the plan boundary.
-        events = _full_timeline() + [(95.0, _gen(20, "late duplicate"))]
+        # A duplicate progress-22 later must not move the plan boundary.
+        events = _full_timeline() + [(95.0, _gen(22, "late duplicate"))]
         d = stage_durations(events)
-        assert d["plan_s"] == 4.0
+        assert d["plan_s"] == 2.0
 
     def test_empty_stream(self):
         d = stage_durations([])

@@ -9,7 +9,7 @@ against the baseline produced here. Guardrails that must never regress:
 
 | Metric | Source |
 |---|---|
-| plan / identify / assemble / dryrun wall-clock | SSE progress checkpoints, timestamped client-side (plan 5→20, identify 22→60, assemble 62→80, dryrun 80→100) |
+| plan / identify / assemble / dryrun wall-clock | SSE checkpoints, timestamped client-side. Boundaries are anchored on stage STARTS (plan 5→22, identify 22→62, assemble 62→dryrun-start message, dryrun →100) because the task-completion checkpoints (20/60/80) are unreliable in the live stream: CrewAI fires the next task's start before the completion push, and the forward-only progress guard discards the completion event |
 | exec wall-clock | first→last SSE `execution`-stage event |
 | LLM calls / tokens / cost, locator success | the run's `workflow_metrics` Postgres row (deliberate deviation from `mark1-enhancements/00-OVERVIEW.md` §8 log-scraping — approved) |
 | flake retries | `llm_cleaning_stats` (empty_response_retries + formatting_errors_detected) from the metrics row **+** dryrun repair rounds ("🔧 Fixing test code..." SSE events); repairs also get their own `dryrun_repairs` column |

@@ -29,48 +29,70 @@ from datetime import datetime
 # SSE stage mapping
 # ---------------------------------------------------------------------------
 
-# (stage_name, start_progress, end_progress)
-_PROGRESS_STAGES = (
-    ("plan_s", 5, 20),
-    ("identify_s", 22, 60),
-    ("assemble_s", 62, 80),
-    ("dryrun_s", 80, 100),
-)
+# Observed live-stream reality (Task-2 Decision Log): the task-COMPLETION
+# checkpoints (20/60/80) are unreliable — CrewAI fires the next task's start
+# event before the completion push, and the forward-only progress guard then
+# discards the completion. Boundaries are therefore anchored on the reliable
+# stage STARTS (5/22/62), the dryrun-gate start message, and the terminal 100.
+_PLAN_START, _IDENTIFY_START, _ASSEMBLE_START, _TERMINAL = 5, 22, 62, 100
 
+_DRYRUN_START_MARKER = "🔬 Preparing verification environment..."
 _DRYRUN_REPAIR_MARKER = "🔧 Fixing test code..."
 
 
-def stage_durations(events):
-    """Map [(client_time, event_dict), ...] onto per-stage wall-clock seconds.
-
-    Returns {'plan_s', 'identify_s', 'assemble_s', 'dryrun_s', 'exec_s',
-    'total_s'} — a stage is None when either of its checkpoints is missing.
-    First occurrence of each progress checkpoint wins (progress only moves
-    forward server-side; anything later is a stray).
-    """
+def _scan_stage_boundaries(events):
+    """One pass over the stream: first-seen progress times, dryrun-gate start,
+    first/last execution-stage times."""
     first_progress_t = {}
+    dryrun_start_t = None
     exec_first = exec_last = None
     for t, ev in events:
         if ev.get("stage") == "generation":
             p = ev.get("progress")
             if p is not None and p not in first_progress_t:
                 first_progress_t[p] = t
+            if (dryrun_start_t is None
+                    and _DRYRUN_START_MARKER in (ev.get("message") or "")):
+                dryrun_start_t = t
         elif ev.get("stage") == "execution":
             if exec_first is None:
                 exec_first = t
             exec_last = t
+    return first_progress_t, dryrun_start_t, exec_first, exec_last
 
-    out = {}
-    for name, start, end in _PROGRESS_STAGES:
-        t0, t1 = first_progress_t.get(start), first_progress_t.get(end)
-        out[name] = (t1 - t0) if t0 is not None and t1 is not None else None
 
-    out["exec_s"] = (exec_last - exec_first) if exec_first is not None else None
-    if events:
-        out["total_s"] = events[-1][0] - events[0][0]
-    else:
-        out["total_s"] = None
-    return out
+def _span(t0, t1):
+    return (t1 - t0) if t0 is not None and t1 is not None else None
+
+
+def stage_durations(events):
+    """Map [(client_time, event_dict), ...] onto per-stage wall-clock seconds.
+
+    Returns {'plan_s', 'identify_s', 'assemble_s', 'dryrun_s', 'exec_s',
+    'total_s'} — a stage is None when either of its boundaries is missing.
+    First occurrence of each boundary wins (progress only moves forward
+    server-side; anything later is a stray).
+
+    assemble ends at the dryrun-gate start message; when the gate is skipped
+    (DRYRUN_ENABLED=false) it ends at progress 100 and dryrun_s is None.
+    """
+    first_progress_t, dryrun_start_t, exec_first, exec_last = (
+        _scan_stage_boundaries(events))
+
+    plan_t = first_progress_t.get(_PLAN_START)
+    identify_t = first_progress_t.get(_IDENTIFY_START)
+    assemble_t = first_progress_t.get(_ASSEMBLE_START)
+    terminal_t = first_progress_t.get(_TERMINAL)
+    assemble_end_t = dryrun_start_t if dryrun_start_t is not None else terminal_t
+
+    return {
+        "plan_s": _span(plan_t, identify_t),
+        "identify_s": _span(identify_t, assemble_t),
+        "assemble_s": _span(assemble_t, assemble_end_t),
+        "dryrun_s": _span(dryrun_start_t, terminal_t),
+        "exec_s": _span(exec_first, exec_last),
+        "total_s": (events[-1][0] - events[0][0]) if events else None,
+    }
 
 
 def count_dryrun_repairs(events):
@@ -170,8 +192,10 @@ def compare_summaries(baseline, candidate):
 # ---------------------------------------------------------------------------
 
 # console renderer: `<iso-ts> [level   ] <event padded> [logger] key=value`
+# Character classes are kept disjoint from their literal neighbours so the
+# pattern matches in linear time (no backtracking blow-up on crafted lines).
 _CONSOLE_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*)\s+\[\w+\s*\]\s+(?P<msg>.*)$"
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^ ]*) \[\w+ *\] (?P<msg>.*)$"
 )
 
 _TIMER_RE = re.compile(
