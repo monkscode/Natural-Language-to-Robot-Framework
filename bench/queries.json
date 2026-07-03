@@ -1,0 +1,45 @@
+{
+  "comment": "FROZEN benchmark queries (Task 2, owner-confirmed 2026-07-03). Do not edit wording — any change invalidates every baseline recorded against this file. Known caveat (accepted): q01's pinned repo can change over time; re-baseline if it is re-pinned.",
+  "queries": [
+    {
+      "id": "q01",
+      "query": "Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project"
+    },
+    {
+      "id": "q02",
+      "query": "Go to https://www.wikipedia.org/ and search for \"Narendra Modi\""
+    },
+    {
+      "id": "q03",
+      "query": "Open https://nutronsystems.com/ then click on Solutions from the top right and then click on OEM Solution"
+    },
+    {
+      "id": "q04",
+      "query": "Go to https://the-internet.herokuapp.com/tables and click on the first table \"edit\" link in the row containing \"Smith\""
+    },
+    {
+      "id": "q05",
+      "query": "Go to https://the-internet.herokuapp.com/tables and get the text from the first row, second column of Table 1"
+    },
+    {
+      "id": "q06",
+      "query": "Go to https://demoqa.com/webtables, type \"Cierra\" in the search box, and verify the table rows only have data of Cierra"
+    },
+    {
+      "id": "q07",
+      "query": "Go to https://www.saucedemo.com, type standard_user in the username field, type secret_sauce in the password field, click the Login button, and verify the products page shows the Products heading"
+    },
+    {
+      "id": "q08",
+      "query": "Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, and verify Option 2 is selected"
+    },
+    {
+      "id": "q09",
+      "query": "Go to https://the-internet.herokuapp.com/iframe, type Hello Bench into the text editor inside the iframe, and verify the editor contains Hello Bench"
+    },
+    {
+      "id": "q10",
+      "query": "Go to https://books.toscrape.com, get the titles of all books on the first page, and verify there are 20 books"
+    }
+  ]
+}

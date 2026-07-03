@@ -61,3 +61,6 @@ FuturePlans/*
 
 tests/test_clients/
 clients/integrity/*
+
+# Bench harness: captured per-run evidence stays local (baselines/ IS committed)
+bench/runs/
