@@ -1,0 +1,87 @@
+"""Preflight pin checks + pins metadata (bench profile spec 2026-07-04).
+
+A baseline is only comparable to runs pinned the same way (bench/README.md).
+preflight_violations() gates the runner before it spends anything;
+build_meta()/load_meta() make the pins travel with each CSV as
+<out>.csv.meta.json; compare_pins() lets report.py flag drift between
+baseline and candidate.
+"""
+
+import json
+
+from bench.bench_lib import (
+    build_meta,
+    compare_pins,
+    load_meta,
+    meta_path_for,
+    preflight_violations,
+)
+
+PINNED_NLRF = {"status": "healthy", "pins": {
+    "optimization_enabled": False, "model_provider": "gemini",
+    "online_model": "gemini-3.5-flash", "dryrun_enabled": True}}
+BROWSER_NO_HEADLESS = {"status": "healthy", "model_provider": "gemini"}
+
+
+class TestPreflightViolations:
+    def test_pinned_stack_passes_with_headless_warning(self):
+        violations, warnings = preflight_violations(PINNED_NLRF, BROWSER_NO_HEADLESS)
+        assert violations == []
+        assert len(warnings) == 1 and "headless" in warnings[0]
+
+    def test_learning_on_is_a_violation(self):
+        nlrf = {"pins": {**PINNED_NLRF["pins"], "optimization_enabled": True}}
+        violations, _ = preflight_violations(nlrf, BROWSER_NO_HEADLESS)
+        assert any("OPTIMIZATION_ENABLED" in v for v in violations)
+
+    def test_missing_pins_object_is_a_violation(self):
+        violations, _ = preflight_violations({"status": "healthy"}, BROWSER_NO_HEADLESS)
+        assert any("pins" in v for v in violations)
+
+    def test_headless_reported_true_no_warning(self):
+        browser = {**BROWSER_NO_HEADLESS, "headless": True}
+        violations, warnings = preflight_violations(PINNED_NLRF, browser)
+        assert violations == [] and warnings == []
+
+    def test_headless_reported_false_is_a_violation(self):
+        browser = {**BROWSER_NO_HEADLESS, "headless": False}
+        violations, _ = preflight_violations(PINNED_NLRF, browser)
+        assert any("headless" in v for v in violations)
+
+
+class TestMeta:
+    def test_build_meta_captures_pins_and_urls(self):
+        meta = build_meta(PINNED_NLRF, {**BROWSER_NO_HEADLESS, "headless": True},
+                          "http://127.0.0.1:5000", "http://127.0.0.1:4999")
+        assert meta["nlrf_pins"] == PINNED_NLRF["pins"]
+        assert meta["browser_service"] == {"model_provider": "gemini", "headless": True}
+        assert meta["base_url"] == "http://127.0.0.1:5000"
+        assert meta["captured_at"]
+
+    def test_meta_path_is_csv_plus_meta_json(self, tmp_path):
+        assert str(meta_path_for(tmp_path / "x.csv")).endswith("x.csv.meta.json")
+
+    def test_load_meta_roundtrip_and_missing(self, tmp_path):
+        csv_path = tmp_path / "run.csv"
+        assert load_meta(csv_path) is None
+        meta_path_for(csv_path).write_text(json.dumps({"nlrf_pins": {}}), encoding="utf-8")
+        assert load_meta(csv_path) == {"nlrf_pins": {}}
+
+
+class TestComparePins:
+    BASE = {"nlrf_pins": PINNED_NLRF["pins"], "browser_service": {"model_provider": "gemini"}}
+
+    def test_identical_pins_no_mismatch(self):
+        assert compare_pins(self.BASE, json.loads(json.dumps(self.BASE))) == []
+
+    def test_model_change_is_reported(self):
+        cand = {"nlrf_pins": {**PINNED_NLRF["pins"], "online_model": "gemini-4.0-flash"},
+                "browser_service": {"model_provider": "gemini"}}
+        mismatches = compare_pins(self.BASE, cand)
+        assert len(mismatches) == 1
+        assert "online_model" in mismatches[0]
+        assert "gemini-3.5-flash" in mismatches[0] and "gemini-4.0-flash" in mismatches[0]
+
+    def test_browser_provider_change_is_reported(self):
+        cand = {"nlrf_pins": PINNED_NLRF["pins"], "browser_service": {"model_provider": "vertex"}}
+        assert any("browser_service.model_provider" in m for m in compare_pins(self.BASE, cand))

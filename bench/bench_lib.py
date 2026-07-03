@@ -24,6 +24,7 @@ import math
 import re
 import statistics
 from datetime import datetime
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # SSE stage mapping
@@ -361,3 +362,80 @@ def extract_metrics_fields(data):
         "flake_retries": (cleaning.get("empty_response_retries", 0)
                           + cleaning.get("formatting_errors_detected", 0)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Preflight pins (bench profile) — a baseline is only comparable to runs
+# pinned the same way; these helpers gate the run and record the pins.
+# ---------------------------------------------------------------------------
+
+_COMPARABILITY_KEYS = ("optimization_enabled", "model_provider",
+                       "online_model", "dryrun_enabled")
+
+
+def preflight_violations(nlrf_health: dict, browser_health: dict) -> tuple[list[str], list[str]]:
+    """(violations, warnings) for a pinned guardrail run. Violations block."""
+    violations: list[str] = []
+    warnings: list[str] = []
+    pins = nlrf_health.get("pins")
+    if pins is None:
+        violations.append(
+            "nlrf /health reports no 'pins' — server predates the bench "
+            "profile; restart the stack with ./run.sh bench")
+    elif pins.get("optimization_enabled") is not False:
+        violations.append(
+            f"OPTIMIZATION_ENABLED={pins.get('optimization_enabled')} — learning "
+            f"must be OFF for a comparable run (start the stack with ./run.sh bench)")
+    headless = browser_health.get("headless")
+    if headless is None:
+        warnings.append(
+            "browser-service /health does not report 'headless' — the launcher "
+            "pins it but it cannot be verified here (field arrives with a later sync)")
+    elif headless is not True:
+        violations.append(
+            f"browser-service headless={headless} — must be true for a comparable run")
+    return violations, warnings
+
+
+def build_meta(nlrf_health: dict, browser_health: dict,
+               base_url: str, browser_url: str) -> dict:
+    """Pins snapshot written beside the CSV as <out>.csv.meta.json."""
+    return {
+        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "base_url": base_url,
+        "browser_url": browser_url,
+        "nlrf_pins": nlrf_health.get("pins") or {},
+        "browser_service": {
+            "model_provider": browser_health.get("model_provider"),
+            "headless": browser_health.get("headless"),
+        },
+    }
+
+
+def meta_path_for(csv_path) -> Path:
+    return Path(f"{csv_path}.meta.json")
+
+
+def load_meta(csv_path) -> dict | None:
+    path = meta_path_for(csv_path)
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def compare_pins(base_meta: dict, cand_meta: dict) -> list[str]:
+    """Human-readable mismatches between two pins snapshots."""
+    mismatches = []
+    base_pins = base_meta.get("nlrf_pins") or {}
+    cand_pins = cand_meta.get("nlrf_pins") or {}
+    for key in _COMPARABILITY_KEYS:
+        if base_pins.get(key) != cand_pins.get(key):
+            mismatches.append(f"{key}: baseline={base_pins.get(key)!r} "
+                              f"candidate={cand_pins.get(key)!r}")
+    base_bp = (base_meta.get("browser_service") or {}).get("model_provider")
+    cand_bp = (cand_meta.get("browser_service") or {}).get("model_provider")
+    if base_bp != cand_bp:
+        mismatches.append(f"browser_service.model_provider: "
+                          f"baseline={base_bp!r} candidate={cand_bp!r}")
+    return mismatches
