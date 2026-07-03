@@ -55,9 +55,16 @@ executor, docker). Then, from the nlrf repo root:
 
 ```powershell
 $env:BROWSER_SERVICE_LOG = "c:/Users/1dhru/Documents/Projects/browser-service/logs/browser_use.log"
-# $env:BENCH_TOKEN = "<jwt>"   # only when AUTH_ENFORCED=true
+# $env:BENCH_TOKEN = "<jwt>"   # only when AUTH_ENFORCED=true — see note below
 python -m bench.run_bench --out bench/baselines/2026-07-03-baseline.csv
 ```
+
+Auth note: when the server runs with `AUTH_ENFORCED=true`, `BENCH_TOKEN` must
+be a **real login token** (POST `/auth/login` with a registered, active user).
+`require_user` re-validates every token against the users table (existence,
+active status, token_version), so a hand-minted JWT is rejected with 401.
+Simplest alternative for a local bench stack: run the server with
+`AUTH_ENFORCED=false` and no token.
 
 Defaults: 10 queries × 3 repeats, sequential (no parallelism), base URL
 `http://127.0.0.1:5000`. Expect **≈1–2.5 hours** wall-clock and real LLM
