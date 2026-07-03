@@ -217,12 +217,14 @@ class TestLLMCallDeduplication:
         event = MagicMock()
         event.task_id = "task-0"
 
-        # First call — should produce message
+        # First call — pushes the task-start ladder step (5), then the message
         _on_llm_call_started(source=None, event=event)
+        ladder = q.get(timeout=1)
+        assert ladder["progress"] == 5
         msg = q.get(timeout=1)
         assert "📋" in msg["message"]
 
-        # Second call — should be silently skipped
+        # Second call — silently skipped (ladder already at 8, message deduped)
         _on_llm_call_started(source=None, event=event)
         with pytest.raises(Empty):
             q.get(timeout=0.1)
@@ -264,6 +266,9 @@ class TestToolEvents:
 
         _on_tool_started(source=None, event=event)
 
+        # Ladder steps first (task-0 completion, task-1 start), then the event
+        assert q.get(timeout=1)["progress"] == 20
+        assert q.get(timeout=1)["progress"] == 22
         msg = q.get(timeout=1)
         assert msg["progress"] == 30
         assert "🌐" in msg["message"]
@@ -298,6 +303,9 @@ class TestToolEvents:
 
         _on_tool_finished(source=None, event=event)
 
+        # Ladder steps first, then the element-count message
+        assert q.get(timeout=1)["progress"] == 20
+        assert q.get(timeout=1)["progress"] == 22
         msg = q.get(timeout=1)
         assert "8" in msg["message"]
         assert "📍" in msg["message"]
@@ -320,6 +328,9 @@ class TestToolEvents:
 
         _on_tool_finished(source=None, event=event)
 
+        # Ladder steps first, then the fallback message
+        assert q.get(timeout=1)["progress"] == 20
+        assert q.get(timeout=1)["progress"] == 22
         msg = q.get(timeout=1)
         assert "Page elements detected" in msg["message"]
         assert "📍" in msg["message"]
@@ -382,11 +393,162 @@ class TestConcurrentWorkflows:
         msg_a = q_a.get(timeout=1)
         assert msg_a["progress"] == 5  # Task 0 started
 
+        # Task 1 starting synthesizes task 0's completion first (see
+        # TestCompletionSynthesis), then pushes its own start.
+        msg_b_completion = q_b.get(timeout=1)
+        assert msg_b_completion["progress"] == 20
         msg_b = q_b.get(timeout=1)
         assert msg_b["progress"] == 22  # Task 1 started (scanning elements)
 
-        # Each queue should only have its own event
+        # Each queue should only have its own event(s)
         with pytest.raises(Empty):
             q_a.get(timeout=0.1)
         with pytest.raises(Empty):
             q_b.get(timeout=0.1)
+
+
+class TestCompletionSynthesis:
+    """Task-completion checkpoints are synthesized from the NEXT task's start.
+
+    CrewAI's event bus runs sync handlers in a ThreadPoolExecutor, so the
+    TaskCompletedEvent handler races the next task's TaskStartedEvent handler.
+    When the start wins (observed: always in practice), the completion's lower
+    progress (20 < 22, 60 < 62) is discarded forever by the forward-only
+    guard — users never see the ✅ messages. Deriving the completion push from
+    the next start (same handler → deterministic queue order) fixes 20/60;
+    the assembler's 80 is pushed at the dryrun-gate entry (dryrun_service).
+    """
+
+    def _fire_start(self, task_id):
+        from src.backend.crew_ai.progress_events import _on_task_started
+        event = MagicMock()
+        event.task = MagicMock()
+        event.task.id = task_id
+        _on_task_started(source=None, event=event)
+
+    def test_task1_start_emits_task0_completion_first(self):
+        from src.backend.crew_ai.progress_events import register_workflow
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
+
+        self._fire_start("task-1")
+
+        completion = q.get(timeout=1)
+        assert completion["progress"] == 20
+        assert "planned successfully" in completion["message"]
+        start = q.get(timeout=1)
+        assert start["progress"] == 22
+
+    def test_task2_start_emits_task1_completion_first(self):
+        from src.backend.crew_ai.progress_events import register_workflow
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-1": 1, "task-2": 2})
+
+        self._fire_start("task-2")
+
+        completion = q.get(timeout=1)
+        assert completion["progress"] == 60
+        assert "elements identified" in completion["message"]
+        start = q.get(timeout=1)
+        assert start["progress"] == 62
+
+    def test_task0_start_synthesizes_nothing(self):
+        from src.backend.crew_ai.progress_events import register_workflow
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+
+        self._fire_start("task-0")
+
+        only = q.get(timeout=1)
+        assert only["progress"] == 5
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_late_real_completion_is_still_deduped(self):
+        """The racy real TaskCompletedEvent arriving AFTER the synthesized push
+        must be dropped by the forward-only guard (no duplicate ✅ message)."""
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _on_task_completed,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
+
+        self._fire_start("task-1")  # synthesizes 20, then pushes 22
+        q.get(timeout=1)
+        q.get(timeout=1)
+
+        late = MagicMock()
+        late.task = MagicMock()
+        late.task.id = "task-0"
+        _on_task_completed(source=None, event=late)
+
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_llm_started_winning_the_race_still_emits_the_ladder(self):
+        """Observed live: llm-started(65) can beat task-started(62) in the
+        thread pool, silently killing 60 AND 62. Every handler must emit its
+        task's ladder (prev completion → task start → own event) itself."""
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _on_llm_call_started,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-1": 1, "task-2": 2})
+
+        event = MagicMock()
+        event.task_id = "task-2"
+        _on_llm_call_started(source=None, event=event)
+
+        assert q.get(timeout=1)["progress"] == 60
+        assert q.get(timeout=1)["progress"] == 62
+        assert q.get(timeout=1)["progress"] == 65
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_tool_started_winning_the_race_still_emits_the_ladder(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _on_tool_started,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
+
+        event = MagicMock()
+        event.tool_name = "batch_browser_automation"
+        event.task_id = "task-1"
+        _on_tool_started(source=None, event=event)
+
+        assert q.get(timeout=1)["progress"] == 20
+        assert q.get(timeout=1)["progress"] == 22
+        assert q.get(timeout=1)["progress"] == 30
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_tool_finished_winning_the_race_still_emits_the_ladder(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _on_tool_finished,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
+
+        event = MagicMock()
+        event.tool_name = "batch_browser_automation"
+        event.task_id = "task-1"
+        event.output = "unparseable"
+        _on_tool_finished(source=None, event=event)
+
+        assert q.get(timeout=1)["progress"] == 20
+        assert q.get(timeout=1)["progress"] == 22
+        assert q.get(timeout=1)["progress"] == 55
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)

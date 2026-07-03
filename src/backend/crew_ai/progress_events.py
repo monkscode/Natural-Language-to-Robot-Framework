@@ -190,6 +190,25 @@ def _push_if_forward(
     queue.put({"status": "running", "message": message, "progress": progress})
 
 
+def _push_task_ladder(workflow_id: str, queue: Queue, task_index: int) -> None:
+    """Push the checkpoints implied by ANY event of this task: the previous
+    task's completion, then this task's start.
+
+    The bus runs sync handlers in a ThreadPoolExecutor, so handlers for
+    in-order events race each other; whichever loses is discarded forever by
+    the forward-only guard (observed live: completions 20/60/80 always lost,
+    task-2's start 62 sometimes lost to its own llm-started 65). Every handler
+    calls this before pushing its own event, so the winner of any race emits
+    the missing rungs itself — _push_if_forward dedups the repeats.
+    """
+    prev_entry = _TASK_COMPLETED_MESSAGES.get(task_index - 1)
+    if prev_entry is not None:
+        _push_if_forward(workflow_id, queue, prev_entry[0], prev_entry[1])
+    start_entry = _TASK_STARTED_MESSAGES.get(task_index)
+    if start_entry is not None:
+        _push_if_forward(workflow_id, queue, start_entry[0], start_entry[1])
+
+
 # ---------------------------------------------------------------------------
 # Event handlers — registered once at module import, persist for process lifetime
 # ---------------------------------------------------------------------------
@@ -210,11 +229,10 @@ def _on_task_started(source, event: TaskStartedEvent) -> None:
         if queue is None or task_index is None:
             return
 
-        entry = _TASK_STARTED_MESSAGES.get(task_index)
-        if entry is None:
-            return
-        message, progress = entry
-        _push_if_forward(workflow_id, queue, message, progress)
+        # The ladder covers the previous task's completion AND this start; the
+        # real (late) TaskCompletedEvent handler stays registered as a no-op
+        # dedup. See _push_task_ladder for the race this defeats.
+        _push_task_ladder(workflow_id, queue, task_index)
     except Exception:
         logger.exception("Error in _on_task_started handler")
 
@@ -277,6 +295,9 @@ def _on_llm_call_started(source, event: LLMCallStartedEvent) -> None:
         if queue is None or task_index is None:
             return
 
+        # Emit any rungs this handler may have outraced (see _push_task_ladder).
+        _push_task_ladder(workflow_id, queue, task_index)
+
         # Deduplicate: only first LLM call per task shows a message
         with _lock:
             seen = _llm_call_seen.get(workflow_id)
@@ -307,6 +328,9 @@ def _on_tool_started(source, event: ToolUsageStartedEvent) -> None:
         if queue is None or task_index is None:
             return
 
+        # Emit any rungs this handler may have outraced (see _push_task_ladder).
+        _push_task_ladder(workflow_id, queue, task_index)
+
         # Only first tool invocation per task produces a message
         with _lock:
             seen = _tool_usage_seen.get(workflow_id)
@@ -331,6 +355,9 @@ def _on_tool_finished(source, event: ToolUsageFinishedEvent) -> None:
         workflow_id, queue, task_index = _resolve(event.task_id)
         if queue is None or task_index is None:
             return
+
+        # Emit any rungs this handler may have outraced (see _push_task_ladder).
+        _push_task_ladder(workflow_id, queue, task_index)
 
         # Only first finished event per task produces a message
         with _lock:

@@ -515,6 +515,13 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     """
     repair_usage: dict = {}
 
+    # The assembler's 80% checkpoint. Its TaskCompletedEvent is lost to the
+    # event-bus handler race (see progress_events._on_task_started); the gate
+    # runs strictly after the crew returned, so this is the deterministic
+    # emission point. Pushed before the skip check — a disabled gate does not
+    # change the fact that assembly finished.
+    _push_progress(progress_queue, "✅ Test code assembled", 80)
+
     # §8.4 — skip the gate (and never spawn a container) when disabled or empty.
     if not settings.DRYRUN_ENABLED or not robot_code or not robot_code.strip():
         reason = "DRYRUN_ENABLED=False" if not settings.DRYRUN_ENABLED else "empty code"
