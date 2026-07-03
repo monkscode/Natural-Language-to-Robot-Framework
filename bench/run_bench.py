@@ -353,7 +353,7 @@ def main() -> int:
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     with open(meta_file, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    _log(f"pins recorded → {meta_file}")
+    _log(f"pins recorded -> {meta_file}")
 
     # autocommit: each DELETE/SELECT stands alone; a failed capture must not
     # hold a transaction open across the next run.
