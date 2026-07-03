@@ -6,6 +6,7 @@ Usage (from the repo root, against a fully running dev stack):
 
 Environment:
     NLRF_BASE_URL        nlrf base URL (default http://127.0.0.1:5000)
+    BROWSER_SERVICE_URL  browser-service base URL (default http://127.0.0.1:4999)
     BENCH_TOKEN          optional Bearer token (needed when AUTH_ENFORCED=true)
     BROWSER_SERVICE_LOG  path to the RUNNING browser-service's logs/browser_use.log;
                          unset → log-derived metrics (cold start, cleanup, locator
@@ -38,12 +39,15 @@ from psycopg.rows import dict_row
 from bench.bench_lib import (
     CSV_COLUMNS,
     build_csv_row,
+    build_meta,
     count_dryrun_repairs,
     duplicate_lookup_rate,
     extract_metrics_fields,
     extract_run_identity,
     median_p90,
+    meta_path_for,
     parse_locator_timers,
+    preflight_violations,
     span_durations,
     stage_durations,
 )
@@ -75,6 +79,17 @@ def _log(msg: str) -> None:
 
 def _warn(msg: str) -> None:
     print(f"[bench] WARNING: {msg}", file=sys.stderr, flush=True)
+
+
+def fetch_health(url: str) -> dict:
+    """GET {url}/health or exit with a clear pointer to ./run.sh bench."""
+    try:
+        resp = requests.get(f"{url}/health", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        sys.exit(f"[bench] preflight: {url}/health unreachable ({e}) — "
+                 f"start the stack with ./run.sh bench")
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +308,12 @@ def main() -> int:
                         default=os.environ.get("NLRF_BASE_URL", "http://127.0.0.1:5000"))
     parser.add_argument("--browser-log",
                         default=os.environ.get("BROWSER_SERVICE_LOG", ""))
+    parser.add_argument("--browser-url",
+                        default=os.environ.get("BROWSER_SERVICE_URL",
+                                               "http://127.0.0.1:4999"))
+    parser.add_argument("--allow-unpinned", action="store_true",
+                        help="downgrade preflight pin violations to warnings "
+                             "(exploration runs — never comparable to the baseline)")
     args = parser.parse_args()
 
     token = os.environ.get("BENCH_TOKEN", "") or None
@@ -309,8 +330,30 @@ def main() -> int:
     out_path = Path(args.out)
 
     _log(f"target={args.base_url}  queries={len(queries)}  repeats={args.repeats}")
-    _log("reminder: the SERVER must run with OPTIMIZATION_ENABLED=false and "
-         "BROWSER_HEADLESS=true for a comparable baseline (see bench/README.md)")
+
+    nlrf_health = fetch_health(args.base_url)
+    browser_health = fetch_health(args.browser_url)
+    violations, warnings = preflight_violations(nlrf_health, browser_health)
+    for w in warnings:
+        _warn(f"preflight: {w}")
+    if violations:
+        for v in violations:
+            _warn(f"preflight: {v}")
+        if not args.allow_unpinned:
+            sys.exit("[bench] preflight FAILED — fix the pins (./run.sh bench) or pass "
+                     "--allow-unpinned (run will NOT be comparable to the baseline)")
+        _warn("preflight violations ignored (--allow-unpinned) — this run is "
+              "not comparable to the baseline")
+    meta = build_meta(nlrf_health, browser_health, args.base_url, args.browser_url)
+    pins_str = ", ".join(f"{k}={v}" for k, v in meta["nlrf_pins"].items()) or "unavailable"
+    _log(f"preflight OK — nlrf pins: {pins_str}")
+    _log(f"browser-service: model_provider={meta['browser_service']['model_provider']} "
+         f"headless={meta['browser_service']['headless']}")
+    meta_file = meta_path_for(out_path)
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    _log(f"pins recorded → {meta_file}")
 
     # autocommit: each DELETE/SELECT stands alone; a failed capture must not
     # hold a transaction open across the next run.
