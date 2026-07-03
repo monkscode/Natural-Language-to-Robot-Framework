@@ -8,6 +8,14 @@ import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from typing import Any
 
+# Load src/backend/.env BEFORE the getenv reads below. config's import runs
+# load_dotenv as a side effect; without this, a process that imports this
+# module before config (runner_exec.app did) silently gets the hard-coded
+# defaults — it only ever worked under run.sh because the shell exported the
+# whole .env first. Observed failure: runner-exec built 'robot-test-runner:
+# latest' from scratch instead of using the .env-pinned local image.
+from src.backend.core import config as _config  # noqa: F401
+
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
 IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 # Default remote image - fallback if local image not found
