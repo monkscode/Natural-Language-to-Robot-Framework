@@ -85,3 +85,30 @@ class TestComparePins:
     def test_browser_provider_change_is_reported(self):
         cand = {"nlrf_pins": PINNED_NLRF["pins"], "browser_service": {"model_provider": "vertex"}}
         assert any("browser_service.model_provider" in m for m in compare_pins(self.BASE, cand))
+
+
+class TestReportPinCheck:
+    def test_mismatch_prints_loud_warning(self, tmp_path, capsys):
+        from bench.report import print_pin_check
+        base, cand = tmp_path / "base.csv", tmp_path / "cand.csv"
+        meta_path_for(base).write_text(json.dumps(
+            {"nlrf_pins": {"online_model": "gemini-3.5-flash"}}), encoding="utf-8")
+        meta_path_for(cand).write_text(json.dumps(
+            {"nlrf_pins": {"online_model": "gemini-4.0-flash"}}), encoding="utf-8")
+        print_pin_check(str(base), str(cand))
+        out = capsys.readouterr().out
+        assert "NOT comparable" in out and "online_model" in out
+
+    def test_matching_pins_stay_quiet(self, tmp_path, capsys):
+        from bench.report import print_pin_check
+        base, cand = tmp_path / "base.csv", tmp_path / "cand.csv"
+        for p in (base, cand):
+            meta_path_for(p).write_text(json.dumps(
+                {"nlrf_pins": {"online_model": "gemini-3.5-flash"}}), encoding="utf-8")
+        print_pin_check(str(base), str(cand))
+        assert "NOT comparable" not in capsys.readouterr().out
+
+    def test_missing_meta_prints_note(self, tmp_path, capsys):
+        from bench.report import print_pin_check
+        print_pin_check(str(tmp_path / "a.csv"), str(tmp_path / "b.csv"))
+        assert "comparability not verified" in capsys.readouterr().out

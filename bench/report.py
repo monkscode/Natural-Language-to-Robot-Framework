@@ -17,7 +17,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from bench.bench_lib import compare_summaries, summarize_rows
+from bench.bench_lib import compare_pins, compare_summaries, load_meta, summarize_rows
 
 NUMERIC_METRICS = (
     "plan_s", "identify_s", "assemble_s", "dryrun_s", "exec_s", "total_s",
@@ -88,6 +88,21 @@ def print_compare(base_rows: list[dict], cand_rows: list[dict]) -> None:
           + ", ".join(GUARDRAILS) + ", pass rate")
 
 
+def print_pin_check(base_csv: str, cand_csv: str) -> None:
+    """Warn loudly when the two runs' recorded pins differ (or can't be read)."""
+    base_meta, cand_meta = load_meta(base_csv), load_meta(cand_csv)
+    if base_meta is None or cand_meta is None:
+        missing = [p for p, m in ((base_csv, base_meta), (cand_csv, cand_meta)) if m is None]
+        print(f"\nnote: no pins metadata ({', '.join(missing)}) — "
+              f"comparability not verified")
+        return
+    mismatches = compare_pins(base_meta, cand_meta)
+    if mismatches:
+        print("\n!! PIN MISMATCH — these runs are NOT comparable !!")
+        for m in mismatches:
+            print(f"   {m}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark report / compare")
     parser.add_argument("csv", nargs="+",
@@ -105,6 +120,7 @@ def main() -> int:
         if args.by_query:
             print_by_query(rows)
     else:
+        print_pin_check(args.csv[0], args.csv[1])
         print_compare(rows, load_rows(args.csv[1]))
     return 0
 
