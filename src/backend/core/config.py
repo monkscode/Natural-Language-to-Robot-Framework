@@ -105,7 +105,6 @@ class Settings(BaseSettings):
     
     # Custom Actions Configuration
     ENABLE_CUSTOM_ACTIONS: bool = Field(default=True, description="Enable/disable custom actions for browser automation")
-    CUSTOM_ACTION_TIMEOUT: int = Field(default=5, description="Timeout for custom action execution (in seconds)")
     MAX_LOCATOR_STRATEGIES: int = Field(default=21, description="Maximum number of locator strategies to try")
     TRACK_LLM_COSTS: bool = Field(default=True, description="Enable/disable LLM cost tracking and logging")
     
@@ -272,13 +271,6 @@ class Settings(BaseSettings):
         """LLM_EMPTY_RESPONSE_MAX_RETRIES must be between 0 (disabled) and 5."""
         if v < 0 or v > 5:
             raise ValueError(f"LLM_EMPTY_RESPONSE_MAX_RETRIES must be between 0 and 5, got {v}")
-        return v
-    
-    @validator('CUSTOM_ACTION_TIMEOUT')
-    def validate_custom_action_timeout(cls, v):
-        """Validate that CUSTOM_ACTION_TIMEOUT is positive."""
-        if v <= 0:
-            raise ValueError(f"CUSTOM_ACTION_TIMEOUT must be positive, got {v}")
         return v
     
     @validator('MAX_LOCATOR_STRATEGIES')

@@ -9,7 +9,6 @@ Tests:
   - Default MODEL_PROVIDER, ROBOT_LIBRARY, BROWSER_HEADLESS, OPTIMIZATION_ENABLED
   - ROBOT_LIBRARY validator accepts 'browser'/'selenium', rejects others
   - MAX_AGENT_ITERATIONS validator enforces 1-5 range
-  - CUSTOM_ACTION_TIMEOUT validator enforces positive
   - Environment variable override
 """
 
@@ -31,7 +30,6 @@ class TestSettingsDefaults:
             "BROWSER_HEADLESS": "true",
             "MAX_AGENT_ITERATIONS": "3",
             "ENABLE_CUSTOM_ACTIONS": "true",
-            "CUSTOM_ACTION_TIMEOUT": "5",
             "MAX_LOCATOR_STRATEGIES": "21",
             "OPTIMIZATION_ENABLED": "false",
         }
@@ -77,7 +75,6 @@ class TestSettingsValidators:
             "ONLINE_MODEL": "gemini-2.5-flash",
             "ROBOT_LIBRARY": "selenium",
             "MAX_AGENT_ITERATIONS": "3",
-            "CUSTOM_ACTION_TIMEOUT": "5",
             "MAX_LOCATOR_STRATEGIES": "21",
         }
         env.update(overrides)
@@ -109,11 +106,6 @@ class TestSettingsValidators:
         """MAX_AGENT_ITERATIONS=6 raises ValidationError."""
         with pytest.raises(ValidationError):
             self._make_settings({"MAX_AGENT_ITERATIONS": "6"})
-
-    def test_custom_timeout_rejects_zero(self):
-        """CUSTOM_ACTION_TIMEOUT=0 raises ValidationError."""
-        with pytest.raises(ValidationError):
-            self._make_settings({"CUSTOM_ACTION_TIMEOUT": "0"})
 
     def test_locator_strategies_rejects_high(self):
         """MAX_LOCATOR_STRATEGIES=100 raises ValidationError."""
