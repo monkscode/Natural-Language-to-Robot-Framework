@@ -398,15 +398,15 @@ def _repair_usage_dict(repair_crew, model_name: str) -> dict:
 
 
 def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
-                      model_name, library_type=None) -> tuple:
+                      model_name) -> tuple:
     """Top-level Assembler repair mini-crew. Returns (task_output, usage_dict).
 
     Builds FRESH RobotAgents + RobotTasks (never reuses the main-crew instances —
     §2.4). The single assembler agent has allow_delegation=False; the crew has NO
     step/task callbacks, output_log_file=None, and is NOT registered in
     progress_events — its bus events route nowhere and are safely dropped (§8.5).
-    Library context is resolved from settings.ROBOT_LIBRARY when library_type is
-    None so the repair agent knows Browser-vs-Selenium keywords (§8.2). The repaired
+    Library context is resolved from settings.ROBOT_LIBRARY so the repair agent
+    knows the Browser Library keywords (§8.2). The repaired
     code is read DIRECTLY from crew.tasks[0].output (no in-crew delegation).
 
     Pure repair step — pushes no progress itself; the caller (validate_and_repair)
@@ -417,9 +417,7 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     from src.backend.crew_ai.tasks import RobotTasks
     from src.backend.crew_ai.library_context import get_library_context
 
-    if library_type is None:
-        library_type = settings.ROBOT_LIBRARY
-    library_context = get_library_context(library_type)
+    library_context = get_library_context(settings.ROBOT_LIBRARY)
 
     # FRESH instances — own CleanedLLMWrapper + monitor, so the MAIN crew's
     # calculate_usage_metrics()/llm_monitor never see these repair calls (no

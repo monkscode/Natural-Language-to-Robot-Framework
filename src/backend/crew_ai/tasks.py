@@ -272,21 +272,20 @@ class RobotTasks:
             # Use dynamic code structure from library context
             return self.library_context.code_assembly_context
         else:
-            # Fallback to basic SeleniumLibrary structure (backward compatibility)
+            # Fallback when constructed without a context (identification-only
+            # usage in tests) — Browser Library is the only supported target.
             return """
             --- MANDATORY STRUCTURE ---
             ```robot
             *** Settings ***
-            Library    SeleniumLibrary
+            Library    Browser
             Library    BuiltIn
-
-            *** Variables ***
-            ${browser}    chrome
-            ${options}    add_argument("--headless")
 
             *** Test Cases ***
             Generated Test
-                Open Browser    <url>    ${browser}    options=${options}
+                New Browser    chromium    headless=True
+                New Context    viewport=None
+                New Page    <url>
                 # Test steps here
                 Close Browser
             ```
@@ -296,32 +295,22 @@ class RobotTasks:
         """Get library-specific browser initialization instructions."""
         if self.library_context:
             params = self.library_context.browser_init_params
-            library_name = self.library_context.library_name
-
-            if library_name == "Browser":
-                # Browser Library uses New Browser
-                param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
-                return f"""
+            # Browser Library is the only supported target (Task 11/E8)
+            param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
+            return f"""
     - For Browser Library: Use "New Browser" keyword
     - Include these parameters: {param_list}
     - Example: {{"keyword": "New Browser", "browser": "{params.get('browser', 'chromium')}", "headless": "{params.get('headless', 'True')}"}}
     - DO NOT include 'options' parameter for Browser Library
-                """
-            else:
-                # SeleniumLibrary uses Open Browser
-                param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
-                return f"""
-    - For SeleniumLibrary: Use "Open Browser" keyword
-    - Include these parameters: {param_list}
-    - Example: {{"keyword": "Open Browser", "value": "<url>", "browser": "{params.get('browser', 'chrome')}", "options": "{params.get('options', '')}"}}
-                """
+            """
         else:
-            # Fallback for backward compatibility
+            # Fallback when constructed without a context (identification-only
+            # usage in tests) — Browser Library defaults.
             logger.warning(
-                "No library context available, using SeleniumLibrary defaults")
+                "No library context available, using Browser Library defaults")
             return """
-    - Use "Open Browser" keyword with browser=chrome and options parameters
-    - Example: {"keyword": "Open Browser", "value": "<url>", "browser": "chrome", "options": "add_argument(\\"--headless\\")"}
+    - Use "New Browser" keyword with browser=chromium and headless parameters
+    - Example: {"keyword": "New Browser", "browser": "chromium", "headless": "True"}
             """
 
     def _get_viewport_instructions(self) -> str:
@@ -651,7 +640,7 @@ Generated Test
 
     def assemble_code_task(self, agent) -> Task:
         # Build libraries section dynamically
-        library_name = self.library_context.library_name if self.library_context else 'SeleniumLibrary'
+        library_name = self.library_context.library_name if self.library_context else 'Browser'
         libraries_section = (
             f"--- LIBRARIES TO INCLUDE ---\n"
             f"Always include these libraries in the Settings section:\n"
@@ -733,8 +722,8 @@ Generated Test
             "3. Do NOT add, remove, or reorder test steps, settings, or variables.\n"
             "4. If the error says a keyword does not exist and SUGGESTS an alternative "
             "(e.g. \"Did you mean: Browser.Click\"), use the suggested keyword.\n"
-            "5. Keep the same library (Browser vs SeleniumLibrary) — fix to the keyword "
-            "that belongs to the library already imported in the Settings section.\n\n"
+            "5. Fix to the keyword that belongs to the library already imported "
+            "in the Settings section.\n\n"
 
             "--- ROBOT --DRYRUN ERRORS (fix exactly these) ---\n"
             f"{dryrun_errors}\n\n"
