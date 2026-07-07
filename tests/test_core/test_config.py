@@ -7,7 +7,8 @@ Purpose: Settings drives ALL configuration.  A wrong default means the app
 
 Tests:
   - Default MODEL_PROVIDER, ROBOT_LIBRARY, BROWSER_HEADLESS, OPTIMIZATION_ENABLED
-  - ROBOT_LIBRARY validator accepts 'browser'/'selenium', rejects others
+  - ROBOT_LIBRARY validator accepts only 'browser'; 'selenium' rejected with a
+    migration message (browser-only, fail fast — Task 11/E8)
   - MAX_AGENT_ITERATIONS validator enforces 1-5 range
   - Environment variable override
 """
@@ -26,7 +27,7 @@ class TestSettingsDefaults:
             "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
             "ONLINE_MODEL": "gemini-2.5-flash",
-            "ROBOT_LIBRARY": "selenium",
+            "ROBOT_LIBRARY": "browser",
             "BROWSER_HEADLESS": "true",
             "MAX_AGENT_ITERATIONS": "3",
             "ENABLE_CUSTOM_ACTIONS": "true",
@@ -45,9 +46,12 @@ class TestSettingsDefaults:
         assert s.MODEL_PROVIDER == "gemini"
 
     def test_default_robot_library(self):
-        """Default ROBOT_LIBRARY is validated and lowercased."""
+        """Field default is 'browser' — a deployment with no env var gets the
+        only library the locator engine actually emits syntax for."""
+        from src.backend.core.config import Settings
+        assert Settings.__fields__["ROBOT_LIBRARY"].default == "browser"
         s = self._make_settings()
-        assert s.ROBOT_LIBRARY in ["selenium", "browser"]
+        assert s.ROBOT_LIBRARY == "browser"
 
     def test_default_browser_headless(self):
         """BROWSER_HEADLESS defaults to True."""
@@ -73,7 +77,7 @@ class TestSettingsValidators:
             "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
             "ONLINE_MODEL": "gemini-2.5-flash",
-            "ROBOT_LIBRARY": "selenium",
+            "ROBOT_LIBRARY": "browser",
             "MAX_AGENT_ITERATIONS": "3",
             "MAX_LOCATOR_STRATEGIES": "21",
         }
@@ -87,10 +91,15 @@ class TestSettingsValidators:
         s = self._make_settings({"ROBOT_LIBRARY": "browser"})
         assert s.ROBOT_LIBRARY == "browser"
 
-    def test_robot_library_accepts_selenium(self):
-        """ROBOT_LIBRARY='selenium' is valid."""
-        s = self._make_settings({"ROBOT_LIBRARY": "selenium"})
-        assert s.ROBOT_LIBRARY == "selenium"
+    def test_robot_library_rejects_selenium_with_migration_message(self):
+        """ROBOT_LIBRARY='selenium' fails startup with a clear migration error.
+
+        The pipeline emits Browser Library (Playwright) locator syntax only
+        (role=, text=, >>> iframe piercing); selenium mode silently generated
+        broken tests, so it now fails fast instead.
+        """
+        with pytest.raises(ValidationError, match="no longer supported"):
+            self._make_settings({"ROBOT_LIBRARY": "selenium"})
 
     def test_robot_library_rejects_invalid(self):
         """ROBOT_LIBRARY='puppeteer' raises ValidationError."""
