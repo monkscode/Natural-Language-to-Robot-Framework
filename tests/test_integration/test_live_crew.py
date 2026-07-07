@@ -72,15 +72,15 @@ class TestExtractUrlFromQueryLive:
         result = extract_url_from_query("login to flipkart.com and search")
         assert "flipkart" in result
 
-    def test_preposition_website(self):
+    def test_bare_site_name_not_guessed(self):
+        """Task 14: no TLD means no guess — 'wikipedia' could be .org, .com,
+        or a staging host; fabricating one poisons learning-store domain keys."""
         from src.backend.crew_ai.crew import extract_url_from_query
-        result = extract_url_from_query("go to wikipedia and search for python")
-        assert "wikipedia" in result
+        assert extract_url_from_query("go to wikipedia and search for python") is None
 
-    def test_no_url_returns_placeholder(self):
+    def test_no_url_returns_none(self):
         from src.backend.crew_ai.crew import extract_url_from_query
-        result = extract_url_from_query("click the submit button")
-        assert result == "website mentioned in query"
+        assert extract_url_from_query("click the submit button") is None
 
 
 # ---------------------------------------------------------------------------

@@ -102,6 +102,48 @@ class TestWorkflowMetricsModel:
         assert "wf-resp" in json_str
 
 
+class TestUrlOptional:
+    """Task 14: extract_url_from_query returns None when the query names no
+    URL, and both WorkflowMetrics call sites pass that value straight in —
+    so url=None must construct and round-trip."""
+
+    def _valid_data(self, **overrides):
+        data = {
+            "workflow_id": "wf-nourl",
+            "url": None,
+            "total_llm_calls": 0,
+            "total_cost": 0.0,
+            "execution_time": 1.0,
+            "timestamp": datetime.now(),
+        }
+        data.update(overrides)
+        return data
+
+    def test_construction_with_url_none(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        m = WorkflowMetrics(**self._valid_data())
+        assert m.url is None
+
+    def test_url_none_round_trips_through_dict(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        m = WorkflowMetrics(**self._valid_data())
+        d = m.to_dict()
+        assert d["url"] is None
+        m2 = WorkflowMetrics.from_dict(
+            {**d, "timestamp": datetime.now().isoformat()}
+        )
+        assert m2.url is None
+
+    def test_response_conversion_with_url_none(self):
+        from src.backend.core.models.workflow_metrics_models import (
+            WorkflowMetrics,
+            WorkflowMetricsResponse,
+        )
+        m = WorkflowMetrics(**self._valid_data())
+        resp = WorkflowMetricsResponse.from_workflow_metrics(m)
+        assert resp.url is None
+
+
 # ===================================================================
 # C4 — optimization_fallback_used field
 # ===================================================================

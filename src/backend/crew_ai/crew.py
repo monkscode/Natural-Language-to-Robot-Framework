@@ -67,44 +67,48 @@ def _rotate_crewai_log():
         logger.warning(f"📂 Log rotation skipped due to OS error: {e}")
 
 
-def extract_url_from_query(query: str) -> str:
+# TLDs accepted as the final label of a bare hostname. Curated rather than
+# exhaustive: accepting any TLD-shaped ending would mint domains out of
+# filenames ("test.py" — .py is Paraguay's TLD).
+_ALLOWED_TLDS = frozenset({
+    "com", "in", "org", "net", "co", "io", "ai", "app", "dev", "tech",
+    "uk", "us", "au", "ca", "de", "fr", "eu", "jp",
+})
+
+_FULL_URL_RE = re.compile(r'https?://[^\s]+', re.IGNORECASE)
+_HOSTNAME_RE = re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b')
+
+
+def extract_url_from_query(query: str) -> str | None:
     """
-    Dynamically extract URL from user query using regex patterns.
-    Returns the URL if found, otherwise returns a generic placeholder.
+    Extract a URL from the user query, if one is actually present.
+
+    Full URLs with protocol are returned as written. Bare dotted hostnames
+    (example.com, portal.mycompany.co.uk) are returned as https://<hostname>
+    when their final label is a known TLD; the whole hostname is captured so
+    multi-label domains are never truncated to an earlier label.
+
+    Returns None when the query names no URL. Never guesses: the result
+    feeds metrics and the learning store's domain keys, where a fabricated
+    domain poisons persistent state while None only means generic (unscoped)
+    hints for this one run.
     """
-    # Pattern 1: Full URLs with protocol (http:// or https://)
-    url_pattern = r'https?://[^\s]+'
-    match = re.search(url_pattern, query, re.IGNORECASE)
+    match = _FULL_URL_RE.search(query)
     if match:
         url = match.group(0).rstrip('.,;!?')  # Remove trailing punctuation
         logger.info(f"Extracted full URL from query: {url}")
         return url
 
-    # Pattern 2: Domain names with common TLDs (www.example.com, example.in, etc.)
-    domain_pattern = r'\b(?:www\.)?([a-zA-Z0-9-]+\.(?:com|in|org|net|co|io|ai|app|dev|tech))\b'
-    match = re.search(domain_pattern, query, re.IGNORECASE)
-    if match:
-        domain = match.group(0)
-        # Add https:// if not present
-        url = f"https://{domain}" if not domain.startswith('http') else domain
-        logger.info(f"Extracted domain from query and constructed URL: {url}")
-        return url
+    for candidate in _HOSTNAME_RE.finditer(query):
+        hostname = candidate.group(0).lower()
+        if hostname.rsplit('.', 1)[-1] in _ALLOWED_TLDS:
+            url = f"https://{hostname}"
+            logger.info(
+                f"Extracted domain from query and constructed URL: {url}")
+            return url
 
-    # Pattern 3: Website names without TLD (e.g., "on flipkart", "amazon", "google")
-    # Try to extract potential website name and construct URL
-    website_pattern = r'\b(?:on|from|at|in|visit|go to|open)\s+([a-zA-Z0-9]+)\b'
-    match = re.search(website_pattern, query, re.IGNORECASE)
-    if match:
-        website_name = match.group(1).lower()
-        # Common TLD is .com, user can be more specific if needed
-        url = f"https://www.{website_name}.com"
-        logger.info(
-            f"Inferred website name '{website_name}' and constructed URL: {url}")
-        return url
-
-    # If no URL found, return placeholder - let the popup analyzer handle it
-    logger.warning("No URL found in query, returning placeholder")
-    return "website mentioned in query"
+    logger.info("No URL in query; proceeding without domain scoping")
+    return None
 
 
 def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
