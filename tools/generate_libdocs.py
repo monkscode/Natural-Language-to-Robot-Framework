@@ -80,9 +80,9 @@ def main():
     print(f"Generating libdocs to: {output_dir.absolute()}")
     print("-" * 50)
     
-    # Libraries to generate docs for
+    # Libraries to generate docs for — Browser Library is the only supported
+    # automation target (Task 11/E8); BuiltIn backs core RF keywords.
     libraries = [
-        "SeleniumLibrary",
         "Browser",
         "BuiltIn"
     ]
