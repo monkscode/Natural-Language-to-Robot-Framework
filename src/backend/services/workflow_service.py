@@ -616,7 +616,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
-                natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
+                natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
         # Store hint metadata for the execution phase to consume

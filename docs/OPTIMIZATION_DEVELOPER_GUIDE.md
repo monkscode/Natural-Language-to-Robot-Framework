@@ -1403,11 +1403,11 @@ from src.backend.crew_ai.optimization import (
 from src.backend.core.config import settings
 
 def run_crew(query: str, model_provider: str, model_name: str, 
-             library_type: str = None, workflow_id: str = ""):
+             workflow_id: str = ""):
     """Run CrewAI workflow with optimization."""
     
-    # Load library context
-    library_context = get_library_context(library_type or settings.ROBOT_LIBRARY)
+    # Load library context (browser-only since Task 11/E8)
+    library_context = get_library_context(settings.ROBOT_LIBRARY)
     
     # Initialize optimization if enabled
     if settings.OPTIMIZATION_ENABLED:

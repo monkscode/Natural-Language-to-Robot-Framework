@@ -88,9 +88,7 @@ rectangle "Multi-Agent AI System (CrewAI)\n[Runs in Separate Thread]" as crewai 
 rectangle "Library Context System" as libcontext #C8E6C9 {
   component "get_library_context()" as factory
   component "BrowserLibraryContext\n(Playwright)" as browser
-  component "SeleniumLibraryContext\n(Legacy)" as selenium
   factory --> browser : ROBOT_LIBRARY=browser
-  factory --> selenium : ROBOT_LIBRARY=selenium
 }
 
 ' BrowserUse Service - SEPARATE PROCESS
@@ -301,13 +299,13 @@ webui --> user : 33. Display results\n+ report links
 4. **Library Context System** ✅
    - ✅ **Factory Pattern**: `get_library_context(library_type)`
    - ✅ **Supported Libraries**:
-     - `BrowserLibraryContext` (Playwright) - Recommended
-     - `SeleniumLibraryContext` - Legacy support
+     - `BrowserLibraryContext` (Playwright) — the only supported target;
+       SeleniumLibrary support was removed (browser-only, fail fast)
    - ✅ **Injection Point**: `RobotAgents(model_provider, model_name, library_context)`
    - ✅ **Context Types**: 
      - `planning_context` - For Agent 1 (planning)
      - `code_assembly_context` - For Agent 3 (code generation)
-   - ✅ **Configuration**: `ROBOT_LIBRARY` in `config.py` (default: "selenium")
+   - ✅ **Configuration**: `ROBOT_LIBRARY` in `config.py` (default: "browser"; "selenium" fails startup)
 
 5. **BrowserUse Service (Separate Flask Process)** ✅
    - ✅ **Architecture**: Standalone Flask application on port 4999
@@ -344,7 +342,7 @@ webui --> user : 33. Display results\n+ report links
        5. `text` - Content-based
        6. `role` - Playwright-specific
        7. `css-class` - Styling (lowest priority)
-     - Library-aware formatting (Browser vs Selenium)
+     - Browser Library (Playwright) locator formatting
      
      **Phase 4: Validation** (`tools/browser_service/locators/validation.py`)
      - Uses Playwright's built-in `locator().count()` method
@@ -503,9 +501,8 @@ def generate_locators_from_attributes(element_attrs, library_type)
   6. **role** - Playwright-specific, semantic but content-dependent
   7. **css-class** - Styling-based, can change during refactoring
 
-- **Library-aware formatting**:
-  * Browser Library (Playwright): `id=value`, `data-testid=value`, `[name="value"]`
-  * SeleniumLibrary: `id=value`, `css=[data-testid="value"]`, `name=value`
+- **Locator formatting** (Browser Library / Playwright):
+  * `id=value`, `data-testid=value`, `[name="value"]`
 
 ### Phase 4: Validation
 **Location**: `tools/browser_service/locators/validation.py`
@@ -581,7 +578,7 @@ async def find_unique_locator_at_coordinates(page, x, y, element_id, element_des
 - ✅ **No JavaScript generation**: Uses Playwright's Python API directly
 - ✅ **Priority-based**: Always selects most stable locator available
 - ✅ **Comprehensive fallback**: 21 strategies ensure we find something
-- ✅ **Library-aware**: Generates correct syntax for Browser/Selenium libraries
+- ✅ **Library-aware**: Generates Browser Library (Playwright) syntax
 - ✅ **Validation guarantees**: Only unique locators (count=1) are returned
 - ✅ **Maintainable**: Small, focused modules vs monolithic validation code
 
@@ -626,7 +623,6 @@ Mark 1 uses a flexible library context system to support multiple Robot Framewor
 src/backend/crew_ai/library_context/
 ├── base.py                    # Abstract base class
 ├── browser_context.py         # Browser Library (Playwright)
-├── selenium_context.py        # SeleniumLibrary
 ├── dynamic_context.py         # Dynamic keyword extraction
 └── __init__.py               # Factory function
 ```
@@ -663,7 +659,7 @@ def get_library_context(library_type: str):
 # config.py
 @validator('ROBOT_LIBRARY')
 def validate_robot_library(cls, v):
-    if v.lower() not in ['selenium', 'browser', 'mylibrary']:
+    if v.lower() not in ['browser', 'mylibrary']:
         raise ValueError(...)
 ```
 
@@ -862,7 +858,7 @@ IMAGE_TAG = "robot-test-runner:latest"
 **Image Contents** (from Dockerfile):
 - **Base**: Python 3.12-slim
 - **Package Manager**: UV (10-100x faster than pip)
-- **Robot Framework**: Core + SeleniumLibrary + Browser Library
+- **Robot Framework**: Core + Browser Library
 - **Browsers**: Playwright Chromium + Google Chrome
 - **Display**: Xvfb for headless execution
 

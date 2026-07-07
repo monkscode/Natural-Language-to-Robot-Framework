@@ -181,18 +181,6 @@ class TestLiveLLMCrewOnline:
 class TestLiveCrewFallbackBehaviour:
     """Verify graceful error handling in run_crew() — no LLM required."""
 
-    def test_run_crew_raises_on_invalid_library_type(self):
-        """Unsupported library_type raises ValueError from get_library_context."""
-        from src.backend.crew_ai.crew import run_crew
-        with pytest.raises((ValueError, Exception)):
-            run_crew(
-                "click a button",
-                model_provider="local",
-                model_name="ollama",
-                library_type="invalid_library_xyz",
-                workflow_id="error-test",
-            )
-
     def test_hint_metadata_type_from_crew_signature(self):
         """hint_metadata is always initialised as dict before any logic runs.
 

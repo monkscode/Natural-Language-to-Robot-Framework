@@ -31,7 +31,6 @@ RUN pip install --no-cache-dir uv
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     robotframework \
-    robotframework-seleniumlibrary \
     robotframework-browser
 
 # Initialize Browser library (requires Node.js)
@@ -40,7 +39,7 @@ RUN rfbrowser init --skip-browsers
 # Copy libdoc generation script
 COPY tools/generate_libdocs.py /build/generate_libdocs.py
 
-# Generate library documentation as JSON (SeleniumLibrary, BuiltIn, and Browser)
+# Generate library documentation as JSON (BuiltIn and Browser)
 RUN mkdir -p /build/libdocs && \
     python /build/generate_libdocs.py /build/libdocs && \
     test -n "$(ls -1 /build/libdocs/*.json 2>/dev/null)"

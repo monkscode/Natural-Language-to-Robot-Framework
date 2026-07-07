@@ -107,7 +107,7 @@ def extract_url_from_query(query: str) -> str:
     return "website mentioned in query"
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str | None = None, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
+def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -115,24 +115,19 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         query: User's natural language test description
         model_provider: "local", "gemini", or "vertex"
         model_name: Model identifier
-        library_type: "selenium" or "browser" (optional, defaults to config setting)
         workflow_id: Unique workflow identifier for metrics tracking
 
     Architecture Note:
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
-    - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
+    - Library context comes from settings.ROBOT_LIBRARY (browser-only since Task 11/E8).
     - Optimization system (pattern learning, ChromaDB) can be enabled via OPTIMIZATION_ENABLED config.
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
     from src.backend.crew_ai.library_context import get_library_context
 
-    # Use provided library_type or fall back to config setting
-    if library_type is None:
-        library_type = settings.ROBOT_LIBRARY
-
-    logger.info(f"🔧 Loading library context for: {library_type}")
-    library_context = get_library_context(library_type)
+    logger.info(f"🔧 Loading library context for: {settings.ROBOT_LIBRARY}")
+    library_context = get_library_context(settings.ROBOT_LIBRARY)
     logger.info(
         f"✅ Loaded {library_context.library_name} context with dynamic keywords")
 

@@ -2,9 +2,8 @@
 Unit tests for src.backend.crew_ai.library_context.
 
 Covers:
-  - get_library_context factory function
+  - get_library_context factory function (browser-only since Task 11/E8)
   - BrowserLibraryContext properties and methods
-  - SeleniumLibraryContext properties and methods
   - LibraryContext.get_full_context() dispatch
   - Abstract contract enforcement
 """
@@ -13,7 +12,6 @@ import pytest
 from src.backend.crew_ai.library_context import (
     get_library_context,
     BrowserLibraryContext,
-    SeleniumLibraryContext,
     LibraryContext,
 )
 
@@ -25,17 +23,15 @@ class TestGetLibraryContextFactory:
         ctx = get_library_context("browser")
         assert isinstance(ctx, BrowserLibraryContext)
 
-    def test_selenium_type_returns_selenium_context(self):
-        ctx = get_library_context("selenium")
-        assert isinstance(ctx, SeleniumLibraryContext)
-
     def test_case_insensitive_browser(self):
         ctx = get_library_context("Browser")
         assert isinstance(ctx, BrowserLibraryContext)
 
-    def test_case_insensitive_selenium(self):
-        ctx = get_library_context("SELENIUM")
-        assert isinstance(ctx, SeleniumLibraryContext)
+    def test_selenium_raises_value_error(self):
+        """SeleniumLibrary support was removed (Task 11/E8) — the factory
+        rejects it like any other unknown library."""
+        with pytest.raises(ValueError, match="Unknown library type"):
+            get_library_context("selenium")
 
     def test_unknown_type_raises_value_error(self):
         with pytest.raises(ValueError, match="Unknown library type"):
@@ -145,54 +141,6 @@ class TestBrowserLibraryContext:
             ctx.get_full_context("unknown_role")
 
 
-class TestSeleniumLibraryContext:
-    """Tests for SeleniumLibraryContext."""
-
-    @pytest.fixture
-    def ctx(self):
-        return SeleniumLibraryContext()
-
-    def test_library_name_contains_selenium(self, ctx):
-        assert "Selenium" in ctx.library_name or "selenium" in ctx.library_name.lower()
-
-    def test_library_import_is_string(self, ctx):
-        assert isinstance(ctx.library_import, str)
-        assert len(ctx.library_import) > 0
-
-    def test_browser_init_params_is_dict(self, ctx):
-        params = ctx.browser_init_params
-        assert isinstance(params, dict)
-
-    def test_requires_viewport_config_is_bool(self, ctx):
-        assert isinstance(ctx.requires_viewport_config, bool)
-
-    def test_viewport_config_code_is_string(self, ctx):
-        code = ctx.get_viewport_config_code()
-        assert isinstance(code, str)
-
-    def test_core_rules_is_non_empty_string(self, ctx):
-        rules = ctx.core_rules
-        assert isinstance(rules, str)
-        assert len(rules) > 0
-
-    def test_planning_rules_is_non_empty_string(self, ctx):
-        rules = ctx.planning_rules
-        assert isinstance(rules, str)
-        assert len(rules) > 0
-
-    def test_planning_context_is_string(self, ctx):
-        assert isinstance(ctx.planning_context, str)
-
-    def test_code_assembly_context_is_string(self, ctx):
-        assert isinstance(ctx.code_assembly_context, str)
-
-    def test_get_full_context_all_roles(self, ctx):
-        for role in ("planner", "assembler"):
-            result = ctx.get_full_context(role)
-            assert isinstance(result, str)
-            assert len(result) > 0
-
-
 class TestLibraryContextContract:
     """Verify the abstract contract is enforced."""
 
@@ -202,11 +150,3 @@ class TestLibraryContextContract:
 
     def test_browser_context_is_subclass(self):
         assert issubclass(BrowserLibraryContext, LibraryContext)
-
-    def test_selenium_context_is_subclass(self):
-        assert issubclass(SeleniumLibraryContext, LibraryContext)
-
-    def test_both_contexts_have_different_library_names(self):
-        browser = BrowserLibraryContext()
-        selenium = SeleniumLibraryContext()
-        assert browser.library_name != selenium.library_name
