@@ -99,7 +99,9 @@ class WorkflowMetricsBase(
     """
     # Core identifiers
     workflow_id: str
-    url: str
+    # None when the user query named no URL (extract_url_from_query returns
+    # None rather than guessing a domain — Task 14).
+    url: Optional[str] = None
     
     # Overall metrics (totals)
     total_llm_calls: int
