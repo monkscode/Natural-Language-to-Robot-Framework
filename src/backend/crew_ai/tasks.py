@@ -675,7 +675,9 @@ Generated Test
             f"{PromptComponents.DROPDOWN_HANDLING}\n"
             
             f"{PromptComponents.CHECKBOX_RADIO_HANDLING}\n"
-            
+
+            f"{PromptComponents.FILE_UPLOAD_HANDLING}\n"
+
             f"{libraries_section}"
             
             f"{PromptComponents.ASSEMBLY_FORMAT_RULES}"

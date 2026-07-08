@@ -482,6 +482,48 @@ Standard 'Click' may FAIL because the input is not visible.
 Use standard Click keyword.
 """
 
+    FILE_UPLOAD_HANDLING = """
+--- HANDLING FILE UPLOADS (element_type='file-upload') ---
+⚠️ **CRITICAL**: When a step's element has element_type='file-upload', the locator
+points at the real `<input type="file">`. That input is usually HIDDEN behind a
+styled browse button — this is EXPECTED and correct: hidden file inputs are legal
+targets for the upload keyword. Do NOT try to make it visible, do NOT click any
+styled browse button instead.
+
+**NEVER use Click on a file-upload element.** Clicking opens the browser's NATIVE
+file dialog, which Robot Framework cannot control — the test hangs until timeout.
+
+**ALWAYS use Upload File By Selector:**
+```robot
+Upload File By Selector    ${locator}    <file path>
+```
+
+**File path rules:**
+- If the step provides a file name or path value, use it.
+- If the step names NO file, declare a placeholder variable so the user can fill
+  in real test data before running:
+```robot
+*** Variables ***
+# TODO: replace with the real file to upload
+${UPLOAD_FILE}    ${CURDIR}${/}test_data.csv
+```
+  and use `${UPLOAD_FILE}` as the file path argument.
+
+*Example 1 — hidden file input, file named in the step:*
+Input: `{"locator": "id=customer_import_mapper", "element_type": "file-upload", "value": "customers.csv"}`
+Output:
+```robot
+    Upload File By Selector    id=customer_import_mapper    ${CURDIR}${/}customers.csv
+```
+
+*Example 2 — no file named in the step:*
+Input: `{"locator": "input[type=\\"file\\"][name=\\"ratedeck_csv\\"]", "element_type": "file-upload"}`
+Output:
+```robot
+    Upload File By Selector    input[type="file"][name="ratedeck_csv"]    ${UPLOAD_FILE}
+```
+"""
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PLANNING COMPONENTS - Used in plan_steps_task
     # ═══════════════════════════════════════════════════════════════════════════
