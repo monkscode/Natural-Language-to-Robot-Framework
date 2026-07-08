@@ -109,6 +109,45 @@ class TestIdentifiedElement:
         assert elem.dropdown_framework == ""
         assert elem.select_id is None
 
+    def test_date_picker_field_accepted(self):
+        """datepicker_framework must be accepted so the Pydantic model does
+        not strip flatpickr metadata before it reaches the Code Assembler
+        (Task D, G4 — same pipe as dropdown_framework/select_id)."""
+        elem = IdentifiedElement(
+            step_description="Set the CDR from date",
+            keyword="Fill Text",
+            locator="id=customer_cdr_from_date",
+            found=True,
+            element_type="date-picker",
+            datepicker_framework="flatpickr",
+            value="2026-07-01",
+        )
+        assert elem.datepicker_framework == "flatpickr"
+
+    def test_date_picker_field_defaults_to_none(self):
+        """Elements that are not date pickers must not require the field."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.datepicker_framework is None
+
+    def test_empty_datepicker_framework_accepted(self):
+        """browser_use_tool sends an empty string for non-widget elements;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Fill username",
+            keyword="Fill Text",
+            locator="id=username",
+            found=True,
+            element_type="input",
+            datepicker_framework="",
+        )
+        assert elem.datepicker_framework == ""
+
 
 class TestAssemblyOutput:
     """Tests for AssemblyOutput model."""

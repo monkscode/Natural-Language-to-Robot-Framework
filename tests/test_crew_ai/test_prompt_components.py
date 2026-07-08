@@ -140,3 +140,65 @@ class TestFileUploadHandlingPromptComponent:
         import src.backend.crew_ai.tasks as tasks_mod
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "FILE_UPLOAD_HANDLING" in src_text
+
+
+class TestDatePickerHandlingPromptComponent:
+    """Task D (G4): flatpickr date pickers render READONLY inputs — Fill
+    Text waits for editability and dies with a timeout, every run. The
+    only robust path is the widget's own API via one Evaluate JavaScript
+    line (verified live on ASTPP 2026-07-08). Native input[type=date]
+    keeps plain Fill Text."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.DATE_PICKER_HANDLING, str)
+        assert len(PromptComponents.DATE_PICKER_HANDLING) > 0
+
+    def test_routes_on_element_type_and_framework(self):
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "element_type='date-picker'" in body
+        assert "datepicker_framework='flatpickr'" in body
+
+    def test_flatpickr_path_uses_setdate_js(self):
+        """The template must call setDate(value, true) on el._flatpickr —
+        state update + change event in one call, no calendar clicking."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "Evaluate JavaScript" in body
+        assert "el._flatpickr" in body
+        assert "setDate" in body
+        # Null-guard: the instance can be absent if the page re-rendered.
+        assert "if (fp)" in body
+
+    def test_flatpickr_path_forbids_fill_text(self):
+        """The readonly input is EXPECTED — the agent must not 'fix' it
+        by trying Fill Text first."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "readonly" in body.lower()
+        assert "do NOT try Fill Text" in body
+
+    def test_native_path_keeps_fill_text(self):
+        """Plain input[type=date] accepts Fill Text with an ISO date —
+        no JS needed."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "datepicker_framework='native'" in body
+        assert "Fill Text" in body
+
+    def test_worked_example_present(self):
+        """A worked example with the real ASTPP locator gives the LLM a
+        concrete substitution pattern."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "customer_cdr_from_date" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "DATE_PICKER_HANDLING" in src_text
+
+    def test_identify_task_forwards_datepicker_framework(self):
+        """The Assembler only sees what the identify agent copies to the
+        step — the extraction instruction must name datepicker_framework
+        (same pipe as dropdown_framework/select_id)."""
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "'datepicker_framework' → 'datepicker_framework'" in src_text

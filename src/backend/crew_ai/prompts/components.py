@@ -524,6 +524,50 @@ Output:
 ```
 """
 
+    DATE_PICKER_HANDLING = """
+--- HANDLING DATE PICKERS (element_type='date-picker') ---
+⚠️ **CRITICAL**: Check `datepicker_framework` for date-picker elements!
+
+Widget date pickers (flatpickr) render READONLY inputs — typing is disabled by
+design and values are set via a calendar overlay. `Fill Text` waits for the
+input to become editable and FAILS with a timeout, every run. The input being
+readonly is EXPECTED and correct — do NOT try Fill Text on it, do NOT try to
+remove the readonly attribute, do NOT click through the calendar overlay.
+
+**When datepicker_framework='flatpickr':**
+The flatpickr instance lives on the input element as `el._flatpickr`. Set the
+date through the widget's own API — ONE Evaluate JavaScript line, no clicking,
+no calendar navigation:
+```robot
+Evaluate JavaScript    ${locator}    (el) => { const fp = el._flatpickr; if (fp) fp.setDate('${value}', true); }
+```
+- `setDate(value, true)` updates the widget state AND fires the change event.
+- flatpickr parses the value with the instance's own date format; a date-only
+  value like '2026-07-01' is accepted even when the widget shows date+time.
+
+**When datepicker_framework='native' or missing (plain input[type=date]):**
+Native date inputs are editable — use Fill Text with an ISO date (YYYY-MM-DD):
+```robot
+Fill Text    ${locator}    2026-07-01
+```
+
+--- EXAMPLES ---
+
+*Example 1 - flatpickr (readonly input, ASTPP CDR report filter):*
+Input: `{"keyword": "Fill Text", "element_description": "From Date filter", "locator": "id=customer_cdr_from_date", "element_type": "date-picker", "datepicker_framework": "flatpickr", "value": "2026-07-01"}`
+Output:
+```robot
+    Evaluate JavaScript    id=customer_cdr_from_date    (el) => { const fp = el._flatpickr; if (fp) fp.setDate('2026-07-01', true); }
+```
+
+*Example 2 - native date input:*
+Input: `{"locator": "id=dob", "element_type": "date-picker", "datepicker_framework": "native", "value": "1990-05-15"}`
+Output:
+```robot
+    Fill Text    id=dob    1990-05-15
+```
+"""
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PLANNING COMPONENTS - Used in plan_steps_task
     # ═══════════════════════════════════════════════════════════════════════════

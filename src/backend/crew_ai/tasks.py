@@ -45,6 +45,7 @@ class IdentifiedElement(PlannedStep):
     element_type: Optional[str] = Field(default=None, description="Element type (input, select, etc.)")
     dropdown_framework: Optional[str] = Field(default=None, description="Custom dropdown framework detected (e.g. 'tom-select'), empty string if none")
     select_id: Optional[str] = Field(default=None, description="Original <select> element ID for TomSelect — used to build the Evaluate JavaScript locator")
+    datepicker_framework: Optional[str] = Field(default=None, description="Date-picker widget framework detected (e.g. 'flatpickr'), empty string if none — routes the Assembler to the setDate Evaluate JavaScript idiom")
 
 
 class IdentificationOutput(BaseModel):
@@ -492,11 +493,12 @@ Generated Test
                 "}\n"
                 "```\n"
                 "\n"
-                "⚠️ **IMPORTANT**: Extract ALL three of these fields from each locator_mapping entry:\n"
-                "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
+                "⚠️ **IMPORTANT**: Extract ALL FOUR of these fields from each locator_mapping entry:\n"
+                "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown', 'date-picker'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
                 "- 'dropdown_framework' → 'dropdown_framework' (e.g., 'tom-select', or empty string '')\n"
                 "- 'select_id' → 'select_id' (the original <select> element ID for TomSelect, or null)\n"
-                "You MUST copy all three to the step when mapping locators!\n"
+                "- 'datepicker_framework' → 'datepicker_framework' (e.g., 'flatpickr', or empty string '')\n"
+                "You MUST copy all four to the step when mapping locators!\n"
                 "\n"
                 "**STEP 7: MAP LOCATORS TO STEPS**\n"
                 "\n"
@@ -519,7 +521,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type', 'dropdown_framework', and 'select_id' from the response\n"
+                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', and 'datepicker_framework' from the response\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"
@@ -677,6 +679,8 @@ Generated Test
             f"{PromptComponents.CHECKBOX_RADIO_HANDLING}\n"
 
             f"{PromptComponents.FILE_UPLOAD_HANDLING}\n"
+
+            f"{PromptComponents.DATE_PICKER_HANDLING}\n"
 
             f"{libraries_section}"
             
