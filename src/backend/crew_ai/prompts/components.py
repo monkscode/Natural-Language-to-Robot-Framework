@@ -568,6 +568,66 @@ Output:
 ```
 """
 
+    STATE_VERIFICATION_HANDLING = """
+--- HANDLING STATE VERIFICATION (keyword='Get Classes' / 'Get Attribute') ---
+A Get Classes step verifies a field's state (shows an error / invalid /
+highlighted) via its CSS classes. The step carries `element_classes`: the
+class list the locator engine OBSERVED on the element at locate time —
+captured after the preceding steps had already run, so for "click Save,
+then verify the field shows an error" the observed list is the field IN its
+error state. This is real evidence from the live page. Decide from it —
+never from guesswork.
+
+**Decision rule (strict order):**
+1. Pick the STATE MARKER from `element_classes`: a class qualifies ONLY if
+   it contains 'invalid', 'error', 'danger', or 'warning' (e.g. `invalid`,
+   `is-invalid`, `has-error`, `ng-invalid`, `text-danger`).
+   Base/layout/skin classes NEVER qualify — `form-control`, `text`, `field`,
+   `medium`, `input`, `btn`, `row` are always on the element, error or not;
+   asserting one produces a test that passes forever even when validation
+   breaks.
+2. If the step's 'value' names a state word, treat it as a cross-check
+   only: use it if it appears in the observed `element_classes`; if it does
+   not appear there, use the marker found by rule 1 instead and add a
+   comment noting the user's word was not observed on the element.
+3. If NO class in `element_classes` qualifies as a state marker, do NOT
+   pick anything else. Emit a loud placeholder that FAILS until a human
+   fills it, with the observed classes listed so they can pick in seconds:
+```robot
+    # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
+    # to this state. Observed classes on this element: <element_classes>
+    Get Classes    ${locator}    contains    EXPECTED_STATE_CLASS
+```
+
+**Generated line (rules 1 and 2):**
+```robot
+    Get Classes    ${locator}    contains    <marker>
+```
+
+For `Get Attribute` steps (the user named a specific attribute):
+```robot
+    Get Attribute    ${locator}    <attribute>    ==    <expected>
+```
+
+--- EXAMPLES ---
+
+*Example 1 — auto-pick (ASTPP customer form, verified live 2026-07-09):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "input[name=\\"email\\"]", "element_classes": "text field medium form-control invalid"}`
+Output ('invalid' is the only error-family token; 'form-control' is base):
+```robot
+    Get Classes    input[name="email"]    contains    invalid
+```
+
+*Example 2 — no marker observed (site with an unrecognizable state class):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control fld-x2"}`
+Output:
+```robot
+    # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
+    # to this state. Observed classes on this element: form-control fld-x2
+    Get Classes    id=email    contains    EXPECTED_STATE_CLASS
+```
+"""
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PLANNING COMPONENTS - Used in plan_steps_task
     # ═══════════════════════════════════════════════════════════════════════════
@@ -628,6 +688,32 @@ For validation steps that require comparison (like price checks), structure the 
 Example for price validation:
 1. Get Text from price element -> store in variable
 2. Validate with Should Be True and condition_expression like "${float(product_price.replace('₹', '').replace(',', '')) < 9999}"
+"""
+
+    PLANNING_STATE_VERIFICATION = """
+--- VERIFYING A FIELD'S STATE (shows an error / disabled / highlighted) ---
+When the user wants to verify a field's CONDITION — "the Email field shows an
+error", "the field is marked invalid", "the button is disabled", "the row is
+highlighted" — that is an ELEMENT-STATE check, not a text check.
+
+Many sites (server-rendered apps especially) signal these states ONLY by
+adding a CSS class to the field. There is often NO error message text
+anywhere on the page — so do NOT plan a step to read an error message.
+
+*   Target the field itself: element_description = the field the user named
+    (e.g. "Email input field in the customer form"), NOT a message element.
+*   Use keyword `Get Classes` for state checks (error/invalid/highlighted).
+*   Use keyword `Get Attribute` only when the user names a specific
+    attribute (e.g. "verify aria-invalid is true").
+*   Put the user's own state word in 'value' if they used one (e.g. user
+    says "marked invalid" → value = "invalid"); leave value empty for vague
+    phrasings like "shows an error". Later stages fill it from what the
+    browser actually observes on the field — never from a guess.
+
+Example — "Click Save without filling anything and verify the Email field
+shows an error":
+1. Click Element → Save button in the customer form
+2. Get Classes → Email input field in the customer form   (no value)
 """
 
     PLANNING_LOOP_HANDLING = """

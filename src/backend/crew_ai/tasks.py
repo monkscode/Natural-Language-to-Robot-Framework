@@ -46,6 +46,7 @@ class IdentifiedElement(PlannedStep):
     dropdown_framework: Optional[str] = Field(default=None, description="Custom dropdown framework detected (e.g. 'tom-select'), empty string if none")
     select_id: Optional[str] = Field(default=None, description="Original <select> element ID for TomSelect — used to build the Evaluate JavaScript locator")
     datepicker_framework: Optional[str] = Field(default=None, description="Date-picker widget framework detected (e.g. 'flatpickr'), empty string if none — routes the Assembler to the setDate Evaluate JavaScript idiom")
+    element_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element at locate time (from element_info.className) — captured after the preceding steps ran, so it is the evidence for Get Classes state verifications; empty string if the element has no class attribute")
 
 
 class IdentificationOutput(BaseModel):
@@ -394,6 +395,8 @@ Generated Test
 
             {PromptComponents.PLANNING_CONDITIONAL_LOGIC}
 
+            {PromptComponents.PLANNING_STATE_VERIFICATION}
+
             {PromptComponents.PLANNING_LOOP_HANDLING}
 
             {PromptComponents.PLANNING_OUTPUT_RULES.replace("{browser_init_placeholder}", self._cached_browser_init)}
@@ -420,7 +423,8 @@ Generated Test
                 "- Read ALL test steps from context\n"
                 "- Identify which steps need element locators\n"
                 "- Note: 'Open Browser', 'Close Browser', 'Should Be True' steps DON'T need locators\n"
-                "- Note: 'Input Text', 'Click Element', 'Get Text', 'Select From List' steps NEED locators\n"
+                "- Note: 'Input Text', 'Click Element', 'Get Text', 'Select From List', 'Get Classes', 'Get Attribute' steps NEED locators\n"
+                "- Note: for 'Get Classes' / 'Get Attribute' state-verification steps, use action 'get_text' (locate-only). Keep the element in plan order: the browser locates it AFTER the preceding actions have run, so the observed state is the state to verify.\n"
                 "\n"
                 "**STEP 2: EXTRACT URL**\n"
                 "- Find the 'Open Browser' step in the plan\n"
@@ -493,12 +497,13 @@ Generated Test
                 "}\n"
                 "```\n"
                 "\n"
-                "⚠️ **IMPORTANT**: Extract ALL FOUR of these fields from each locator_mapping entry:\n"
+                "⚠️ **IMPORTANT**: Extract ALL FIVE of these fields from each locator_mapping entry:\n"
                 "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown', 'date-picker'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
                 "- 'dropdown_framework' → 'dropdown_framework' (e.g., 'tom-select', or empty string '')\n"
                 "- 'select_id' → 'select_id' (the original <select> element ID for TomSelect, or null)\n"
                 "- 'datepicker_framework' → 'datepicker_framework' (e.g., 'flatpickr', or empty string '')\n"
-                "You MUST copy all four to the step when mapping locators!\n"
+                "- 'element_info.className' → 'element_classes' (the class list observed on the element at locate time — the evidence for Get Classes state verifications; copy it VERBATIM, or empty string '')\n"
+                "You MUST copy all five to the step when mapping locators!\n"
                 "\n"
                 "**STEP 7: MAP LOCATORS TO STEPS**\n"
                 "\n"
@@ -521,7 +526,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', and 'datepicker_framework' from the response\n"
+                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', 'datepicker_framework', and 'element_classes' from the response\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"
@@ -681,6 +686,8 @@ Generated Test
             f"{PromptComponents.FILE_UPLOAD_HANDLING}\n"
 
             f"{PromptComponents.DATE_PICKER_HANDLING}\n"
+
+            f"{PromptComponents.STATE_VERIFICATION_HANDLING}\n"
 
             f"{libraries_section}"
             

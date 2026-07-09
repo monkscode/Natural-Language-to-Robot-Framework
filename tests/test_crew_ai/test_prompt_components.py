@@ -202,3 +202,119 @@ class TestDatePickerHandlingPromptComponent:
         import src.backend.crew_ai.tasks as tasks_mod
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "'datepicker_framework' → 'datepicker_framework'" in src_text
+
+
+class TestStateVerificationPlanning:
+    """Task G (G7): planner side of class-state verification.
+
+    'Verify the Email field shows an error' on ASTPP: the site shows NO
+    error text anywhere — the server round-trip adds class `invalid` to
+    the input. The planner's only verification patterns were read-text
+    and check-number, so it planned a Get Text hunt for a message that
+    does not exist → dead step. The planner must instead target the
+    FIELD ITSELF with Get Classes."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.PLANNING_STATE_VERIFICATION, str)
+        assert len(PromptComponents.PLANNING_STATE_VERIFICATION) > 0
+
+    def test_plans_get_classes_against_the_field(self):
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "Get Classes" in body
+        assert "field itself" in body
+
+    def test_forbids_hunting_for_message_text(self):
+        """The failure mode being fixed: planning a Get Text step for an
+        error message element that does not exist on class-only sites."""
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "do NOT plan a step to read an error message" in body
+
+    def test_covers_the_state_phrasing_family(self):
+        """'shows an error' is one of a family: disabled, highlighted,
+        marked invalid — all are element-state checks, not text checks."""
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "shows an error" in body
+        assert "disabled" in body
+        assert "highlighted" in body
+
+    def test_wired_into_plan_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "PLANNING_STATE_VERIFICATION" in src_text
+
+
+class TestStateVerificationHandling:
+    """Task G (G7): assembler side of class-state verification.
+
+    The identify agent forwards the classes the locator engine OBSERVED
+    on the field at locate time — captured after the preceding steps ran,
+    so on ASTPP the empty-form Save has already happened and the observed
+    list is 'text field medium form-control invalid'. The assembler picks
+    the state marker from that observed evidence; it never guesses. When
+    no token reads as a state marker, it emits a loud placeholder that
+    fails until a human fills it — never a silently-green base-class
+    assertion (Bootstrap 3 puts has-error on the PARENT, so the field's
+    own list can legitimately contain no marker)."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.STATE_VERIFICATION_HANDLING, str)
+        assert len(PromptComponents.STATE_VERIFICATION_HANDLING) > 0
+
+    def test_routes_on_get_classes_keyword(self):
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "Get Classes" in body
+        assert "element_classes" in body
+
+    def test_auto_picks_marker_from_observed_classes(self):
+        """The common case must be fully automatic: pick the error-family
+        token from the observed class list — no user input needed."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "invalid" in body
+        assert "error" in body
+        assert "danger" in body
+
+    def test_base_classes_never_qualify(self):
+        """Picking a base/layout class (present error or not) produces a
+        test that passes forever — the silent-green disease. The prompt
+        must name form-control as a NEVER-qualifying example."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "form-control" in body
+        assert "NEVER" in body
+
+    def test_user_word_is_cross_check_only(self):
+        """Owner decision 2026-07-09: observation decides. A user-named
+        state word is used only when it appears in the observed list."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "observed" in body
+        assert "cross-check" in body
+
+    def test_placeholder_fallback_is_loud(self):
+        """No marker in the observed list → EXPECTED_STATE_CLASS placeholder
+        with a TODO comment listing what WAS observed, so the test fails
+        loudly until a human fills it (Task 12 contract)."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "EXPECTED_STATE_CLASS" in body
+        assert "TODO" in body
+
+    def test_worked_example_uses_astpp_reality(self):
+        """A worked example with the live-verified ASTPP data gives the
+        LLM a concrete substitution pattern."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "form-control invalid" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "STATE_VERIFICATION_HANDLING" in src_text
+
+    def test_identify_task_forwards_element_classes(self):
+        """The Assembler only sees what the identify agent copies to the
+        step — the extraction instruction must map element_info.className
+        to element_classes (the pipe verified in browser-service
+        smart_locator.py element_info payload)."""
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "'element_info.className' → 'element_classes'" in src_text

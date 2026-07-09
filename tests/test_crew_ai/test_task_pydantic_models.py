@@ -148,6 +148,46 @@ class TestIdentifiedElement:
         )
         assert elem.datepicker_framework == ""
 
+    def test_element_classes_field_accepted(self):
+        """element_classes must be accepted so the Pydantic model does not
+        strip the observed class list before it reaches the Code Assembler
+        (Task G, G7 — the classes the locator engine saw on the field at
+        locate time, i.e. AFTER the preceding steps ran; on ASTPP the
+        empty-form Save has happened, so 'invalid' is in the list)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator='input[name="email"]',
+            found=True,
+            element_type="input",
+            element_classes="text field medium form-control invalid",
+        )
+        assert elem.element_classes == "text field medium form-control invalid"
+
+    def test_element_classes_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.element_classes is None
+
+    def test_empty_element_classes_accepted(self):
+        """Elements with no class attribute come back as empty string;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator='input[name="email"]',
+            found=True,
+            element_type="input",
+            element_classes="",
+        )
+        assert elem.element_classes == ""
+
 
 class TestAssemblyOutput:
     """Tests for AssemblyOutput model."""
