@@ -49,6 +49,8 @@ class IdentifiedElement(PlannedStep):
     element_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element at locate time (from element_info.className) — captured after the preceding steps ran, so it is the evidence for Get Classes state verifications; empty string if the element has no class attribute")
     aria_invalid: Optional[str] = Field(default=None, description="Observed aria-invalid attribute value (from element_info.ariaInvalid) — 'true' when the page marks the field invalid via ARIA; routes the Assembler to a Get Attribute assertion when no error-family class is observed")
     parent_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element's immediate parent at locate time (from element_info.parentClassName) — Bootstrap-3-era sites mark invalid fields on the wrapper div; the Assembler asserts one level up via '${locator} >> xpath=..' when the marker lives there")
+    stability: Optional[str] = Field(default=None, description="Locator stability verdict from browser-service (Task 10): 'stable', 'volatile', or 'positional' — anything but 'stable' makes the Assembler emit an in-code WARNING comment above the step")
+    all_locators: Optional[List[Any]] = Field(default=None, description="Full validated-locator candidate list from browser-service — forwarded so self-healing (Task 21) has alternatives at the Assembler boundary")
 
 
 class IdentificationOutput(BaseModel):
