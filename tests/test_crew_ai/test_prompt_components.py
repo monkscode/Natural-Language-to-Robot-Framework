@@ -336,3 +336,24 @@ class TestStateVerificationHandling:
         import src.backend.crew_ai.tasks as tasks_mod
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "'element_info.ariaInvalid' → 'aria_invalid'" in src_text
+
+    def test_parent_class_rule_before_placeholder(self):
+        """Bootstrap 3 marks invalid fields on the PARENT div (form-group
+        has-error) while the field's own list stays clean — the one real
+        case that previously forced the placeholder despite the error
+        state being visibly observed. The parent-marker rule must sit
+        before the fallback and assert one level up via xpath=.. chaining."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "parent_classes" in body
+        assert ">> xpath=.." in body
+        assert "has-error" in body
+        assert body.index("parent_classes") < body.index("EXPECTED_STATE_CLASS")
+
+    def test_identify_task_forwards_parent_classes(self):
+        """Same pipe: element_info.parentClassName (added in
+        browser-service 97b3e10) must be copied to the step as
+        parent_classes."""
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "'element_info.parentClassName' → 'parent_classes'" in src_text

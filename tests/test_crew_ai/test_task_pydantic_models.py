@@ -228,6 +228,34 @@ class TestIdentifiedElement:
         )
         assert elem.aria_invalid == ""
 
+    def test_parent_classes_field_accepted(self):
+        """parent_classes must be accepted so the Pydantic model does not
+        strip the parent's observed class list (Task G parent scan —
+        Bootstrap 3 marks invalid fields on the PARENT div while the
+        field's own list stays clean; the assembler asserts one level up
+        via `${locator} >> xpath=..`)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            element_classes="form-control",
+            parent_classes="form-group has-error",
+        )
+        assert elem.parent_classes == "form-group has-error"
+
+    def test_parent_classes_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.parent_classes is None
+
 
 class TestAssemblyOutput:
     """Tests for AssemblyOutput model."""

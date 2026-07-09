@@ -596,12 +596,22 @@ never from guesswork.
 ```robot
     Get Attribute    ${locator}    aria-invalid    ==    true
 ```
-4. If neither a marker class nor aria-invalid was observed, do NOT pick
-   anything else. Emit a loud placeholder that FAILS until a human
-   fills it, with the observed classes listed so they can pick in seconds:
+4. If still nothing, apply the SAME marker vocabulary to the observed
+   `parent_classes` — Bootstrap-3-era sites mark the WRAPPER div, not
+   the field (`form-group has-error` around a clean `form-control`
+   input). Assert one level up by chaining the parent step onto the
+   field's locator:
+```robot
+    Get Classes    ${locator} >> xpath=..    contains    <marker>
+```
+5. If none of the observed evidence (element classes, aria-invalid,
+   parent classes) shows a state marker, do NOT pick anything else.
+   Emit a loud placeholder that FAILS until a human fills it, with the
+   observed classes listed so they can pick in seconds:
 ```robot
     # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
-    # to this state. Observed classes on this element: <element_classes>
+    # to this state. Observed on this element: <element_classes>;
+    # on its parent: <parent_classes>
     Get Classes    ${locator}    contains    EXPECTED_STATE_CLASS
 ```
 
@@ -624,12 +634,20 @@ Output ('invalid' is the only error-family token; 'form-control' is base):
     Get Classes    input[name="email"]    contains    invalid
 ```
 
-*Example 2 — no marker observed (site with an unrecognizable state class):*
-Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control fld-x2"}`
+*Example 2 — marker on the parent (Bootstrap 3 convention):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control", "aria_invalid": "", "parent_classes": "form-group has-error"}`
+Output ('has-error' observed one level up; the field's own list is clean):
+```robot
+    Get Classes    id=email >> xpath=..    contains    has-error
+```
+
+*Example 3 — no marker observed anywhere (unrecognizable state class):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control fld-x2", "aria_invalid": "", "parent_classes": "form-wrap"}`
 Output:
 ```robot
     # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
-    # to this state. Observed classes on this element: form-control fld-x2
+    # to this state. Observed on this element: form-control fld-x2;
+    # on its parent: form-wrap
     Get Classes    id=email    contains    EXPECTED_STATE_CLASS
 ```
 """
