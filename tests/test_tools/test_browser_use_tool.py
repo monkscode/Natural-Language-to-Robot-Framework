@@ -136,6 +136,26 @@ class TestLocatorMappingFoundEntries:
         )])
         assert mapping["elem_1"]["dropdown_framework"] == ""
 
+    def test_datepicker_framework_forwarded(self, tool):
+        """Task D repair: browser-service returns top-level
+        datepicker_framework='flatpickr' but the locator_mapping builder
+        never copied it — the identify agent was instructed to extract a
+        key that could not exist, so DATE_PICKER_HANDLING never routed to
+        the setDate idiom and Fill Text timed out on readonly inputs.
+        Same silent-drop shape as the Tom Select fields this file guards."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "id=customer_cdr_from_date",
+            element_type="date-picker",
+            datepicker_framework="flatpickr",
+        )])
+        assert mapping["elem_1"]["datepicker_framework"] == "flatpickr"
+
+    def test_datepicker_framework_defaults_to_empty_string_when_absent(self, tool):
+        """Non-datepicker elements omit the key — must default to ''
+        (the contract IdentifiedElement expects)."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        assert mapping["elem_1"]["datepicker_framework"] == ""
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""

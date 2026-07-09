@@ -462,6 +462,7 @@ class BatchBrowserUseTool(BaseTool):
                             "element_type": elem_result.get("element_type"),
                             "dropdown_framework": elem_result.get("dropdown_framework", ""),
                             "select_id": elem_result.get("select_id"),
+                            "datepicker_framework": elem_result.get("datepicker_framework", ""),
                         }
                     else:
                         locator_mapping[element_id] = {
