@@ -463,6 +463,13 @@ class BatchBrowserUseTool(BaseTool):
                             "dropdown_framework": elem_result.get("dropdown_framework", ""),
                             "select_id": elem_result.get("select_id"),
                             "datepicker_framework": elem_result.get("datepicker_framework", ""),
+                            # "stable" default mirrors browser-service's own
+                            # re-ranker default — absent must never read as volatile.
+                            "stability": elem_result.get("stability", "stable"),
+                            # ASTPP flags are emitted top-level only when True.
+                            "visibility_filtered": elem_result.get("visibility_filtered", False),
+                            "row_anchored": elem_result.get("row_anchored", False),
+                            "row_anchor_ambiguous": elem_result.get("row_anchor_ambiguous", False),
                         }
                     else:
                         locator_mapping[element_id] = {
