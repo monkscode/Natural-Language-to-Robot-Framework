@@ -188,6 +188,46 @@ class TestIdentifiedElement:
         )
         assert elem.element_classes == ""
 
+    def test_aria_invalid_field_accepted(self):
+        """aria_invalid must be accepted so the Pydantic model does not
+        strip the observed ARIA state before it reaches the Code Assembler
+        (Task G aria pipe — for sites that mark invalid fields via ARIA
+        instead of a CSS class, the assembler emits a Get Attribute
+        assertion instead of the placeholder)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            aria_invalid="true",
+        )
+        assert elem.aria_invalid == "true"
+
+    def test_aria_invalid_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.aria_invalid is None
+
+    def test_empty_aria_invalid_accepted(self):
+        """Elements without the attribute come back as empty string;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            aria_invalid="",
+        )
+        assert elem.aria_invalid == ""
+
 
 class TestAssemblyOutput:
     """Tests for AssemblyOutput model."""

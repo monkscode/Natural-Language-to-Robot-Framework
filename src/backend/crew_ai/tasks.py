@@ -47,6 +47,7 @@ class IdentifiedElement(PlannedStep):
     select_id: Optional[str] = Field(default=None, description="Original <select> element ID for TomSelect — used to build the Evaluate JavaScript locator")
     datepicker_framework: Optional[str] = Field(default=None, description="Date-picker widget framework detected (e.g. 'flatpickr'), empty string if none — routes the Assembler to the setDate Evaluate JavaScript idiom")
     element_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element at locate time (from element_info.className) — captured after the preceding steps ran, so it is the evidence for Get Classes state verifications; empty string if the element has no class attribute")
+    aria_invalid: Optional[str] = Field(default=None, description="Observed aria-invalid attribute value (from element_info.ariaInvalid) — 'true' when the page marks the field invalid via ARIA; routes the Assembler to a Get Attribute assertion when no error-family class is observed")
 
 
 class IdentificationOutput(BaseModel):
@@ -497,13 +498,14 @@ Generated Test
                 "}\n"
                 "```\n"
                 "\n"
-                "⚠️ **IMPORTANT**: Extract ALL FIVE of these fields from each locator_mapping entry:\n"
+                "⚠️ **IMPORTANT**: Extract ALL SIX of these fields from each locator_mapping entry:\n"
                 "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown', 'date-picker'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
                 "- 'dropdown_framework' → 'dropdown_framework' (e.g., 'tom-select', or empty string '')\n"
                 "- 'select_id' → 'select_id' (the original <select> element ID for TomSelect, or null)\n"
                 "- 'datepicker_framework' → 'datepicker_framework' (e.g., 'flatpickr', or empty string '')\n"
                 "- 'element_info.className' → 'element_classes' (the class list observed on the element at locate time — the evidence for Get Classes state verifications; copy it VERBATIM, or empty string '')\n"
-                "You MUST copy all five to the step when mapping locators!\n"
+                "- 'element_info.ariaInvalid' → 'aria_invalid' ('true' when the page marks the field invalid via ARIA, or empty string '')\n"
+                "You MUST copy all six to the step when mapping locators!\n"
                 "\n"
                 "**STEP 7: MAP LOCATORS TO STEPS**\n"
                 "\n"
@@ -526,7 +528,7 @@ Generated Test
                 "  * Add 'locator' key to that step's JSON\n"
                 "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
                 "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', 'datepicker_framework', and 'element_classes' from the response\n"
+                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', 'datepicker_framework', 'element_classes', and 'aria_invalid' from the response\n"
                 "- If step didn't need a locator (Open Browser, Close Browser):\n"
                 "  * Leave it as-is (no locator key needed)\n"
                 "\n"

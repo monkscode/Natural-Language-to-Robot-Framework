@@ -318,3 +318,21 @@ class TestStateVerificationHandling:
         import src.backend.crew_ai.tasks as tasks_mod
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "'element_info.className' → 'element_classes'" in src_text
+
+    def test_aria_invalid_rule_before_placeholder(self):
+        """Sites that mark invalid fields via ARIA instead of a CSS class
+        (aria-invalid='true' observed, no error-family class) must get a
+        real Get Attribute assertion, not the placeholder — the aria rule
+        must sit between the class-marker rules and the fallback."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "aria_invalid" in body
+        assert "Get Attribute    ${locator}    aria-invalid    ==    true" in body
+        assert body.index("aria_invalid") < body.index("EXPECTED_STATE_CLASS")
+
+    def test_identify_task_forwards_aria_invalid(self):
+        """Same pipe: element_info.ariaInvalid (added in browser-service
+        e0ebfea) must be copied to the step as aria_invalid."""
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "'element_info.ariaInvalid' → 'aria_invalid'" in src_text

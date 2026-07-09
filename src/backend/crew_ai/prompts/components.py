@@ -590,8 +590,14 @@ never from guesswork.
    only: use it if it appears in the observed `element_classes`; if it does
    not appear there, use the marker found by rule 1 instead and add a
    comment noting the user's word was not observed on the element.
-3. If NO class in `element_classes` qualifies as a state marker, do NOT
-   pick anything else. Emit a loud placeholder that FAILS until a human
+3. If NO class qualifies but the observed `aria_invalid` is 'true', the
+   site marks the state via ARIA instead of a CSS class — assert the
+   attribute:
+```robot
+    Get Attribute    ${locator}    aria-invalid    ==    true
+```
+4. If neither a marker class nor aria-invalid was observed, do NOT pick
+   anything else. Emit a loud placeholder that FAILS until a human
    fills it, with the observed classes listed so they can pick in seconds:
 ```robot
     # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
