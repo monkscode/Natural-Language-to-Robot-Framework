@@ -204,6 +204,51 @@ class TestDatePickerHandlingPromptComponent:
         assert "'datepicker_framework' → 'datepicker_framework'" in src_text
 
 
+class TestStabilityWarningPromptComponent:
+    """Task 16 (#10): steps whose stapled stability != 'stable' must get an
+    in-code WARNING comment above them — the in-code comment is the
+    disclosure channel (Task 12 precedent), NOT a UI/SSE warning. The field
+    arrives on the step via the deterministic merge (element_identification)."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.STABILITY_WARNING_RULES, str)
+        assert len(PromptComponents.STABILITY_WARNING_RULES) > 0
+
+    def test_routes_on_stability_field(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "stability" in body
+        assert "stable" in body
+
+    def test_mandates_warning_comment_above_the_step(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "# WARNING" in body
+        assert "above" in body.lower()
+
+    def test_covers_volatile_and_positional(self):
+        """browser-service emits 'stable' | 'volatile' | 'positional' —
+        anything but 'stable' warns."""
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "volatile" in body
+        assert "positional" in body
+
+    def test_warning_does_not_change_the_locator(self):
+        """The locator itself is still used exactly as provided — the
+        warning is disclosure, not a licence to substitute."""
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "still use" in body.lower() or "use it anyway" in body.lower() \
+            or "exactly as provided" in body.lower()
+
+    def test_worked_example_present(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "xpath=" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "STABILITY_WARNING_RULES" in src_text
+
+
 class TestStateVerificationPlanning:
     """Task G (G7): planner side of class-state verification.
 

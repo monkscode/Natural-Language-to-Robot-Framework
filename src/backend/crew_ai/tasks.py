@@ -678,6 +678,8 @@ Generated Test
             f"{PromptComponents.USE_PROVIDED_LOCATORS_RULES}\n\n"
             
             f"{PromptComponents.LOCATOR_MAPPING_RULES}\n\n"
+
+            f"{PromptComponents.STABILITY_WARNING_RULES}\n\n"
             
             f"{PromptComponents.VALIDATION_RULES}\n"
             

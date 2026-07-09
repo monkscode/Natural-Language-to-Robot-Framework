@@ -231,6 +231,30 @@ Test
 ```
 """
 
+    STABILITY_WARNING_RULES = """
+--- LOCATOR STABILITY WARNINGS ---
+Each step may carry a 'stability' field ('stable', 'volatile', or 'positional')
+— the locator engine's verdict on whether the locator survives a fresh session.
+
+**Rule:** When a step's 'stability' is present and NOT 'stable', add a comment
+line directly ABOVE that step:
+`# WARNING: locator for '<element_description>' is <stability> — may break in a fresh session`
+
+**CRITICAL:** Still use the provided locator exactly as provided. The warning
+is disclosure for the human reviewer, NOT permission to modify, substitute,
+or skip the locator. Steps with stability 'stable' (or no stability field)
+get NO warning comment.
+
+**Example:**
+*Input Step:*
+`{"keyword": "Click", "element_description": "submit button", "locator": "xpath=//div[4]/center/input[1]", "stability": "positional"}`
+*Output Code:*
+```robot
+    # WARNING: locator for 'submit button' is positional — may break in a fresh session
+    Click    ${submit_button_locator}
+```
+"""
+
     VALIDATION_RULES = """
 --- CRITICAL RULES FOR VALIDATION ---
 
