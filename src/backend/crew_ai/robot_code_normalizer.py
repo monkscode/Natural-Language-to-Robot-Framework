@@ -33,7 +33,7 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 the LLM occasionally ignores prompt rules.
 
 Referenced by:
-    src.backend.services.workflow_service._run_crew_thread (after tasks[2] extraction)
+    src.backend.services.workflow_service._run_crew_thread (after tasks[-1] extraction)
 """
 
 import logging

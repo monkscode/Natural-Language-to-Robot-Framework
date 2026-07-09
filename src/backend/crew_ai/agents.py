@@ -1,22 +1,15 @@
 import logging
 from crewai import Agent
-# from crewai_tools import ScrapeElementFromWebsiteTool  # DEPRECATED - use batch tool instead
 
-# Import browser_use_tool from tools package
-# Note: Path setup is handled by tools/__init__.py automatically
-from tools.browser_use_tool import BatchBrowserUseTool
+# NOTE: BatchBrowserUseTool is no longer wired into any agent — the
+# element-identifier LLM agent was deleted in Task 16 and the tool is now
+# called directly by the deterministic element stage
+# (src/backend/crew_ai/element_identification.py).
 
 # Import LLM factory function
 from .cleaned_llm_wrapper import get_llm
 
 logger = logging.getLogger(__name__)
-
-
-# Initialize the tools
-# Note: These are tool instances, not classes. CrewAI requires instantiated tools.
-# scrape_tool = ScrapeElementFromWebsiteTool()  # DEPRECATED - use batch tool instead 
-# Primary tool: Batch processing for multiple elements with full context
-batch_browser_use_tool = BatchBrowserUseTool()
 
 
 class RobotAgents:
@@ -127,25 +120,10 @@ class RobotAgents:
             allow_delegation=False,
         )
 
-    def element_identifier_agent(self) -> Agent:
-        return Agent(
-            role="Advanced Web Element Locator Specialist with Batch Vision AI",
-            goal="Use batch_browser_automation to find ALL element locators in ONE call.",
-            backstory=(
-                "Expert web element locator using batch vision AI. "
-                "Workflow: (1) Collect ALL elements from test steps, (2) Extract URL, (3) Call batch_browser_automation ONCE with all elements, (4) Map locators to steps. "
-                "Tool format: Action: batch_browser_automation | Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"...\", \"action\": \"input/click/get_text\"}], \"url\": \"...\", \"user_query\": \"...\"}. "
-                "CRITICAL: Action line must have ONLY 'batch_browser_automation' with NO extra text. Action Input must be a dict {}, NOT array []. "
-                "Benefits: Browser opens once (3-5x faster), full context awareness, intelligent popup handling, validated locators. "
-                "⚠️ CRITICAL: Always use the 'best_locator' value from locator_mapping - it has been AI-validated and scored. "
-                "DO NOT analyze or override with your own preference. See task description for detailed rules."
-            ),
-            # NEW: Batch processing tool for multiple elements
-            tools=[batch_browser_use_tool],
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=False,
-        )
+    # NOTE: element_identifier_agent was REMOVED (Task 16). Its entire job —
+    # deciding which steps need locators, extracting the URL, building the one
+    # batch tool call, and copying the locator contract onto steps — is now
+    # deterministic Python in element_identification.py.
 
     def code_assembler_agent(self) -> Agent:
         # Get context via unified method with consistent priority chain

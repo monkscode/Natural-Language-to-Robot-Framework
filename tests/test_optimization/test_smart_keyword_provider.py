@@ -524,26 +524,17 @@ class TestGetAgentContext:
         assert len(result.context) > 0  # Existing tiers still work
 
     def test_all_agent_roles(self, in_memory_db):
-        """All agent roles should work."""
+        """Both LLM agent roles should work (Task 16 removed the identifier
+        agent — only planner and assembler receive context now)."""
         p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
 
-        for role in ["planner", "identifier", "assembler"]:
+        for role in ["planner", "assembler"]:
             result = p.get_agent_context("click button", role)
             assert isinstance(result, AgentContextResult), f"Failed for role: {role}"
             assert len(result.context) > 0, f"Empty context for role: {role}"
-
-    def test_identifier_no_hints(self, in_memory_db):
-        """Identifier role should get no hints (engines filter by role)."""
-        p = create_provider(execution_memory=in_memory_db)
-        # Structural only returns for planner/assembler
-        p._structural_engine = MockEngine(hints=None)
-        p._keyword_engine = MockEngine(hints=None)
-        p._anti_pattern_engine = MockEngine(hints=None)
-        result = p.get_agent_context("find element", "identifier")
-        assert result.hints_count == 0
 
 
 # ===================================================================
@@ -674,11 +665,11 @@ class TestRegression:
         result = p.get_agent_context("click button", "assembler")
         assert "keyword_search" in result.context.lower() or "KEYWORD SEARCH" in result.context
 
-    def test_full_context_fallback(self):
-        """Full context fallback for identifier role."""
+    def test_full_context_fallback_unknown_role(self):
+        """Unknown roles fall back to code_assembly_context with a warning
+        (the 'identifier' branch was removed in Task 16 — it was dead code)."""
         p = create_provider()
-        result = p.get_agent_context("find element", "identifier")
-        # Identifier gets minimal guidance in fallback
+        result = p.get_agent_context("find element", "unknown-role")
         assert len(result.context) > 0
         assert isinstance(result, AgentContextResult)
 

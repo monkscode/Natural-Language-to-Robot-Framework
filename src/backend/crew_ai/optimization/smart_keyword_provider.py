@@ -673,7 +673,7 @@ Use keyword_search tool if you need additional keywords.
 
         Args:
             user_query: User's natural language query
-            agent_role: "planner", "identifier", or "assembler"
+            agent_role: "planner" or "assembler"
             url: Optional target URL for domain-scoped hints
 
         Returns:
@@ -795,11 +795,11 @@ Use keyword_search tool if you need additional keywords.
         """
         logger.info(f"Fallback to full context for {agent_role} agent")
 
+        # NOTE: the "identifier" branch was removed in Task 16 — it was
+        # pre-existing dead code (zero callers even before the element
+        # identifier agent itself was replaced by deterministic Python).
         if agent_role == "planner":
             return self.library_context.planning_context
-        elif agent_role == "identifier":
-            # Element identifier doesn't need keyword context, just minimal guidance
-            return "Expert web element locator. Use batch_browser_automation tool to find all elements in one call."
         elif agent_role == "assembler":
             return self.library_context.code_assembly_context
         else:

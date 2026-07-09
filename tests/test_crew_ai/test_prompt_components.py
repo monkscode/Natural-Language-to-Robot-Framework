@@ -194,14 +194,18 @@ class TestDatePickerHandlingPromptComponent:
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "DATE_PICKER_HANDLING" in src_text
 
-    def test_identify_task_forwards_datepicker_framework(self):
-        """The Assembler only sees what the identify agent copies to the
-        step — the extraction instruction must name datepicker_framework
+    def test_merge_forwards_datepicker_framework(self):
+        """The Assembler only sees what the deterministic merge staples onto
+        the step (Task 16) — datepicker_framework must survive the pipe
         (same pipe as dropdown_framework/select_id)."""
-        from pathlib import Path
-        import src.backend.crew_ai.tasks as tasks_mod
-        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
-        assert "'datepicker_framework' → 'datepicker_framework'" in src_text
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Fill Text", "element_description": "from date",
+                  "value": "2026-07-01", "step_description": "fill date"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=customer_cdr_from_date",
+            "element_type": "date-picker", "datepicker_framework": "flatpickr",
+        }})
+        assert merged[0]["datepicker_framework"] == "flatpickr"
 
 
 class TestStabilityWarningPromptComponent:
@@ -354,15 +358,20 @@ class TestStateVerificationHandling:
         src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
         assert "STATE_VERIFICATION_HANDLING" in src_text
 
-    def test_identify_task_forwards_element_classes(self):
-        """The Assembler only sees what the identify agent copies to the
-        step — the extraction instruction must map element_info.className
-        to element_classes (the pipe verified in browser-service
+    def test_merge_forwards_element_classes(self):
+        """The Assembler only sees what the deterministic merge staples onto
+        the step (Task 16) — element_info.className must land on the step as
+        element_classes (the pipe verified in browser-service
         smart_locator.py element_info payload)."""
-        from pathlib import Path
-        import src.backend.crew_ai.tasks as tasks_mod
-        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
-        assert "'element_info.className' → 'element_classes'" in src_text
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input",
+                             "className": "text field medium form-control invalid"},
+        }})
+        assert merged[0]["element_classes"] == "text field medium form-control invalid"
 
     def test_aria_invalid_rule_before_placeholder(self):
         """Sites that mark invalid fields via ARIA instead of a CSS class
@@ -374,13 +383,17 @@ class TestStateVerificationHandling:
         assert "Get Attribute    ${locator}    aria-invalid    ==    true" in body
         assert body.index("aria_invalid") < body.index("EXPECTED_STATE_CLASS")
 
-    def test_identify_task_forwards_aria_invalid(self):
+    def test_merge_forwards_aria_invalid(self):
         """Same pipe: element_info.ariaInvalid (added in browser-service
-        e0ebfea) must be copied to the step as aria_invalid."""
-        from pathlib import Path
-        import src.backend.crew_ai.tasks as tasks_mod
-        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
-        assert "'element_info.ariaInvalid' → 'aria_invalid'" in src_text
+        e0ebfea) must land on the step as aria_invalid."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input", "ariaInvalid": "true"},
+        }})
+        assert merged[0]["aria_invalid"] == "true"
 
     def test_parent_class_rule_before_placeholder(self):
         """Bootstrap 3 marks invalid fields on the PARENT div (form-group
@@ -394,11 +407,15 @@ class TestStateVerificationHandling:
         assert "has-error" in body
         assert body.index("parent_classes") < body.index("EXPECTED_STATE_CLASS")
 
-    def test_identify_task_forwards_parent_classes(self):
+    def test_merge_forwards_parent_classes(self):
         """Same pipe: element_info.parentClassName (added in
-        browser-service 97b3e10) must be copied to the step as
-        parent_classes."""
-        from pathlib import Path
-        import src.backend.crew_ai.tasks as tasks_mod
-        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
-        assert "'element_info.parentClassName' → 'parent_classes'" in src_text
+        browser-service 97b3e10) must land on the step as parent_classes."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input",
+                             "parentClassName": "form-group has-error"},
+        }})
+        assert merged[0]["parent_classes"] == "form-group has-error"

@@ -1,13 +1,16 @@
 from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
-from src.backend.crew_ai.tasks import RobotTasks
+from src.backend.crew_ai.tasks import RobotTasks, _extract_json_by_key
+from src.backend.crew_ai.element_identification import identify_elements
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from datetime import datetime
+import json
 import os
 import re
+import time
 import logging
 import threading
 
@@ -109,6 +112,34 @@ def extract_url_from_query(query: str) -> str | None:
 
     logger.info("No URL in query; proceeding without domain scoping")
     return None
+
+
+def _extract_plan_steps(task_output) -> list:
+    """Extract the planned steps from the planner task's output.
+
+    Prefers the already-validated pydantic model (the normal path — CrewAI's
+    converter ran during kickoff), then json_dict, then the same raw-JSON
+    extraction the guardrails use. Raises when nothing parses: with no plan
+    there is nothing to identify or assemble, so failing the workflow here is
+    correct (same outcome as a planner task failure).
+    """
+    pydantic_output = getattr(task_output, "pydantic", None)
+    steps = getattr(pydantic_output, "steps", None)
+    if steps is not None:
+        return list(steps)
+
+    json_dict = getattr(task_output, "json_dict", None)
+    if isinstance(json_dict, dict) and isinstance(json_dict.get("steps"), list):
+        return json_dict["steps"]
+
+    raw = getattr(task_output, "raw", "") or ""
+    extracted = _extract_json_by_key(raw, "steps", "PlanOutput")
+    if extracted:
+        parsed_steps = json.loads(extracted).get("steps")
+        if isinstance(parsed_steps, list):
+            return parsed_steps
+
+    raise ValueError("Planner output contained no parsable steps")
 
 
 def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
@@ -372,61 +403,97 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     )
     tasks = RobotTasks(library_context, hint_context=hint_context)
 
-    # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
-    # The CrewAI LLM validator agent was removed in favour of a deterministic
-    # `robot --dryrun` gate (see src/backend/services/dryrun_service.py). The crew
-    # now ends at the Code Assembler — delivered code comes from tasks[2].
+    # Task 16 pipeline: two single-task kickoffs around a deterministic Python
+    # stage — Planner (LLM) → element_identification (plain Python + ONE
+    # batch_browser_automation call) → Assembler (LLM). The element-identifier
+    # LLM agent was deleted: its whole job (which steps need locators, the URL,
+    # element specs, the batch call, copying the locator contract onto steps)
+    # was mechanical rule-following, now code. The CrewAI LLM validator agent
+    # was removed earlier in favour of the deterministic `robot --dryrun` gate
+    # (see src/backend/services/dryrun_service.py). Delivered code comes from
+    # the assembler crew's tasks[-1].
     step_planner_agent = agents.step_planner_agent()
-    element_identifier_agent = agents.element_identifier_agent()
     code_assembler_agent = agents.code_assembler_agent()
 
-    # Define Tasks (removed popup analysis - focus only on user's explicit query)
     plan_steps = tasks.plan_steps_task(step_planner_agent, query)
-    identify_elements = tasks.identify_elements_task(element_identifier_agent)
-    assemble_code = tasks.assemble_code_task(code_assembler_agent)
 
-    # Register real-time progress event routing (no-op when progress_queue is None)
+    # Register real-time progress event routing (no-op when progress_queue is
+    # None). The assembler task is registered later (register_task) — it can
+    # only be built after the element stage, since its description embeds the
+    # merged steps. Stage indices stay 0/1/2: index 1 is the python stage,
+    # which pushes its own events via push_stage_progress.
     if progress_queue is not None:
-        from src.backend.crew_ai.progress_events import register_workflow, unregister_workflow
-        register_workflow(workflow_id, progress_queue, {
-            str(plan_steps.id): 0,
-            str(identify_elements.id): 1,
-            str(assemble_code.id): 2,
-        })
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            register_task,
+            unregister_workflow,
+            push_stage_progress,
+        )
+        register_workflow(workflow_id, progress_queue, {str(plan_steps.id): 0})
 
-    # Rotate crewai.log if it exceeds size limit (before creating the Crew)
+    # Rotate crewai.log if it exceeds size limit (before creating the Crews)
     _rotate_crewai_log()
 
     step_callback, task_callback = get_crew_callbacks()
 
-    # Create and run the crew
-    crew = Crew(
-        agents=[step_planner_agent, element_identifier_agent,
-                code_assembler_agent],
-        tasks=[plan_steps, identify_elements, assemble_code],
-        process=Process.sequential,
-        verbose=True,
-        output_log_file=CREWAI_LOG_FILE,
-        step_callback=step_callback,
-        task_callback=task_callback,
-        embedder=None,  # Disable automatic knowledge/embedding system
-    )
+    def _make_crew(agent, task):
+        return Crew(
+            agents=[agent],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=True,
+            output_log_file=CREWAI_LOG_FILE,
+            step_callback=step_callback,
+            task_callback=task_callback,
+            embedder=None,  # Disable automatic knowledge/embedding system
+        )
+
+    planner_crew = _make_crew(step_planner_agent, plan_steps)
 
     logger.info("🚀 Starting CrewAI workflow execution...")
-    logger.info("🔄 Sequential 3-agent pipeline (planner → identifier → assembler)")
+    logger.info("🔄 2-agent pipeline (planner → deterministic element stage → assembler)")
     logger.info(
         f"📊 LLM Output Cleaner Status: {agents.llm._monitor.get_stats()}")
 
     try:
         try:
-            result = crew.kickoff()
+            planner_crew.kickoff()
+            plan_step_dicts = _extract_plan_steps(plan_steps.output)
+
+            # ── Deterministic element stage (Task 16) ──
+            # ONE batch tool call, full contract merged onto the steps; tool
+            # error or found:false degrade to the Assembler's placeholder
+            # path inside identify_elements — it never raises for those.
+            on_progress = None
+            if progress_queue is not None:
+                on_progress = (lambda progress, message:
+                               push_stage_progress(workflow_id, message, progress))
+            stage_started = time.time()
+            identification = identify_elements(
+                plan_step_dicts, query, on_progress=on_progress)
+            logger.info(
+                "⏱️ Deterministic element stage finished in %.1fs — %s",
+                time.time() - stage_started, identification["summary"],
+            )
+
+            assemble_code = tasks.assemble_code_task(
+                code_assembler_agent,
+                json.dumps({"steps": identification["steps"]}),
+            )
+            if progress_queue is not None:
+                register_task(workflow_id, str(assemble_code.id), 2)
+
+            assembler_crew = _make_crew(code_assembler_agent, assemble_code)
+            result = assembler_crew.kickoff()
+
             logger.info("✅ CrewAI workflow completed successfully")
             logger.info("🏁 Crew execution finished")
             # agents.llm._monitor is the authoritative call count: incremented once per
             # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-            # Compare against "Raw CrewAI usage metrics" in workflow_service.py — that
-            # figure is N_agents × real_calls due to CrewAI summing the shared LLM
-            # instance once per agent in calculate_usage_metrics().
+            # (Both crews share the same agents.llm instance, so the monitor —
+            # and the assembler crew's calculate_usage_metrics(), which reads
+            # the shared LLM's cumulative usage once for its single agent —
+            # cover the planner and assembler stages together.)
             logger.info(f"📊 Final LLM Stats: {agents.llm._monitor.get_stats()}")
 
             # NOTE: Pattern learning is NOT done here!
@@ -446,7 +513,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             # progress bar (frontend hides at >=100%) while the gate is still
             # verifying/repairing. See dryrun_service.validate_and_repair (prog-2).
 
-            return result, crew, optimization_metrics, hint_metadata, agents.llm._monitor
+            # The ASSEMBLER crew is returned: workflow_service reads delivered
+            # code from its tasks[-1].output and usage metrics from it (the
+            # shared LLM accumulates across both kickoffs).
+            return result, assembler_crew, optimization_metrics, hint_metadata, agents.llm._monitor
 
         except Exception as e:
             error_msg = str(e)

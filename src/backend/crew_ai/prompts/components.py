@@ -25,8 +25,9 @@ class PromptComponents:
     Components are organized into categories:
     - SHARED: Rules used across multiple tasks
     - PLANNING: Specific to plan_steps_task
-    - IDENTIFICATION: Specific to identify_elements_task
     - ASSEMBLY: Specific to assemble_code_task
+    (IDENTIFICATION components were removed in Task 16 — element
+    identification is deterministic Python now, see element_identification.py)
     """
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -784,70 +785,13 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # IDENTIFICATION COMPONENTS - Used in identify_elements_task
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    FORM_ELEMENT_HANDLING = """
-⚠️ **CRITICAL FORM ELEMENT HANDLING** ⚠️
-When the description mentions checkboxes, radio buttons, or toggle switches:
-- ALWAYS request the actual INPUT element, NOT the label text!
-- Modify description to explicitly target the input control:
-  * 'checkbox 1' → 'the checkbox INPUT element next to text "checkbox 1"'
-  * 'remember me checkbox' → 'the checkbox INPUT element for "remember me"'
-  * 'male radio button' → 'the radio button INPUT element for "male"'
-  * 'agree to terms' → 'the checkbox INPUT element for "agree to terms"'
-- This ensures BrowserUse finds the clickable <input> element, not just the text label
-- Text labels alone cannot be checked/unchecked - only input elements can!
-"""
-
-    SPATIAL_CONTEXT_PRESERVATION = """
-⚠️ CRITICAL: Preserve the FULL element description from the plan, including ALL spatial hints like:
-- Location context: 'in header', 'in main content', 'in sidebar', 'in footer'
-- Relative position: 'below the image', 'next to the button', 'above the form'
-- Exclusions: 'not in sidebar', 'not in filters', 'not in navigation'
-- Container: 'in the results list', 'in the form', 'in the dialog'
-These spatial clues help vision AI accurately locate the correct element!
-"""
-
-    BATCH_TOOL_FORMAT = """
---- CRITICAL OUTPUT RULE ---
-
-⚠️ MOST IMPORTANT: You MUST output the tool call in EXACTLY this format:
-
-Action: batch_browser_automation
-Action Input: {"elements": [...], "url": "...", "user_query": "..."}
-
-CRITICAL FORMATTING RULES:
-1. The line 'Action: batch_browser_automation' must have NOTHING else on it
-2. Do NOT add any text before, after, or on the same line as 'Action:'
-3. Do NOT add backticks, quotes, or any other characters after 'batch_browser_automation'
-4. The next line must be 'Action Input:' followed by a JSON dictionary
-5. Action Input must be a DICTIONARY { } NOT an array [ ]
-
-✅ CORRECT FORMAT:
-Action: batch_browser_automation
-Action Input: {"elements": [{"id": "elem_1", "description": "search box", "action": "input"}], "url": "https://example.com", "user_query": "search for items"}
-
-❌ WRONG FORMATS (DO NOT DO THIS):
-Action: batch_browser_automation` and `Action Input` using...  ← WRONG! Extra text on Action line
-Action: batch_browser_automation`  ← WRONG! Backtick at end
-First I need to... Action: batch_browser_automation  ← WRONG! Text before Action
-Action Input: [{"elements": [...]}]  ← WRONG! Array instead of dictionary
-
-REMEMBER:
-- Action line = ONLY 'Action: batch_browser_automation'
-- Action Input = ONE dictionary starting with { and ending with }
-- The 'elements' key INSIDE the dictionary contains the array
-- NO explanations, NO thinking, NO extra text
-
-Structure of Action Input:
-{
-  "elements": [array of elements],  ← Array is INSIDE the dictionary
-  "url": "...",
-  "user_query": "..."
-}
-"""
+    # NOTE: the IDENTIFICATION COMPONENTS (FORM_ELEMENT_HANDLING,
+    # SPATIAL_CONTEXT_PRESERVATION, BATCH_TOOL_FORMAT) were removed in Task 16
+    # together with identify_elements_task. The one real rule they carried —
+    # the checkbox/radio/toggle description rewrite — is now code:
+    # element_identification.rewrite_form_description(). Descriptions are
+    # forwarded verbatim by build_elements(), and there is no LLM tool call
+    # left to format.
 
     # ═══════════════════════════════════════════════════════════════════════════
     # ASSEMBLY OUTPUT RULES

@@ -408,7 +408,8 @@ class LearningEngine(ABC):
         Args:
             user_query: The natural language test query
             url: Target website URL
-            agent_role: "planner" | "identifier" | "assembler"
+            agent_role: "planner" | "assembler" (engines role-filter and may
+                return None for anything else)
 
         Returns:
             List of hint strings, or None if no relevant hints

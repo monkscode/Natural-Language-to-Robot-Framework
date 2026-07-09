@@ -35,8 +35,10 @@ class PlanOutput(BaseModel):
 
 
 class IdentifiedElement(PlannedStep):
-    """Schema for an element with an identified locator from identify_elements_task.
+    """Schema for a step with its identified locator contract.
 
+    Produced by the deterministic element stage (element_identification.py,
+    Task 16) — the full locator_mapping entry is stapled onto the plan step.
     Inherits all fields from PlannedStep and adds locator-specific fields.
     """
     # Locator information from browser automation (new fields only)
@@ -51,11 +53,6 @@ class IdentifiedElement(PlannedStep):
     parent_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element's immediate parent at locate time (from element_info.parentClassName) — Bootstrap-3-era sites mark invalid fields on the wrapper div; the Assembler asserts one level up via '${locator} >> xpath=..' when the marker lives there")
     stability: Optional[str] = Field(default=None, description="Locator stability verdict from browser-service (Task 10): 'stable', 'volatile', or 'positional' — anything but 'stable' makes the Assembler emit an in-code WARNING comment above the step")
     all_locators: Optional[List[Any]] = Field(default=None, description="Full validated-locator candidate list from browser-service — forwarded so self-healing (Task 21) has alternatives at the Assembler boundary")
-
-
-class IdentificationOutput(BaseModel):
-    """Schema for identify_elements_task output - steps with locators."""
-    steps: List[IdentifiedElement] = Field(description="Steps with identified locators")
 
 
 class AssemblyOutput(BaseModel):
@@ -83,7 +80,7 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
     Args:
         raw: Raw LLM output string
         required_key: The JSON key that must be present (e.g., "steps", "valid")
-        log_prefix: Prefix for log messages (e.g., "IdentificationOutput")
+        log_prefix: Prefix for log messages (e.g., "PlanOutput")
         
     Returns:
         JSON string if extraction successful, None if failed
@@ -211,29 +208,6 @@ def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     # Only fail if truly no code found - this triggers a retry
     logger.warning("❌ Guardrail: No RF code found, requesting retry")
     return (False, "Output must contain Robot Framework code. Start with *** Settings *** section.")
-
-
-def identification_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
-    """
-    Guardrail for identify_elements_task that handles JSON extraction.
-    
-    The LLM sometimes outputs valid JSON followed by extra text (trailing characters).
-    This guardrail extracts the valid JSON portion.
-    
-    Returns:
-        (True, fixed_output) - If we can extract valid JSON
-        (False, feedback) - If JSON extraction fails, triggers retry
-    """
-    raw = result.raw
-    logger.debug(f"IdentificationOutput guardrail received (length: {len(raw)})")
-    
-    extracted = _extract_json_by_key(raw, "steps", "IdentificationOutput")
-    if extracted:
-        return (True, extracted)
-    
-    # Failed to extract - trigger retry
-    logger.warning("❌ Guardrail: Could not extract valid IdentificationOutput JSON")
-    return (False, "Output must be a valid JSON object with 'steps' array. Ensure proper JSON formatting.")
 
 
 class RobotTasks:
@@ -413,245 +387,14 @@ Generated Test
             output_pydantic=PlanOutput,
         )
 
-    def identify_elements_task(self, agent) -> Task:
-        return Task(
-            description=(
-                "⚠️ **BATCH LOCATOR IDENTIFICATION WORKFLOW**\n\n"
-                "Your mission: Find locators for ALL elements in ONE batch operation.\n"
-                "The context will be a JSON object from 'plan_steps_task' with: {\"steps\": [array of test steps]}.\n"
-                "Extract the test steps from the 'steps' key.\n\n"
-                "ℹ️ All elements will be found using batch_browser_automation.\n\n"
-                "--- MANDATORY BATCH WORKFLOW ---\n"
-                "\n"
-                "**STEP 1: ANALYZE THE PLAN**\n"
-                "- Read ALL test steps from context\n"
-                "- Identify which steps need element locators\n"
-                "- Note: 'Open Browser', 'Close Browser', 'Should Be True' steps DON'T need locators\n"
-                "- Note: 'Input Text', 'Click Element', 'Get Text', 'Select From List', 'Get Classes', 'Get Attribute' steps NEED locators\n"
-                "- Note: for 'Get Classes' / 'Get Attribute' state-verification steps, use action 'get_text' (locate-only). Keep the element in plan order: the browser locates it AFTER the preceding actions have run, so the observed state is the state to verify.\n"
-                "\n"
-                "**STEP 2: EXTRACT URL**\n"
-                "- Find the 'Open Browser' step in the plan\n"
-                "- Extract the URL from its 'value' field\n"
-                "- Example: If step says {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"}\n"
-                "  → URL is \"https://www.flipkart.com\"\n"
-                "\n"
-                "**STEP 3: COLLECT ELEMENTS**\n"
-                "- For each step that needs a locator, extract:\n"
-                "  * Unique ID (e.g., \"elem_1\", \"elem_2\")\n"
-                "  * Element description (from 'element_description' field) - USE EXACT DESCRIPTION with all spatial context\n"
-                "  * Action keyword (from 'keyword' field: input, click, get_text, etc.)\n"
-                "  * ⚠️ Value (from 'value' field) - CRITICAL for input actions! This is the text to type.\n"
-                "\n"
-                f"{PromptComponents.FORM_ELEMENT_HANDLING}\n"
-                f"{PromptComponents.SPATIAL_CONTEXT_PRESERVATION}\n"
-                "Example elements list:\n"
-                "```json\n"
-                "[\n"
-                "    {\"id\": \"elem_1\", \"description\": \"username input field\", \"action\": \"input\", \"value\": \"bob@example.com\"},\n"
-                "    {\"id\": \"elem_2\", \"description\": \"password input field\", \"action\": \"input\", \"value\": \"password123\"},\n"
-                "    {\"id\": \"elem_3\", \"description\": \"login submit button\", \"action\": \"click\"},\n"
-                "    {\"id\": \"elem_4\", \"description\": \"country dropdown\", \"action\": \"select\", \"value\": \"India\"},\n"
-                "    {\"id\": \"elem_5\", \"description\": \"first item title in results list\", \"action\": \"get_text\"}\n"
-                "]\n"
-                "```\n"
-                "\n"
-                "⚠️ **CRITICAL**: The 'value' field is required for these actions:\n"
-                "- 'input': text to type (credentials, search terms, etc.)\n"
-                "- 'select': the exact option text to select from the dropdown (e.g. 'India', 'Male', 'Yes')\n"
-                "Without the 'value' field, browser-use won't know what to type or select!\n"
-                "\n"
-                "**STEP 4: BUILD USER QUERY CONTEXT**\n"
-                "- Summarize what the test is trying to accomplish\n"
-                "- Example: \"Search for shoes on Flipkart and extract first product name and price\"\n"
-                "- This helps BrowserUse understand the workflow and handle popups intelligently\n"
-                "\n"
-                "**STEP 5: CALL BATCH TOOL (ONCE!)**\n"
-                "\n"
-                "```\n"
-                "Action: batch_browser_automation\n"
-                f"Action Input: {{\"elements\": [{{\"id\": \"elem_1\", \"description\": \"username field\", \"action\": \"input\", \"value\": \"bob@example.com\"}}, {{\"id\": \"elem_2\", \"description\": \"password field\", \"action\": \"input\", \"value\": \"password123\"}}, {{\"id\": \"elem_3\", \"description\": \"login button\", \"action\": \"click\"}}], \"url\": \"https://example.com/login\", \"user_query\": \"Login with username and password\"}}\n"
-                "```\n"
-                "\n"
-                "**STEP 6: RECEIVE BATCH RESPONSE**\n"
-                "\n"
-                "The tool will return:\n"
-                "```json\n"
-                "{\n"
-                "    \"success\": true,\n"
-                "    \"locator_mapping\": {\n"
-                "        \"elem_1\": {\n"
-                "            \"best_locator\": \"name=q\",\n"
-                "            \"found\": true,\n"
-                "            \"element_type\": null,\n"
-                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"search\", ...},\n"
-                "            \"all_locators\": [...]\n"
-                "        },\n"
-                "        \"elem_2\": {\n"
-                "            \"best_locator\": \"css=#pricelist_id-ts-control\",\n"
-                "            \"found\": true,\n"
-                "            \"element_type\": \"dropdown\",\n"
-                "            \"element_info\": {\"tagName\": \"input\", \"id\": \"pricelist_id-ts-control\", ...},\n"
-                "            \"dropdown_framework\": \"tom-select\",\n"
-                "            \"select_id\": \"pricelist_id\",\n"
-                "            \"all_locators\": [...]\n"
-                "        }\n"
-                "    },\n"
-                "    \"summary\": {\"total_elements\": 2, \"successful\": 2, \"failed\": 0}\n"
-                "}\n"
-                "```\n"
-                "\n"
-                "⚠️ **IMPORTANT**: Extract ALL SEVEN of these fields from each locator_mapping entry:\n"
-                "- 'element_type': use the 'element_type' field directly if non-null (e.g., 'checkbox', 'radio', 'collection', 'dropdown', 'date-picker'); otherwise fall back to 'element_info.tagName' (e.g., 'input', 'select', 'button')\n"
-                "- 'dropdown_framework' → 'dropdown_framework' (e.g., 'tom-select', or empty string '')\n"
-                "- 'select_id' → 'select_id' (the original <select> element ID for TomSelect, or null)\n"
-                "- 'datepicker_framework' → 'datepicker_framework' (e.g., 'flatpickr', or empty string '')\n"
-                "- 'element_info.className' → 'element_classes' (the class list observed on the element at locate time — the evidence for Get Classes state verifications; copy it VERBATIM, or empty string '')\n"
-                "- 'element_info.ariaInvalid' → 'aria_invalid' ('true' when the page marks the field invalid via ARIA, or empty string '')\n"
-                "- 'element_info.parentClassName' → 'parent_classes' (the class list observed on the element's immediate parent — copy it VERBATIM, or empty string '')\n"
-                "You MUST copy all seven to the step when mapping locators!\n"
-                "\n"
-                "**STEP 7: MAP LOCATORS TO STEPS**\n"
-                "\n"
-                "⚠️ **CRITICAL LOCATOR USAGE RULE** ⚠️\n"
-                "When mapping locators to steps:\n"
-                "1. Use ONLY the 'best_locator' value from locator_mapping\n"
-                "2. DO NOT analyze or select from 'all_locators' array\n"
-                "3. DO NOT override with your own preference\n"
-                "4. DO NOT second-guess the locator selection\n"
-                "5. The 'best_locator' has already been:\n"
-                "   - AI-detected with vision on actual page\n"
-                "   - Validated with Playwright (unique & working)\n"
-                "   - Scored by quality (ID=100, text=65, XPath=18)\n"
-                "   - Re-ranked to select optimal option\n"
-                "6. Even if you see a 'better' locator in all_locators, IGNORE IT\n"
-                "7. Your ONLY job is to copy best_locator values to steps\n\n"
-                "Process:\n"
-                "- Go through each test step again\n"
-                "- If step needed a locator (e.g., elem_1, elem_2, elem_3):\n"
-                "  * Add 'locator' key to that step's JSON\n"
-                "  * Use the 'best_locator' value EXACTLY from locator_mapping\n"
-                "  * DO NOT modify, analyze, or substitute the locator\n"
-                "  * ALSO add 'element_type', 'dropdown_framework', 'select_id', 'datepicker_framework', 'element_classes', 'aria_invalid', and 'parent_classes' from the response\n"
-                "- If step didn't need a locator (Open Browser, Close Browser):\n"
-                "  * Leave it as-is (no locator key needed)\n"
-                "\n"
-                "Example output:\n"
-                "```json\n"
-                "[\n"
-                "    {\"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
-                "    {\"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
-                "    {\"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"Enter\", \"locator\": \"name=q\", \"element_type\": \"input\"},\n"
-                "    {\"keyword\": \"Select Options By\", \"element_description\": \"Rate Group dropdown\", \"locator\": \"css=#pricelist_id-ts-control\", \"element_type\": \"dropdown\", \"dropdown_framework\": \"tom-select\", \"select_id\": \"pricelist_id\", \"value\": \"label    default\"}\n"
-                "]\n"
-                "```\n"
-                "\n"
-                "--- COMPLETE EXAMPLE ---\n"
-                "\n"
-                "**Input Context (from plan_steps_task):**\n"
-                "```json\n"
-                "[\n"
-                "    {\"step_description\": \"Open browser to Flipkart\", \"keyword\": \"Open Browser\", \"value\": \"https://www.flipkart.com\"},\n"
-                "    {\"step_description\": \"Input shoes in search\", \"keyword\": \"Input Text\", \"element_description\": \"search box\", \"value\": \"shoes\"},\n"
-                "    {\"step_description\": \"Press Enter\", \"keyword\": \"Press Keys\", \"element_description\": \"search box\", \"value\": \"Enter\"},\n"
-                "    {\"step_description\": \"Get first product name\", \"keyword\": \"Get Text\", \"element_description\": \"first product name\"},\n"
-                "    {\"step_description\": \"Get first product price\", \"keyword\": \"Get Text\", \"element_description\": \"first product price\"}\n"
-                "]\n"
-                "```\n"
-                "\n"
-                "**What You Do:**\n"
-                "\n"
-                "1. Analyze: 5 steps, 3 need locators (steps 2, 3, 4, 5 exclude step 1 Open Browser)\n"
-                "2. Extract URL: https://www.flipkart.com\n"
-                "3. Collect elements:\n"
-                "   - elem_1: search box (steps 2 & 3 use same element)\n"
-                "   - elem_2: first product name (step 4)\n"
-                "   - elem_3: first product price (step 5)\n"
-                "4. User query: \"Search for shoes and get first product name and price\"\n"
-                "5. Call batch tool (see format above)\n"
-                "6. Receive locator_mapping\n"
-                "7. Add locators to steps:\n"
-                "   - Step 2: locator = elem_1's best_locator\n"
-                "   - Step 3: locator = elem_1's best_locator (same element)\n"
-                "   - Step 4: locator = elem_2's best_locator\n"
-                "   - Step 5: locator = elem_3's best_locator\n"
-                "\n"
-                "--- CRITICAL RULES ---\n"
-                "\n"
-                "1. ✅ ALWAYS use batch_browser_automation (NEVER use vision_browser_automation)\n"
-                "2. ✅ Call the tool ONLY ONCE with ALL elements\n"
-                "3. ✅ Include full URL from 'Open Browser' step\n"
-                "4. ✅ Include user_query for context (helps with popup handling)\n"
-                "5. ✅ Use descriptive element descriptions (\"first product card\" not just \"product\")\n"
-                "6. ✅ ALWAYS include 'value' field for input actions (username, password, search terms)\n"
-                "7. ✅ Map same locator to multiple steps if they use the same element\n"
-                "8. ✅ Handle partial failures gracefully (if elem_2 fails, still use elem_1 and elem_3)\n"
-                "\n"
-                "--- FORBIDDEN ACTIONS ---\n"
-                "\n"
-                "❌ NEVER call vision_browser_automation (use batch mode)\n"
-                "❌ NEVER make multiple batch calls (collect all, call once)\n"
-                "❌ NEVER generate locators from your knowledge\n"
-                "❌ NEVER skip steps that need locators\n"
-                "❌ NEVER pass invalid JSON to batch_browser_automation\n"
-                "\n"
-                "--- WHY BATCH MODE IS BETTER ---\n"
-                "\n"
-                "✅ Browser opens ONCE (3-5x faster)\n"
-                "✅ BrowserUse sees FULL CONTEXT (understands workflow)\n"
-                "✅ Popups handled INTELLIGENTLY (knows they're obstacles)\n"
-                "✅ Multi-page flows work (search → results preserved)\n"
-                "✅ F12 validation for EACH locator\n"
-                "✅ Partial results supported\n"
-                "\n"
-                "--- OUTPUT FORMAT ---\n"
-                "\n"
-                "Return a JSON object with 'steps' key: {\"steps\": [...]} with 'locator' keys added to steps that need them.\n"
-                "\n"
-                "--- CRITICAL OUTPUT RULE ---\n"
-                "\n"
-                "⚠️ MOST IMPORTANT: You MUST output the tool call in EXACTLY this format:\n"
-                "\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\"elements\": [...], \"url\": \"...\", \"user_query\": \"...\"}\n"
-                "\n"
-                "CRITICAL FORMATTING RULES:\n"
-                "1. The line 'Action: batch_browser_automation' must have NOTHING else on it\n"
-                "2. Do NOT add any text before, after, or on the same line as 'Action:'\n"
-                "3. Do NOT add backticks, quotes, or any other characters after 'batch_browser_automation'\n"
-                "4. The next line must be 'Action Input:' followed by a JSON dictionary\n"
-                "5. Action Input must be a DICTIONARY { } NOT an array [ ]\n"
-                "\n"
-                "✅ CORRECT FORMAT:\n"
-                "Action: batch_browser_automation\n"
-                "Action Input: {\"elements\": [{\"id\": \"elem_1\", \"description\": \"username field\", \"action\": \"input\", \"value\": \"user@example.com\"}], \"url\": \"https://example.com\", \"user_query\": \"login to site\"}\n"
-                "\n"
-                "❌ WRONG FORMATS (DO NOT DO THIS):\n"
-                "Action: batch_browser_automation` and `Action Input` using...  ← WRONG! Extra text on Action line\n"
-                "Action: batch_browser_automation`  ← WRONG! Backtick at end\n"
-                "First I need to... Action: batch_browser_automation  ← WRONG! Text before Action\n"
-                "Action Input: [{\"elements\": [...]}]  ← WRONG! Array instead of dictionary\n"
-                "\n"
-                "REMEMBER:\n"
-                "- Action line = ONLY 'Action: batch_browser_automation'\n"
-                "- Action Input = ONE dictionary starting with { and ending with }\n"
-                "- The 'elements' key INSIDE the dictionary contains the array\n"
-                "- NO explanations, NO thinking, NO extra text\n"
-                "\n"
-                "Structure of Action Input:\n"
-                "{\n"
-                "  \"elements\": [array of elements],  ← Array is INSIDE the dictionary\n"
-                "  \"url\": \"...\",\n"
-                "  \"user_query\": \"...\"\n"
-                "}\n"
-            ),
-            expected_output="A JSON object with 'steps' key containing an array of test step objects with 'locator', 'found', and 'element_type' keys added from batch_browser_automation.",
-            agent=agent,
-            output_pydantic=IdentificationOutput,
-            guardrail=identification_output_guardrail,  # Fixes JSON with trailing chars
-        )
+    def assemble_code_task(self, agent, identified_steps_json: str) -> Task:
+        """Build the assembler task around the merged steps.
 
-    def assemble_code_task(self, agent) -> Task:
+        Task 16: the steps (with the full locator contract stapled on by the
+        deterministic element stage) are embedded directly in the description —
+        the assembler runs in its own single-task crew, so there is no CrewAI
+        context chain to carry them.
+        """
         # Build libraries section dynamically
         library_name = self.library_context.library_name if self.library_context else 'Browser'
         libraries_section = (
@@ -661,12 +404,15 @@ Generated Test
             f"- BuiltIn (for basic Robot Framework keywords like Should Be True, Evaluate)\n"
             f"- Collections (for Get Length with lists)\n\n"
         )
-        
+
         description = (
             f"{self._get_task_hints('assembler')}"
             f"{PromptComponents.ASSEMBLY_OUTPUT_RULES}\n\n"
-            
-            "The context will be a JSON object from 'identify_elements_task' with: {\"steps\": [array of steps with locators]}.\n"
+
+            "--- TEST STEPS WITH LOCATORS (deterministic element identification) ---\n"
+            "The following JSON object holds the test steps; steps that target page "
+            "elements carry validated locators and their metadata.\n"
+            f"{identified_steps_json}\n\n"
             "Extract the steps array from the 'steps' key to generate Robot Framework code.\n\n"
             
             f"{self._cached_code_structure}\n\n"
@@ -718,11 +464,11 @@ Generated Test
         """Conservative repair task for the dryrun gate's bounded repair loop.
 
         Built by the top-level repair mini-crew in dryrun_service.repair_robot_code
-        (NOT part of the main 3-agent crew). The agent receives the current code and
+        (NOT part of the main pipeline's crews). The agent receives the current code and
         the exact `robot --dryrun` error text, and is instructed to change ONLY the
         flagged keyword/syntax while reproducing every locator and value VERBATIM
         (production-hardening §8.1 — prevents a one-keyword fix from silently
-        rewriting a carefully-chosen locator from the Element Identifier).
+        rewriting a carefully-chosen locator from the locator engine).
 
         Reuses AssemblyOutput + assembly_output_guardrail so the repaired output is
         parsed by the SAME pipeline (dryrun_service.extract_and_normalize_robot_code)

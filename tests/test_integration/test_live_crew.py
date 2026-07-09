@@ -109,10 +109,11 @@ class TestLiveLLMCrewOnline:
     def test_run_crew_output_is_non_empty_string(self):
         """The assembler task's raw output is a non-empty string.
 
-        Contract (CLAUDE.md): Robot code is extracted from
-        crew.tasks[2].output.raw — the first return value is the CrewOutput
-        object, not a string (the old string contract predates the dryrun
-        redesign that removed the validator agent).
+        Contract: Robot code is extracted from crew.tasks[-1].output.raw —
+        since Task 16 the returned crew is the single-task ASSEMBLER crew.
+        The first return value is the CrewOutput object, not a string (the
+        old string contract predates the dryrun redesign that removed the
+        validator agent).
         """
         from src.backend.crew_ai.crew import run_crew
         _, crew_obj, _, _, _ = run_crew(
@@ -121,12 +122,12 @@ class TestLiveLLMCrewOnline:
             model_name=_MODEL,
             workflow_id="live-test-002",
         )
-        assembler_raw = crew_obj.tasks[2].output.raw
+        assembler_raw = crew_obj.tasks[-1].output.raw
         assert isinstance(assembler_raw, str)
         assert len(assembler_raw) > 0
 
     def test_run_crew_output_contains_robot_sections(self):
-        """Generated code (tasks[2].output.raw) has Robot Framework section markers."""
+        """Generated code (tasks[-1].output.raw) has Robot Framework section markers."""
         from src.backend.crew_ai.crew import run_crew
         _, crew_obj, _, _, _ = run_crew(
             "navigate to google.com and search for python",
@@ -134,7 +135,7 @@ class TestLiveLLMCrewOnline:
             model_name=_MODEL,
             workflow_id="live-test-003",
         )
-        assembler_raw = crew_obj.tasks[2].output.raw
+        assembler_raw = crew_obj.tasks[-1].output.raw
         assert _is_valid_robot_code(assembler_raw), (
             f"Output does not look like Robot Framework code:\n{assembler_raw[:500]}"
         )

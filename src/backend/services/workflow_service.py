@@ -610,9 +610,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY,
                                   org_id=org_id, user_id=user_id):
-            # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
-            # task is now the Assembler — there is no validator verdict). Unused here;
-            # delivered code is read from crew_with_results.tasks[2] below.
+            # run_crew's first element is the assembler crew kickoff's CrewOutput
+            # (the terminal task is the Assembler — there is no validator verdict).
+            # Unused here; delivered code is read from crew_with_results.tasks[-1]
+            # below. Since Task 16, crew_with_results is the ASSEMBLER crew (the
+            # pipeline is two single-task kickoffs around the deterministic
+            # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
@@ -623,10 +626,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         if hint_metadata:
             _store_hint_metadata(workflow_id, hint_metadata)
 
-        # Extract robot code from task[2] (Code Assembler — the terminal crew task)
-        # and apply the shared normalization pipeline (also used by the dryrun repair
-        # path) so both normalize identically.
-        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[2].output)
+        # Extract robot code from tasks[-1] (Code Assembler — the terminal task of
+        # the assembler crew) and apply the shared normalization pipeline (also used
+        # by the dryrun repair path) so both normalize identically.
+        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[-1].output)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -662,11 +665,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 }
 
                 logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: successful_requests above is inflated — CrewAI's
-                # calculate_usage_metrics() adds the shared LLM's _token_usage once per
-                # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
-                # which reads llm_monitor (agents.llm._monitor) — incremented exactly once
-                # per CleanedLLMWrapper.call() invocation, scoped to this workflow only.
+                # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
+                # calculate_usage_metrics() covers the WHOLE pipeline: both kickoffs
+                # share one LLM instance whose _token_usage accumulates across them,
+                # and CrewAI sums the shared LLM once per agent (here: once — the old
+                # 3-agent crew triple-counted). The authoritative call count is in
+                # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
+                # (agents.llm._monitor) — incremented exactly once per
+                # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
 
             except Exception as e:
                 logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
