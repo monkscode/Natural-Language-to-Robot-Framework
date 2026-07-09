@@ -1,8 +1,14 @@
 """Unit tests for progress_events.py — the CrewAI event bus bridge.
 
 Tests the register/unregister lifecycle, event routing, progress monotonicity,
-LLM call deduplication, tool event filtering, exception isolation, and
-concurrent workflow isolation.
+LLM call deduplication, exception isolation, concurrent workflow isolation,
+and the Task 16 additions: register_task (late-built assembler task) and
+push_stage_progress (the deterministic python stage's SSE channel).
+
+The CrewAI tool-usage handlers were REMOVED in Task 16 — the batch browser
+tool is now called directly by the python stage (element_identification), so
+no ToolUsage events ever fire for it; the stage pushes 22/30/55/60 itself via
+push_stage_progress.
 
 All tests are self-contained — they mock the crewai event bus and test the
 handler functions directly, without importing crewai.events (avoids triggering
@@ -26,24 +32,17 @@ def _isolate_module_state():
     """Reset all module-level dicts before each test to prevent cross-contamination."""
     from src.backend.crew_ai import progress_events as pe
 
-    with pe._lock:
-        pe._task_to_workflow.clear()
-        pe._workflow_queues.clear()
-        pe._workflow_task_map.clear()
-        pe._current_progress.clear()
-        pe._llm_call_seen.clear()
-        pe._tool_usage_seen.clear()
-        pe._tool_finished_seen.clear()
+    def _clear():
+        with pe._lock:
+            pe._task_to_workflow.clear()
+            pe._workflow_queues.clear()
+            pe._workflow_task_map.clear()
+            pe._current_progress.clear()
+            pe._llm_call_seen.clear()
+
+    _clear()
     yield
-    # Cleanup after test
-    with pe._lock:
-        pe._task_to_workflow.clear()
-        pe._workflow_queues.clear()
-        pe._workflow_task_map.clear()
-        pe._current_progress.clear()
-        pe._llm_call_seen.clear()
-        pe._tool_usage_seen.clear()
-        pe._tool_finished_seen.clear()
+    _clear()
 
 
 class TestRegisterUnregister:
@@ -57,12 +56,10 @@ class TestRegisterUnregister:
             _workflow_task_map,
             _current_progress,
             _llm_call_seen,
-            _tool_usage_seen,
-            _tool_finished_seen,
         )
 
         q = Queue()
-        task_id_map = {"task-a": 0, "task-b": 1, "task-c": 2}
+        task_id_map = {"task-a": 0, "task-c": 2}
         register_workflow("wf-1", q, task_id_map)
 
         assert _workflow_queues["wf-1"] is q
@@ -71,8 +68,6 @@ class TestRegisterUnregister:
         assert _task_to_workflow["task-c"] == "wf-1"
         assert _current_progress["wf-1"] == 0
         assert _llm_call_seen["wf-1"] == set()
-        assert _tool_usage_seen["wf-1"] == set()
-        assert _tool_finished_seen["wf-1"] == set()
 
     def test_unregister_cleans_up(self):
         from src.backend.crew_ai.progress_events import (
@@ -103,6 +98,142 @@ class TestRegisterUnregister:
 
         # Should not raise
         unregister_workflow("nonexistent-workflow")
+
+
+class TestRegisterTask:
+    """Task 16: the assembler task is built AFTER the python stage (its
+    description embeds the merged steps), so it is registered incrementally
+    into the already-registered workflow."""
+
+    def test_registered_task_routes_events(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            register_task,
+            _on_task_started,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+        register_task("wf-1", "task-2", 2)
+
+        event = MagicMock()
+        event.task = MagicMock()
+        event.task.id = "task-2"
+        _on_task_started(source=None, event=event)
+
+        # Ladder: index-1 completion (60) synthesized, then index-2 start (62).
+        assert q.get(timeout=1)["progress"] == 60
+        assert q.get(timeout=1)["progress"] == 62
+
+    def test_register_task_unknown_workflow_is_noop(self):
+        from src.backend.crew_ai.progress_events import (
+            register_task,
+            _task_to_workflow,
+        )
+
+        register_task("nonexistent-wf", "task-2", 2)  # must not raise
+        assert "task-2" not in _task_to_workflow
+
+    def test_unregister_cleans_incrementally_registered_task(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            register_task,
+            unregister_workflow,
+            _task_to_workflow,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+        register_task("wf-1", "task-2", 2)
+        unregister_workflow("wf-1")
+
+        assert "task-0" not in _task_to_workflow
+        assert "task-2" not in _task_to_workflow
+
+
+class TestPushStageProgress:
+    """Task 16: the deterministic element stage has no CrewAI task, so it
+    pushes its own SSE events (22/30/55/60) through the same forward-only
+    bookkeeping the event handlers use."""
+
+    def test_pushes_to_registered_workflow_queue(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            push_stage_progress,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+        push_stage_progress("wf-1", "🔍 Scanning webpage for interactive elements...", 22)
+
+        msg = q.get(timeout=1)
+        assert msg == {
+            "status": "running",
+            "message": "🔍 Scanning webpage for interactive elements...",
+            "progress": 22,
+        }
+
+    def test_forward_only(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            push_stage_progress,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+        push_stage_progress("wf-1", "at 55", 55)
+        q.get(timeout=1)
+        push_stage_progress("wf-1", "stale 30", 30)
+
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_stage_push_interleaves_with_task_ladder(self):
+        """Stage pushes share _current_progress with the handlers: after the
+        stage pushed 60, the assembler's task-started ladder must not
+        re-emit the synthesized index-1 completion (60)."""
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            register_task,
+            push_stage_progress,
+            _on_task_started,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-0": 0})
+        register_task("wf-1", "task-2", 2)
+
+        push_stage_progress("wf-1", "✅ All page elements identified", 60)
+        assert q.get(timeout=1)["progress"] == 60
+
+        event = MagicMock()
+        event.task = MagicMock()
+        event.task.id = "task-2"
+        _on_task_started(source=None, event=event)
+
+        # Only the 62 start — the 60 rung is deduped.
+        assert q.get(timeout=1)["progress"] == 62
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
+    def test_unknown_workflow_is_noop(self):
+        from src.backend.crew_ai.progress_events import push_stage_progress
+
+        push_stage_progress("nonexistent-wf", "message", 30)  # must not raise
+
+
+class TestToolHandlersRemoved:
+    """Task 16 removed the ToolUsage handlers — the batch tool never fires
+    CrewAI tool events anymore (it is called directly by the python stage),
+    and no other tool ever produced messages."""
+
+    def test_tool_handlers_are_gone(self):
+        from src.backend.crew_ai import progress_events as pe
+
+        assert not hasattr(pe, "_on_tool_started")
+        assert not hasattr(pe, "_on_tool_finished")
+        assert not hasattr(pe, "_tool_usage_seen")
+        assert not hasattr(pe, "_tool_finished_seen")
 
 
 class TestTaskStartedEvent:
@@ -230,112 +361,6 @@ class TestLLMCallDeduplication:
             q.get(timeout=0.1)
 
 
-class TestToolEvents:
-    """Test tool event handling."""
-
-    def test_non_browser_tool_ignored(self):
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_started,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-1": 1})
-
-        event = MagicMock()
-        event.tool_name = "keyword_search"
-        event.task_id = "task-1"
-
-        _on_tool_started(source=None, event=event)
-
-        with pytest.raises(Empty):
-            q.get(timeout=0.1)
-
-    def test_browser_tool_started_produces_message(self):
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_started,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-1": 1})
-
-        event = MagicMock()
-        event.tool_name = "batch_browser_automation"
-        event.task_id = "task-1"
-
-        _on_tool_started(source=None, event=event)
-
-        # Ladder steps first (task-0 completion, task-1 start), then the event
-        assert q.get(timeout=1)["progress"] == 20
-        assert q.get(timeout=1)["progress"] == 22
-        msg = q.get(timeout=1)
-        assert msg["progress"] == 30
-        assert "🌐" in msg["message"]
-
-    def test_tool_finished_extracts_element_count_from_string(self):
-        """Element count extraction works when output is a stringified dict
-        (the text-based tool path in CrewAI)."""
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_finished,
-            _current_progress,
-            _lock,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-1": 1})
-
-        # Simulate text-based path: output is str(dict)
-        tool_output = str({
-            "status": "success",
-            "summary": {"total_elements": 8, "successful": 7, "failed": 1},
-        })
-
-        event = MagicMock()
-        event.tool_name = "batch_browser_automation"
-        event.task_id = "task-1"
-        event.output = tool_output
-
-        # Set progress to a value below 55 so the message goes through
-        with _lock:
-            _current_progress["wf-1"] = 0
-
-        _on_tool_finished(source=None, event=event)
-
-        # Ladder steps first, then the element-count message
-        assert q.get(timeout=1)["progress"] == 20
-        assert q.get(timeout=1)["progress"] == 22
-        msg = q.get(timeout=1)
-        assert "8" in msg["message"]
-        assert "📍" in msg["message"]
-        assert msg["progress"] == 55
-
-    def test_tool_finished_fallback_when_no_count(self):
-        """Fallback message when element count cannot be extracted."""
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_finished,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-1": 1})
-
-        event = MagicMock()
-        event.tool_name = "batch_browser_automation"
-        event.task_id = "task-1"
-        event.output = "some unparseable string"
-
-        _on_tool_finished(source=None, event=event)
-
-        # Ladder steps first, then the fallback message
-        assert q.get(timeout=1)["progress"] == 20
-        assert q.get(timeout=1)["progress"] == 22
-        msg = q.get(timeout=1)
-        assert "Page elements detected" in msg["message"]
-        assert "📍" in msg["message"]
-
-
 class TestHandlerExceptionIsolation:
     """Test that handler exceptions don't propagate."""
 
@@ -406,6 +431,23 @@ class TestConcurrentWorkflows:
         with pytest.raises(Empty):
             q_b.get(timeout=0.1)
 
+    def test_stage_pushes_are_isolated_per_workflow(self):
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            push_stage_progress,
+        )
+
+        q_a = Queue()
+        q_b = Queue()
+        register_workflow("wf-a", q_a, {"task-a0": 0})
+        register_workflow("wf-b", q_b, {"task-b0": 0})
+
+        push_stage_progress("wf-a", "stage msg", 30)
+
+        assert q_a.get(timeout=1)["progress"] == 30
+        with pytest.raises(Empty):
+            q_b.get(timeout=0.1)
+
 
 class TestCompletionSynthesis:
     """Task-completion checkpoints are synthesized from the NEXT task's start.
@@ -417,6 +459,10 @@ class TestCompletionSynthesis:
     guard — users never see the ✅ messages. Deriving the completion push from
     the next start (same handler → deterministic queue order) fixes 20/60;
     the assembler's 80 is pushed at the dryrun-gate entry (dryrun_service).
+
+    Task 16 note: index 1 has no CrewAI task anymore (the python stage pushes
+    22/30/55/60 itself), but the ladder still covers the crash/degraded case
+    where the assembler task starts before the stage pushed 60.
     """
 
     def _fire_start(self, task_id):
@@ -509,46 +555,5 @@ class TestCompletionSynthesis:
         assert q.get(timeout=1)["progress"] == 60
         assert q.get(timeout=1)["progress"] == 62
         assert q.get(timeout=1)["progress"] == 65
-        with pytest.raises(Empty):
-            q.get(timeout=0.1)
-
-    def test_tool_started_winning_the_race_still_emits_the_ladder(self):
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_started,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
-
-        event = MagicMock()
-        event.tool_name = "batch_browser_automation"
-        event.task_id = "task-1"
-        _on_tool_started(source=None, event=event)
-
-        assert q.get(timeout=1)["progress"] == 20
-        assert q.get(timeout=1)["progress"] == 22
-        assert q.get(timeout=1)["progress"] == 30
-        with pytest.raises(Empty):
-            q.get(timeout=0.1)
-
-    def test_tool_finished_winning_the_race_still_emits_the_ladder(self):
-        from src.backend.crew_ai.progress_events import (
-            register_workflow,
-            _on_tool_finished,
-        )
-
-        q = Queue()
-        register_workflow("wf-1", q, {"task-0": 0, "task-1": 1})
-
-        event = MagicMock()
-        event.tool_name = "batch_browser_automation"
-        event.task_id = "task-1"
-        event.output = "unparseable"
-        _on_tool_finished(source=None, event=event)
-
-        assert q.get(timeout=1)["progress"] == 20
-        assert q.get(timeout=1)["progress"] == 22
-        assert q.get(timeout=1)["progress"] == 55
         with pytest.raises(Empty):
             q.get(timeout=0.1)
