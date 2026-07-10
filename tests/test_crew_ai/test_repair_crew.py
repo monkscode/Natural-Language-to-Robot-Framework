@@ -50,8 +50,13 @@ def _mock_crew_cls():
 
 def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browser.Click"):
     mock_cls, crew, task = _mock_crew_cls()
+    # _monitor is a CleanedLLMWrapper instance attribute (invisible to spec=);
+    # RobotAgents shares it between the planner and assembler LLMs (Task 22),
+    # so the mocked llm must carry one.
+    mock_llm = MagicMock(name="llm", spec=_CrewAILLM)
+    mock_llm._monitor = MagicMock(name="monitor")
     with patch("crewai.Crew", mock_cls), \
-         patch("src.backend.crew_ai.agents.get_llm", return_value=MagicMock(name="llm", spec=_CrewAILLM)), \
+         patch("src.backend.crew_ai.agents.get_llm", return_value=mock_llm), \
          patch("src.backend.crew_ai.library_context.get_library_context",
                return_value=_fake_library_context()):
         out, usage = ds.repair_robot_code(

@@ -8,6 +8,7 @@ from crewai import Agent
 
 # Import LLM factory function
 from .cleaned_llm_wrapper import get_llm
+from .tasks import PlanOutput
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,16 @@ class RobotAgents:
             assembler_context: Optimized context for Code Assembler (optional)
         """
         self.llm = get_llm(model_provider, model_name)
+        # Task 22: the planner's replies are provider-enforced to the PlanOutput
+        # schema (pure JSON by construction on vertex/gemini; get_llm silently
+        # drops the schema for providers without support, e.g. ollama).
+        # response_format lives on the LLM instance in CrewAI, so the planner
+        # needs its own wrapper — but crew.py treats agents.llm._monitor as the
+        # authoritative cleaning/retry counter, so both instances share the ONE
+        # monitor object to keep those stats complete.
+        self.planner_llm = get_llm(model_provider, model_name,
+                                   response_format=PlanOutput)
+        self.planner_llm._monitor = self.llm._monitor
         self.library_context = library_context
         self.keyword_search_tool = keyword_search_tool
 
@@ -115,7 +126,7 @@ class RobotAgents:
                 "8. Create HIGH-LEVEL steps - the Code Assembler will handle keyword details."
                 f"{library_guidance}"
             ),
-            llm=self.llm,
+            llm=self.planner_llm,
             verbose=True,
             allow_delegation=False,
         )

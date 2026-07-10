@@ -61,3 +61,42 @@ class TestGetAgentContext:
         agents = self._make_agents()
         result = agents._get_agent_context("nonexistent_type")
         assert isinstance(result, str)
+
+
+class TestPlannerStructuredOutput:
+    """Task 22: the planner gets a schema-enforced LLM; the assembler keeps
+    the plain one (until Step 3); both share ONE monitor object so
+    crew.py's `agents.llm._monitor` stays the authoritative counter."""
+
+    @patch("src.backend.crew_ai.agents.get_llm")
+    def test_planner_llm_schema_and_shared_monitor(self, mock_get_llm):
+        from src.backend.crew_ai.agents import RobotAgents
+        from src.backend.crew_ai.tasks import PlanOutput
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+
+        # spec= so crewai Agent's pydantic llm-field validation (isinstance
+        # against BaseLLM) accepts the mocks
+        plain_llm = MagicMock(name="plain", spec=CleanedLLMWrapper)
+        planner_llm = MagicMock(name="planner", spec=CleanedLLMWrapper)
+        # _monitor is an instance attribute (set in __init__), invisible to
+        # spec= — seed it so the shared-monitor wiring can read it
+        plain_llm._monitor = MagicMock(name="monitor")
+        mock_get_llm.side_effect = [plain_llm, planner_llm]
+
+        agents = RobotAgents("vertex", "gemini-2.5-flash")
+
+        # Factory called twice: legacy call first, then the planner call with schema
+        assert mock_get_llm.call_count == 2
+        first_kwargs = mock_get_llm.call_args_list[0].kwargs
+        second_kwargs = mock_get_llm.call_args_list[1].kwargs
+        assert "response_format" not in first_kwargs
+        assert second_kwargs["response_format"] is PlanOutput
+
+        # Wiring: assembler keeps plain llm, planner gets the schema llm
+        assert agents.llm is plain_llm
+        assert agents.planner_llm is planner_llm
+        assert agents.step_planner_agent().llm is planner_llm
+        assert agents.code_assembler_agent().llm is plain_llm
+
+        # Metrics: one shared monitor object → agents.llm._monitor sees planner calls too
+        assert agents.planner_llm._monitor is agents.llm._monitor

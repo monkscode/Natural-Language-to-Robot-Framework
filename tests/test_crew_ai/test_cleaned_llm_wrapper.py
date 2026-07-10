@@ -131,3 +131,70 @@ class TestGetLlm:
 
         with pytest.raises(ValueError, match="Unsupported model_provider"):
             get_llm(model_provider=bad_provider, model_name="some-model")
+
+
+class TestGetLlmResponseFormat:
+    """Tests for get_llm's response_format pass-through with provider gating (Task 22).
+
+    Contract: response_format (a Pydantic model class) is forwarded to
+    CleanedLLMWrapper ONLY when LiteLLM's capability table says the routed
+    model supports response schemas. Unsupported or unknown models silently
+    fall back to the legacy free-text contract (Option A: Ollama keeps the
+    guardrail path).
+    """
+
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_response_format_forwarded_when_supported(self, MockCleanedLLMWrapper):
+        """Supported model (vertex gemini): response_format reaches the wrapper."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+        from src.backend.crew_ai.tasks import PlanOutput
+
+        with patch("litellm.utils.supports_response_schema", return_value=True):
+            get_llm(model_provider="vertex", model_name="gemini-2.5-flash",
+                    response_format=PlanOutput)
+
+        call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
+        assert call_kwargs["response_format"] is PlanOutput
+
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_response_format_gated_off_when_unsupported(self, MockCleanedLLMWrapper):
+        """Unsupported model (ollama): wrapper is built WITHOUT response_format."""
+        import os
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+        from src.backend.crew_ai.tasks import PlanOutput
+
+        os.environ.pop("OLLAMA_API_BASE", None)
+        with patch("litellm.utils.supports_response_schema", return_value=False):
+            get_llm(model_provider="local", model_name="qwen2.5-coder:14b",
+                    response_format=PlanOutput)
+
+        call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
+        assert "response_format" not in call_kwargs
+
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_response_format_gated_off_on_capability_check_error(self, MockCleanedLLMWrapper):
+        """Capability check blowing up (unknown model) must NOT break get_llm —
+        falls back to legacy contract instead of raising."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+        from src.backend.crew_ai.tasks import PlanOutput
+
+        with patch("litellm.utils.supports_response_schema",
+                   side_effect=Exception("model not in DB")):
+            llm = get_llm(model_provider="vertex", model_name="unknown-model-xyz",
+                          response_format=PlanOutput)
+
+        assert llm == MockCleanedLLMWrapper.return_value
+        call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
+        assert "response_format" not in call_kwargs
+
+    @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
+    def test_no_response_format_keeps_legacy_call_shape(self, MockCleanedLLMWrapper):
+        """Callers that don't pass response_format get the exact legacy kwargs
+        (no stray response_format=None leaking into the wrapper)."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict('os.environ', {"VERTEXAI_PROJECT": "p"}):
+            get_llm(model_provider="vertex", model_name="gemini-2.5-flash")
+
+        call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
+        assert "response_format" not in call_kwargs
