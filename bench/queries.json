@@ -1,5 +1,5 @@
 {
-  "comment": "FROZEN benchmark queries (Task 2, owner-confirmed 2026-07-03). Do not edit wording — any change invalidates every baseline recorded against this file. Known caveat (accepted): q01's pinned repo can change over time; re-baseline if it is re-pinned.",
+  "comment": "FROZEN benchmark queries (Task 2, owner-confirmed 2026-07-03). Do not edit wording — any change invalidates every baseline recorded against this file. Known caveat (accepted): q01's pinned repo can change over time; re-baseline if it is re-pinned. q09 re-baselined 2026-07-10 (owner-confirmed): the-internet.herokuapp.com's TinyMCE demo hit its shared TinyMCE Cloud API key's monthly editor-load quota and went read-only (external, not fixable by us; the quota is global across every free-tier TinyMCE embed on the internet, not just this page) — swapped to w3schools' static contenteditable Try It playground (stable, no vendor quota, no scroll-animation interference, verified passing). The narrow bug this query originally guarded — Fill Text failing on a document.designMode-based editor (no literal contenteditable attribute), as opposed to an element with a literal contenteditable=\"true\" attribute which Fill Text already handles — is covered instead by a real-chromium fixture test (tests/test_locators/locator_fixtures/), since no current, quota-free, non-flaky public site reproduces that exact pattern.",
   "queries": [
     {
       "id": "q01",
@@ -35,7 +35,7 @@
     },
     {
       "id": "q09",
-      "query": "Go to https://the-internet.herokuapp.com/iframe, type Hello Bench into the text editor inside the iframe, and verify the editor contains Hello Bench"
+      "query": "Go to https://www.w3schools.com/tags/tryit.asp?filename=tryhtml5_global_contenteditable, type Hello Bench into the editable paragraph inside the iframe, and verify the paragraph contains Hello Bench"
     },
     {
       "id": "q10",

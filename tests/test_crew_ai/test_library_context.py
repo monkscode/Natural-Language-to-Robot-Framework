@@ -67,10 +67,18 @@ class TestBrowserLibraryContext:
     def test_requires_viewport_config_is_true(self, ctx):
         assert ctx.requires_viewport_config is True
 
-    def test_viewport_config_code_contains_new_context(self, ctx):
+    def test_viewport_config_code_sets_explicit_desktop_viewport(self, ctx):
+        """viewport=None does not escape headless Chromium's 800x600 default
+        window size (only Playwright's viewport *emulation* layer is
+        disabled) — confirmed live against nutronsystems.com, where an
+        800x600 render collapses the nav into a closed mobile menu and a
+        same-text decoy element gets matched instead. An explicit desktop
+        size is required, matching the 1920x1080 browser-service already
+        uses at identify time (browser_service/tasks/workflow.py)."""
         code = ctx.get_viewport_config_code()
         assert "New Context" in code
-        assert "viewport=None" in code
+        assert "viewport=None" not in code
+        assert "1920" in code and "1080" in code
 
     def test_core_rules_not_empty(self, ctx):
         rules = ctx.core_rules

@@ -98,7 +98,7 @@ class LibraryContext(ABC):
             str: Robot Framework code snippet or empty string if not needed
         
         Example for Browser Library:
-            "    New Context    viewport=None"
+            "    New Context    viewport={'width': 1920, 'height': 1080}"
         
         Example for SeleniumLibrary:
             ""  (empty string - no viewport config needed)
@@ -116,7 +116,7 @@ class LibraryContext(ABC):
         
         Should include:
         - Critical keyword sequences (e.g., New Browser → New Context → New Page)
-        - Parameter rules (e.g., viewport=None requirement)
+        - Parameter rules (e.g., explicit desktop viewport requirement)
         - Auto-waiting behavior
         - Locator priorities
         - Common pitfalls to avoid

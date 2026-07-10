@@ -264,7 +264,7 @@ class RobotTasks:
             *** Test Cases ***
             Generated Test
                 New Browser    chromium    headless=True
-                New Context    viewport=None
+                New Context    viewport={'width': 1920, 'height': 1080}
                 New Page    <url>
                 # Test steps here
                 Close Browser
@@ -302,14 +302,19 @@ class RobotTasks:
 **MANDATORY**: After "New Browser" and before "New Page", you MUST add:
 {self.library_context.get_viewport_config_code()}
 
-**Why**: Browser Library uses a small default viewport (800x600) which causes:
+**Why**: Headless Chromium's default window is 800x600 even when the
+viewport is set to None (that only disables Playwright's viewport
+*emulation* layer, not the underlying window size). At 800x600, many real sites switch
+to a mobile/responsive layout — nav items collapse into closed hamburger
+menus, and text-based locators can silently match the wrong (but visible)
+element instead of erroring. This causes:
 - Elements outside viewport are not detected
-- Locators fail to find elements
-- Tests fail with "element not found" errors
+- Locators match decoy elements in the mobile/narrow layout
+- Tests fail with "element not found" or timeout errors on later steps
 
 **Correct Order**:
 1. New Browser    ${{browser}}    headless=${{headless}}
-2. New Context    viewport=None    ← REQUIRED
+2. New Context    viewport={{'width': 1920, 'height': 1080}}    ← REQUIRED
 3. New Page    ${{url}}
 
 **Example**:
@@ -317,12 +322,14 @@ class RobotTasks:
 *** Test Cases ***
 Generated Test
     New Browser    chromium    headless=True
-    New Context    viewport=None
+    New Context    viewport={{'width': 1920, 'height': 1080}}
     New Page    https://example.com
     # Test steps here
 ```
 
-**CRITICAL**: viewport=None uses full browser window size, ensuring all elements are visible.
+**CRITICAL**: an explicit desktop-sized viewport ensures the site renders
+its normal desktop layout, matching what was seen during element
+identification (which already runs at 1920x1080).
             """
         return ""
 
