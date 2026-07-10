@@ -54,7 +54,9 @@ Full stack up first (nlrf API on :5000, browser-service, Postgres, runner-exec
 executor, docker). Then, from the nlrf repo root:
 
 ```powershell
-$env:BROWSER_SERVICE_LOG = "c:/Users/1dhru/Documents/Projects/browser-service/logs/browser_use.log"
+# run.sh launches the service from tools/, so the live log is in THIS repo —
+# pointing at the browser-service repo's logs/ yields empty log-derived metrics
+$env:BROWSER_SERVICE_LOG = "c:/Users/1dhru/Documents/Projects/Natural-Language-to-Robot-Framework/logs/browser_use.log"
 # $env:BENCH_TOKEN = "<jwt>"   # only when AUTH_ENFORCED=true — see note below
 python -m bench.run_bench --out bench/baselines/2026-07-03-baseline.csv
 ```
