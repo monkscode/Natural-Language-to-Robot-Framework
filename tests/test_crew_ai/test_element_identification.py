@@ -14,7 +14,11 @@ The module has three jobs, all pure Python:
   3. MERGE:  staple the FULL locator_mapping entry onto each step that used the
      element: locator, element_type (element_info.tagName fallback),
      dropdown_framework, select_id, datepicker_framework, element_classes,
-     aria_invalid, parent_classes, stability, all_locators.
+     aria_invalid, parent_classes, stability, all_locators, and the ASTPP
+     flags (visibility_filtered/row_anchored/row_anchor_ambiguous, only when
+     True). Steps are filtered to PlannedStep fields first, so raw-fallback
+     dicts with LLM key drift can neither crash the merge nor leak fabricated
+     locator keys.
 
 No LLM, no network — the tool is injected as a plain callable.
 """
@@ -590,3 +594,134 @@ class TestIdentifyElements:
         assert result["summary"]["total_elements"] == 2
         assert result["summary"]["found"] == 1
         assert result["summary"]["not_found"] == 1
+
+
+# ─── merge robustness: raw-fallback steps with LLM key drift ─────────────────
+
+class TestMergeRobustnessAgainstKeyDrift:
+    """crew._extract_plan_steps' raw-JSON fallback can hand over dicts exactly
+    as the LLM emitted them. Hallucinated locator-contract keys must never
+    crash the merge (TypeError: multiple values for keyword argument) or leak
+    into the output over the service's values."""
+
+    def test_hallucinated_contract_keys_do_not_crash_found_path(self):
+        steps = [
+            OPEN,
+            _step("Input Text", description="search box", value="shoes",
+                  locator="id=WRONG", found=True, element_type="hallucinated",
+                  stability="volatile", unexpected_key="junk"),
+        ]
+        merged = merge_locators(steps, {1: "elem_1"},
+                                {"elem_1": _mapping_entry(locator="name=q")})
+        # The service's contract wins; the LLM's fabrications are dropped.
+        assert merged[1]["locator"] == "name=q"
+        assert merged[1]["stability"] == "stable"
+        assert "unexpected_key" not in merged[1]
+
+    def test_hallucinated_contract_keys_do_not_crash_placeholder_path(self):
+        steps = [OPEN, _step("Get Text", description="phantom",
+                             locator="id=WRONG", found=True)]
+        merged = merge_locators(steps, {1: "elem_1"},
+                                {"elem_1": {"found": False}})
+        assert merged[1]["found"] is False
+        assert "locator" not in merged[1]
+
+    def test_hallucinated_keys_on_non_locator_step_are_dropped(self):
+        steps = [_step("Open Browser", value="https://example.com",
+                       locator="id=WRONG", extra="junk")]
+        merged = merge_locators(steps, {}, {})
+        assert "locator" not in merged[0]
+        assert "extra" not in merged[0]
+
+    def test_found_without_best_locator_is_placeholder(self):
+        """found:true with an empty best_locator is unusable — the single
+        _entry_found criterion sends it down the placeholder path."""
+        steps = [OPEN, _step("Get Text", description="banner")]
+        merged = merge_locators(steps, {1: "elem_1"},
+                                {"elem_1": {"found": True, "best_locator": ""}})
+        assert merged[1]["found"] is False
+        assert "locator" not in merged[1]
+
+
+# ─── ASTPP flags: stapled only when True (Task 16 boundary, completed) ───────
+
+class TestAstppFlagStapling:
+
+    def _merge_one(self, entry):
+        steps = [OPEN, _step("Click", description="edit link in first row")]
+        return merge_locators(steps, {1: "elem_1"}, {"elem_1": entry})[1]
+
+    def test_flags_stapled_when_true(self):
+        step = self._merge_one(_mapping_entry(
+            visibility_filtered=True, row_anchored=True, row_anchor_ambiguous=True,
+        ))
+        assert step["visibility_filtered"] is True
+        assert step["row_anchored"] is True
+        assert step["row_anchor_ambiguous"] is True
+
+    def test_flags_absent_when_false(self):
+        step = self._merge_one(_mapping_entry())  # all three default False
+        assert "visibility_filtered" not in step
+        assert "row_anchored" not in step
+        assert "row_anchor_ambiguous" not in step
+
+    def test_flags_absent_when_service_omits_them(self):
+        entry = _mapping_entry()
+        for key in ("visibility_filtered", "row_anchored", "row_anchor_ambiguous"):
+            entry.pop(key)
+        step = self._merge_one(entry)
+        assert "row_anchored" not in step
+
+
+# ─── honest stage telemetry ──────────────────────────────────────────────────
+
+class TestStageCompletionMessages:
+
+    def _events_for(self, steps, response):
+        events = []
+
+        def run_tool(elements, url, user_query):
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        identify_elements(steps, "q", run_tool=run_tool,
+                          on_progress=lambda p, m: events.append((p, m)))
+        return events
+
+    def _final_message(self, events):
+        return [m for p, m in events if p == 60][0]
+
+    def test_all_found_reads_as_success(self):
+        events = self._events_for(
+            [OPEN, _step("Input Text", description="search box", value="x")],
+            {"status": "success",
+             "locator_mapping": {"elem_1": _mapping_entry(locator="name=q")},
+             "summary": {}},
+        )
+        assert "All page elements identified" in self._final_message(events)
+
+    def test_tool_failure_does_not_read_as_success(self):
+        events = self._events_for(
+            [OPEN, _step("Input Text", description="search box", value="x")],
+            RuntimeError("service down"),
+        )
+        final = self._final_message(events)
+        assert "0 of 1" in final
+        assert "All page elements identified" not in final
+
+    def test_partial_failure_reports_the_ratio(self):
+        events = self._events_for(
+            [OPEN,
+             _step("Input Text", description="search box", value="x"),
+             _step("Get Text", description="phantom banner")],
+            {"status": "success",
+             "locator_mapping": {"elem_1": _mapping_entry(locator="name=q"),
+                                 "elem_2": {"found": False}},
+             "summary": {}},
+        )
+        assert "1 of 2" in self._final_message(events)
+
+    def test_no_elements_needed_message(self):
+        events = self._events_for([OPEN, CLOSE], {"status": "success"})
+        assert "No page elements needed" in self._final_message(events)

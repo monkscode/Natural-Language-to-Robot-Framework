@@ -1,6 +1,7 @@
 from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
-from src.backend.crew_ai.tasks import RobotTasks, _extract_json_by_key
+from pydantic import ValidationError
+from src.backend.crew_ai.tasks import RobotTasks, PlanOutput, _extract_json_by_key
 from src.backend.crew_ai.element_identification import identify_elements
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
@@ -114,14 +115,29 @@ def extract_url_from_query(query: str) -> str | None:
     return None
 
 
+def _validated_plan_steps(raw_steps: list) -> list:
+    """Re-validate fallback-path steps through PlanOutput.
+
+    The pydantic path is already validated by CrewAI's converter; the
+    json_dict/raw fallbacks hand back dicts exactly as the LLM emitted them —
+    key drift (a hallucinated 'locator', a missing 'keyword', a numeric
+    'value') must fail HERE, before the browser call is paid for, not
+    mid-merge after it. Same outcome as a planner task failure.
+    """
+    try:
+        return list(PlanOutput(steps=raw_steps).steps)
+    except ValidationError as e:
+        raise ValueError(f"Planner output failed validation: {e}") from e
+
+
 def _extract_plan_steps(task_output) -> list:
     """Extract the planned steps from the planner task's output.
 
     Prefers the already-validated pydantic model (the normal path — CrewAI's
     converter ran during kickoff), then json_dict, then the same raw-JSON
-    extraction the guardrails use. Raises when nothing parses: with no plan
-    there is nothing to identify or assemble, so failing the workflow here is
-    correct (same outcome as a planner task failure).
+    extraction the guardrails use. Raises when nothing parses or validates:
+    with no plan there is nothing to identify or assemble, so failing the
+    workflow here is correct (same outcome as a planner task failure).
     """
     pydantic_output = getattr(task_output, "pydantic", None)
     steps = getattr(pydantic_output, "steps", None)
@@ -130,14 +146,14 @@ def _extract_plan_steps(task_output) -> list:
 
     json_dict = getattr(task_output, "json_dict", None)
     if isinstance(json_dict, dict) and isinstance(json_dict.get("steps"), list):
-        return json_dict["steps"]
+        return _validated_plan_steps(json_dict["steps"])
 
     raw = getattr(task_output, "raw", "") or ""
     extracted = _extract_json_by_key(raw, "steps", "PlanOutput")
     if extracted:
         parsed_steps = json.loads(extracted).get("steps")
         if isinstance(parsed_steps, list):
-            return parsed_steps
+            return _validated_plan_steps(parsed_steps)
 
     raise ValueError("Planner output contained no parsable steps")
 

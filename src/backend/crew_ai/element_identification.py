@@ -14,7 +14,15 @@ Every job the old agent did is a mechanical rule, ported here as code:
   - dedup by identical element_description (build_elements)
   - user_query: the user's original query, verbatim (identify_elements)
   - merge: staple the FULL locator_mapping contract onto each step
-    (merge_locators)
+    (merge_locators) — locator, element_type, dropdown/datepicker framework,
+    select_id, observed class/aria evidence, stability, all_locators, and
+    the ASTPP flags (visibility_filtered / row_anchored /
+    row_anchor_ambiguous, present only when True)
+
+Steps arriving from crew._extract_plan_steps are PlanOutput-validated
+(fail-fast, pre-browser); merge_locators additionally filters each step to
+PlannedStep fields so raw-dict callers with LLM key drift can never crash
+the model construction or leak fabricated locator keys.
 
 FAILURE CONTRACT (Task 16 §F, deliberate): tool error OR found:false → the
 step gets NO locator → the Assembler's existing placeholder path
@@ -133,10 +141,9 @@ def step_needs_locator(step: Dict[str, Any]) -> bool:
         return False
     if keyword in _ACTION_EXACT:
         return True
-    has_description = bool((step.get("element_description") or "").strip())
-    if _prefix_action(keyword) is not None:
-        return has_description
-    return has_description
+    # Prefix families and unknown keywords share the same rule: the step
+    # targets an element iff the planner named one.
+    return bool((step.get("element_description") or "").strip())
 
 
 def action_for_keyword(keyword: str) -> str:
@@ -237,6 +244,14 @@ def build_elements(steps: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[int, st
 # Merge (port checklist #7, #8)
 # ---------------------------------------------------------------------------
 
+def _entry_found(entry: Optional[Dict[str, Any]]) -> bool:
+    """The single definition of "this element was found": the service said so
+    AND handed over a usable locator. merge_locators and the stage summary
+    both use it, so the SSE counts can never disagree with the merged steps.
+    """
+    return bool(entry and entry.get("found") and entry.get("best_locator"))
+
+
 def merge_locators(
     steps: List[Any],
     step_element_ids: Dict[int, str],
@@ -251,21 +266,29 @@ def merge_locators(
     merged: List[Dict[str, Any]] = []
     for index, raw_step in enumerate(steps):
         step = _as_dict(raw_step)
+        # Only PlannedStep fields feed the models below. The normal path is
+        # already-validated PlannedStep dumps, but the raw-JSON fallback in
+        # crew._extract_plan_steps can carry LLM key drift (a hallucinated
+        # 'locator'/'element_type'), which would collide with the explicit
+        # kwargs — filter, never trust.
+        plan_fields = {
+            key: step[key] for key in step.keys() & PlannedStep.model_fields.keys()
+        }
         if not step_needs_locator(step):
-            merged.append(PlannedStep(**step).model_dump(exclude_none=True))
+            merged.append(PlannedStep(**plan_fields).model_dump(exclude_none=True))
             continue
 
         element_id = step_element_ids.get(index)
         entry = locator_mapping.get(element_id) if element_id else None
-        if not entry or not entry.get("found") or not entry.get("best_locator"):
+        if not _entry_found(entry):
             merged.append(
-                IdentifiedElement(**step, found=False).model_dump(exclude_none=True)
+                IdentifiedElement(**plan_fields, found=False).model_dump(exclude_none=True)
             )
             continue
 
         info = entry.get("element_info") or {}
         identified = IdentifiedElement(
-            **step,
+            **plan_fields,
             locator=entry.get("best_locator"),
             found=True,
             # The old prompt's extraction rule, now code: element_type when
@@ -279,6 +302,13 @@ def merge_locators(
             parent_classes=info.get("parentClassName") or "",
             stability=entry.get("stability") or "stable",
             all_locators=entry.get("all_locators") or [],
+            # ASTPP flags: stapled only when True (None → dropped by
+            # exclude_none), mirroring the service's emitted-only-when-True
+            # payload shape. row_anchor_ambiguous pairs with
+            # stability='positional', which already drives the WARNING comment.
+            visibility_filtered=entry.get("visibility_filtered") or None,
+            row_anchored=entry.get("row_anchored") or None,
+            row_anchor_ambiguous=entry.get("row_anchor_ambiguous") or None,
         )
         merged.append(identified.model_dump(exclude_none=True))
     return merged
@@ -361,15 +391,22 @@ def identify_elements(
             len(elements),
         )
 
-    found = sum(
-        1 for e in elements
-        if (locator_mapping.get(e["id"]) or {}).get("found")
-    )
+    # Same criterion merge_locators applies (_entry_found) — the reported
+    # counts always match what the Assembler will actually see.
+    found = sum(1 for e in elements if _entry_found(locator_mapping.get(e["id"])))
     if elements and url:
         notify(55, f"📍 Found {found} of {len(elements)} elements on the page")
 
     merged = merge_locators(dict_steps, step_element_ids, locator_mapping)
-    notify(60, "✅ All page elements identified")
+    # Honest stage completion: a failed tool call must not read as success —
+    # progress still reaches 60 (forward-only ladder), only the text differs.
+    if not elements:
+        notify(60, "✅ No page elements needed for this test")
+    elif found == len(elements):
+        notify(60, "✅ All page elements identified")
+    else:
+        notify(60, f"⚠️ Identified {found} of {len(elements)} elements — "
+                   "placeholders will mark the rest")
 
     return {
         "steps": merged,

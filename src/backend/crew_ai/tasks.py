@@ -53,6 +53,12 @@ class IdentifiedElement(PlannedStep):
     parent_classes: Optional[str] = Field(default=None, description="Space-separated class list observed on the element's immediate parent at locate time (from element_info.parentClassName) — Bootstrap-3-era sites mark invalid fields on the wrapper div; the Assembler asserts one level up via '${locator} >> xpath=..' when the marker lives there")
     stability: Optional[str] = Field(default=None, description="Locator stability verdict from browser-service (Task 10): 'stable', 'volatile', or 'positional' — anything but 'stable' makes the Assembler emit an in-code WARNING comment above the step")
     all_locators: Optional[List[Any]] = Field(default=None, description="Full validated-locator candidate list from browser-service — forwarded so self-healing (Task 21) has alternatives at the Assembler boundary")
+    # ASTPP flags (Task 16 boundary): stapled only when True — merge_locators
+    # passes None otherwise, and model_dump(exclude_none=True) drops the key,
+    # mirroring browser-service's emitted-only-when-True payload shape.
+    visibility_filtered: Optional[bool] = Field(default=None, description="Locator engine narrowed the match set to visible elements (ASTPP flag B) — context for healing/debugging")
+    row_anchored: Optional[bool] = Field(default=None, description="Locator was rescued by anchoring to a specific row's text (ASTPP flag A / G1)")
+    row_anchor_ambiguous: Optional[bool] = Field(default=None, description="Row anchor matched more than one row and the locator fell back to a positional form — pairs with stability='positional', which already drives the Assembler's WARNING comment")
 
 
 class AssemblyOutput(BaseModel):

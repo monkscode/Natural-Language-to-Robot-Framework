@@ -459,3 +459,71 @@ class TestRunCrewProgressQueue:
         # identifier is deterministic Python and receives no context.
         total = sum(r["count"] for r in hint_metadata["agents"].values())
         assert total == 4  # 2 agents × hints_count=2
+
+
+# ---------------------------------------------------------------------------
+# Tests: _extract_plan_steps — fallback-path validation (fail fast, pre-browser)
+# ---------------------------------------------------------------------------
+
+class TestExtractPlanSteps:
+    """The pydantic path is CrewAI-validated; the json_dict/raw fallbacks are
+    NOT — they must be re-validated HERE so a drifted plan fails before the
+    ~40s browser call, never mid-merge after it."""
+
+    @staticmethod
+    def _output(pydantic=None, json_dict=None, raw=""):
+        out = MagicMock()
+        out.pydantic = pydantic
+        out.json_dict = json_dict
+        out.raw = raw
+        return out
+
+    def test_pydantic_path_returns_steps_as_is(self):
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        from src.backend.crew_ai.tasks import PlanOutput, PlannedStep
+        plan = PlanOutput(steps=[PlannedStep(step_description="open", keyword="Open Browser")])
+        assert _extract_plan_steps(self._output(pydantic=plan)) == list(plan.steps)
+
+    def test_json_dict_path_validates_and_returns_models(self):
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        from src.backend.crew_ai.tasks import PlannedStep
+        steps = _extract_plan_steps(self._output(json_dict={"steps": [
+            {"step_description": "open", "keyword": "Open Browser",
+             "value": "https://example.com"},
+        ]}))
+        assert isinstance(steps[0], PlannedStep)
+        assert steps[0].keyword == "Open Browser"
+
+    def test_json_dict_path_missing_required_field_raises_before_browser(self):
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        with pytest.raises(ValueError, match="failed validation"):
+            _extract_plan_steps(self._output(json_dict={"steps": [
+                {"step_description": "no keyword here"},
+            ]}))
+
+    def test_raw_path_numeric_value_raises_before_browser(self):
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        raw = json.dumps({"steps": [
+            {"step_description": "type", "keyword": "Input Text",
+             "element_description": "qty field", "value": 123},
+        ]})
+        with pytest.raises(ValueError, match="failed validation"):
+            _extract_plan_steps(self._output(raw=raw))
+
+    def test_raw_path_drift_keys_are_dropped_by_validation(self):
+        """Hallucinated locator-contract keys never reach merge_locators."""
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        raw = json.dumps({"steps": [
+            {"step_description": "click", "keyword": "Click",
+             "element_description": "save button", "locator": "id=WRONG",
+             "found": True},
+        ]})
+        steps = _extract_plan_steps(self._output(raw=raw))
+        dumped = steps[0].model_dump()
+        assert "locator" not in dumped
+        assert "found" not in dumped
+
+    def test_no_parsable_steps_raises(self):
+        from src.backend.crew_ai.crew import _extract_plan_steps
+        with pytest.raises(ValueError, match="no parsable steps"):
+            _extract_plan_steps(self._output(raw="total garbage"))
