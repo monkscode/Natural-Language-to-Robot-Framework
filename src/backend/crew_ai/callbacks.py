@@ -13,7 +13,24 @@ import os
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+from src.backend.core.grafana_events import emit_event
+
 logger = logging.getLogger(__name__)
+
+# Agent role → dashboard stage name. Keys are matched as substrings of the
+# TaskOutput.agent role string (see agents.py role= definitions).
+_AGENT_STAGE_MAP = {
+    "Planner": "planner",
+    "Locator Specialist": "identifier",
+    "Code Generator": "assembler",
+}
+
+
+def _stage_for_agent(agent_role: str) -> str:
+    for needle, stage in _AGENT_STAGE_MAP.items():
+        if needle in agent_role:
+            return stage
+    return "unknown"
 
 CREWAI_STEP_LOG_FILE = "logs/crewai_steps.log"
 CREWAI_STEP_LOG_MAX_BYTES = 20 * 1024 * 1024  # 20MB per file
@@ -88,7 +105,7 @@ def make_step_callback(step_logger: logging.Logger):
     return _callback
 
 
-def make_task_callback(step_logger: logging.Logger):
+def make_task_callback(step_logger: logging.Logger, llm=None):
     """Return a callback that logs task completion with elapsed time.
 
     Fires once per task after the final output is produced. Also emits an
@@ -98,6 +115,12 @@ def make_task_callback(step_logger: logging.Logger):
     state["last_ts"] is seeded to datetime.now() at callback creation so
     the first task's elapsed measures time from kickoff start to first
     task completion (i.e., the planner agent's actual duration).
+
+    llm: the workflow's shared CleanedLLMWrapper. Its per-stage usage
+    accumulator is drained at every task boundary — sequential execution means
+    everything accumulated since the previous task completed belongs to this
+    task — giving real per-agent tokens AND cost on task_completed events
+    (TaskOutput.token_usage is not populated in this CrewAI version).
     """
     state = {"last_ts": datetime.now()}
 
@@ -105,6 +128,7 @@ def make_task_callback(step_logger: logging.Logger):
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d %H:%M:%S")
         elapsed_str = ""
+        delta = None
         if state["last_ts"] is not None:
             delta = (now - state["last_ts"]).total_seconds()
             elapsed_str = f", elapsed={delta:.1f}s"
@@ -121,13 +145,38 @@ def make_task_callback(step_logger: logging.Logger):
         # Surface task timing in application.log for quick cross-log correlation
         logger.info(f"[TASK DONE] {ts}{elapsed_str}: {getattr(task_output, 'description', '')[:60]!r}")
 
+        # Grafana per-stage panels (duration/tokens/cost by stage). Primary
+        # source: the shared wrapper's usage accumulator (real per-call token
+        # diffs + LiteLLM pricing). Fallback: TaskOutput.token_usage, which is
+        # not populated in this CrewAI version (arrives as 0s).
+        try:
+            agent_role = str(getattr(task_output, "agent", "unknown"))
+            stage_usage = llm.pop_stage_usage() if llm is not None else {}
+            fallback = getattr(task_output, "token_usage", None)
+            emit_event(
+                "task_completed",
+                stage=_stage_for_agent(agent_role),
+                agent=agent_role,
+                duration_s=round(delta, 2) if delta is not None else 0.0,
+                output_len=len(str(getattr(task_output, "raw", ""))),
+                tokens=stage_usage.get("tokens") or int(getattr(fallback, "total_tokens", 0) or 0),
+                prompt_tokens=stage_usage.get("prompt_tokens") or int(getattr(fallback, "prompt_tokens", 0) or 0),
+                completion_tokens=stage_usage.get("completion_tokens") or int(getattr(fallback, "completion_tokens", 0) or 0),
+                llm_calls=stage_usage.get("llm_calls", 0),
+                cost=stage_usage.get("cost", 0.0),
+            )
+        except Exception:
+            logger.debug("task_completed event emission failed", exc_info=True)
+
     return _callback
 
 
-def get_crew_callbacks():
+def get_crew_callbacks(llm=None):
     """Return (step_callback, task_callback) ready to pass to Crew().
 
     Single call site so crew.py doesn't need to know about the logger.
+    Pass the workflow's shared CleanedLLMWrapper as llm to enable per-agent
+    token/cost attribution on task_completed events.
     """
     step_logger = _get_step_logger()
-    return make_step_callback(step_logger), make_task_callback(step_logger)
+    return make_step_callback(step_logger), make_task_callback(step_logger, llm=llm)

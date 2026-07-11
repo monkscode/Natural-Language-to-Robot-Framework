@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 import logging
 import json
@@ -18,9 +19,9 @@ from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
 from src.backend.core.workflow_metrics import (
     get_workflow_metrics_collector,
     WorkflowMetrics,
-    calculate_crewai_cost
 )
 from src.backend.core.run_registry import get_run_registry
+from src.backend.core.grafana_events import emit_event, resolve_hint
 from src.backend.core.artifact_store import get_artifact_store
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
@@ -567,6 +568,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         user_id=user_id,
     )
 
+    _t0 = time.time()
+    emit_event("workflow_started", query=natural_language_query[:200])
+
     # Start with welcome message
     yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
 
@@ -615,7 +619,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # delivered code is read from crew_with_results.tasks[2] below.
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
-            _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+            _crew_output, crew_with_results, optimization_metrics, hint_metadata, shared_llm = run_crew(
                 natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
@@ -648,39 +652,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # NEW: Collect and merge metrics
         # ============================================
         try:
-            # 1. Extract CrewAI metrics
-            # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
-            try:
-                usage_metrics_obj = crew_with_results.calculate_usage_metrics()
-
-                # Convert UsageMetrics object to dict
-                usage_metrics_dict = {
-                    'total_tokens': usage_metrics_obj.total_tokens,
-                    'prompt_tokens': usage_metrics_obj.prompt_tokens,
-                    'completion_tokens': usage_metrics_obj.completion_tokens,
-                    'successful_requests': usage_metrics_obj.successful_requests
-                }
-
-                logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: successful_requests above is inflated — CrewAI's
-                # calculate_usage_metrics() adds the shared LLM's _token_usage once per
-                # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
-                # which reads llm_monitor (agents.llm._monitor) — incremented exactly once
-                # per CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-
-            except Exception as e:
-                logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
-                # Fallback to empty metrics
-                usage_metrics_dict = {
-                    'total_tokens': 0,
-                    'prompt_tokens': 0,
-                    'completion_tokens': 0,
-                    'successful_requests': 0
-                }
-
-            crewai_metrics = calculate_crewai_cost(
-                usage_metrics_dict,
-                model_name=model_name
+            # 1. Extract CrewAI metrics from the shared LLM wrapper — read ONCE.
+            # Do NOT use crew_with_results.calculate_usage_metrics(): it adds the
+            # shared LLM's _token_usage once per agent, so this 3-agent crew
+            # reported 3x the real tokens/calls/cost — the workflow_completed
+            # totals then disagreed with the task_completed per-agent events
+            # (Grafana "Cost per workflow" vs "Cost per Agent" mismatch).
+            # get_workflow_usage() reads the same counters exactly once and
+            # prices them via LiteLLM, matching how per-agent costs are priced.
+            crewai_metrics = (
+                shared_llm.get_workflow_usage() if shared_llm is not None
+                else {'llm_calls': 0, 'cost': 0.0, 'tokens': 0,
+                      'prompt_tokens': 0, 'completion_tokens': 0}
             )
             logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
             # Fold the dryrun repair crew's LLM cost into the CrewAI bucket. The repair
@@ -775,8 +758,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # folded here. Its COST is folded into crewai_metrics above; repair is rare
             # and few-call on the SAME model, so the main crew's counts already surface
             # any flakiness. Only cost needs to be exact — these counters do not.
-            if llm_monitor is not None:
-                unified_metrics.llm_cleaning_stats = llm_monitor.get_numeric_stats()
+            if shared_llm is not None:
+                unified_metrics.llm_cleaning_stats = shared_llm._monitor.get_numeric_stats()
 
             collector = get_workflow_metrics_collector()
             # Prefer the org_id threaded into this call. The run row may not be
@@ -797,6 +780,36 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info("✅ Unified metrics recorded successfully")
             logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
             logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
+
+            # Grafana events — one tool_used per browser-tool run (locator success
+            # rate panel) and one workflow_completed carrying the unified totals.
+            if browser_metrics:
+                emit_event(
+                    "tool_used",
+                    tool="batch_browser_automation",
+                    success_rate=browser_metrics.get('success_rate', 0.0),
+                    elements_processed=browser_metrics.get('elements_processed', 0),
+                    custom_action_usage=browser_metrics.get('custom_action_usage_count', 0),
+                )
+            emit_event(
+                "workflow_completed",
+                duration_s=round(time.time() - _t0, 2),
+                total_cost=round(unified_metrics.total_cost, 6),
+                total_tokens=unified_metrics.crewai_tokens + unified_metrics.browser_use_tokens,
+                total_llm_calls=unified_metrics.total_llm_calls,
+                crewai_cost=unified_metrics.crewai_cost,
+                crewai_tokens=unified_metrics.crewai_tokens,
+                crewai_llm_calls=unified_metrics.crewai_llm_calls,
+                browser_use_cost=unified_metrics.browser_use_cost,
+                browser_use_tokens=unified_metrics.browser_use_tokens,
+                browser_use_llm_calls=unified_metrics.browser_use_llm_calls,
+                success_rate=unified_metrics.success_rate,
+                total_elements=unified_metrics.total_elements,
+                successful_elements=unified_metrics.successful_elements,
+                failed_elements=unified_metrics.failed_elements,
+                dryrun_status=gate["dryrun_status"],
+                url=unified_metrics.url,
+            )
 
         except Exception as metrics_error:
             logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)
@@ -829,12 +842,18 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
         logging.error("Failed to generate valid Robot Framework code: %s", e)
+        emit_event("workflow_failed", duration_s=round(time.time() - _t0, 2),
+                   error_type=type(e).__name__, error=str(e)[:300],
+                   resolution=resolve_hint(type(e).__name__, str(e)))
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
         yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}"}
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
+        emit_event("workflow_failed", duration_s=round(time.time() - _t0, 2),
+                   error_type=type(e).__name__, error=str(e)[:300],
+                   resolution=resolve_hint(type(e).__name__, str(e)))
 
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)

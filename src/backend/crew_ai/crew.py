@@ -398,7 +398,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
     # Rotate crewai.log if it exceeds size limit (before creating the Crew)
     _rotate_crewai_log()
 
-    step_callback, task_callback = get_crew_callbacks()
+    # Pass the shared LLM wrapper so the task callback can drain its per-stage
+    # usage accumulator → real per-agent tokens/cost on task_completed events.
+    step_callback, task_callback = get_crew_callbacks(llm=agents.llm)
 
     # Create and run the crew
     crew = Crew(
@@ -425,9 +427,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             logger.info("🏁 Crew execution finished")
             # agents.llm._monitor is the authoritative call count: incremented once per
             # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-            # Compare against "Raw CrewAI usage metrics" in workflow_service.py — that
-            # figure is N_agents × real_calls due to CrewAI summing the shared LLM
-            # instance once per agent in calculate_usage_metrics().
+            # Workflow token/cost totals come from agents.llm.get_workflow_usage()
+            # (read once in workflow_service) — never from crew.calculate_usage_metrics(),
+            # which sums the shared LLM instance once per agent (3x inflation).
             logger.info(f"📊 Final LLM Stats: {agents.llm._monitor.get_stats()}")
 
             # NOTE: Pattern learning is NOT done here!
@@ -447,7 +449,9 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             # progress bar (frontend hides at >=100%) while the gate is still
             # verifying/repairing. See dryrun_service.validate_and_repair (prog-2).
 
-            return result, crew, optimization_metrics, hint_metadata, agents.llm._monitor
+            # The shared CleanedLLMWrapper: workflow_service reads authoritative
+            # workflow usage (get_workflow_usage) and cleaning stats (._monitor).
+            return result, crew, optimization_metrics, hint_metadata, agents.llm
 
         except Exception as e:
             error_msg = str(e)

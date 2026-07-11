@@ -249,7 +249,79 @@ class CleanedLLMWrapper(LLM):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
         self._monitor = LLMFormattingMonitor()
+        # Per-stage usage accumulator for the Grafana per-agent panels. call()
+        # diffs BaseLLM._token_usage around each invocation (updated
+        # synchronously in the calling thread — llm.py line ~1150) and
+        # accumulates here; callbacks.make_task_callback drains it at each task
+        # boundary via pop_stage_usage(). Instance-level, so concurrent
+        # workflows (each with its own wrapper) never share counts.
+        # NOTE: litellm.success_callback CANNOT be used for this — callbacks
+        # fire in a spawned logging thread (verified empirically), so neither
+        # thread-locals nor contextvars survive into them.
+        self._stage_usage = {"llm_calls": 0, "prompt_tokens": 0,
+                             "completion_tokens": 0, "tokens": 0}
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
+
+    def _cost_for(self, prompt_tokens: int, completion_tokens: int) -> float:
+        """Price a token count via LiteLLM's tables. Returns 0.0 on any failure.
+
+        Pricing is linear in tokens, so aggregating before pricing is exact
+        for a single model.
+        """
+        if not (prompt_tokens or completion_tokens):
+            return 0.0
+        try:
+            import litellm
+            prompt_cost, completion_cost = litellm.cost_per_token(
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            return round(prompt_cost + completion_cost, 6)
+        except Exception as e:
+            logger.debug("LLM cost lookup failed: %s", e)
+            return 0.0
+
+    def pop_stage_usage(self) -> dict:
+        """Return usage accumulated since the last drain, with cost, and reset.
+
+        Never raises; returns zeroed usage on any failure.
+        """
+        try:
+            usage = self._stage_usage
+            self._stage_usage = {"llm_calls": 0, "prompt_tokens": 0,
+                                 "completion_tokens": 0, "tokens": 0}
+            usage["cost"] = self._cost_for(
+                usage["prompt_tokens"], usage["completion_tokens"])
+            return usage
+        except Exception:
+            return {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "tokens": 0, "cost": 0.0}
+
+    def get_workflow_usage(self) -> dict:
+        """Return this wrapper's lifetime usage with cost — the workflow totals.
+
+        Reads BaseLLM._token_usage exactly once. Crew.calculate_usage_metrics()
+        must NOT be used for workflow totals: it adds the shared LLM instance's
+        _token_usage once per agent, so a 3-agent crew reports 3x the real
+        tokens/calls/cost. One wrapper per workflow makes this exact. Does not
+        reset anything (safe alongside pop_stage_usage, which drains a separate
+        accumulator). Never raises; returns zeroed usage on any failure.
+        """
+        try:
+            u = self._token_usage
+            prompt = int(u.get("prompt_tokens", 0) or 0)
+            completion = int(u.get("completion_tokens", 0) or 0)
+            return {
+                "llm_calls": int(u.get("successful_requests", 0) or 0),
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                "cost": self._cost_for(prompt, completion),
+            }
+        except Exception:
+            return {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "tokens": 0, "cost": 0.0}
 
     def get_context_window_size(self) -> int:
         """Return the context window size for the configured model.
@@ -356,6 +428,30 @@ class CleanedLLMWrapper(LLM):
     _EMPTY_RETRY_CAP_SECONDS = 5.0
 
     def call(self, messages, *args, **kwargs) -> str:
+        """Delegate to _call_impl, accounting per-call token deltas.
+
+        BaseLLM._token_usage is updated synchronously inside LLM.call (same
+        thread), so diffing it around the call captures exactly this call's
+        usage — including empty-response retries, which still cost money.
+        """
+        before = dict(self._token_usage)
+        try:
+            return self._call_impl(messages, *args, **kwargs)
+        finally:
+            try:
+                after = self._token_usage
+                d_prompt = after["prompt_tokens"] - before["prompt_tokens"]
+                d_completion = after["completion_tokens"] - before["completion_tokens"]
+                d_calls = after["successful_requests"] - before["successful_requests"]
+                if d_prompt or d_completion or d_calls:
+                    self._stage_usage["prompt_tokens"] += d_prompt
+                    self._stage_usage["completion_tokens"] += d_completion
+                    self._stage_usage["tokens"] += d_prompt + d_completion
+                    self._stage_usage["llm_calls"] += d_calls
+            except Exception:
+                pass  # accounting must never break an LLM call
+
+    def _call_impl(self, messages, *args, **kwargs) -> str:
         """
         CrewAI LLM.call wrapper. Applies Action/ActionInput cleaning and retries
         on empty responses (None / "" / whitespace), which Vertex AI Gemini —

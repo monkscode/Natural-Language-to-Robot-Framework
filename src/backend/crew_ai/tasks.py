@@ -1,4 +1,5 @@
 from crewai import Task, TaskOutput
+import functools
 import logging
 import json
 import re
@@ -7,8 +8,28 @@ from typing import List, Optional, Tuple, Any
 
 # Import reusable prompt components
 from .prompts import PromptComponents
+from src.backend.core.grafana_events import record_guardrail_result
 
 logger = logging.getLogger(__name__)
+
+
+def _track_guardrail(name: str):
+    """Emit a guardrail_passed/guardrail_retry Grafana event per invocation.
+
+    CrewAI retries the task when a guardrail returns (False, ...), so each
+    invocation counts as one attempt; the pass event carries the total.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(result: TaskOutput) -> Tuple[bool, Any]:
+            outcome = fn(result)
+            try:
+                record_guardrail_result(name, bool(outcome[0]))
+            except Exception:
+                pass
+            return outcome
+        return wrapper
+    return decorator
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -142,6 +163,7 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
         return json.dumps(best['data'])
 
 
+@_track_guardrail("assembly_output")
 def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     """
     Guardrail for assemble_code_task that fixes output format without retry.
@@ -207,6 +229,7 @@ def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     return (False, "Output must contain Robot Framework code. Start with *** Settings *** section.")
 
 
+@_track_guardrail("identification_output")
 def identification_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     """
     Guardrail for identify_elements_task that handles JSON extraction.

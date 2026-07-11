@@ -42,6 +42,7 @@ import docker
 import requests as _requests
 
 from src.backend.core.config import settings
+from src.backend.core.grafana_events import emit_event
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
 from src.backend.core.artifact_store import get_artifact_store
@@ -514,11 +515,26 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     learning DB; only the real Docker run feeds learning.
     """
     repair_usage: dict = {}
+    dryruns_run = 0
+    repairs_run = 0
+
+    def _emit_gate(status: str) -> None:
+        """One dryrun_completed event per gate invocation (Grafana pass-rate panel).
+
+        `passed` is only present for real verdicts (passed/failed) so the
+        pass-rate denominator can filter on it without counting skipped or
+        unverified (infra-degrade) gates.
+        """
+        fields = {"status": status, "attempts": dryruns_run, "repairs": repairs_run}
+        if status in ("passed", "failed"):
+            fields["passed"] = (status == "passed")
+        emit_event("dryrun_completed", **fields)
 
     # §8.4 — skip the gate (and never spawn a container) when disabled or empty.
     if not settings.DRYRUN_ENABLED or not robot_code or not robot_code.strip():
         reason = "DRYRUN_ENABLED=False" if not settings.DRYRUN_ENABLED else "empty code"
         logger.info("🔬 DRYRUN: skipping gate (%s) for run_id=%s", reason, run_id)
+        _emit_gate("skipped")
         return {"code": robot_code, "dryrun_status": "skipped", "repair_usage": repair_usage}
 
     # learn-6 — ensure the runner image via the executor hop. Any failure (incl.
@@ -531,6 +547,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: executor/image unavailable — delivering unverified: %s",
             e, exc_info=True,
         )
+        _emit_gate("unverified")
         return {"code": robot_code, "dryrun_status": "unverified",
                 "message": f"Verification unavailable: {e}", "repair_usage": repair_usage}
 
@@ -543,9 +560,11 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             _push_progress(progress_queue, "🔬 Verifying generated test...",
                            88 if attempt == 0 else None)
             last_result = runner_exec_client.dryrun(run_id, code)
+            dryruns_run += 1
 
             if last_result["passed"]:
                 logger.info("🔬 DRYRUN: passed for run_id=%s (attempt %d)", run_id, attempt)
+                _emit_gate("passed")
                 return {"code": code, "dryrun_status": "passed", "repair_usage": repair_usage}
 
             # Failed — repair only if attempts remain.
@@ -556,6 +575,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                         run_id, code, last_result["errors"],
                         model_provider, model_name,
                     )
+                    repairs_run += 1
                     # Count the repair cost as soon as it is known, before
                     # extraction, so it is not lost if extraction later fails.
                     _accumulate_usage(repair_usage, attempt_usage)
@@ -584,10 +604,12 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: dryrun execution error — delivering unverified (non-blocking): %s",
             e, exc_info=True,
         )
+        _emit_gate("unverified")
         return {"code": code, "dryrun_status": "unverified",
                 "message": str(e), "repair_usage": repair_usage}
 
     # Loop exhausted (or broke early) without a pass → failed, but STILL delivered.
+    _emit_gate("failed")
     return {"code": code, "dryrun_status": "failed",
             "dryrun_errors": last_result["errors"] if last_result else "",
             "repair_usage": repair_usage}

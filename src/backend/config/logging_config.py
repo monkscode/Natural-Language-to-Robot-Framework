@@ -101,6 +101,13 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
         root.addHandler(console_handler)
     root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
+    # Mirror ERROR/CRITICAL records into logs/events.log for the Grafana live
+    # error feed (structured, with resolution hints) — independent of LOG_FORMAT.
+    from src.backend.core.grafana_events import ErrorEventHandler
+    error_handler = ErrorEventHandler()
+    error_handler.setLevel(logging.ERROR)
+    root.addHandler(error_handler)
+
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 
