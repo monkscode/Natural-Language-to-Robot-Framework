@@ -6,14 +6,15 @@
 ![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-purple.svg)
 
-**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, execute infinitely—even if your application changes!
+**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, run repeatedly — and when your application changes, regenerate the test from the same plain-English description.
 
 ```
 "Open Flipkart and search for shoes and then get the first product name"
                             ↓
-        [4 AI Agents Working Together]
+   [AI planning + real-browser element detection + code generation,
+        gated by a deterministic Robot Framework validation]
                             ↓
-    ✅ Working Robot Framework Test (Can run forever)
+        ✅ Working, validated Robot Framework Test
 ```
 
 ## 🚀 What Can Mark 1 Do For You?
@@ -27,7 +28,7 @@
 ### 📝 Write Once, Execute Infinitely
 - **Reusable Tests** - Generate test code once, run it 1000 times
 - **Environment Agnostic** - Same test works on dev, staging, and production
-- **No Re-recording Needed** - Unlike traditional record-and-playback tools, AI keeps up with UI changes
+- **No Re-recording Needed** - Unlike traditional record-and-playback tools, when the UI changes you regenerate from the same plain-English description instead of re-recording
 - **Cost Efficient** - Setup overhead paid once, then unlimited test runs
 
 ### 🧠 Gets Smarter Over Time
@@ -122,7 +123,7 @@ python tools/browser_use_service.py
 
 **In Technical Terms:**
 
-Mark 1 uses a **multi-agent AI system** to transform your natural language into working tests:
+Mark 1 uses **AI agents combined with deterministic validation** to transform your natural language into working tests:
 
 ```
 Your Query → [AI Processing] → Robot Framework Code → Execution → Results
