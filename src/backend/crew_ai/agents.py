@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None,
-                 keyword_search_tool=None,
                  planner_context=None,
                  assembler_context=None):
         """
@@ -25,7 +24,6 @@ class RobotAgents:
             model_provider: "local", "gemini", or "vertex"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            keyword_search_tool: KeywordSearchTool instance (optional, added to code assembler tools)
             planner_context: Optimized context for Test Automation Planner (optional)
             assembler_context: Optimized context for Code Assembler (optional)
         """
@@ -47,7 +45,12 @@ class RobotAgents:
         # this line they silently vanish from metrics and pricing.
         self.planner_llm._token_usage = self.llm._token_usage
         self.library_context = library_context
-        self.keyword_search_tool = keyword_search_tool
+
+        # NOTE: the keyword-search tool was RETIRED (Task 24R Stage 1,
+        # owner-approved 2026-07-11): 0 invocations across 15,987 traced
+        # calls, unreachable by construction (the prompts forbid the ReAct
+        # syntax CrewAI tool calls require). Retirement unlocks assembler
+        # structured output (Stage 3). Do not re-attach without new evidence.
 
         # Role-specific optimized contexts
         self.planner_context = planner_context
@@ -118,18 +121,15 @@ class RobotAgents:
         return Agent(
             role="Test Automation Planner",
             goal=f"Break down a natural language query into a structured series of high-level test steps for Robot Framework using {library_name}. ONLY include elements and actions explicitly mentioned in the user's query.",
+            # The detailed rulebook (explicit-elements-only, no popup steps,
+            # etc.) lives ONCE, in the task description's
+            # EXPLICIT_ELEMENTS_ONLY_RULES component — the backstory used to
+            # duplicate it as an 8-rule list (~400 tokens, finding F9).
             backstory=(
-                "You are an expert test automation planner with a strict focus on user requirements. "
-                "Your task is to analyze the user's query and convert ONLY the explicitly mentioned actions into structured test steps. "
-                "CRITICAL RULES:\n"
-                "1. ONLY create steps for elements and actions explicitly mentioned by the user\n"
-                "2. DO NOT add popup dismissal, cookie consent, or any 'smart' helper steps\n"
-                "3. DO NOT anticipate or add steps for common website patterns (login, popups, etc.)\n"
-                "4. The browser automation will handle popups contextually - you don't need to\n"
-                "5. If user says 'search for shoes', create steps for: search input + enter. Nothing else.\n"
-                "6. If user says 'get product name', create step for: get product name. Nothing else.\n"
-                "7. Be meticulous but ONLY for what user explicitly asked for.\n"
-                "8. Create HIGH-LEVEL steps - the Code Assembler will handle keyword details."
+                "You are an expert test automation planner with a strict focus on user "
+                "requirements: you convert ONLY the actions explicitly mentioned in the "
+                "user's query into structured, HIGH-LEVEL test steps — the Code Assembler "
+                "handles keyword and implementation details."
                 f"{library_guidance}"
             ),
             llm=self.planner_llm,
@@ -147,62 +147,22 @@ class RobotAgents:
         library_knowledge = self._get_agent_context("assembler")
 
         return Agent(
-            role="Robot Framework Code Generator (Output ONLY Code)",
-            goal=f"Generate ONLY raw Robot Framework code using {self.library_context.library_name if self.library_context else 'Robot Framework'}. NO explanations, NO thinking process, ONLY code.",
+            role="Robot Framework Code Generator",
+            goal=f"Generate complete, executable Robot Framework code using {self.library_context.library_name if self.library_context else 'Robot Framework'} and return it as a JSON object with a single 'code' key.",
+            # Single output contract. The old backstory demanded raw code
+            # ("start IMMEDIATELY with *** Settings ***") while the task
+            # description demanded {"code"} JSON — the model chose JSON 30/30
+            # on the 2026-07-11 bench and the raw-code manifesto only fed the
+            # salvage net (finding F3).
             backstory=(
-                "You are a CODE PRINTER, not a code explainer. Your ONLY job is to output raw Robot Framework code.\n\n"
-                
-                "🚫 **ABSOLUTELY FORBIDDEN IN YOUR OUTPUT** 🚫\n"
-                "You must NEVER include:\n"
-                "❌ Thinking process ('Thought:', 'I will', 'Let me', 'First', 'Now')\n"
-                "❌ Explanations ('From the first step:', 'Also add', 'This is because')\n"
-                "❌ Markdown formatting ('**Variables:**', '```robot', '```')\n"
-                "❌ Numbered lists ('1. New Browser', '2. New Context')\n"
-                "❌ Commentary ('# This does X', except actual Robot Framework comments)\n"
-                "❌ Any text before *** Settings ***\n"
-                "❌ Any text after the last keyword (Close Browser, etc.)\n\n"
-                
-                "✅ **YOUR OUTPUT MUST BE** ✅\n"
-                "ONLY raw Robot Framework code that:\n"
-                "1. Starts IMMEDIATELY with *** Settings *** (first line, first character)\n"
-                "2. Contains ONLY valid Robot Framework syntax\n"
-                "3. Has NO explanatory text anywhere\n"
-                "4. Can be directly saved as a .robot file and executed\n\n"
-                
-                "📋 **EXAMPLE OF CORRECT OUTPUT** 📋\n"
-                "*** Settings ***\n"
-                "Library    Browser\n"
-                "Library    BuiltIn\n\n"
-                "*** Variables ***\n"
-                "${browser}    chromium\n\n"
-                "*** Test Cases ***\n"
-                "Generated Test\n"
-                "    New Browser    ${browser}\n"
-                "    Close Browser\n\n"
-                
-                "❌ **EXAMPLE OF WRONG OUTPUT** ❌\n"
-                "Now, I will assemble the code.*** Settings ***  ← WRONG! No text before ***\n"
-                "**Variables:**  ← WRONG! No markdown headers\n"
-                "From the first step: ...  ← WRONG! No explanations\n\n"
-                
-                "🎯 **REMEMBER** 🎯\n"
-                "You are a CODE PRINTER. Your output is directly saved as a .robot file.\n"
-                "If you include ANY text that is not valid Robot Framework syntax, the file will be broken.\n"
-                "Think of yourself as a printer that can ONLY print code, nothing else.\n\n"
-                
-                "🔍 **KEYWORD SYNTAX LOOKUP (CRITICAL)** 🔍\n"
-                "You have access to 'keyword_search' tool. USE IT BEFORE generating code when:\n"
-                "- You see ANY keyword not in common list (New Browser, Click, Fill Text, Get Text)\n"
-                "- Step value contains '=' pattern (e.g., 'something=value') - may need splitting\n"
-                "- You're not 100% sure about argument count or order\n"
-                "Pattern: If value is 'x=y', search the keyword first - tool will show if it needs\n"
-                "separate args <x> <y> or combined 'x=y'. Follow the tool's argument structure exactly.\n\n"
-                
-                "When you receive input, immediately output the code starting with *** Settings ***.\n"
-                "Do NOT explain what you're doing. Do NOT think out loud. Just output the code."
+                "You are a Robot Framework code generator for automated web tests. "
+                "Your reply is parsed by a machine, not read by a human.\n\n"
+                "**OUTPUT CONTRACT (the ONLY accepted format):**\n"
+                "Reply with ONE JSON object: {\"code\": \"<complete .robot file content>\"}\n"
+                "- \"code\" holds the entire Robot Framework file as a string, with \\n for newlines\n"
+                "- No markdown fences, no explanations, no thinking text — just the JSON object"
                 f"{library_knowledge}"
             ),
-            tools=[self.keyword_search_tool] if self.keyword_search_tool else [],
             llm=self.llm,
             verbose=True,
             # No in-crew delegation: the LLM validator agent was removed and replaced

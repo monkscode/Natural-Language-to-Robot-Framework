@@ -89,32 +89,6 @@ Element descriptions must be SPECIFIC and include SPATIAL/CONTEXTUAL clues to he
    - This ensures the actual clickable input control is targeted, not just text
 """
 
-    LOCATOR_USAGE_RULES = """
-⚠️ **CRITICAL LOCATOR USAGE RULE** ⚠️
-When mapping locators to steps:
-1. Use ONLY the 'best_locator' value from locator_mapping
-2. DO NOT analyze or select from 'all_locators' array
-3. DO NOT override with your own preference
-4. DO NOT second-guess the locator selection
-5. The 'best_locator' has already been:
-   - AI-detected with vision on actual page
-   - Validated with Playwright (unique & working)
-   - Scored by quality (ID=100, text=65, XPath=18)
-   - Re-ranked to select optimal option
-6. Even if you see a 'better' locator in all_locators, IGNORE IT
-7. Your ONLY job is to copy best_locator values to steps
-
-Process:
-- Go through each test step again
-- If step needed a locator (e.g., elem_1, elem_2, elem_3):
-  * Add 'locator' key to that step's JSON
-  * Use the 'best_locator' value EXACTLY from locator_mapping
-  * DO NOT modify, analyze, or substitute the locator
-  * ALSO add 'element_type' from the response (e.g., 'input', 'select')
-- If step didn't need a locator (Open Browser, Close Browser):
-  * Leave it as-is (no locator key needed)
-"""
-
     # ═══════════════════════════════════════════════════════════════════════════
     # ASSEMBLY COMPONENTS - Used in assemble_code_task
     # ═══════════════════════════════════════════════════════════════════════════
@@ -123,87 +97,48 @@ Process:
 --- CRITICAL: VARIABLE DECLARATION RULES ---
 1. **ALWAYS include *** Variables *** section** (even if empty)
 2. **Declare ALL variables before use:**
-   - If Open Browser step has 'browser' key → ${browser}    <value from step>
-   - If Open Browser step has 'options' key → ${options}    <value from step>
+   - Browser init step → ${browser}    <value from step>, ${headless}    <value from step>
    - For each element with locator → ${elem_X_locator}    <locator value>
    - For Get Text results → ${variable_name}    (no initial value needed)
 
 3. **Variable Naming Convention:**
-   - Browser config: ${browser}, ${options}
+   - Browser config: ${browser}, ${headless}
    - Element locators: ${search_box_locator}, ${product_name_locator}
    - Retrieved values: ${product_name}, ${product_price}, ${result}
-
-4. **Extracting Values from Steps:**
-   - Look for 'browser' key in Open Browser step → use as ${browser} value
-   - Look for 'options' key in Open Browser step → use as ${options} value
-   - Look for 'locator' key in each step → declare as ${elem_X_locator}
 
 **Example Variable Extraction:**
 If you receive:
 ```json
 {
-  "keyword": "Open Browser",
+  "keyword": "New Browser",
   "value": "https://www.flipkart.com",
-  "browser": "chrome",
-  "options": "add_argument('--headless')"
+  "browser": "chromium",
+  "headless": "True"
 }
 ```
 You MUST declare:
 ```robot
 *** Variables ***
-${browser}    chrome
-${options}    add_argument('--headless')
+${browser}    chromium
+${headless}    True
 ```
 """
 
-    USE_PROVIDED_LOCATORS_RULES = """
---- CRITICAL: USE PROVIDED LOCATORS EXACTLY (NO EXCEPTIONS) ---
+    LOCATOR_RULES = """
+--- CRITICAL: LOCATOR RULES (USE PROVIDED LOCATORS EXACTLY) ---
 ⚠️ **MOST IMPORTANT RULE FOR LOCATORS** ⚠️
 
-The locators provided have been:
-- Found by AI vision on the actual webpage
-- Validated to work correctly
-- Scored and prioritized (ID > data-testid > name > aria-label > text > XPath)
-- Selected as the BEST option for stability
+The locators provided have been found by AI vision on the actual webpage,
+validated to work, and scored for stability. Your job is code assembly,
+not locator optimization.
 
-**YOU MUST:**
-1. Copy the EXACT locator value from the 'locator' field
-2. DO NOT modify, improve, or convert the locator
-3. DO NOT change id=X to xpath=//*[@id='X']
-4. DO NOT change any locator format
-5. If you think a locator is wrong, USE IT ANYWAY and add a comment
-
-**WHY THIS IS CRITICAL:**
-- The locator was validated on the actual page
-- Changing it will break the test
-- The scoring system already selected the best option
-- Your job is code assembly, not locator optimization
-
-**EXAMPLES:**
-✅ CORRECT:
-Input: {"locator": "id=submit-btn"}
-Output: ${submit_locator}    id=submit-btn
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "id=submit-btn"}
-Output: ${submit_locator}    xpath=//*[@id='submit-btn']  ← WRONG!
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "xpath=//button[1]"}
-Output: ${submit_locator}    id=submit-btn  ← WRONG! Use provided XPath!
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "name=q"}
-Output: ${search_locator}    id=search-box  ← WRONG! Use provided name locator!
-
-⚠️ REMEMBER: Locators are pre-validated and pre-scored. DO NOT modify them! ⚠️
-"""
-
-    LOCATOR_MAPPING_RULES = """
---- LOCATOR MAPPING RULES ---
-For each step that needs a locator:
+**For each step that needs a locator:**
 1. Check if 'locator' key exists and 'found' is true
-2. If found: Declare locator as variable and use it EXACTLY as provided
+2. If found: declare the locator as a variable and copy the EXACT value
+   from the 'locator' field
+   - DO NOT modify, improve, or convert the locator
+   - DO NOT change id=X to xpath=//*[@id='X'] or any other format
+   - If you think a locator is wrong, USE IT ANYWAY and add a comment
 3. If NOT found (found=false or error present):
    a. Add comment: # WARNING: Locator not found for <element_description>
    b. Use placeholder: xpath=//PLACEHOLDER_FOR_<element_id>
@@ -212,11 +147,11 @@ For each step that needs a locator:
 **Example for found locator:**
 ```robot
 *** Variables ***
-${search_box_locator}    id=search-input  # ← Use EXACT value from 'locator' field
+${search_box_locator}    id=search-input  # ← EXACT value from 'locator' field
 
 *** Test Cases ***
 Test
-    Input Text    ${search_box_locator}    shoes
+    Fill Text    ${search_box_locator}    shoes
 ```
 
 **Example for missing locator:**
@@ -230,6 +165,10 @@ Test
     # Manual intervention required: Inspect page and update locator
     ${product_name}=    Get Text    ${product_locator}
 ```
+
+❌ WRONG (DO NOT DO THIS):
+Input: {"locator": "id=submit-btn"}
+Output: ${submit_locator}    xpath=//*[@id='submit-btn']  ← WRONG! Copy it EXACTLY.
 """
 
     STABILITY_WARNING_RULES = """
@@ -288,9 +227,9 @@ If a step in the context contains the keys `condition_type` and `condition_value
 
 **Example:**
 *Input Step:*
-`{"keyword": "Input Text", "locator": "id=discount-code", "value": "SAVE10", "condition_type": "IF", "condition_value": "${total} > 100"}`
+`{"keyword": "Fill Text", "locator": "id=discount-code", "value": "SAVE10", "condition_type": "IF", "condition_value": "${total} > 100"}`
 *Output Code:*
-`    Run Keyword If    ${total} > 100    Input Text    id=discount-code    SAVE10`
+`    Run Keyword If    ${total} > 100    Fill Text    id=discount-code    SAVE10`
 """
 
     LOOP_HANDLING = """
@@ -328,10 +267,10 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 
 **Simple Loop Example:**
 *Input Step:*
-`{"keyword": "Click Element", "loop_type": "FOR", "loop_source": "@{links}"}`
+`{"keyword": "Click", "loop_type": "FOR", "loop_source": "@{links}"}`
 *Output Code:*
 `    FOR    ${link}    IN    @{links}`
-`        Click Element    ${link}`
+`        Click    ${link}`
 `    END`
 
 **Key Rules:**
@@ -496,12 +435,19 @@ Output:
 ⚠️ **CRITICAL**: Check the 'element_type' field for radio/checkbox elements!
 
 Modern CSS frameworks often HIDE the actual input element with CSS.
-Standard 'Click' may FAIL because the input is not visible.
+Standard 'Click' may FAIL because the input is not visible (Click has NO
+force option).
 
 **When element_type is 'radio' or 'checkbox':**
-1. Use keyword_search tool to search for 'click hidden element force'
-2. The tool will return the correct keyword with force=True option
-3. Use that keyword syntax in your generated code
+Use Check Checkbox with force=True — it checks a checkbox or SELECTS a radio
+button even when the input itself is hidden:
+```robot
+    Check Checkbox    ${locator}    force=True
+```
+To untick a checkbox, same pattern with Uncheck Checkbox:
+```robot
+    Uncheck Checkbox    ${locator}    force=True
+```
 
 **When element_type is something else (button, link, div, etc.):**
 Use standard Click keyword.
@@ -809,20 +755,7 @@ Your task: Generate Robot Framework code and return as JSON.
 1. Final Answer must be a JSON object with "code" key
 2. "code" value: Complete Robot Framework code with \\n for newlines
 3. No markdown, no explanatory text - just the JSON
-
---- KEYWORD SYNTAX LOOKUP (CRITICAL) ---
-⚠️ Use 'keyword_search' tool for unfamiliar keywords.
-
-**BEFORE generating code for unfamiliar keywords:**
-1. Call keyword_search with the EXACT keyword name
-2. Check returned syntax: argument count and order
-3. If tool shows <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
-4. If step value has 'x=y' format, check if tool expects 2 separate args
-
-**Pattern Recognition:**
-- 'attr=value' → likely: Keyword    ${loc}    attr    value (3 args)
-- 'just_text' → likely: Keyword    ${loc}    just_text (2 args)
-- When unsure → ALWAYS search first
+4. For price/numeric validations: use Evaluate to convert strings to numbers
 
 **FORBIDDEN in Final Answer:**
 - Markdown code blocks (```json, ```)
@@ -831,15 +764,4 @@ Your task: Generate Robot Framework code and return as JSON.
 
 **CORRECT Example:**
 {"code": "*** Settings ***\\nLibrary    Browser\\n\\n*** Variables ***\\n${browser}    chromium\\n\\n*** Test Cases ***\\nGenerated Test\\n    New Browser    ${browser}    headless=True\\n    Close Browser"}
-"""
-
-    ASSEMBLY_FORMAT_RULES = """
---- OUTPUT FORMAT ---
-Final Answer must be: {"code": "<robot_code>"}
-
-1. Code must start with *** Settings ***
-2. Use \\n for newlines
-3. End with last test keyword (e.g., Close Browser)
-4. No explanatory text in code value
-5. For price/numeric validations: use Evaluate to convert strings to numbers
 """

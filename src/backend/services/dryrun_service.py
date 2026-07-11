@@ -421,8 +421,8 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
 
     # FRESH instances — own CleanedLLMWrapper + monitor, so the MAIN crew's
     # calculate_usage_metrics()/llm_monitor never see these repair calls (no
-    # double-count; §5). No keyword_search tool: the assembler relies on
-    # library_context for keyword knowledge (§8.2).
+    # double-count; §5). The assembler relies on library_context for keyword
+    # knowledge (§8.2).
     agents = RobotAgents(model_provider, model_name, library_context)
     tasks = RobotTasks(library_context)
     assembler = agents.code_assembler_agent()

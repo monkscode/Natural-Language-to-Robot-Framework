@@ -416,7 +416,6 @@ class TestRunCrewProgressQueue:
         )
         mock_provider = MagicMock()
         mock_provider.get_agent_context.return_value = fake_result
-        mock_provider.get_keyword_search_tool.return_value = None
 
         with ExitStack() as stack:
             stack.enter_context(patch("src.backend.crew_ai.crew.Crew"))

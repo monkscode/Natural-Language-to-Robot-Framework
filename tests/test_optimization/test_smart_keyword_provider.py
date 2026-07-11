@@ -660,10 +660,13 @@ class TestRegression:
         assert "RELEVANT KEYWORDS" in result.context
 
     def test_zero_context_fallback(self):
-        """With no predictions, should fall back to zero-context + tool."""
+        """With no predictions, should fall back to core-rules-only zero-context
+        (the keyword-search tool and its usage instructions were retired,
+        Task 24R Stage 1)."""
         p = create_provider(predicted_keywords=None)
         result = p.get_agent_context("click button", "assembler")
-        assert "keyword_search" in result.context.lower() or "KEYWORD SEARCH" in result.context
+        assert "CORE RULES" in result.context
+        assert "keyword_search" not in result.context.lower()
 
     def test_full_context_fallback_unknown_role(self):
         """Unknown roles fall back to code_assembly_context with a warning

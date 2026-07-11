@@ -4,7 +4,7 @@ Smart Keyword Provider with Hybrid Architecture
 This module orchestrates the 4-tier keyword retrieval system:
 0. Surgical Learning Hints (from learning engines — NEW in DAY_06)
 1. Core Rules (always included, ~300 tokens)
-2. Predicted Keywords (from pattern learning) OR Zero-Context + Tool
+2. Predicted Keywords (from pattern learning) OR Zero-Context (core rules only)
 3. Full Context Fallback (if both fail)
 
 Returns AgentContextResult (NamedTuple) containing both the context string
@@ -16,7 +16,6 @@ import random
 from typing import Optional, List, Dict, NamedTuple
 from .pattern_learning import QueryPatternMatcher
 from .keyword_vector_store import KeywordVectorStore
-from .keyword_search_tool import KeywordSearchTool
 from .context_pruner import ContextPruner
 from .learning_config import LEARNING_CONFIG
 
@@ -129,7 +128,7 @@ class SmartKeywordProvider:
     Intelligent keyword provider with hybrid approach:
     - Tier 0: Surgical Learning Hints (from past executions)
     - Tier 1: Core Rules (always included)
-    - Tier 2: Predicted Keywords OR Zero-Context + Tool
+    - Tier 2: Predicted Keywords OR Zero-Context (core rules only)
     - Tier 3: Full Context Fallback
     """
 
@@ -510,18 +509,20 @@ class SmartKeywordProvider:
         """
         return self.library_context.core_rules
 
-    def _format_zero_context_with_tool(self, agent_role: str) -> str:
+    def _format_zero_context(self, agent_role: str) -> str:
         """
-        Format minimal context with keyword search tool instructions.
+        Format minimal core-rules-only context.
 
         Used when no predictions are available from pattern learning.
-        Target: core rules (300) + tool instructions (200) = 500 tokens
+        (This tier used to teach the retired keyword-search tool's ReAct
+        call syntax — Task 24R Stage 1 reduced it to the core rules; the
+        static KEYWORD REFERENCE list lives in code_assembly_context.)
 
         Args:
             agent_role: "planner" or "assembler"
 
         Returns:
-            Formatted context string with core rules + tool usage instructions
+            Formatted context string with core rules
         """
         core_rules = self._get_core_rules()
 
@@ -529,30 +530,6 @@ class SmartKeywordProvider:
 You are an expert Robot Framework developer using {self.library_context.library_name}.
 
 {core_rules}
-
-**KEYWORD SEARCH TOOL AVAILABLE:**
-
-You have access to a keyword_search tool to find relevant keywords on-demand.
-When you need a keyword, search for it by describing what you want to do.
-
-**How to use the tool:**
-- Need to click? Search: "click button element"
-- Need to input text? Search: "type text input field"
-- Need to wait? Search: "wait element visible"
-- Need to get text? Search: "get text from element"
-
-The tool will return the top 3 matching keywords with documentation and examples.
-Use the exact keyword names and syntax from the tool results.
-
-**Examples:**
-```
-Action: keyword_search
-Action Input: "click button"
-
-Result: Click, Click Element, Click Button (with docs and examples)
-```
-
-Use this tool whenever you need to find the right keyword for an action.
 """
 
     def _format_predicted_context(self, predicted_keywords: List[str], agent_role: str, user_query: str = "") -> str:
@@ -652,8 +629,6 @@ You are an expert Robot Framework developer using {self.library_context.library_
 
 **RELEVANT KEYWORDS (from similar queries):**
 {predicted_docs}
-
-Use keyword_search tool if you need additional keywords.
 """
 
     # ------------------------------------------------------------------
@@ -668,7 +643,7 @@ Use keyword_search tool if you need additional keywords.
         Implements 4-tier retrieval:
         0. Surgical Learning Hints (from past executions — NEW)
         1. Core Rules (always)
-        2. Predicted Keywords OR Zero-Context + Tool
+        2. Predicted Keywords OR Zero-Context (core rules only)
         3. Full Context Fallback
 
         Args:
@@ -741,7 +716,7 @@ Use keyword_search tool if you need additional keywords.
                 except Exception as e:
                     logger.warning(f"Failed to format predicted context: {e}, falling back to zero-context")
             else:
-                logger.info("No predictions from pattern learning, using zero-context + tool")
+                logger.info("No predictions from pattern learning, using zero-context (core rules only)")
 
                 # Track that no prediction was used
                 if self.metrics:
@@ -759,10 +734,10 @@ Use keyword_search tool if you need additional keywords.
                     keyword_count=0,
                 )
 
-        # Tier 2 Fallback: Zero-context + tool instructions
+        # Tier 2 Fallback: Zero-context (core rules only)
         if existing_context is None:
             try:
-                existing_context = self._format_zero_context_with_tool(agent_role)
+                existing_context = self._format_zero_context(agent_role)
             except Exception as e:
                 logger.error(f"Zero-context formatting failed: {e}, falling back to full context")
                 # Tier 3: Full context fallback (baseline behavior)
@@ -806,17 +781,4 @@ Use keyword_search tool if you need additional keywords.
             # Default to code assembly context
             logger.warning(f"Unknown agent role '{agent_role}', using code_assembly_context")
             return self.library_context.code_assembly_context
-
-    def get_keyword_search_tool(self) -> KeywordSearchTool:
-        """
-        Get keyword search tool for agents.
-
-        Returns:
-            KeywordSearchTool instance configured for this library
-        """
-        return KeywordSearchTool(
-            library_name=self.library_context.library_name,
-            vector_store=self.vector_store,
-            metrics=self.metrics
-        )
 

@@ -26,7 +26,7 @@ the model construction or leak fabricated locator keys.
 
 FAILURE CONTRACT (Task 16 §F, deliberate): tool error OR found:false → the
 step gets NO locator → the Assembler's existing placeholder path
-(USE_PROVIDED_LOCATORS_RULES / LOCATOR_MAPPING_RULES, Task 12). NO retry,
+(LOCATOR_RULES, Task 12). NO retry,
 NO second tool call, NO reformulation. The old LLM once violated its own
 call-ONCE rule and returned a fabricated locator for a non-existent element;
 this module makes that impossible.

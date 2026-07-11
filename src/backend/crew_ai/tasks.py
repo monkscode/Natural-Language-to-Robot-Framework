@@ -230,10 +230,13 @@ class RobotTasks:
 
         # Cache static context - computed once on initialization
         # These values depend on library_context which is set at init time
+        # NOTE (Task 24R Stage 1): code-structure and viewport instructions are
+        # NOT cached/shipped here anymore — they live ONCE in the assembler
+        # agent's system prompt (library_context.code_assembly_context via
+        # RobotAgents._get_agent_context); the task description used to re-ship
+        # both verbatim (~1,130 tokens/run, finding F1).
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
-        self._cached_code_structure = self._get_code_structure_template()
         self._cached_browser_init = self._get_browser_init_instructions()
-        self._cached_viewport = self._get_viewport_instructions()
 
     def _get_keyword_guidelines(self) -> str:
         """Get MINIMAL keyword guidelines for planning phase."""
@@ -250,31 +253,6 @@ class RobotTasks:
             • Keyboard Actions: Pressing keys
             
             Focus on HIGH-LEVEL steps. Code Assembler handles details.
-            """
-
-    def _get_code_structure_template(self) -> str:
-        """Get code structure template from library context or use defaults."""
-        if self.library_context:
-            # Use dynamic code structure from library context
-            return self.library_context.code_assembly_context
-        else:
-            # Fallback when constructed without a context (identification-only
-            # usage in tests) — Browser Library is the only supported target.
-            return """
-            --- MANDATORY STRUCTURE ---
-            ```robot
-            *** Settings ***
-            Library    Browser
-            Library    BuiltIn
-
-            *** Test Cases ***
-            Generated Test
-                New Browser    chromium    headless=True
-                New Context    viewport={'width': 1920, 'height': 1080}
-                New Page    <url>
-                # Test steps here
-                Close Browser
-            ```
             """
 
     def _get_browser_init_instructions(self) -> str:
@@ -299,46 +277,6 @@ class RobotTasks:
     - Example: {"keyword": "New Browser", "browser": "chromium", "headless": "True"}
             """
 
-    def _get_viewport_instructions(self) -> str:
-        """Get viewport configuration instructions if needed."""
-        if self.library_context and self.library_context.requires_viewport_config:
-            return f"""
---- VIEWPORT CONFIGURATION (CRITICAL FOR {self.library_context.library_name.upper()}) ---
-
-**MANDATORY**: After "New Browser" and before "New Page", you MUST add:
-{self.library_context.get_viewport_config_code()}
-
-**Why**: Headless Chromium's default window is 800x600 even when the
-viewport is set to None (that only disables Playwright's viewport
-*emulation* layer, not the underlying window size). At 800x600, many real sites switch
-to a mobile/responsive layout — nav items collapse into closed hamburger
-menus, and text-based locators can silently match the wrong (but visible)
-element instead of erroring. This causes:
-- Elements outside viewport are not detected
-- Locators match decoy elements in the mobile/narrow layout
-- Tests fail with "element not found" or timeout errors on later steps
-
-**Correct Order**:
-1. New Browser    ${{browser}}    headless=${{headless}}
-2. New Context    viewport={{'width': 1920, 'height': 1080}}    ← REQUIRED
-3. New Page    ${{url}}
-
-**Example**:
-```robot
-*** Test Cases ***
-Generated Test
-    New Browser    chromium    headless=True
-    New Context    viewport={{'width': 1920, 'height': 1080}}
-    New Page    https://example.com
-    # Test steps here
-```
-
-**CRITICAL**: an explicit desktop-sized viewport ensures the site renders
-its normal desktop layout, matching what was seen during element
-identification (which already runs at 1920x1080).
-            """
-        return ""
-
     def _get_task_hints(self, role: str) -> str:
         """Get mandatory hint block for a task description, or empty string.
 
@@ -361,10 +299,16 @@ identification (which already runs at 1920x1080).
 
     def plan_steps_task(self, agent, query) -> Task:
         # Build prompt using PromptComponents for maintainability
-        description = f"""{self._get_task_hints("planner")}
-            CRITICAL: Any code examples in the USER FEEDBACK blocks above are reference context only.
-            Your output MUST be pure JSON — do NOT echo, copy, or reproduce any Robot Framework code from those blocks.
-
+        # The preamble only makes sense when a hint block was actually
+        # injected above it — with no hints it referenced blocks that do not
+        # exist (finding F9; always the case in bench, learning-OFF).
+        planner_hints = self._get_task_hints("planner")
+        if planner_hints:
+            planner_hints += (
+                "CRITICAL: Any code examples in the USER FEEDBACK blocks above are reference context only.\n"
+                "Your output MUST be pure JSON — do NOT echo, copy, or reproduce any Robot Framework code from those blocks.\n"
+            )
+        description = f"""{planner_hints}
             Your mission is to act as an expert Test Automation Planner. You must analyze a user's natural language query and decompose it into a comprehensive, step-by-step test plan that a junior test engineer could follow.
 
             The user query is: "{query}"
@@ -373,7 +317,7 @@ identification (which already runs at 1920x1080).
 
             --- CORE PRINCIPLES ---
             1.  **Explicitness:** Your plan must be explicit. Do not assume any prior context. If a user says "log in", you must include steps for navigating to the login page, entering the username, entering the password, and clicking the submit button.
-            2.  **Decomposition:** Break down complex actions into smaller, single-action steps. For example, "search for a product and add it to the cart" should be multiple steps: "Input text into search bar", "Click search button", "Click product link", "Click add to cart button".
+            2.  **Decomposition:** Break down complex actions into smaller, single-action steps. For example, "search for a product and add it to the cart" should be multiple steps: "Input text into search bar", "Press Keys with Enter to search", "Click product link", "Click add to cart button".
             3.  **Keyword Precision:** Use the most appropriate Robot Framework keyword for each action.
             4.  **User Intent Only:** ONLY create steps for what the user explicitly asked for.
 
@@ -427,16 +371,12 @@ identification (which already runs at 1920x1080).
             "elements carry validated locators and their metadata.\n"
             f"{identified_steps_json}\n\n"
             "Extract the steps array from the 'steps' key to generate Robot Framework code.\n\n"
-            
-            f"{self._cached_code_structure}\n\n"
-            
-            f"{self._cached_viewport}\n\n"
-            
+
+            # Code structure + viewport rules are NOT re-shipped here — they
+            # live once, in the assembler's system prompt (F1 dedup).
             f"{PromptComponents.VARIABLE_DECLARATION_RULES}\n\n"
-            
-            f"{PromptComponents.USE_PROVIDED_LOCATORS_RULES}\n\n"
-            
-            f"{PromptComponents.LOCATOR_MAPPING_RULES}\n\n"
+
+            f"{PromptComponents.LOCATOR_RULES}\n\n"
 
             f"{PromptComponents.STABILITY_WARNING_RULES}\n\n"
             
@@ -457,8 +397,6 @@ identification (which already runs at 1920x1080).
             f"{PromptComponents.STATE_VERIFICATION_HANDLING}\n"
 
             f"{libraries_section}"
-            
-            f"{PromptComponents.ASSEMBLY_FORMAT_RULES}"
         )
         
         return Task(

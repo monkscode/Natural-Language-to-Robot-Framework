@@ -13,7 +13,7 @@ Tables (in the consolidated DB):
   accumulated (user_query -> keywords) patterns from successful runs.
 - kw_library_version(library, version) — for rebuild-on-version-change.
 
-Referenced by: keyword_search_tool.py, pattern_learning.py, feedback_loop.py, crew.py.
+Referenced by: pattern_learning.py, feedback_loop.py, crew.py.
 """
 
 import json

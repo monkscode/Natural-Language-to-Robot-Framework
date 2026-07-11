@@ -197,7 +197,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
         )
     
     # Initialize optimization system if enabled
-    keyword_search_tool = None
     smart_provider = None
     baseline_context_tokens = 0
     optimized_context_tokens = 0
@@ -382,9 +381,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                     f"({abs(pct):.1f}% {direction})"
                 )
             
-            # Get keyword search tool
-            keyword_search_tool = smart_provider.get_keyword_search_tool()
-            
             logger.info("✅ Optimization system initialized successfully for ALL agents")
             if feedback_loop is not None:
                 feedback_loop._optimization_init_ok = True
@@ -394,7 +390,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
             planner_context = None
             assembler_context = None
-            keyword_search_tool = None
             smart_provider = None
             optimization_metrics = None
             hint_context = {}
@@ -414,7 +409,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
         model_name,
         library_context,
         assembler_context=assembler_context,
-        keyword_search_tool=keyword_search_tool,
         planner_context=planner_context,
     )
     tasks = RobotTasks(library_context, hint_context=hint_context)

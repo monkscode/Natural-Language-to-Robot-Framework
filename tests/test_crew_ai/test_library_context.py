@@ -116,23 +116,14 @@ class TestBrowserLibraryContext:
         second = ctx.code_assembly_context
         assert first is second
 
-    def test_code_assembly_context_includes_tom_select_template(self, ctx):
-        """Phase 3.1 — Tom Select interaction template must be present so the
-        Code Assembler agent can route ``dropdown_framework='tom-select'``
-        elements to the id-anchored / positional templates from
-        docs/ELEMENT_TYPE_CLASSIFIER_ARCHITECTURE.md Section 6."""
+    def test_code_assembly_context_excludes_tom_select_template(self, ctx):
+        """Task 24R Stage 1 — the Tom Select interaction template moved OUT
+        of the always-on system context; its single home is the
+        DROPDOWN_HANDLING prompt component (template content pinned by
+        test_prompt_components.TestDropdownHandlingPromptComponent)."""
         ctx_str = ctx.code_assembly_context
-        assert "TOM SELECT INTERACTION" in ctx_str
-        assert "tom-select" in ctx_str
-        # Preferred path: Evaluate JavaScript targeting id=${select_id} (the hidden <select>).
-        assert "Evaluate JavaScript" in ctx_str
-        assert "id=${select_id}" in ctx_str
-        assert "el.tomselect.setValue" in ctx_str
-        # Fallback path: class-based lookup via select.tomselected — position-independent.
-        assert "closest('.ts-wrapper').parentElement.querySelector('select.tomselected')" in ctx_str
-        assert "if (sel && sel.tomselect)" in ctx_str
-        # Old click-chain class selectors must be absent.
-        assert ".ts-option" not in ctx_str
+        assert "TOM SELECT INTERACTION" not in ctx_str
+        assert "tomselect" not in ctx_str
 
     def test_get_full_context_planner(self, ctx):
         context = ctx.get_full_context("planner")
