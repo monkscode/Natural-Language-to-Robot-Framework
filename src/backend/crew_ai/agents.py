@@ -40,6 +40,12 @@ class RobotAgents:
         self.planner_llm = get_llm(model_provider, model_name,
                                    response_format=PlanOutput)
         self.planner_llm._monitor = self.llm._monitor
+        # Usage accounting shares the same way: workflow metrics read token
+        # usage ONCE, from the assembler crew's agent.llm (BaseLLM._token_usage,
+        # a dict mutated in place and assigned only in __init__). Aliasing it
+        # keeps the planner's calls/tokens/cost in that single read — without
+        # this line they silently vanish from metrics and pricing.
+        self.planner_llm._token_usage = self.llm._token_usage
         self.library_context = library_context
         self.keyword_search_tool = keyword_search_tool
 

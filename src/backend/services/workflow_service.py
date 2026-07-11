@@ -666,9 +666,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
                 logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
                 # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
-                # calculate_usage_metrics() covers the WHOLE pipeline: both kickoffs
-                # share one LLM instance whose _token_usage accumulates across them,
-                # and CrewAI sums the shared LLM once per agent (here: once — the old
+                # calculate_usage_metrics() covers the WHOLE pipeline: the planner
+                # and assembler wrappers are separate instances (Task 22 gave the
+                # planner its own response_format) that ALIAS one _token_usage dict
+                # (RobotAgents.__init__), so it accumulates across both kickoffs and
+                # CrewAI sums it once per agent (here: once — the old
                 # 3-agent crew triple-counted). The authoritative call count is in
                 # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
                 # (agents.llm._monitor) — incremented exactly once per

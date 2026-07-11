@@ -506,10 +506,11 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             logger.info("🏁 Crew execution finished")
             # agents.llm._monitor is the authoritative call count: incremented once per
             # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-            # (Both crews share the same agents.llm instance, so the monitor —
-            # and the assembler crew's calculate_usage_metrics(), which reads
-            # the shared LLM's cumulative usage once for its single agent —
-            # cover the planner and assembler stages together.)
+            # (The planner has its own wrapper instance since Task 22, but it
+            # aliases agents.llm's _monitor AND _token_usage — see
+            # RobotAgents.__init__ — so the monitor and the assembler crew's
+            # calculate_usage_metrics(), which reads the shared accumulator once
+            # for its single agent, cover both stages together.)
             logger.info(f"📊 Final LLM Stats: {agents.llm._monitor.get_stats()}")
 
             # NOTE: Pattern learning is NOT done here!
@@ -531,7 +532,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
 
             # The ASSEMBLER crew is returned: workflow_service reads delivered
             # code from its tasks[-1].output and usage metrics from it (the
-            # shared LLM accumulates across both kickoffs).
+            # shared _token_usage accumulator covers both kickoffs).
             return result, assembler_crew, optimization_metrics, hint_metadata, agents.llm._monitor
 
         except Exception as e:

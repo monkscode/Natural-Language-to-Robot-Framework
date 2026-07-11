@@ -78,9 +78,10 @@ class TestPlannerStructuredOutput:
         # against BaseLLM) accepts the mocks
         plain_llm = MagicMock(name="plain", spec=CleanedLLMWrapper)
         planner_llm = MagicMock(name="planner", spec=CleanedLLMWrapper)
-        # _monitor is an instance attribute (set in __init__), invisible to
-        # spec= — seed it so the shared-monitor wiring can read it
+        # _monitor and _token_usage are instance attributes (set in __init__),
+        # invisible to spec= — seed them so the sharing wiring can read them
         plain_llm._monitor = MagicMock(name="monitor")
+        plain_llm._token_usage = {}
         mock_get_llm.side_effect = [plain_llm, planner_llm]
 
         agents = RobotAgents("vertex", "gemini-2.5-flash")
@@ -100,3 +101,29 @@ class TestPlannerStructuredOutput:
 
         # Metrics: one shared monitor object → agents.llm._monitor sees planner calls too
         assert agents.planner_llm._monitor is agents.llm._monitor
+
+    @patch("src.backend.crew_ai.agents.get_llm")
+    def test_planner_llm_shares_token_usage_accumulator(self, mock_get_llm):
+        """Usage accounting: crew.py reads token usage ONCE from the assembler
+        crew, whose single agent holds `agents.llm` — CrewAI's
+        calculate_usage_metrics() reads `agent.llm._token_usage` (BaseLLM dict,
+        mutated in place, assigned only in __init__). The planner's separate
+        wrapper must alias that same dict, or the planner's calls/tokens/cost
+        vanish from workflow metrics (bench evidence: crewai_tokens ==
+        assembler-only tokens on every 2026-07-11 checkpoint run)."""
+        from src.backend.crew_ai.agents import RobotAgents
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+
+        plain_llm = MagicMock(name="plain", spec=CleanedLLMWrapper)
+        planner_llm = MagicMock(name="planner", spec=CleanedLLMWrapper)
+        plain_llm._monitor = MagicMock(name="monitor")
+        # Real BaseLLM seeds this dict in __init__; invisible to spec= mocks
+        plain_llm._token_usage = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "successful_requests": 0, "cached_prompt_tokens": 0,
+        }
+        mock_get_llm.side_effect = [plain_llm, planner_llm]
+
+        agents = RobotAgents("vertex", "gemini-2.5-flash")
+
+        assert agents.planner_llm._token_usage is agents.llm._token_usage
