@@ -133,6 +133,29 @@ class TestExtractPlanUrl:
     def test_none_when_navigation_step_has_no_value(self):
         assert extract_plan_url([_step("Open Browser")]) is None
 
+    def test_url_shaped_value_on_non_navigation_keyword(self):
+        """Planner keyword variance (2026-07-11 bench, q03 rep2): the plan's
+        only URL sat on a 'New Browser' step's value — not a navigation
+        keyword, so the browser call was skipped and every element got a
+        found:false placeholder. A literal URL anywhere in the plan's values
+        must win over that guaranteed failure."""
+        steps = [_step("New Browser", value="https://nutronsystems.com/"),
+                 _step("Click Element", description="Solutions link")]
+        assert extract_plan_url(steps) == "https://nutronsystems.com/"
+
+    def test_navigation_keyword_beats_url_shaped_fallback(self):
+        steps = [
+            _step("New Browser", value="https://fallback.com"),
+            _step("New Page", value="https://explicit-nav.com"),
+        ]
+        assert extract_plan_url(steps) == "https://explicit-nav.com"
+
+    def test_non_url_values_never_extracted(self):
+        """browser-type / input-text values must not be mistaken for the URL."""
+        steps = [_step("New Browser", value="chromium"),
+                 _step("Input Text", description="search box", value="Cierra")]
+        assert extract_plan_url(steps) is None
+
 
 # ─── FORM_ELEMENT_HANDLING port (port checklist #3) ──────────────────────────
 

@@ -159,13 +159,25 @@ def action_for_keyword(keyword: str) -> str:
 
 
 def extract_plan_url(steps: List[Any]) -> Optional[str]:
-    """The URL is the first navigation step's value — nothing is guessed."""
-    for step in steps:
-        step = _as_dict(step)
+    """The URL is the first navigation step's value — nothing is guessed.
+
+    Fallback: the planner's keyword vocabulary is a free string, so the URL
+    sometimes rides on a non-navigation step (bench 2026-07-11 q03: keyword
+    "New Browser", value=<url> — the whitelist miss skipped the browser call
+    and every element got a found:false placeholder). If no navigation step
+    carries a value, the first *literal* URL among the step values is taken;
+    non-URL values (browser names, input text) are never eligible.
+    """
+    dict_steps = [_as_dict(step) for step in steps]
+    for step in dict_steps:
         if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
             value = (step.get("value") or "").strip()
             if value:
                 return value
+    for step in dict_steps:
+        value = (step.get("value") or "").strip()
+        if value.lower().startswith(("http://", "https://")):
+            return value
     return None
 
 
