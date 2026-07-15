@@ -143,6 +143,9 @@ not locator optimization.
    a. Add comment: # WARNING: Locator not found for <element_description>
    b. Use placeholder: xpath=//PLACEHOLDER_FOR_<element_id>
    c. Still generate syntactically valid code
+   d. The action step itself stays a LIVE keyword call using the placeholder
+      variable — NEVER comment out the step. Only the WARNING lines are
+      comments; a commented-out step erases the repair surface
 
 **Example for found locator:**
 ```robot

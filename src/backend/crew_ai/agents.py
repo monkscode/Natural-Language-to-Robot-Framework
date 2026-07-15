@@ -8,7 +8,7 @@ from crewai import Agent
 
 # Import LLM factory function
 from .cleaned_llm_wrapper import get_llm
-from .tasks import PlanOutput
+from .tasks import AssemblyOutput, PlanOutput
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,15 @@ class RobotAgents:
             planner_context: Optimized context for Test Automation Planner (optional)
             assembler_context: Optimized context for Code Assembler (optional)
         """
-        self.llm = get_llm(model_provider, model_name)
+        # 24R Stage 3: the assembler's replies are provider-enforced to the
+        # AssemblyOutput {"code"} schema through the same gated get_llm path
+        # as the planner (Task 22). On providers without schema support
+        # (ollama) get_llm silently drops the schema and the guardrail
+        # salvage net stays the live output contract — never delete the net
+        # while that path exists. The repair crew reuses code_assembler_agent,
+        # so dryrun repairs inherit the same enforcement.
+        self.llm = get_llm(model_provider, model_name,
+                           response_format=AssemblyOutput)
         # Task 22: the planner's replies are provider-enforced to the PlanOutput
         # schema (pure JSON by construction on vertex/gemini; get_llm silently
         # drops the schema for providers without support, e.g. ollama).
