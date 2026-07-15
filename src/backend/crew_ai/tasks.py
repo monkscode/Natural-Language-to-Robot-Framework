@@ -216,6 +216,122 @@ def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     return (False, "Output must contain Robot Framework code. Start with *** Settings *** section.")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# DETERMINISTIC PROMPT COMPOSER (Task 24R Stage 2)
+# ═══════════════════════════════════════════════════════════════════════════
+# The 8 element-type blocks are included only when a MERGED step's own
+# routing fields need them (plan §B trigger table — each trigger reads the
+# same fields its block routes on). Fail-open: ANY doubt or exception →
+# include ALL blocks and ship the steps JSON verbatim = today's prompt.
+
+def _norm(value: Any) -> str:
+    """Trigger-matching view of a step field: lowercased/stripped. Tolerates
+    the tagName fallback in merge_locators ('SELECT') and keyword case drift
+    — a missed trigger would silently drop a NEEDED block."""
+    return str(value).strip().lower() if value is not None else ""
+
+
+def _needs_stability_warning(step: dict) -> bool:
+    stability = step.get("stability")
+    return stability is not None and _norm(stability) != "stable"
+
+
+def _needs_conditional(step: dict) -> bool:
+    return bool(step.get("condition_type") or step.get("condition_value"))
+
+
+def _needs_loop(step: dict) -> bool:
+    return bool(step.get("loop_type")) or _norm(step.get("keyword")) == "get elements"
+
+
+def _needs_dropdown(step: dict) -> bool:
+    return (
+        _norm(step.get("element_type")) in ("select", "dropdown")
+        or bool(step.get("dropdown_framework"))
+        or _norm(step.get("keyword")) == "select options by"
+    )
+
+
+def _needs_checkbox_radio(step: dict) -> bool:
+    return _norm(step.get("element_type")) in ("radio", "checkbox")
+
+
+def _needs_file_upload(step: dict) -> bool:
+    return _norm(step.get("element_type")) == "file-upload"
+
+
+def _needs_date_picker(step: dict) -> bool:
+    return (
+        _norm(step.get("element_type")) == "date-picker"
+        or bool(step.get("datepicker_framework"))
+    )
+
+
+def _needs_state_verification(step: dict) -> bool:
+    return _norm(step.get("keyword")) in ("get classes", "get attribute")
+
+
+# The assembler description's rule sections in TODAY's order — trigger=None
+# marks the always-sent core; the fail-open path (all triggers pass) then
+# reproduces today's prompt exactly.
+_ASSEMBLER_RULE_SECTIONS = (
+    ("VARIABLE_DECLARATION_RULES", None),
+    ("LOCATOR_RULES", None),
+    ("STABILITY_WARNING_RULES", _needs_stability_warning),
+    ("VALIDATION_RULES", None),
+    ("CONDITIONAL_LOGIC_HANDLING", _needs_conditional),
+    ("LOOP_HANDLING", _needs_loop),
+    ("DROPDOWN_HANDLING", _needs_dropdown),
+    ("CHECKBOX_RADIO_HANDLING", _needs_checkbox_radio),
+    ("FILE_UPLOAD_HANDLING", _needs_file_upload),
+    ("DATE_PICKER_HANDLING", _needs_date_picker),
+    ("STATE_VERIFICATION_HANDLING", _needs_state_verification),
+)
+
+_ALL_CONDITIONAL_BLOCKS = [
+    name for name, trigger in _ASSEMBLER_RULE_SECTIONS if trigger is not None
+]
+
+
+def select_conditional_blocks(steps: List[dict]) -> List[str]:
+    """Names of the conditional blocks these merged steps need, in the
+    description's order. Fail-open: any exception → ALL conditional blocks."""
+    try:
+        return [
+            name for name, trigger in _ASSEMBLER_RULE_SECTIONS
+            if trigger is not None and any(trigger(step) for step in steps)
+        ]
+    except Exception:
+        logger.exception(
+            "PROMPT COMPOSER: trigger evaluation failed — failing open "
+            "(all conditional blocks included)")
+        return list(_ALL_CONDITIONAL_BLOCKS)
+
+
+def slim_steps_view(steps: List[dict]) -> List[dict]:
+    """PROMPT-ONLY slim view of the merged steps (F7, ~203 t/run dead
+    weight). merge_locators output itself is untouched — this builds new
+    dicts. Drops all_locators (never instructed, always 1 redundant entry),
+    any ""/[]/None value, and stability=="stable"; `found` ALWAYS survives
+    (LOCATOR_RULES routes on it, False included)."""
+    slim = []
+    for step in steps:
+        entry = {}
+        for key, value in step.items():
+            if key == "all_locators":
+                continue
+            if key == "found":
+                entry[key] = value
+                continue
+            if value is None or value == "" or value == []:
+                continue
+            if key == "stability" and value == "stable":
+                continue
+            entry[key] = value
+        slim.append(entry)
+    return slim
+
+
 class RobotTasks:
     def __init__(self, library_context=None, hint_context: dict = None):
         """
@@ -351,7 +467,43 @@ class RobotTasks:
         deterministic element stage) are embedded directly in the description —
         the assembler runs in its own single-task crew, so there is no CrewAI
         context chain to carry them.
+
+        Task 24R Stage 2: the description is composed deterministically —
+        element-type rule blocks are included only when the merged steps'
+        own routing fields need them, the steps ship as a slim prompt-only
+        view, and the steps JSON sits LAST (dynamic tail). Fail-open: any
+        doubt/exception → all blocks + the original JSON verbatim.
         """
+        included_blocks = list(_ALL_CONDITIONAL_BLOCKS)
+        steps_json_for_prompt = identified_steps_json
+        try:
+            payload = json.loads(identified_steps_json)
+            steps = payload.get("steps") if isinstance(payload, dict) else None
+            if isinstance(steps, list) and all(isinstance(s, dict) for s in steps):
+                included_blocks = select_conditional_blocks(steps)
+                steps_json_for_prompt = json.dumps({"steps": slim_steps_view(steps)})
+            else:
+                logger.warning(
+                    "PROMPT COMPOSER: unexpected steps JSON shape — failing "
+                    "open (all conditional blocks, steps JSON verbatim)")
+        except Exception:
+            logger.exception(
+                "PROMPT COMPOSER: steps JSON processing failed — failing "
+                "open (all conditional blocks, steps JSON verbatim)")
+        logger.info(
+            "PROMPT COMPOSER: conditional blocks included=[%s] (%d of %d)",
+            ", ".join(included_blocks) or "none",
+            len(included_blocks), len(_ALL_CONDITIONAL_BLOCKS),
+        )
+
+        # Code structure + viewport rules are NOT shipped here — they live
+        # once, in the assembler's system prompt (F1 dedup).
+        rule_sections = "\n".join(
+            getattr(PromptComponents, name)
+            for name, trigger in _ASSEMBLER_RULE_SECTIONS
+            if trigger is None or name in included_blocks
+        )
+
         # Build libraries section dynamically
         library_name = self.library_context.library_name if self.library_context else 'Browser'
         libraries_section = (
@@ -364,41 +516,16 @@ class RobotTasks:
 
         description = (
             f"{self._get_task_hints('assembler')}"
-            f"{PromptComponents.ASSEMBLY_OUTPUT_RULES}\n\n"
-
+            f"{PromptComponents.ASSEMBLY_OUTPUT_RULES}\n"
+            f"{rule_sections}\n"
+            f"{libraries_section}"
             "--- TEST STEPS WITH LOCATORS (deterministic element identification) ---\n"
             "The following JSON object holds the test steps; steps that target page "
-            "elements carry validated locators and their metadata.\n"
-            f"{identified_steps_json}\n\n"
-            "Extract the steps array from the 'steps' key to generate Robot Framework code.\n\n"
-
-            # Code structure + viewport rules are NOT re-shipped here — they
-            # live once, in the assembler's system prompt (F1 dedup).
-            f"{PromptComponents.VARIABLE_DECLARATION_RULES}\n\n"
-
-            f"{PromptComponents.LOCATOR_RULES}\n\n"
-
-            f"{PromptComponents.STABILITY_WARNING_RULES}\n\n"
-            
-            f"{PromptComponents.VALIDATION_RULES}\n"
-            
-            f"{PromptComponents.CONDITIONAL_LOGIC_HANDLING}\n"
-            
-            f"{PromptComponents.LOOP_HANDLING}\n"
-            
-            f"{PromptComponents.DROPDOWN_HANDLING}\n"
-            
-            f"{PromptComponents.CHECKBOX_RADIO_HANDLING}\n"
-
-            f"{PromptComponents.FILE_UPLOAD_HANDLING}\n"
-
-            f"{PromptComponents.DATE_PICKER_HANDLING}\n"
-
-            f"{PromptComponents.STATE_VERIFICATION_HANDLING}\n"
-
-            f"{libraries_section}"
+            "elements carry validated locators and their metadata. "
+            "Extract the steps array from the 'steps' key to generate Robot Framework code.\n"
+            f"{steps_json_for_prompt}"
         )
-        
+
         return Task(
             description=description,
             expected_output=(
