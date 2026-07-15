@@ -121,6 +121,12 @@ python tools/browser_use_service.py
 ```
 **Pro Tip:** Be specific about what you want. Mention exact elements like "first product name" or "search button in header".
 
+### Example 3: Sites With a One-Time Popup After Login
+```
+"Go to https://yourapp.example.com, type admin in the username field, type admin in the password field, click the Sign In button, wait 5 seconds for the dashboard to load, go to the reports page, and click the Filter button"
+```
+**Why the wait step?** Some sites show an announcement or welcome popup exactly once per login, on the first page that finishes rendering. A short wait right after login lets that popup appear and expire on the dashboard — before your real steps run — instead of blocking a click later in the test. Two rules: put the wait immediately after login, and make sure a navigation to another page follows it. Persistent popups (cookie banners, consent dialogs) don't need this trick — just mention them as a step ("accept the cookie banner") and they are automated like any other click.
+
 **In Technical Terms:**
 
 Mark 1 uses **AI agents combined with deterministic validation** to transform your natural language into working tests:
