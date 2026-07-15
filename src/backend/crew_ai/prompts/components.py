@@ -671,9 +671,8 @@ User query: "search for shoes on Flipkart and get first product name and price"
 
     SEARCH_OPTIMIZATION_RULES = """
 --- SEARCH OPTIMIZATION RULES ---
-*   For search operations: After `Input Text` into search box, use `Press Keys` with `Enter` (Enter key) instead of finding/clicking a search button.
-*   Modern websites (Flipkart, Amazon, Google, etc.) trigger search on Enter press.
-*   This is faster, more reliable, and reduces element identification overhead.
+*   DEFAULT for search operations: after `Input Text` into the search box, use `Press Keys` with `Enter` instead of finding and clicking a search button. Most sites trigger search on Enter, and it removes one element to identify.
+*   EXCEPTION: if the user explicitly asks to click a search/submit button, plan that click — the user's explicit instructions always win.
 """
 
     PLANNING_CONDITIONAL_LOGIC = """
@@ -730,8 +729,7 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
 6.  When generating a browser initialization step, you MUST include library-specific parameters:
 {browser_init_placeholder}
-7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "Enter" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
-8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
+7.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """
 
     # NOTE: the IDENTIFICATION COMPONENTS (FORM_ELEMENT_HANDLING,
