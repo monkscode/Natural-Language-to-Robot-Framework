@@ -304,14 +304,19 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             baseline_context = library_context.code_assembly_context
             baseline_context_tokens = count_tokens(baseline_context, token_model)
             
-            # Get optimized contexts for ALL agents
-            # URL extracted once, passed to all agents for domain-scoped hints
+            # Optimized context for the assembler; hints for BOTH agents.
+            # URL extracted once, passed to all agents for domain-scoped hints.
+            # The planner call is hints_only: its agent ships static minimal
+            # context by design (RobotAgents has no planner context slot), so
+            # building Tier-1/2 context for it was dead weight — a vector
+            # search + keyword-doc fetches per run for a string nothing read,
+            # plus a phantom "Planner=N tokens" context-size log.
             url = extract_url_from_query(query)
-            logger.info("🎯 Generating optimized contexts for all agents...")
-            planner_result = smart_provider.get_agent_context(query, "planner", url=url)
+            logger.info("🎯 Generating optimized contexts...")
+            planner_result = smart_provider.get_agent_context(
+                query, "planner", url=url, hints_only=True)
             assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
 
-            planner_context = planner_result.context
             assembler_context = assembler_result.context
 
             # Capture hint metadata for FeedbackLoop integration
@@ -361,12 +366,12 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             if assembler_result.hint_text:
                 hint_context["assembler"] = assembler_result.hint_text
 
-            # Calculate total optimized tokens
-            planner_tokens = count_tokens(planner_context, token_model)
+            # Calculate total optimized tokens (assembler only — the planner
+            # ships no optimized context, so there is nothing to count)
             assembler_tokens = count_tokens(assembler_context, token_model)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
 
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}")
+            logger.info(f"📊 Context size: Assembler={assembler_tokens} tokens")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -388,7 +393,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
-            planner_context = None
             assembler_context = None
             smart_provider = None
             optimization_metrics = None
@@ -399,7 +403,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 feedback_loop._optimization_init_ok = False
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
-        planner_context = None
         assembler_context = None
         hint_context = {}
 
@@ -409,7 +412,6 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
         model_name,
         library_context,
         assembler_context=assembler_context,
-        planner_context=planner_context,
     )
     tasks = RobotTasks(library_context, hint_context=hint_context)
 

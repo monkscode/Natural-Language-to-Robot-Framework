@@ -157,11 +157,15 @@ class TestTriggerTable:
 
     @pytest.mark.parametrize("overrides,expected", [
         # DROPDOWN: element_type ∈ {select, dropdown} OR dropdown_framework
-        # truthy OR keyword == "Select Options By"
+        # truthy OR a select-family keyword (planner phrasing drifts —
+        # element_identification._ACTION_EXACT accepts the whole family, so
+        # the trigger must too; checkbox selects are click-family, excluded)
         ({"element_type": "select"}, "DROPDOWN_HANDLING"),
         ({"element_type": "dropdown"}, "DROPDOWN_HANDLING"),
         ({"dropdown_framework": "tom-select"}, "DROPDOWN_HANDLING"),
         ({"keyword": "Select Options By"}, "DROPDOWN_HANDLING"),
+        ({"keyword": "Select Options By Label"}, "DROPDOWN_HANDLING"),
+        ({"keyword": "Select From List By Value"}, "DROPDOWN_HANDLING"),
         # CHECKBOX_RADIO: element_type ∈ {radio, checkbox}
         ({"element_type": "radio"}, "CHECKBOX_RADIO_HANDLING"),
         ({"element_type": "checkbox"}, "CHECKBOX_RADIO_HANDLING"),
@@ -210,6 +214,29 @@ class TestTriggerTable:
             "DROPDOWN_HANDLING",
             "STATE_VERIFICATION_HANDLING",
         ]
+
+    def test_select_family_keyword_triggers_dropdown_on_found_false(self):
+        """The real defect scenario: locator not found → no element_type from
+        the service, so the KEYWORD is the only dropdown signal left. An exact
+        match on 'select options by' missed the rest of the family and
+        silently dropped the NEEDED block."""
+        steps = [{
+            "step_description": "pick the timezone",
+            "element_description": "timezone dropdown",
+            "keyword": "Select From List By Label",
+            "value": "label    Asia/Kolkata",
+            "found": False,
+        }]
+        assert select_conditional_blocks(steps) == ["DROPDOWN_HANDLING"]
+
+    def test_select_checkbox_keywords_do_not_trigger_dropdown(self):
+        """'Select Checkbox' / 'Unselect Checkbox' are click-family
+        (element_identification._ACTION_EXACT) — shipping the ~1.9k-token
+        dropdown block for them is exactly the waste the composer removes."""
+        steps = [_step_with(keyword="Select Checkbox", element_type="checkbox")]
+        assert select_conditional_blocks(steps) == ["CHECKBOX_RADIO_HANDLING"]
+        steps = [_step_with(keyword="Unselect Checkbox", element_type="checkbox")]
+        assert select_conditional_blocks(steps) == ["CHECKBOX_RADIO_HANDLING"]
 
     def test_found_false_placeholder_step_needs_no_blocks(self):
         """found:false steps carry only plan fields + found=False — the

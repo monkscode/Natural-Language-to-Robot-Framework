@@ -245,10 +245,17 @@ def _needs_loop(step: dict) -> bool:
 
 
 def _needs_dropdown(step: dict) -> bool:
+    # Keyword match covers the whole select family ("Select Options By
+    # Label", "Select From List By Value", ...) — the same vocabulary
+    # element_identification._ACTION_EXACT accepts. Matters on found:false
+    # steps, where the keyword is the only dropdown signal left (no
+    # element_type from the service). "Select Checkbox"/"Unselect Checkbox"
+    # are click-family — excluded.
+    keyword = _norm(step.get("keyword"))
     return (
         _norm(step.get("element_type")) in ("select", "dropdown")
         or bool(step.get("dropdown_framework"))
-        or _norm(step.get("keyword")) == "select options by"
+        or (keyword.startswith("select") and "checkbox" not in keyword)
     )
 
 

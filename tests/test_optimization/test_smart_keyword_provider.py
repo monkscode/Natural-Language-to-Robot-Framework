@@ -538,6 +538,58 @@ class TestGetAgentContext:
 
 
 # ===================================================================
+# Category 5b: hints_only (planner retrieval mode)
+# ===================================================================
+
+class RecordingPatternMatcher:
+    """Counts get_relevant_keywords calls — hints_only must never trigger
+    the Tier-2 vector search."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_relevant_keywords(self, query, confidence_threshold=0.7, org_id=None):
+        self.calls += 1
+        return ["Click"]
+
+
+class TestHintsOnly:
+    """hints_only=True runs ONLY Tier 0 (learning hints) and returns an
+    empty context string. This is the planner's retrieval mode: its agent
+    ships static minimal context by design (RobotAgents.step_planner_agent),
+    so building Tier-1/2 context for it was dead weight — a vector search
+    plus keyword-doc fetches per production run for a string nothing read,
+    and a phantom 'Planner=N tokens' context-size log."""
+
+    def test_empty_context_and_no_pattern_learning(self):
+        matcher = RecordingPatternMatcher()
+        p = create_provider(pattern_matcher=matcher)
+        result = p.get_agent_context("click button", "planner", hints_only=True)
+        assert result.context == ""
+        assert matcher.calls == 0, "Tier-2 vector search must be skipped"
+
+    def test_hints_still_flow(self, in_memory_db):
+        p = create_provider(execution_memory=in_memory_db)
+        p._structural_engine = MockEngine(hints=["HINT_MARKER"])
+        p._keyword_engine = MockEngine(hints=None)
+        p._anti_pattern_engine = MockEngine(hints=None)
+        result = p.get_agent_context("get rows", "planner", hints_only=True)
+        assert result.context == ""
+        assert "HINT_MARKER" in result.hint_text
+        assert result.hints_count == 1
+        assert result.hints_available == 1
+        assert result.hint_sources == ("structural",)
+
+    def test_default_still_builds_context(self):
+        """Without the flag the assembler path is untouched."""
+        matcher = RecordingPatternMatcher()
+        p = create_provider(pattern_matcher=matcher)
+        result = p.get_agent_context("click button", "assembler")
+        assert "CORE RULES" in result.context
+        assert matcher.calls == 1
+
+
+# ===================================================================
 # Category 6: Lazy Loading Tests
 # ===================================================================
 

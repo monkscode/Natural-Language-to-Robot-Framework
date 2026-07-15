@@ -636,7 +636,8 @@ You are an expert Robot Framework developer using {self.library_context.library_
     # ------------------------------------------------------------------
 
     def get_agent_context(self, user_query: str, agent_role: str,
-                          url: str = None) -> AgentContextResult:
+                          url: str = None,
+                          hints_only: bool = False) -> AgentContextResult:
         """
         Get optimized context for an agent based on query and role.
 
@@ -650,6 +651,12 @@ You are an expert Robot Framework developer using {self.library_context.library_
             user_query: User's natural language query
             agent_role: "planner" or "assembler"
             url: Optional target URL for domain-scoped hints
+            hints_only: When True, run ONLY Tier 0 and return an empty
+                context string. The planner's retrieval mode: its agent
+                ships static minimal context by design (RobotAgents has no
+                planner context slot), so building Tier-1/2 context for it
+                is dead weight — a vector search plus keyword-doc fetches
+                whose result nothing reads.
 
         Returns:
             AgentContextResult with context string and hint metadata
@@ -688,6 +695,18 @@ You are an expert Robot Framework developer using {self.library_context.library_
             logger.warning(
                 f"[LEARNING] Hint retrieval failed for {agent_role} "
                 f"(non-blocking): {e}"
+            )
+
+        # hints_only (planner path): Tier 0 ran; Tiers 1/2/3 are skipped.
+        if hints_only:
+            return AgentContextResult(
+                context="",
+                hints_count=hints_count,
+                hints_available=hints_available,
+                hint_sources=tuple(hint_sources),
+                hint_text=hint_text,
+                nl_injected_ids=nl_injected_ids,
+                selection_trace=selection_trace,
             )
 
         # ═══ Existing Tiers (1, 2a, 2b, 3) — UNCHANGED ═══

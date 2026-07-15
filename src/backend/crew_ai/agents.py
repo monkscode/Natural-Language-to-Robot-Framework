@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 class RobotAgents:
     def __init__(self, model_provider, model_name, library_context=None,
-                 planner_context=None,
                  assembler_context=None):
         """
         Initialize Robot Framework agents.
@@ -24,8 +23,11 @@ class RobotAgents:
             model_provider: "local", "gemini", or "vertex"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            planner_context: Optimized context for Test Automation Planner (optional)
-            assembler_context: Optimized context for Code Assembler (optional)
+            assembler_context: Optimized context for Code Assembler (optional).
+                The planner has NO context slot by design — it runs on the
+                static minimal planning context (see step_planner_agent);
+                its learning hints arrive via the task description instead
+                (RobotTasks hint_context).
         """
         # 24R Stage 3: the assembler's replies are provider-enforced to the
         # AssemblyOutput {"code"} schema through the same gated get_llm path
@@ -60,34 +62,35 @@ class RobotAgents:
         # syntax CrewAI tool calls require). Retirement unlocks assembler
         # structured output (Stage 3). Do not re-attach without new evidence.
 
-        # Role-specific optimized contexts
-        self.planner_context = planner_context
+        # Role-specific optimized contexts. Assembler-only: crew.py used to
+        # build a planner context every production run (vector search +
+        # keyword-doc fetches) that NOTHING ever read — the planner ships
+        # static minimal context by design (caught 2026-07-16).
         self.assembler_context = assembler_context
 
     def _get_agent_context(self, agent_type: str) -> str:
         """
         Unified context retrieval with consistent priority chain.
-        
+
         Priority:
         1. Optimized context (from SmartKeywordProvider - pattern learning/zero-context+tool)
         2. Library context (static context from library_context)
         3. Empty string (graceful degradation)
-        
+
         Args:
-            agent_type: "planner" or "assembler"
+            agent_type: "assembler" (the planner has no context slot — it
+                runs on static minimal context, see step_planner_agent)
 
         Returns:
             Context string with appropriate formatting
         """
         # Map agent type to optimized context attribute
         optimized_context_map = {
-            "planner": self.planner_context,
             "assembler": self.assembler_context,
         }
 
         # Map agent type to library context property
         library_context_map = {
-            "planner": "planning_context",
             "assembler": "code_assembly_context",
         }
         
