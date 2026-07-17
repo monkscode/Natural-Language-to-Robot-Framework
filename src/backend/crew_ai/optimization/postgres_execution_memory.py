@@ -22,7 +22,6 @@ Referenced by: learning_registry.py (after cutover).
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -33,6 +32,7 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
+from src.backend.crew_ai.optimization import embedding as _shared_embedding
 from src.backend.crew_ai.optimization import pg_compat, pg_schema
 from src.backend.crew_ai.optimization.pg_compat import CompatConnection, compat_row
 from src.backend.crew_ai.optimization.execution_memory import (
@@ -76,9 +76,6 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def __init__(self, dsn: str = None, chroma_dir: str = None):
         self.dsn = dsn or settings.DATABASE_URL
-        # fastembed model cache (persisted under data/ so it isn't re-downloaded).
-        self._embed_cache_dir = os.path.join(
-            os.path.dirname(LEARNING_CONFIG["CHROMADB_DIR"]) or "data", "fastembed_cache")
 
         # Schema bootstrap on a throwaway raw connection (pg_schema uses native
         # %s SQL, so it must NOT go through the ?-translating compat adapter).
@@ -108,6 +105,11 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         self._chroma_failed_at = None
         self._chroma_last_error = None
         self._chroma_init_lock = threading.Lock()
+        # Text -> literal memo (Task 31), invalidated when the client identity
+        # changes (tests inject fakes; a reload after failure). Same rationale
+        # as embedding._memo: the query is embedded repeatedly per workflow.
+        self._embed_memo: dict = {}
+        self._embed_memo_client = None
         self._last_trace_prune_ts = 0.0
         logger.debug("[LEARNING] PostgresExecutionMemory initialised")
 
@@ -426,12 +428,15 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     # -------------------------------------------------------------------
 
     def _init_chromadb(self):
-        """Lazy-load the fastembed model into `_chroma_client` (idempotent).
+        """Bind the SHARED fastembed model into `_chroma_client` (idempotent).
 
-        Mirrors the old ChromaDB lazy-init tri-state: the _CHROMADB_INIT_FAILED
+        Task 31: the store no longer loads its own TextEmbedding — it borrows
+        the process-wide singleton from embedding.get_embedder() (same model,
+        same cache dir), removing the duplicate ~1.3s ONNX cold load. The old
+        ChromaDB lazy-init tri-state is preserved: the _CHROMADB_INIT_FAILED
         sentinel with `_chroma_failed_at is None` means "explicitly disabled"
         (tests) and stays disabled; with a timestamp it is a genuine failure
-        retried after the cooldown.
+        retried after the cooldown (embedding.py keeps its own cooldown too).
         """
         if self._chromadb_available:
             return
@@ -444,17 +449,17 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 if time.monotonic() - self._chroma_failed_at < self._CHROMA_RETRY_COOLDOWN_S:
                     return
                 self._chroma_client = None
-            try:
-                from fastembed import TextEmbedding
-                self._chroma_client = TextEmbedding(
-                    model_name=EMBED_MODEL, cache_dir=self._embed_cache_dir)
+            shared = _shared_embedding.get_embedder()
+            if shared is not None:
+                self._chroma_client = shared
                 self._chroma_failed_at = None
                 self._chroma_last_error = None
-            except Exception as e:
-                logger.error("[LEARNING] fastembed init failed: %s", e)
+            else:
+                logger.error(
+                    "[LEARNING] shared fastembed embedder unavailable")
                 self._chroma_client = self._CHROMADB_INIT_FAILED
                 self._chroma_failed_at = time.monotonic()
-                self._chroma_last_error = str(e)
+                self._chroma_last_error = "shared fastembed embedder unavailable"
 
     @property
     def _chromadb_available(self) -> bool:
@@ -463,16 +468,30 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 and self._chroma_client is not self._CHROMADB_INIT_FAILED)
 
     def _embed(self, text: str) -> str | None:
-        """Embed `text` to a pgvector literal '[v1,v2,...]', or None if disabled."""
+        """Embed `text` to a pgvector literal '[v1,v2,...]', or None if disabled.
+
+        Memoized per client instance (Task 31); failures are never cached.
+        """
         self._init_chromadb()
         if not self._chromadb_available:
             return None
+        client = self._chroma_client
+        if self._embed_memo_client is not client:
+            self._embed_memo = {}
+            self._embed_memo_client = client
+        hit = self._embed_memo.get(text)
+        if hit is not None:
+            return hit
         try:
-            vec = next(iter(self._chroma_client.embed([text])))
+            vec = next(iter(client.embed([text])))
         except Exception as e:
             logger.warning("[LEARNING] embedding failed (non-blocking): %s", e)
             return None
-        return "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+        lit = "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+        if len(self._embed_memo) >= 64:
+            self._embed_memo.clear()
+        self._embed_memo[text] = lit
+        return lit
 
     def _store_execution_embedding(self, record: ExecutionRecord) -> None:
         _assert_writer_thread("PostgresExecutionMemory._store_execution_embedding")
@@ -566,11 +585,9 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         if not qvec:  # embedder disabled / failed / empty → fail-open
             _mark(score_sink, candidate_ids, "fail_open")
             return set(candidate_ids)
+        total = None
         try:
             with self.read_conn() as conn:
-                total = conn.execute(
-                    "SELECT COUNT(*) AS n FROM learning_anchors"
-                ).fetchone()["n"]
                 if org_id is not None:
                     rows = conn.execute(
                         "SELECT record_id, 1 - (embedding <=> ?::vector) AS sim "
@@ -585,6 +602,13 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                         "FROM learning_anchors WHERE kind = ? AND record_id = ANY(?)",
                         (qvec, kind, list(candidate_ids)),
                     ).fetchall()
+                if not rows:
+                    # COUNT only on the empty branch (Task 31): it exists
+                    # solely to tell cold start (no anchors at all) from
+                    # genuinely unanchored candidates below.
+                    total = conn.execute(
+                        "SELECT COUNT(*) AS n FROM learning_anchors"
+                    ).fetchone()["n"]
         except Exception as e:
             logger.warning("[LEARNING] similarity filter query failed (fail-open): %s", e)
             _mark(score_sink, candidate_ids, "fail_open")

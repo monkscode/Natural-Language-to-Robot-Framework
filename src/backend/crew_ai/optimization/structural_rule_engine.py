@@ -316,35 +316,55 @@ class StructuralRuleEngine(LearningEngine):
                     # the required keywords were indeed needed
                     self._increment_evidence(rule, boost=True)
 
-    def get_hints(self, user_query: str, url: str,
-                  agent_role: str) -> Optional[List[str]]:
-        """Return structural hints for the planner or assembler."""
-        if agent_role not in ("planner", "assembler"):
-            return None
+    def get_intent_rules(self, user_query: str) -> List[dict]:
+        """Role-independent retrieval half of get_hints (Task 31).
 
+        Extracts intents and returns the threshold-passing rules — the part
+        that hits the DB — so the SmartKeywordProvider can cache it per
+        workflow and format per role via format_hints().
+        """
         intents = self.intent_extractor.extract_intents(user_query)
-        hints = []
-
+        rules = []
         for intent in intents:
             rule = self._find_rule(intent["intent"])
             if rule and EffectivenessScore.passes_threshold(
                 rule["evidence_count"], rule["counter_evidence"]
             ):
-                if agent_role == "planner":
-                    keywords_list = json.loads(
-                        rule["required_keywords_json"] or "[]"
-                    )
-                    hints.append(
-                        f"⚠️ STRUCTURAL: This query requires "
-                        f"{rule['required_structure']} structure. "
-                        f"Use {', '.join(keywords_list)}"
-                    )
-                elif agent_role == "assembler" and rule.get("code_template"):
-                    hints.append(
-                        f"📋 TEMPLATE: {rule['code_template']}"
-                    )
+                rules.append(rule)
+        return rules
 
+    @staticmethod
+    def format_hints(rules: List[dict],
+                     agent_role: str) -> Optional[List[str]]:
+        """Pure formatting half of get_hints — no DB access."""
+        if agent_role not in ("planner", "assembler") or not rules:
+            return None
+        hints = []
+        for rule in rules:
+            if agent_role == "planner":
+                keywords_list = json.loads(
+                    rule["required_keywords_json"] or "[]"
+                )
+                hints.append(
+                    f"⚠️ STRUCTURAL: This query requires "
+                    f"{rule['required_structure']} structure. "
+                    f"Use {', '.join(keywords_list)}"
+                )
+            elif agent_role == "assembler" and rule.get("code_template"):
+                hints.append(
+                    f"📋 TEMPLATE: {rule['code_template']}"
+                )
         return hints if hints else None
+
+    def get_hints(self, user_query: str, url: str,
+                  agent_role: str) -> Optional[List[str]]:
+        """Return structural hints for the planner or assembler.
+
+        Composed from get_intent_rules + format_hints (Task 31 split).
+        """
+        if agent_role not in ("planner", "assembler"):
+            return None
+        return self.format_hints(self.get_intent_rules(user_query), agent_role)
 
     def get_stats(self) -> Dict:
         """Return engine statistics."""

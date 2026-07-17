@@ -3,7 +3,8 @@
 One process-wide lazily-loaded ONNX model (all-MiniLM-L6-v2, 384-dim) — the same
 model ChromaDB used by default, so vectors are identical (verified: cosine
 1.00000 per text). No torch / sentence-transformers. Used by the keyword-pattern
-store; the learning store keeps its own copy for now.
+store AND the learning store (PostgresExecutionMemory borrows this singleton
+since Task 31 — one model per process, one cold load).
 
 Returns vectors as pgvector text literals ('[v1,v2,...]') so they insert into a
 `vector(384)` column via the text->vector cast and need no extra psycopg adapter.
@@ -22,6 +23,14 @@ EMBEDDING_DIM = 384
 _embedder = None
 _lock = threading.Lock()
 _failed_at: float | None = None  # time.monotonic() of the last failed init
+# Text -> literal memo (Task 31). The same user query is embedded several
+# times per workflow (similarity filters + pattern search); vectors are
+# deterministic per model instance, so recomputing is pure waste (~25-140ms
+# ONNX inference each). Keyed against the embedder identity: a swapped
+# instance (tests inject fakes; a reload after failure) invalidates the memo.
+_memo: dict = {}
+_memo_embedder = None
+_MEMO_MAX = 256
 # Same cooldown as PostgresExecutionMemory._CHROMA_RETRY_COOLDOWN_S: a failed
 # init can mean an ~80MB model download attempt, so without the cooldown every
 # embed call would retry it (serialized under the lock — blocking callers).
@@ -64,13 +73,28 @@ def get_embedder():
 
 
 def embed_to_literal(text: str) -> str | None:
-    """Embed one string to a pgvector literal '[...]', or None if embedding is unavailable."""
+    """Embed one string to a pgvector literal '[...]', or None if embedding is unavailable.
+
+    Memoized per embedder instance; failures are never cached, so a transient
+    ONNX error does not poison later calls for the same text.
+    """
+    global _memo, _memo_embedder
     emb = get_embedder()
     if emb is None:
         return None
+    if _memo_embedder is not emb:
+        _memo = {}
+        _memo_embedder = emb
+    hit = _memo.get(text)
+    if hit is not None:
+        return hit
     try:
         vec = next(iter(emb.embed([text])))
     except Exception as e:
         logger.warning("[EMBED] embedding failed (non-blocking): %s", e)
         return None
-    return "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+    lit = "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+    if len(_memo) >= _MEMO_MAX:
+        _memo.clear()
+    _memo[text] = lit
+    return lit

@@ -190,6 +190,14 @@ class SmartKeywordProvider:
         # cache lifetime is one workflow: no staleness risk.
         self._nl_hints_cache: dict = {}
 
+        # Task 31: the same argument applies to the anti-pattern and
+        # structural engines — their retrieval halves (get_warnings /
+        # get_intent_rules) are role-independent and each cost DB round-trips
+        # (anti additionally an embed + pgvector similarity query), so they
+        # too run once per workflow. Formatting stays per role.
+        self._anti_warnings_cache: dict = {}
+        self._structural_rules_cache: dict = {}
+
         # Lazy-loaded learning engine references
         self._structural_engine = None
         self._keyword_engine = None
@@ -243,11 +251,16 @@ class SmartKeywordProvider:
         sources = []
         safe_url = url or ""
 
-        # Structural hints (planner + assembler)
+        # Structural hints (planner + assembler). Retrieval is
+        # role-independent — cached per workflow (Task 31), formatted per role.
         try:
-            structural_hints = self._get_structural_engine().get_hints(
-                user_query, safe_url, agent_role
-            )
+            engine = self._get_structural_engine()
+            if user_query in self._structural_rules_cache:
+                structural_rules = self._structural_rules_cache[user_query]
+            else:
+                structural_rules = engine.get_intent_rules(user_query)
+                self._structural_rules_cache[user_query] = structural_rules
+            structural_hints = engine.format_hints(structural_rules, agent_role)
             if structural_hints:
                 for hint in structural_hints:
                     candidates.append({"text": hint, "priority": "high"})
@@ -256,11 +269,20 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Structural engine hint retrieval failed: {e}")
 
-        # Anti-pattern warnings (planner + assembler)
+        # Anti-pattern warnings (planner + assembler). Retrieval (embed +
+        # similarity filter + DB) is role-independent — cached per workflow
+        # (Task 31), formatted per role.
         try:
-            anti_pattern_hints = self._get_anti_pattern_engine().get_hints(
-                user_query, safe_url, agent_role, org_id=self._org_id
-            )
+            engine = self._get_anti_pattern_engine()
+            cache_key = (user_query, safe_url)
+            if cache_key in self._anti_warnings_cache:
+                anti_warnings = self._anti_warnings_cache[cache_key]
+            else:
+                anti_warnings = engine.get_warnings(
+                    user_query, safe_url, org_id=self._org_id
+                )
+                self._anti_warnings_cache[cache_key] = anti_warnings
+            anti_pattern_hints = engine.format_hints(anti_warnings, agent_role)
             if anti_pattern_hints:
                 for hint in anti_pattern_hints:
                     candidates.append({"text": hint, "priority": "medium"})
@@ -591,19 +613,17 @@ You are an expert Robot Framework developer using {self.library_context.library_
             except Exception as e:
                 logger.warning(f"Context pruning failed: {e}, using all predicted keywords")
 
-        # Get full documentation for keywords from ChromaDB
+        # Get full documentation for the predicted keywords. Exact-name SQL
+        # lookup (Task 31): the old path embedded each keyword NAME for an ANN
+        # search and then kept the result only on exact name equality anyway —
+        # an indexed WHERE clause does the same with zero embeds.
         logger.info(f"Fetching documentation for {len(keywords_to_fetch)} keywords")
         keyword_docs = []
         for keyword_name in keywords_to_fetch:
-            # Search for exact keyword in ChromaDB
-            results = self.vector_store.search(
-                library_name=self.library_context.library_name,
-                query=keyword_name,
-                top_k=1
+            kw = self.vector_store.get_keyword_doc(
+                self.library_context.library_name, keyword_name
             )
-
-            if results and results[0]['name'] == keyword_name:
-                kw = results[0]
+            if kw:
                 # Format keyword documentation - MINIMAL format to reduce tokens
                 # Only include essential info: name and first 2 args
                 args_list = kw['args'][:2] if kw['args'] else []
