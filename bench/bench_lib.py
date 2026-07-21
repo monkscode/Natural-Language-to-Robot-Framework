@@ -41,6 +41,18 @@ _DRYRUN_START_MARKER = "🔬 Preparing verification environment..."
 _DRYRUN_REPAIR_MARKER = "🔧 Fixing test code..."
 
 
+def _scan_generation_event(t, ev, first_progress_t, dryrun_start_t):
+    """Record a first-seen progress time and the dryrun-gate start; returns
+    the (possibly updated) dryrun start time."""
+    p = ev.get("progress")
+    if p is not None and p not in first_progress_t:
+        first_progress_t[p] = t
+    if (dryrun_start_t is None
+            and _DRYRUN_START_MARKER in (ev.get("message") or "")):
+        dryrun_start_t = t
+    return dryrun_start_t
+
+
 def _scan_stage_boundaries(events):
     """One pass over the stream: first-seen progress times, dryrun-gate start,
     first/last execution-stage times."""
@@ -49,12 +61,8 @@ def _scan_stage_boundaries(events):
     exec_first = exec_last = None
     for t, ev in events:
         if ev.get("stage") == "generation":
-            p = ev.get("progress")
-            if p is not None and p not in first_progress_t:
-                first_progress_t[p] = t
-            if (dryrun_start_t is None
-                    and _DRYRUN_START_MARKER in (ev.get("message") or "")):
-                dryrun_start_t = t
+            dryrun_start_t = _scan_generation_event(
+                t, ev, first_progress_t, dryrun_start_t)
         elif ev.get("stage") == "execution":
             if exec_first is None:
                 exec_first = t
