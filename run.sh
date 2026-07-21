@@ -165,8 +165,15 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-wait -n "${PIDS[@]}"
-EXIT_CODE=$?
+if ((BASH_VERSINFO[0] >= 4)); then
+    # Bash 4+: block until the first background service exits.
+    wait -n "${PIDS[@]}"
+    EXIT_CODE=$?
+else
+    # macOS ships Bash 3.2, which lacks `wait -n`: block until all exit.
+    wait "${PIDS[@]}"
+    EXIT_CODE=$?
+fi
 cleanup
 wait "${PIDS[@]}" 2>/dev/null || true
 exit "$EXIT_CODE"
