@@ -337,28 +337,27 @@ def select_conditional_blocks(steps: List[dict]) -> List[str]:
         return list(_ALL_CONDITIONAL_BLOCKS)
 
 
+def _slim_keeps(key: str, value) -> bool:
+    """Keep/drop rule for one slim_steps_view field. `found` ALWAYS survives
+    (LOCATOR_RULES routes on it, False included)."""
+    if key == "found":
+        return True
+    if key == "all_locators":
+        return False
+    if value is None or value == "" or value == []:
+        return False
+    return not (key == "stability" and value == "stable")
+
+
 def slim_steps_view(steps: List[dict]) -> List[dict]:
     """PROMPT-ONLY slim view of the merged steps (F7, ~203 t/run dead
     weight). merge_locators output itself is untouched — this builds new
     dicts. Drops all_locators (never instructed, always 1 redundant entry),
-    any ""/[]/None value, and stability=="stable"; `found` ALWAYS survives
-    (LOCATOR_RULES routes on it, False included)."""
-    slim = []
-    for step in steps:
-        entry = {}
-        for key, value in step.items():
-            if key == "all_locators":
-                continue
-            if key == "found":
-                entry[key] = value
-                continue
-            if value is None or value == "" or value == []:
-                continue
-            if key == "stability" and value == "stable":
-                continue
-            entry[key] = value
-        slim.append(entry)
-    return slim
+    any ""/[]/None value, and stability=="stable"."""
+    return [
+        {key: value for key, value in step.items() if _slim_keeps(key, value)}
+        for step in steps
+    ]
 
 
 class RobotTasks:
