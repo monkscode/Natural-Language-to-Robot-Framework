@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Browser Library (Playwright) support** - Modern, fast alternative to SeleniumLibrary
 - **Library Context System** - Dynamic code generation for different Robot Framework libraries
 - **Playwright Validation** - Native Playwright validation for Browser Library locators
-- **Configuration-based switching** - Easy switching between Browser and Selenium via `ROBOT_LIBRARY` setting
 - **Library-specific locator strategies** - Text-based, role-based, and traditional selectors
 - **Dynamic keyword extraction** - Automatically extracts keywords from installed libraries
 - **Comprehensive documentation** - Browser Library Guide, Quick Reference, updated configuration docs
@@ -23,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
 
 ### Documentation
-- Added Library Switching Guide - Quick guide for switching between Browser Library & Selenium (guide since removed with SeleniumLibrary support)
 - Updated [Configuration Guide](docs/CONFIGURATION.md) - Detailed ROBOT_LIBRARY documentation
 - Updated [Architecture Guide](docs/ARCHITECTURE.md) - Library context system architecture
 - Updated [README.md](README.md) - Browser Library benefits and usage
@@ -44,11 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `validate_locators_with_playwright()` function in browser_use_service.py
 - Added library-specific JavaScript generation for locator strategies
 
-### Backward Compatibility
-- ✅ SeleniumLibrary fully supported via `ROBOT_LIBRARY=selenium`
-- ✅ Existing tests continue to work
-- ✅ No breaking changes
-- ✅ Easy migration path provided
+### Removed
+- **SeleniumLibrary support** - Browser Library (Playwright) is now the sole target; `ROBOT_LIBRARY=selenium` fails fast at startup
+
+### Breaking Changes
+- ⚠️ Generated tests now require Browser Library - migrate any `ROBOT_LIBRARY=selenium` configuration to `ROBOT_LIBRARY=browser`
 
 ---
 
