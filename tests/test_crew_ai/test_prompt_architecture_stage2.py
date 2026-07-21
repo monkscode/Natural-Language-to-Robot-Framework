@@ -238,6 +238,38 @@ class TestTriggerTable:
         steps = [_step_with(keyword="Unselect Checkbox", element_type="checkbox")]
         assert select_conditional_blocks(steps) == ["CHECKBOX_RADIO_HANDLING"]
 
+    @pytest.mark.parametrize("keyword,expected", [
+        ("Check Checkbox", "CHECKBOX_RADIO_HANDLING"),
+        ("Uncheck Checkbox", "CHECKBOX_RADIO_HANDLING"),
+        ("Select Checkbox", "CHECKBOX_RADIO_HANDLING"),
+        ("Unselect Checkbox", "CHECKBOX_RADIO_HANDLING"),
+        ("Upload File By Selector", "FILE_UPLOAD_HANDLING"),
+    ])
+    def test_keyword_only_signal_triggers_block_on_found_false(
+            self, keyword, expected):
+        """Same defect class as the select family: with found:false there is
+        no element_type from the service, so the KEYWORD is the only signal
+        left. Without this the assembler loses force=True (checkbox) and the
+        never-Click rule (upload) on exactly the steps a human must repair.
+
+        Date pickers are deliberately NOT covered — the planner emits plain
+        'Fill Text' for them, so no keyword signal exists to trigger on.
+        """
+        steps = [{
+            "step_description": "s",
+            "element_description": "the control",
+            "keyword": keyword,
+            "found": False,
+        }]
+        assert select_conditional_blocks(steps) == [expected]
+
+    def test_loop_source_without_loop_type_triggers_loop(self):
+        """_needs_conditional accepts EITHER condition key; the loop trigger
+        must be symmetric. LOOP_HANDLING routes on loop_type AND loop_source,
+        so a step carrying only loop_source still needs the block."""
+        steps = [_step_with(loop_source="the main menu")]
+        assert select_conditional_blocks(steps) == ["LOOP_HANDLING"]
+
     def test_found_false_placeholder_step_needs_no_blocks(self):
         """found:false steps carry only plan fields + found=False — the
         placeholder contract lives in LOCATOR_RULES (core, always sent)."""

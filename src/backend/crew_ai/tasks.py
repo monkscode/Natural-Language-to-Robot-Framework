@@ -241,7 +241,13 @@ def _needs_conditional(step: dict) -> bool:
 
 
 def _needs_loop(step: dict) -> bool:
-    return bool(step.get("loop_type")) or _norm(step.get("keyword")) == "get elements"
+    # Either loop key is enough, mirroring _needs_conditional: LOOP_HANDLING
+    # routes on loop_type AND loop_source, so a step carrying only one of
+    # them still needs the block.
+    return (
+        bool(step.get("loop_type") or step.get("loop_source"))
+        or _norm(step.get("keyword")) == "get elements"
+    )
 
 
 def _needs_dropdown(step: dict) -> bool:
@@ -260,14 +266,30 @@ def _needs_dropdown(step: dict) -> bool:
 
 
 def _needs_checkbox_radio(step: dict) -> bool:
-    return _norm(step.get("element_type")) in ("radio", "checkbox")
+    # Keyword fallback for the same reason as _needs_dropdown: on found:false
+    # there is no element_type, and dropping the block there costs the
+    # force=True idiom on exactly the steps a human has to repair. Covers
+    # Check/Uncheck/Select/Unselect Checkbox (element_identification._ACTION_EXACT).
+    return (
+        _norm(step.get("element_type")) in ("radio", "checkbox")
+        or "checkbox" in _norm(step.get("keyword"))
+    )
 
 
 def _needs_file_upload(step: dict) -> bool:
-    return _norm(step.get("element_type")) == "file-upload"
+    # Keyword fallback (see _needs_checkbox_radio): without the block a
+    # found:false upload step loses the never-Click rule, which is the whole
+    # point of FILE_UPLOAD_HANDLING.
+    return (
+        _norm(step.get("element_type")) == "file-upload"
+        or _norm(step.get("keyword")).startswith("upload")
+    )
 
 
 def _needs_date_picker(step: dict) -> bool:
+    # No keyword fallback here on purpose: the planner emits a plain
+    # "Fill Text" for date fields, so there is no date-specific keyword to
+    # trigger on — element_type/datepicker_framework are the only signals.
     return (
         _norm(step.get("element_type")) == "date-picker"
         or bool(step.get("datepicker_framework"))
