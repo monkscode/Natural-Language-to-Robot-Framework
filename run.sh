@@ -42,8 +42,10 @@ if [ "$MODE" = "bench" ]; then
     export LOG_FORMAT=json
     # Refuse to start over a live stack — otherwise the address-in-use error
     # is buried in a child process log and the bench hits mixed pins.
+    # netstat portability: Windows prints "LISTENING", Linux/macOS "LISTEN";
+    # macOS separates the port with "." not ":"; -o is Windows/Linux-only.
     for port in 5000 4999 4998; do
-        if netstat -ano | grep "LISTENING" | grep -q ":${port} "; then
+        if netstat -an | grep "LISTEN" | grep -Eq "[:.]${port}[[:space:]]"; then
             echo "Error: port ${port} already in use — is the dev stack still running? Stop it first."
             exit 1
         fi
