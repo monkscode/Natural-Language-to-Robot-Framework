@@ -36,9 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Technical Details
 - Implemented `LibraryContext` abstract base class
 - Created `BrowserLibraryContext` with Playwright-specific instructions
-- Created `SeleniumLibraryContext` for backward compatibility
 - Added `DynamicLibraryDocumentation` for keyword extraction
-- Integrated library context into all AI agents (Step Planner, Code Assembler, Validator)
+- Integrated library context into both AI agents (Step Planner, Code Assembler)
 - Added `validate_locators_with_playwright()` function in browser_use_service.py
 - Added library-specific JavaScript generation for locator strategies
 
