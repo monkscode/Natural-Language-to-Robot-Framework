@@ -585,3 +585,35 @@ class TestCompletionSynthesis:
         assert q.get(timeout=1)["progress"] == 65
         with pytest.raises(Empty):
             q.get(timeout=0.1)
+
+
+class TestDeliveryOrderUnderRace:
+    def test_enqueued_progress_never_goes_backward(self):
+        """The bus runs handlers in a ThreadPoolExecutor, so _push_if_forward
+        races itself. State is monotonic either way; DELIVERY is only monotonic
+        if the enqueue happens under the same lock that advances the state."""
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _push_if_forward,
+        )
+
+        q = Queue()
+        register_workflow("wf-race", q, {})
+
+        threads = [
+            threading.Thread(target=_push_if_forward,
+                             args=("wf-race", q, f"m{p}", p))
+            for p in range(1, 81)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        delivered = []
+        while True:
+            try:
+                delivered.append(q.get_nowait()["progress"])
+            except Empty:
+                break
+        assert delivered == sorted(delivered)

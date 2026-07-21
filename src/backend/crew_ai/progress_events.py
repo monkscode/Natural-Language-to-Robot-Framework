@@ -211,8 +211,9 @@ def _push_if_forward(
         if progress <= current:
             return
         _current_progress[workflow_id] = progress
-
-    queue.put({"status": "running", "message": message, "progress": progress})
+        # Enqueue under the same lock: racing handlers would otherwise deliver
+        # advancing values out of order (state monotonic, delivery not).
+        queue.put({"status": "running", "message": message, "progress": progress})
 
 
 def _push_task_ladder(workflow_id: str, queue: Queue, task_index: int) -> None:
