@@ -168,7 +168,6 @@ mark-1/
 
 ## 📚 Documentation
 
-- **[Library Switching Guide](docs/LIBRARY_SWITCHING_GUIDE.md)** - Switch between Browser Library & Selenium ⭐
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Environment variables and settings
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Fix common issues
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
@@ -199,7 +198,7 @@ ${pinned_project_name_locator}    id=892238219
 Generated Test
     [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
-    New Context    viewport=None
+    New Context    viewport={'width': 1920, 'height': 1080}
     New Page    ${url}
     ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
     Log    Retrieved Pinned project name: ${pinned_project_name}
@@ -207,8 +206,6 @@ Generated Test
 ```
 
 **Result:** Working test + detailed HTML report in ~20 seconds.
-
-**Note:** Code format depends on your `ROBOT_LIBRARY` setting (browser or selenium).
 
 ## 🛠️ Configuration
 
@@ -227,7 +224,7 @@ APP_PORT=5000
 BROWSER_USE_SERVICE_URL=http://localhost:4999
 BROWSER_USE_TIMEOUT=900
 
-# Robot Framework Library (selenium or browser)
+# Robot Framework Library (only 'browser' is supported)
 ROBOT_LIBRARY=browser
 ```
 
@@ -237,14 +234,13 @@ For detailed configuration options, see the [Configuration Guide](docs/CONFIGURA
 
 ### 🎯 Robot Framework Library Support
 
-Mark 1 supports **two Robot Framework libraries** for test execution:
+Mark 1 generates **Browser Library (Playwright)** tests:
 
-#### Browser Library (Playwright) - **Recommended** ⭐
 ```env
 ROBOT_LIBRARY=browser
 ```
 
-**Benefits:**
+**Why Browser Library:**
 - ✅ **2-3x faster** test execution
 - ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
 - ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
@@ -252,21 +248,8 @@ ROBOT_LIBRARY=browser
 - ✅ **Powerful locators** - Text-based, role-based, and traditional selectors
 - ✅ **Consistent validation** - Same engine (Playwright) for generation and execution
 
-**When to use:** New projects, modern websites, performance-critical tests
-
-#### SeleniumLibrary - **Legacy Support**
-```env
-ROBOT_LIBRARY=selenium
-```
-
-**Benefits:**
-- ✅ **Mature and stable** - Battle-tested library
-- ✅ **Wide compatibility** - Works with older websites
-- ✅ **Familiar syntax** - Traditional Selenium approach
-
-**When to use:** Existing projects, legacy websites, Selenium expertise
-
-**Switching is easy:** Just change `ROBOT_LIBRARY` in your `.env` file and restart Mark 1!
+**SeleniumLibrary is not supported** — the locator pipeline emits Playwright-only
+syntax, so `ROBOT_LIBRARY=selenium` fails fast at startup.
 
 ## 🐛 Troubleshooting
 

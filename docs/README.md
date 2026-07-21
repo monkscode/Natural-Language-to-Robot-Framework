@@ -6,7 +6,6 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 
 ### Getting Started
 - **[Main README](../README.md)** - Quick start and overview
-- **[Library Switching Guide](LIBRARY_SWITCHING_GUIDE.md)** - Switch between Browser Library & Selenium ⚡
 - **[Configuration Guide](CONFIGURATION.md)** - Set up and configure Mark 1
 - **[FAQ](FAQ.md)** - Frequently asked questions
 

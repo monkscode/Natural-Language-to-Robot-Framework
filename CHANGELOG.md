@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
 
 ### Documentation
-- Added [Library Switching Guide](docs/LIBRARY_SWITCHING_GUIDE.md) - Quick guide for switching between Browser Library & Selenium
+- Added Library Switching Guide - Quick guide for switching between Browser Library & Selenium (guide since removed with SeleniumLibrary support)
 - Updated [Configuration Guide](docs/CONFIGURATION.md) - Detailed ROBOT_LIBRARY documentation
 - Updated [Architecture Guide](docs/ARCHITECTURE.md) - Library context system architecture
 - Updated [README.md](README.md) - Browser Library benefits and usage

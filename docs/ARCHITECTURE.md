@@ -89,8 +89,7 @@ rectangle "Generation Pipeline (crew.py: run_crew)\n[Runs in Separate Thread]" a
     code_assembler_agent()
     Steps+locators -> .robot
     Library-specific syntax
-    keyword_search tool attached
-    when learning is ON
+    No tools attached
   end note
 }
 
@@ -434,8 +433,8 @@ Mark 1 is designed to be extensible:
 9.  crew.py: run_crew()
 10. Loads: get_library_context(ROBOT_LIBRARY)
 11. Initializes: RobotAgents(model_provider, model_name, library_context)
-    (learning ON: optimized planner/assembler context + keyword_search tool
-     fetched from the learning store)
+    (learning ON: optimized planner/assembler context — including relevant
+     keyword knowledge — fetched from the learning store)
 
 Stage 1 — Step Planner (LLM agent, own single-task crew):
   Input:  "Search for shoes on Flipkart"
@@ -459,7 +458,8 @@ Stage 2 — Element identification (deterministic Python, NOT an agent):
 Stage 3 — Code Assembler (LLM agent, own single-task crew):
   Input:  Steps with validated locators
   Uses:   library_context.code_assembly_context
-          (+ keyword_search tool when learning is ON)
+          (no tools — per-query keyword knowledge arrives via the
+           optimized context when learning is ON)
   Output: Complete .robot file — extracted from the assembler crew's
           tasks[-1].output.raw
 ```
