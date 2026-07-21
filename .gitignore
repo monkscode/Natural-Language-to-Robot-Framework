@@ -62,8 +62,10 @@ FuturePlans/*
 tests/test_clients/
 clients/integrity/*
 
-# Bench harness: all bench data stays local — run evidence, baseline CSVs
-# (operational metrics), and private/ (customer query sets) are never committed
+# Bench harness: bench data stays local — run evidence, new baseline CSVs
+# (operational metrics), and private/ (customer query sets) are never committed.
+# The frozen 2026-07-03 public baseline predates this rule and stays tracked
+# as the comparison reference.
 bench/runs/
 bench/baselines/
 bench/private/
