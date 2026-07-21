@@ -314,14 +314,16 @@ class TestProgressMonotonicity:
             "task-0": 0, "task-1": 1, "task-2": 2,
         })
 
-        # Fire task 2 completed (80%) first
-        event_2_done = MagicMock()
-        event_2_done.task = MagicMock()
-        event_2_done.task.id = "task-2"
-        _on_task_completed(source=None, event=event_2_done)
+        # Fire task 1 completed (60%) first. Not task 2: the assembler has no
+        # completion entry — 80 belongs solely to the dryrun gate (see
+        # TestCompletionSynthesis.test_assembler_completion_pushes_nothing).
+        event_1_done = MagicMock()
+        event_1_done.task = MagicMock()
+        event_1_done.task.id = "task-1"
+        _on_task_completed(source=None, event=event_1_done)
 
         msg = q.get(timeout=1)
-        assert msg["progress"] == 80
+        assert msg["progress"] == 60
 
         # Now fire task 0 started (5%) — should be discarded
         event_0_start = MagicMock()
@@ -499,6 +501,32 @@ class TestCompletionSynthesis:
         assert "elements identified" in completion["message"]
         start = q.get(timeout=1)
         assert start["progress"] == 62
+
+    def test_assembler_completion_pushes_nothing(self):
+        """80 has exactly ONE emitter: the dryrun gate (dryrun_service).
+
+        The gate pushes 80 with a raw queue.put AFTER run_crew already called
+        unregister_workflow(), so it bypasses the forward-only dedup here.
+        If this handler ALSO carried an index-2 entry, a TaskCompletedEvent
+        that won its race would emit the same '✅ Test code assembled' line a
+        second time. Index 2 is the last task, so nothing synthesizes it via
+        the ladder either — dropping the entry is what makes 80 unambiguous.
+        """
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            _on_task_completed,
+        )
+
+        q = Queue()
+        register_workflow("wf-1", q, {"task-2": 2})
+
+        event = MagicMock()
+        event.task = MagicMock()
+        event.task.id = "task-2"
+        _on_task_completed(source=None, event=event)
+
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
 
     def test_task0_start_synthesizes_nothing(self):
         from src.backend.crew_ai.progress_events import register_workflow

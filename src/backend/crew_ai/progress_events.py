@@ -87,10 +87,15 @@ _LLM_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
     2: ("💻 Generating test script...", 65),
 }
 
+# Index 2 (the assembler) has NO entry on purpose: 80 is pushed by the dryrun
+# gate (dryrun_service.validate_and_repair) with a raw queue.put, which runs
+# after unregister_workflow() and so bypasses the forward-only dedup below.
+# Keeping an entry here would let a TaskCompletedEvent that won its race emit
+# the same line a second time. Index 2 is the last task, so the ladder never
+# synthesizes it either — one emitter, no duplicates.
 _TASK_COMPLETED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("✅ Test steps planned successfully", 20),
     1: ("✅ All page elements identified", 60),
-    2: ("✅ Test code assembled", 80),
 }
 
 # ---------------------------------------------------------------------------
