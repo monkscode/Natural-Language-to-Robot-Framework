@@ -506,9 +506,9 @@ def test_concurrent_read_write(in_memory_em):
                 ).fetchone()[0]
                 read_results.append(count)
                 # Count should always be >= seed count (5)
-                assert count >= 5, (
-                    f"Reader {thread_id}: count={count} < seed=5"
-                )
+                if count < 5:
+                    errors.append(f"Reader {thread_id}: count={count} < seed=5")
+                    break
                 time.sleep(0.005)
 
             tc.close()
