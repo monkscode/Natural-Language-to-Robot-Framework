@@ -38,6 +38,7 @@ from psycopg.rows import dict_row
 
 from bench.bench_lib import (
     CSV_COLUMNS,
+    append_pin_conflict,
     build_csv_row,
     build_meta,
     count_dryrun_repairs,
@@ -294,6 +295,57 @@ def append_row(out_path: Path, row: dict) -> None:
         writer.writerow(row)
 
 
+def gate_pins(args, out_path: Path) -> None:
+    """Preflight the live stack's pins, then record them beside the CSV.
+
+    Exits the process on an unpinned stack (unless --allow-unpinned) or on an
+    append whose pins disagree with what the target CSV already holds.
+    """
+    nlrf_health = fetch_health(args.base_url)
+    browser_health = fetch_health(args.browser_url)
+    violations, warnings = preflight_violations(nlrf_health, browser_health)
+    for w in warnings:
+        _warn(f"preflight: {w}")
+    if violations:
+        for v in violations:
+            _warn(f"preflight: {v}")
+        if not args.allow_unpinned:
+            sys.exit("[bench] preflight FAILED — fix the pins (./run.sh bench) or pass "
+                     "--allow-unpinned (run will NOT be comparable to the baseline)")
+        _warn("preflight violations ignored (--allow-unpinned) — this run is "
+              "not comparable to the baseline")
+
+    meta = build_meta(nlrf_health, browser_health, args.base_url, args.browser_url)
+    pins_str = ", ".join(f"{k}={v}" for k, v in meta["nlrf_pins"].items()) or "unavailable"
+    _log(f"preflight OK — nlrf pins: {pins_str}")
+    _log(f"browser-service: model_provider={meta['browser_service']['model_provider']} "
+         f"headless={meta['browser_service']['headless']}")
+
+    # --out APPENDS. One sidecar cannot honestly describe rows recorded under
+    # two different pin sets, so a conflicting append is refused outright.
+    conflicts = append_pin_conflict(out_path, meta)
+    if conflicts:
+        for c in conflicts:
+            _warn(f"append guard: {c}")
+        sys.exit(f"[bench] {out_path} already holds rows recorded under different "
+                 f"pins, and --out APPENDS — use a fresh --out path so its "
+                 f"sidecar describes only its own rows")
+
+    meta_file = meta_path_for(out_path)
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+    if meta_file.exists():
+        # Pins already verified identical above — keep the original sidecar so
+        # captured_at still marks when this CSV's first row was recorded.
+        _log(f"appending to {out_path} — pins match existing {meta_file}")
+        return
+    if out_path.exists():
+        _warn(f"{out_path} exists but has no pins sidecar — its earlier rows "
+              f"cannot be verified as comparable to this run")
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    _log(f"pins recorded -> {meta_file}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="NL-to-RF benchmark runner (sequential; detaches all bench "
@@ -331,29 +383,7 @@ def main() -> int:
 
     _log(f"target={args.base_url}  queries={len(queries)}  repeats={args.repeats}")
 
-    nlrf_health = fetch_health(args.base_url)
-    browser_health = fetch_health(args.browser_url)
-    violations, warnings = preflight_violations(nlrf_health, browser_health)
-    for w in warnings:
-        _warn(f"preflight: {w}")
-    if violations:
-        for v in violations:
-            _warn(f"preflight: {v}")
-        if not args.allow_unpinned:
-            sys.exit("[bench] preflight FAILED — fix the pins (./run.sh bench) or pass "
-                     "--allow-unpinned (run will NOT be comparable to the baseline)")
-        _warn("preflight violations ignored (--allow-unpinned) — this run is "
-              "not comparable to the baseline")
-    meta = build_meta(nlrf_health, browser_health, args.base_url, args.browser_url)
-    pins_str = ", ".join(f"{k}={v}" for k, v in meta["nlrf_pins"].items()) or "unavailable"
-    _log(f"preflight OK — nlrf pins: {pins_str}")
-    _log(f"browser-service: model_provider={meta['browser_service']['model_provider']} "
-         f"headless={meta['browser_service']['headless']}")
-    meta_file = meta_path_for(out_path)
-    meta_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(meta_file, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    _log(f"pins recorded -> {meta_file}")
+    gate_pins(args, out_path)
 
     # autocommit: each DELETE/SELECT stands alone; a failed capture must not
     # hold a transaction open across the next run.

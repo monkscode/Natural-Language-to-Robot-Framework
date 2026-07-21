@@ -424,6 +424,24 @@ def load_meta(csv_path) -> dict | None:
         return json.load(f)
 
 
+def append_pin_conflict(csv_path, new_meta: dict) -> list[str]:
+    """Pin mismatches between an existing CSV's recorded meta and this run.
+
+    `--out` APPENDS rows, but the sidecar is ONE file per CSV: re-using a path
+    across differently-pinned runs would leave a single meta claiming pins for
+    rows it did not produce — destroying the comparability guarantee the
+    sidecar exists to make. Returns [] when the CSV is new (nothing to
+    conflict with) or when no meta was recorded (nothing to compare — the
+    runner warns about that case instead of blocking).
+    """
+    if not Path(csv_path).exists():
+        return []
+    existing = load_meta(csv_path)
+    if existing is None:
+        return []
+    return compare_pins(existing, new_meta)
+
+
 def compare_pins(base_meta: dict, cand_meta: dict) -> list[str]:
     """Human-readable mismatches between two pins snapshots."""
     mismatches = []

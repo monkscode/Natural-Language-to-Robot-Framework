@@ -87,6 +87,43 @@ class TestComparePins:
         assert any("browser_service.model_provider" in m for m in compare_pins(self.BASE, cand))
 
 
+class TestAppendPinConflict:
+    """--out APPENDS, but the sidecar is a single file: re-using a path under
+    different pins would leave one meta describing rows it did not produce."""
+
+    NEW_META = {"nlrf_pins": PINNED_NLRF["pins"],
+                "browser_service": {"model_provider": "gemini"}}
+
+    def test_fresh_csv_has_no_conflict(self, tmp_path):
+        from bench.bench_lib import append_pin_conflict
+        assert append_pin_conflict(tmp_path / "new.csv", self.NEW_META) == []
+
+    def test_existing_csv_with_matching_pins_has_no_conflict(self, tmp_path):
+        from bench.bench_lib import append_pin_conflict
+        csv_path = tmp_path / "run.csv"
+        csv_path.write_text("query_id\n", encoding="utf-8")
+        meta_path_for(csv_path).write_text(
+            json.dumps(self.NEW_META), encoding="utf-8")
+        assert append_pin_conflict(csv_path, self.NEW_META) == []
+
+    def test_existing_csv_with_different_model_conflicts(self, tmp_path):
+        from bench.bench_lib import append_pin_conflict
+        csv_path = tmp_path / "run.csv"
+        csv_path.write_text("query_id\n", encoding="utf-8")
+        meta_path_for(csv_path).write_text(json.dumps(
+            {"nlrf_pins": {**PINNED_NLRF["pins"], "online_model": "gemini-2.5-flash"},
+             "browser_service": {"model_provider": "gemini"}}), encoding="utf-8")
+        conflicts = append_pin_conflict(csv_path, self.NEW_META)
+        assert len(conflicts) == 1 and "online_model" in conflicts[0]
+
+    def test_existing_csv_without_meta_cannot_conflict(self, tmp_path):
+        """Nothing to compare against — the runner warns instead of blocking."""
+        from bench.bench_lib import append_pin_conflict
+        csv_path = tmp_path / "run.csv"
+        csv_path.write_text("query_id\n", encoding="utf-8")
+        assert append_pin_conflict(csv_path, self.NEW_META) == []
+
+
 class TestReportPinCheck:
     def test_mismatch_prints_loud_warning(self, tmp_path, capsys):
         from bench.report import print_pin_check
