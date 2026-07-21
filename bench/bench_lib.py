@@ -105,6 +105,20 @@ def count_dryrun_repairs(events):
     )
 
 
+def _apply_generation_event(ident, ev, status):
+    """Fold one generation-stage event into the identity dict. Error events
+    keep the workflow_id too — failed runs must still be detachable (their
+    pre-failure LLM calls are already in llm_traces)."""
+    if status == "complete":
+        ident["generation_status"] = "complete"
+        ident["workflow_id"] = ev.get("workflow_id")
+        if "dryrun_status" in ev:
+            ident["dryrun_status"] = ev["dryrun_status"]
+    elif status == "error" and ident["generation_status"] != "complete":
+        ident["generation_status"] = "error"
+        ident["workflow_id"] = ident["workflow_id"] or ev.get("workflow_id")
+
+
 def extract_run_identity(events):
     """Pull workflow_id / generation_status / test_status / dryrun_status."""
     ident = {"workflow_id": None, "generation_status": None,
@@ -112,13 +126,7 @@ def extract_run_identity(events):
     for _, ev in events:
         stage, status = ev.get("stage"), ev.get("status")
         if stage == "generation":
-            if status == "complete":
-                ident["generation_status"] = "complete"
-                ident["workflow_id"] = ev.get("workflow_id")
-                if "dryrun_status" in ev:
-                    ident["dryrun_status"] = ev["dryrun_status"]
-            elif status == "error" and ident["generation_status"] != "complete":
-                ident["generation_status"] = "error"
+            _apply_generation_event(ident, ev, status)
         elif stage == "execution" and "test_status" in ev:
             ident["test_status"] = ev["test_status"]
     return ident

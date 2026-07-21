@@ -573,26 +573,31 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             logging.error("Orchestrator: GEMINI_API_KEY not found for gemini provider.")
-            yield {"status": "error", "message": "GEMINI_API_KEY not found."}
+            yield {"status": "error", "message": "GEMINI_API_KEY not found.",
+                   "workflow_id": workflow_id}
             return
 
     elif model_provider == "vertex":
         creds_path = os.getenv("VERTEXAI_CREDENTIALS")
         if not creds_path:
             logging.error("Orchestrator: VERTEXAI_CREDENTIALS not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file."}
+            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not os.path.exists(creds_path):
             logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
-            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file."}
+            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_PROJECT:
             logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_LOCATION:
             logging.error("Orchestrator: VERTEXAI_LOCATION not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
 
     # Run CrewAI workflow with real-time progress events.
@@ -839,7 +844,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         logging.error("Failed to generate valid Robot Framework code: %s", e)
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}"}
+        # workflow_id lets the bench detach a failed run — its pre-failure LLM
+        # calls are already recorded in llm_traces.
+        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+               "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
@@ -847,7 +855,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}"}
+        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+               "workflow_id": workflow_id}
     
 
 

@@ -162,3 +162,15 @@ class TestRunIdentity:
         assert ident["generation_status"] == "error"
         assert ident["workflow_id"] is None
         assert ident["test_status"] is None
+
+    def test_generation_error_carries_workflow_id_when_present(self):
+        """Failed runs must still be detachable — their pre-failure LLM calls
+        are already in llm_traces, so the id must survive the error event."""
+        events = [
+            (0.0, _gen(5, "🧠 Analyzing your test requirements...")),
+            (3.0, _gen(None, "An error occurred: boom", status="error",
+                       workflow_id="wf-err")),
+        ]
+        ident = extract_run_identity(events)
+        assert ident["generation_status"] == "error"
+        assert ident["workflow_id"] == "wf-err"

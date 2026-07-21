@@ -148,3 +148,12 @@ class TestSpanDurations:
         got = span_durations(lines, "🧹 Starting browser cleanup...",
                              "🧹 Cleanup complete")
         assert got == [4.0]
+
+
+class TestLogMetricsAbsentLog:
+    def test_no_lines_leaves_every_column_empty(self):
+        """BROWSER_SERVICE_LOG unset → run_bench promises empty columns, not
+        zeros that read as measurements (and would skew report medians)."""
+        from bench.run_bench import log_metrics
+        metrics = log_metrics([])
+        assert all(v is None for v in metrics.values())

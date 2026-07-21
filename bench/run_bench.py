@@ -148,6 +148,13 @@ def read_log_from(log_path: Path | None, offset: int) -> list[str]:
 
 
 def log_metrics(lines: list[str]) -> dict:
+    if not lines:
+        # No log window (BROWSER_SERVICE_LOG unset or log unreadable) — leave
+        # every column empty rather than writing zeros that read as measurements.
+        return dict.fromkeys((
+            "cold_start_s", "cleanup_s", "locator_timer_count",
+            "locator_latency_ms_median", "locator_latency_ms_p90",
+            "probe_total", "probe_unique", "duplicate_lookup_rate"))
     timers = parse_locator_timers(lines)
     lat_median, lat_p90 = median_p90([t["duration_ms"] for t in timers])
     probes = duplicate_lookup_rate(lines)
@@ -269,15 +276,19 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
 
     workflow_id = ident["workflow_id"]
     if workflow_id:
-        data = fetch_metrics_data(conn, workflow_id)
-        if data is not None:
-            metrics = extract_metrics_fields(data)
-            # Guardrail number: metrics-row flakes + dryrun repair rounds.
-            metrics["flake_retries"] += repairs
-            fields.update(metrics)
-        else:
-            _warn(f"{query_id} repeat {repeat}: no workflow_metrics row for "
-                  f"{workflow_id} — LLM/locator columns left empty")
+        # Failed generations never leave a workflow_metrics row (the service
+        # deletes its temp metrics on error) — skip the retry poll, but still
+        # capture+detach: pre-failure LLM calls are already in llm_traces.
+        if ident["generation_status"] == "complete":
+            data = fetch_metrics_data(conn, workflow_id)
+            if data is not None:
+                metrics = extract_metrics_fields(data)
+                # Guardrail number: metrics-row flakes + dryrun repair rounds.
+                metrics["flake_retries"] += repairs
+                fields.update(metrics)
+            else:
+                _warn(f"{query_id} repeat {repeat}: no workflow_metrics row for "
+                      f"{workflow_id} — LLM/locator columns left empty")
 
         if capture_evidence(conn, workflow_id):
             detach_run(conn, workflow_id)
@@ -341,6 +352,9 @@ def gate_pins(args, out_path: Path) -> None:
     if out_path.exists():
         _warn(f"{out_path} exists but has no pins sidecar — its earlier rows "
               f"cannot be verified as comparable to this run")
+        # Recording pins now would vouch for those unverifiable rows on the
+        # NEXT append — leave the CSV sidecar-less and keep warning instead.
+        return
     with open(meta_file, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     _log(f"pins recorded -> {meta_file}")

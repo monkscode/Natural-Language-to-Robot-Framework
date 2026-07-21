@@ -34,6 +34,7 @@ import os
 import json
 import asyncio
 import threading
+import uuid
 import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
@@ -545,6 +546,21 @@ class TestWorkflowCompletionPaths:
             events = list(run_agentic_workflow("query", "gemini", "model"))
 
         assert any(e.get("status") == "error" for e in events)
+
+    @pytest.mark.parametrize("exc", [RuntimeError("LLM offline"), ValueError("bad json")])
+    def test_error_event_carries_workflow_id(self, exc):
+        """Error events carry workflow_id so the bench can detach failed runs —
+        their pre-failure LLM calls are already recorded in llm_traces."""
+        with patch("src.backend.services.workflow_service.run_crew",
+                   side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("query", "gemini", "model"))
+
+        error = next(e for e in events if e.get("status") == "error")
+        uuid.UUID(error["workflow_id"])  # present and a real UUID
 
     def test_gemini_missing_api_key_yields_early_error(self):
         """When GEMINI_API_KEY is absent, an error event is yielded before run_crew()."""

@@ -124,6 +124,34 @@ class TestAppendPinConflict:
         assert append_pin_conflict(csv_path, self.NEW_META) == []
 
 
+class TestGatePinsSidecar:
+    """gate_pins records a sidecar only for CSVs it can vouch for entirely."""
+
+    def _gate(self, out_path):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from bench.run_bench import gate_pins
+        args = SimpleNamespace(base_url="http://nlrf", browser_url="http://bs",
+                               allow_unpinned=False)
+        browser = {**BROWSER_NO_HEADLESS, "headless": True}
+        with patch("bench.run_bench.fetch_health",
+                   side_effect=[PINNED_NLRF, browser]):
+            gate_pins(args, out_path)
+
+    def test_fresh_path_records_sidecar(self, tmp_path):
+        out = tmp_path / "run.csv"
+        self._gate(out)
+        assert meta_path_for(out).exists()
+
+    def test_metaless_existing_csv_gets_no_sidecar(self, tmp_path):
+        """Stamping pins mid-file would vouch for earlier rows recorded under
+        unknown pins on the NEXT append — keep warning instead."""
+        out = tmp_path / "run.csv"
+        out.write_text("query_id\n", encoding="utf-8")
+        self._gate(out)
+        assert not meta_path_for(out).exists()
+
+
 class TestReportPinCheck:
     def test_mismatch_prints_loud_warning(self, tmp_path, capsys):
         from bench.report import print_pin_check
