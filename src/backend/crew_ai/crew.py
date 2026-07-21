@@ -184,13 +184,18 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
 
     # Initialize metrics for optimization tracking
     optimization_metrics = None
+    query_url = None
     if settings.OPTIMIZATION_ENABLED:
+        # Extracted ONCE and reused by the hint lookups below: the metrics
+        # row's domain and the domain-scoped hints must agree, and a second
+        # call is pure overhead (regex re-scan + a duplicate log line).
+        query_url = extract_url_from_query(query)
         # Create a temporary metrics object for tracking optimization metrics
         # This will be merged with the main workflow metrics later
         optimization_metrics = WorkflowMetrics(
             workflow_id=workflow_id or "temp",
             timestamp=datetime.now(),
-            url=extract_url_from_query(query),
+            url=query_url,
             total_llm_calls=0,
             total_cost=0.0,
             execution_time=0.0
@@ -311,11 +316,11 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             # building Tier-1/2 context for it was dead weight — a vector
             # search + keyword-doc fetches per run for a string nothing read,
             # plus a phantom "Planner=N tokens" context-size log.
-            url = extract_url_from_query(query)
             logger.info("🎯 Generating optimized contexts...")
             planner_result = smart_provider.get_agent_context(
-                query, "planner", url=url, hints_only=True)
-            assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
+                query, "planner", url=query_url, hints_only=True)
+            assembler_result = smart_provider.get_agent_context(
+                query, "assembler", url=query_url)
 
             assembler_context = assembler_result.context
 
