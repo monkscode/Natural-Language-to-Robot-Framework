@@ -112,8 +112,8 @@ class TestExtractUrlDomainPattern:
         assert url == "https://portal.mycompany.co.uk"
 
     def test_deep_subdomain_single_tld(self):
-        url = extract_url_from_query("open sujal.astppbilling.org and login")
-        assert url == "https://sujal.astppbilling.org"
+        url = extract_url_from_query("open billing.mycompany.org and login")
+        assert url == "https://billing.mycompany.org"
 
     def test_filename_not_minted_as_domain(self):
         """test.py must not become a domain even though .py is a real ccTLD."""
