@@ -48,10 +48,12 @@ from src.backend.crew_ai.optimization.learning_config import (
 
 logger = logging.getLogger(__name__)
 
-# Same model ChromaDB used by default (all-MiniLM-L6-v2, 384-dim), so the
-# similarity distribution — and the 0.55 retrieval threshold tuned against it —
-# carry over unchanged. fastembed runs it via standalone ONNX (no torch).
-EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# The model name lives in embedding.EMBED_MODEL — this store borrows that
+# module's singleton (Task 31) and no longer constructs its own TextEmbedding,
+# so a local copy of the constant would be a second source of truth for the
+# same value. Same model ChromaDB used by default (all-MiniLM-L6-v2, 384-dim),
+# so the similarity distribution — and the 0.55 retrieval threshold tuned
+# against it — carry over unchanged.
 
 
 class PostgresExecutionMemory(ExecutionStore, SemanticStore):
@@ -471,6 +473,13 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         """Embed `text` to a pgvector literal '[v1,v2,...]', or None if disabled.
 
         Memoized per client instance (Task 31); failures are never cached.
+
+        NOT delegated to embedding.embed_to_literal(): that helper always uses
+        the module singleton, whereas this store embeds through whatever
+        `_chroma_client` currently holds — tests swap in their own instance
+        (conftest `em_vec`) and disable it via the _CHROMADB_INIT_FAILED
+        sentinel. Hence a second memo, keyed on the client identity. Literal
+        formatting IS shared, so both paths stay byte-identical.
         """
         self._init_chromadb()
         if not self._chromadb_available:
@@ -487,7 +496,7 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         except Exception as e:
             logger.warning("[LEARNING] embedding failed (non-blocking): %s", e)
             return None
-        lit = "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+        lit = _shared_embedding.to_literal(vec)
         if len(self._embed_memo) >= 64:
             self._embed_memo.clear()
         self._embed_memo[text] = lit

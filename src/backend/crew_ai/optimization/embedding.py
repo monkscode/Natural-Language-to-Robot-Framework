@@ -72,6 +72,16 @@ def get_embedder():
     return _embedder
 
 
+def to_literal(vec) -> str:
+    """Format one embedding vector as a pgvector text literal '[v1,v2,...]'.
+
+    Shared with PostgresExecutionMemory._embed, which embeds through its OWN
+    client reference (tests swap it) but must produce byte-identical literals —
+    a divergence in precision here would silently store incomparable vectors.
+    """
+    return "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+
+
 def embed_to_literal(text: str) -> str | None:
     """Embed one string to a pgvector literal '[...]', or None if embedding is unavailable.
 
@@ -93,7 +103,7 @@ def embed_to_literal(text: str) -> str | None:
     except Exception as e:
         logger.warning("[EMBED] embedding failed (non-blocking): %s", e)
         return None
-    lit = "[" + ",".join("%.7g" % float(x) for x in vec) + "]"
+    lit = to_literal(vec)
     if len(_memo) >= _MEMO_MAX:
         _memo.clear()
     _memo[text] = lit
