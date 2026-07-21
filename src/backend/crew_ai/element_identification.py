@@ -36,7 +36,7 @@ kickoffs). Depends on: tasks.py models, tools.browser_use_tool (lazily).
 """
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable
 
 from .tasks import IdentifiedElement, PlannedStep
 
@@ -63,7 +63,7 @@ _NO_LOCATOR_PREFIXES = ("should ", "set ", "maximize ", "log ", "run keyword")
 # actually emits (census over logs/crewai.log*); an exact hit means the step
 # needs a locator even when element_description is missing (planner defect →
 # found:false placeholder, never silently skipped).
-_ACTION_EXACT: Dict[str, str] = {
+_ACTION_EXACT: dict[str, str] = {
     # typing
     "input text": "input", "fill text": "input", "type text": "input",
     "fill secret": "input", "input password": "input",
@@ -94,7 +94,7 @@ _ACTION_EXACT: Dict[str, str] = {
 # Visible", "Get Text From Elements", ...). A prefix hit needs a locator only
 # when the step actually names an element — legitimately element-free family
 # members exist (Get Length, Get Time).
-_ACTION_PREFIXES: Tuple[Tuple[str, str], ...] = (
+_ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
     ("input", "input"), ("fill", "input"), ("type", "input"),
     ("click", "click"), ("check ", "click"), ("uncheck", "click"),
     ("press", "click"),
@@ -116,25 +116,25 @@ _VALUE_ACTIONS = frozenset({"input", "select"})
 _NAVIGATION_KEYWORDS = frozenset({"open browser", "new page", "go to"})
 
 
-def _normalize_keyword(keyword: Optional[str]) -> str:
+def _normalize_keyword(keyword: str | None) -> str:
     return " ".join((keyword or "").split()).lower()
 
 
-def _as_dict(step: Any) -> Dict[str, Any]:
+def _as_dict(step: Any) -> dict[str, Any]:
     """Accept plain dicts or pydantic models (PlanOutput.steps)."""
     if hasattr(step, "model_dump"):
         return step.model_dump()
     return dict(step)
 
 
-def _prefix_action(keyword: str) -> Optional[str]:
+def _prefix_action(keyword: str) -> str | None:
     for prefix, action in _ACTION_PREFIXES:
         if keyword.startswith(prefix):
             return action
     return None
 
 
-def step_needs_locator(step: Dict[str, Any]) -> bool:
+def step_needs_locator(step: dict[str, Any]) -> bool:
     """Whitelist decision: does this plan step target a page element?"""
     keyword = _normalize_keyword(step.get("keyword"))
     if keyword in _NO_LOCATOR_EXACT or keyword.startswith(_NO_LOCATOR_PREFIXES):
@@ -158,7 +158,7 @@ def action_for_keyword(keyword: str) -> str:
     return _prefix_action(normalized) or "get_text"
 
 
-def extract_plan_url(steps: List[Any]) -> Optional[str]:
+def extract_plan_url(steps: list[Any]) -> str | None:
     """The URL is the first navigation step's value — nothing is guessed.
 
     Fallback: the planner's keyword vocabulary is a free string, so the URL
@@ -207,7 +207,13 @@ def rewrite_form_description(description: str) -> str:
 # Element building + dedup (port checklist #3, #4, #5)
 # ---------------------------------------------------------------------------
 
-def build_elements(steps: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[int, str]]:
+def _apply_action_value(element: dict[str, Any], action: str, value: Any) -> None:
+    """Attach the step value only for actions that consume one (fill/select)."""
+    if action in _VALUE_ACTIONS and value not in (None, ""):
+        element["value"] = value
+
+
+def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, str]]:
     """Build the batch-tool element specs from the plan.
 
     Returns (elements, step_element_ids) where step_element_ids maps a step's
@@ -215,9 +221,9 @@ def build_elements(steps: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[int, st
     with no element_description get NO element (and no map entry) — the merge
     marks them found:false (planner defect → placeholder, accommodation (a)).
     """
-    elements: List[Dict[str, Any]] = []
-    by_description: Dict[str, Dict[str, Any]] = {}
-    step_element_ids: Dict[int, str] = {}
+    elements: list[dict[str, Any]] = []
+    by_description: dict[str, dict[str, Any]] = {}
+    step_element_ids: dict[int, str] = {}
 
     for index, raw_step in enumerate(steps):
         step = _as_dict(raw_step)
@@ -237,15 +243,13 @@ def build_elements(steps: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[int, st
                 "description": description,
                 "action": action,
             }
-            if action in _VALUE_ACTIONS and value not in (None, ""):
-                element["value"] = value
+            _apply_action_value(element, action, value)
             elements.append(element)
             by_description[description] = element
         elif _ACTION_PRECEDENCE[action] > _ACTION_PRECEDENCE[element["action"]]:
             element["action"] = action
             element.pop("value", None)
-            if action in _VALUE_ACTIONS and value not in (None, ""):
-                element["value"] = value
+            _apply_action_value(element, action, value)
 
         step_element_ids[index] = element["id"]
 
@@ -256,7 +260,7 @@ def build_elements(steps: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[int, st
 # Merge (port checklist #7, #8)
 # ---------------------------------------------------------------------------
 
-def _entry_found(entry: Optional[Dict[str, Any]]) -> bool:
+def _entry_found(entry: dict[str, Any] | None) -> bool:
     """The single definition of "this element was found": the service said so
     AND handed over a usable locator. merge_locators and the stage summary
     both use it, so the SSE counts can never disagree with the merged steps.
@@ -265,17 +269,17 @@ def _entry_found(entry: Optional[Dict[str, Any]]) -> bool:
 
 
 def merge_locators(
-    steps: List[Any],
-    step_element_ids: Dict[int, str],
-    locator_mapping: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    steps: list[Any],
+    step_element_ids: dict[int, str],
+    locator_mapping: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Staple the FULL locator_mapping contract onto each locator step.
 
     found:false, a missing mapping entry, or a missing element id all land on
     the same place: found=False and NO locator key — the Assembler's
     placeholder path. Non-locator steps pass through untouched (no found key).
     """
-    merged: List[Dict[str, Any]] = []
+    merged: list[dict[str, Any]] = []
     for index, raw_step in enumerate(steps):
         step = _as_dict(raw_step)
         # Only PlannedStep fields feed the models below. The normal path is
@@ -298,32 +302,39 @@ def merge_locators(
             )
             continue
 
-        info = entry.get("element_info") or {}
-        identified = IdentifiedElement(
-            **plan_fields,
-            locator=entry.get("best_locator"),
-            found=True,
-            # The old prompt's extraction rule, now code: element_type when
-            # the service classified it, otherwise the observed tagName.
-            element_type=entry.get("element_type") or info.get("tagName") or None,
-            dropdown_framework=entry.get("dropdown_framework") or "",
-            select_id=entry.get("select_id"),
-            datepicker_framework=entry.get("datepicker_framework") or "",
-            element_classes=info.get("className") or "",
-            aria_invalid=str(info.get("ariaInvalid") or ""),
-            parent_classes=info.get("parentClassName") or "",
-            stability=entry.get("stability") or "stable",
-            all_locators=entry.get("all_locators") or [],
-            # ASTPP flags: stapled only when True (None → dropped by
-            # exclude_none), mirroring the service's emitted-only-when-True
-            # payload shape. row_anchor_ambiguous pairs with
-            # stability='positional', which already drives the WARNING comment.
-            visibility_filtered=entry.get("visibility_filtered") or None,
-            row_anchored=entry.get("row_anchored") or None,
-            row_anchor_ambiguous=entry.get("row_anchor_ambiguous") or None,
-        )
-        merged.append(identified.model_dump(exclude_none=True))
+        merged.append(_identified_from_entry(plan_fields, entry))
     return merged
+
+
+def _identified_from_entry(
+    plan_fields: dict[str, Any], entry: dict[str, Any]
+) -> dict[str, Any]:
+    """Full-contract IdentifiedElement dump for a found mapping entry."""
+    info = entry.get("element_info") or {}
+    identified = IdentifiedElement(
+        **plan_fields,
+        locator=entry.get("best_locator"),
+        found=True,
+        # The old prompt's extraction rule, now code: element_type when
+        # the service classified it, otherwise the observed tagName.
+        element_type=entry.get("element_type") or info.get("tagName") or None,
+        dropdown_framework=entry.get("dropdown_framework") or "",
+        select_id=entry.get("select_id"),
+        datepicker_framework=entry.get("datepicker_framework") or "",
+        element_classes=info.get("className") or "",
+        aria_invalid=str(info.get("ariaInvalid") or ""),
+        parent_classes=info.get("parentClassName") or "",
+        stability=entry.get("stability") or "stable",
+        all_locators=entry.get("all_locators") or [],
+        # ASTPP flags: stapled only when True (None → dropped by
+        # exclude_none), mirroring the service's emitted-only-when-True
+        # payload shape. row_anchor_ambiguous pairs with
+        # stability='positional', which already drives the WARNING comment.
+        visibility_filtered=entry.get("visibility_filtered") or None,
+        row_anchored=entry.get("row_anchored") or None,
+        row_anchor_ambiguous=entry.get("row_anchor_ambiguous") or None,
+    )
+    return identified.model_dump(exclude_none=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +344,7 @@ def merge_locators(
 _batch_tool = None
 
 
-def _default_run_tool(elements: List[Dict[str, Any]], url: str, user_query: str) -> Dict[str, Any]:
+def _default_run_tool(elements: list[dict[str, Any]], url: str, user_query: str) -> dict[str, Any]:
     """Call the real batch tool (lazy import keeps unit tests network-free)."""
     global _batch_tool
     if _batch_tool is None:
@@ -342,12 +353,48 @@ def _default_run_tool(elements: List[Dict[str, Any]], url: str, user_query: str)
     return _batch_tool._run(elements=elements, url=url, user_query=user_query)
 
 
-def identify_elements(
-    steps: List[Any],
+def _fetch_locator_mapping(
+    elements: list[dict[str, Any]],
+    url: str,
     user_query: str,
-    run_tool: Optional[Callable[[List[Dict[str, Any]], str, str], Dict[str, Any]]] = None,
-    on_progress: Optional[Callable[[int, str], None]] = None,
-) -> Dict[str, Any]:
+    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """ONE batch tool call; every failure mode returns {} (placeholder path)."""
+    runner = run_tool or _default_run_tool
+    try:
+        response = runner(elements, url, user_query) or {}
+    except Exception:
+        # CONTRACT: no retry, no reformulation — degrade to placeholders.
+        logger.exception(
+            "batch_browser_automation raised — steps fall back to the "
+            "found:false placeholder path (no retry by design)"
+        )
+        response = {}
+    if response.get("status") != "success":
+        logger.warning(
+            "batch_browser_automation returned status=%r — steps fall back "
+            "to the found:false placeholder path (no retry by design)",
+            response.get("status"),
+        )
+    return response.get("locator_mapping") or {}
+
+
+def _stage_summary_message(found: int, total: int) -> str:
+    """Honest stage completion: a failed tool call must not read as success."""
+    if total == 0:
+        return "✅ No page elements needed for this test"
+    if found == total:
+        return "✅ All page elements identified"
+    return (f"⚠️ Identified {found} of {total} elements — "
+            "placeholders will mark the rest")
+
+
+def identify_elements(
+    steps: list[Any],
+    user_query: str,
+    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None = None,
+    on_progress: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
     """The deterministic replacement for identify_elements_task.
 
     Builds the element specs, calls batch_browser_automation EXACTLY ONCE
@@ -375,27 +422,11 @@ def identify_elements(
 
     elements, step_element_ids = build_elements(dict_steps)
     url = extract_plan_url(dict_steps)
-    locator_mapping: Dict[str, Dict[str, Any]] = {}
+    locator_mapping: dict[str, dict[str, Any]] = {}
 
     if elements and url:
         notify(30, "🌐 Navigating to website and detecting elements...")
-        runner = run_tool or _default_run_tool
-        try:
-            response = runner(elements, url, user_query) or {}
-        except Exception:
-            # CONTRACT: no retry, no reformulation — degrade to placeholders.
-            logger.exception(
-                "batch_browser_automation raised — steps fall back to the "
-                "found:false placeholder path (no retry by design)"
-            )
-            response = {}
-        if response.get("status") != "success":
-            logger.warning(
-                "batch_browser_automation returned status=%r — steps fall back "
-                "to the found:false placeholder path (no retry by design)",
-                response.get("status"),
-            )
-        locator_mapping = response.get("locator_mapping") or {}
+        locator_mapping = _fetch_locator_mapping(elements, url, user_query, run_tool)
     elif elements:
         logger.warning(
             "Plan has %d locator-needing elements but no navigation URL — "
@@ -410,15 +441,9 @@ def identify_elements(
         notify(55, f"📍 Found {found} of {len(elements)} elements on the page")
 
     merged = merge_locators(dict_steps, step_element_ids, locator_mapping)
-    # Honest stage completion: a failed tool call must not read as success —
-    # progress still reaches 60 (forward-only ladder), only the text differs.
-    if not elements:
-        notify(60, "✅ No page elements needed for this test")
-    elif found == len(elements):
-        notify(60, "✅ All page elements identified")
-    else:
-        notify(60, f"⚠️ Identified {found} of {len(elements)} elements — "
-                   "placeholders will mark the rest")
+    # Progress still reaches 60 either way (forward-only ladder) — only the
+    # completion text differs on partial/failed identification.
+    notify(60, _stage_summary_message(found, len(elements)))
 
     return {
         "steps": merged,
