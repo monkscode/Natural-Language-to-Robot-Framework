@@ -62,9 +62,13 @@ def _fresh_import_with_env_file(tmp_path, monkeypatch, env_lines):
         for pkg, attr, value in saved_attrs:
             if value is not None:
                 setattr(pkg, attr, value)
+            elif hasattr(pkg, attr):
+                delattr(pkg, attr)
         for key, value in saved_env.items():
             if value is not None:
                 os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
 
 
 class TestImportTimeEnvReads:
