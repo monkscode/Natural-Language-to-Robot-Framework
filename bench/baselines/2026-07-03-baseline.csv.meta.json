@@ -1,0 +1,17 @@
+{
+  "captured_at": "2026-07-04T00:00:00",
+  "backfilled": true,
+  "backfill_source": "bench/runs/*/llm_traces.json model field (gemini-3.5-flash, all runs) + recorded run conditions in DAY-1 §F Task 2 (OPTIMIZATION_ENABLED=false, BROWSER_HEADLESS=true); MODEL_PROVIDER=vertex from src/backend/.env and DRYRUN_ENABLED=true from config default, both unchanged since 2026-07-03",
+  "base_url": "http://127.0.0.1:5000",
+  "browser_url": "http://127.0.0.1:4999",
+  "nlrf_pins": {
+    "optimization_enabled": false,
+    "model_provider": "vertex",
+    "online_model": "gemini-3.5-flash",
+    "dryrun_enabled": true
+  },
+  "browser_service": {
+    "model_provider": "vertex",
+    "headless": true
+  }
+}

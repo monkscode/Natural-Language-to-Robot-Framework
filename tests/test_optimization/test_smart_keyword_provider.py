@@ -50,6 +50,14 @@ class MockVectorStore:
             }
         ]
 
+    def get_keyword_doc(self, library_name, name):
+        # Task 31: predicted-keyword docs come from an exact-name lookup.
+        return {
+            "name": name,
+            "args": ["arg1"],
+            "description": f"Mock doc for {name}",
+        }
+
 
 class MockLibraryContext:
     """Minimal mock of LibraryContext."""
@@ -74,6 +82,28 @@ class MockEngine:
         if self._raise:
             raise RuntimeError("Engine exploded")
         return self._hints
+
+    # Task 31 split API: role-independent retrieval halves (cached per
+    # workflow by the provider) + a pure formatting half. The double passes
+    # its configured hint strings through retrieval so format_hints echoes
+    # them, mirroring the real retrieval->format contract.
+
+    def get_warnings(self, user_query, url, org_id=None):
+        self.call_count += 1
+        self.last_args = (user_query, url, org_id)
+        if self._raise:
+            raise RuntimeError("Engine exploded")
+        return self._hints or []
+
+    def get_intent_rules(self, user_query):
+        self.call_count += 1
+        self.last_args = (user_query,)
+        if self._raise:
+            raise RuntimeError("Engine exploded")
+        return self._hints or []
+
+    def format_hints(self, items, agent_role):
+        return list(items) if items else None
 
     def learn(self, record):
         pass
@@ -415,7 +445,8 @@ class TestGetLearningHints:
         assert result["count"] == 0
 
     def test_url_passed_to_engines(self, in_memory_db):
-        """URL should be forwarded to each engine."""
+        """URL should be forwarded to the url-scoped engines (Task 31: the
+        structural retrieval half takes only the query — it never used url)."""
         p = create_provider(execution_memory=in_memory_db)
         mock_s = MockEngine(hints=None)
         mock_k = MockEngine(hints=None)
@@ -424,18 +455,18 @@ class TestGetLearningHints:
         p._keyword_engine = mock_k
         p._anti_pattern_engine = mock_a
         p._get_learning_hints("planner", "query", url="https://demoqa.com")
-        assert mock_s.last_args == ("query", "https://demoqa.com", "planner", None)
-        assert mock_a.last_args == ("query", "https://demoqa.com", "planner", None)
+        assert mock_s.last_args == ("query",)
+        assert mock_a.last_args == ("query", "https://demoqa.com", None)
 
     def test_none_url_becomes_empty_string(self, in_memory_db):
-        """When url=None, engines should receive empty string."""
+        """When url=None, url-scoped engines should receive empty string."""
         p = create_provider(execution_memory=in_memory_db)
-        mock_s = MockEngine(hints=None)
-        p._structural_engine = mock_s
+        mock_a = MockEngine(hints=None)
+        p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
-        p._anti_pattern_engine = MockEngine(hints=None)
+        p._anti_pattern_engine = mock_a
         p._get_learning_hints("planner", "query", url=None)
-        assert mock_s.last_args[1] == ""
+        assert mock_a.last_args[1] == ""
 
 
 # ===================================================================
@@ -503,12 +534,12 @@ class TestGetAgentContext:
 
     def test_url_param_forwarded(self, in_memory_db):
         p = create_provider(execution_memory=in_memory_db)
-        mock_s = MockEngine(hints=None)
-        p._structural_engine = mock_s
+        mock_a = MockEngine(hints=None)
+        p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
-        p._anti_pattern_engine = MockEngine(hints=None)
+        p._anti_pattern_engine = mock_a
         p.get_agent_context("click", "planner", url="https://test.com")
-        assert mock_s.last_args[1] == "https://test.com"
+        assert mock_a.last_args[1] == "https://test.com"
 
     def test_hint_failure_nonblocking(self, in_memory_db):
         """If _get_learning_hints raises, context should still be returned."""
@@ -524,26 +555,69 @@ class TestGetAgentContext:
         assert len(result.context) > 0  # Existing tiers still work
 
     def test_all_agent_roles(self, in_memory_db):
-        """All agent roles should work."""
+        """Both LLM agent roles should work (Task 16 removed the identifier
+        agent — only planner and assembler receive context now)."""
         p = create_provider(execution_memory=in_memory_db)
         p._structural_engine = MockEngine(hints=None)
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
 
-        for role in ["planner", "identifier", "assembler"]:
+        for role in ["planner", "assembler"]:
             result = p.get_agent_context("click button", role)
             assert isinstance(result, AgentContextResult), f"Failed for role: {role}"
             assert len(result.context) > 0, f"Empty context for role: {role}"
 
-    def test_identifier_no_hints(self, in_memory_db):
-        """Identifier role should get no hints (engines filter by role)."""
+
+# ===================================================================
+# Category 5b: hints_only (planner retrieval mode)
+# ===================================================================
+
+class RecordingPatternMatcher:
+    """Counts get_relevant_keywords calls — hints_only must never trigger
+    the Tier-2 vector search."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_relevant_keywords(self, query, confidence_threshold=0.7, org_id=None):
+        self.calls += 1
+        return ["Click"]
+
+
+class TestHintsOnly:
+    """hints_only=True runs ONLY Tier 0 (learning hints) and returns an
+    empty context string. This is the planner's retrieval mode: its agent
+    ships static minimal context by design (RobotAgents.step_planner_agent),
+    so building Tier-1/2 context for it was dead weight — a vector search
+    plus keyword-doc fetches per production run for a string nothing read,
+    and a phantom 'Planner=N tokens' context-size log."""
+
+    def test_empty_context_and_no_pattern_learning(self):
+        matcher = RecordingPatternMatcher()
+        p = create_provider(pattern_matcher=matcher)
+        result = p.get_agent_context("click button", "planner", hints_only=True)
+        assert result.context == ""
+        assert matcher.calls == 0, "Tier-2 vector search must be skipped"
+
+    def test_hints_still_flow(self, in_memory_db):
         p = create_provider(execution_memory=in_memory_db)
-        # Structural only returns for planner/assembler
-        p._structural_engine = MockEngine(hints=None)
+        p._structural_engine = MockEngine(hints=["HINT_MARKER"])
         p._keyword_engine = MockEngine(hints=None)
         p._anti_pattern_engine = MockEngine(hints=None)
-        result = p.get_agent_context("find element", "identifier")
-        assert result.hints_count == 0
+        result = p.get_agent_context("get rows", "planner", hints_only=True)
+        assert result.context == ""
+        assert "HINT_MARKER" in result.hint_text
+        assert result.hints_count == 1
+        assert result.hints_available == 1
+        assert result.hint_sources == ("structural",)
+
+    def test_default_still_builds_context(self):
+        """Without the flag the assembler path is untouched."""
+        matcher = RecordingPatternMatcher()
+        p = create_provider(pattern_matcher=matcher)
+        result = p.get_agent_context("click button", "assembler")
+        assert "CORE RULES" in result.context
+        assert matcher.calls == 1
 
 
 # ===================================================================
@@ -669,16 +743,19 @@ class TestRegression:
         assert "RELEVANT KEYWORDS" in result.context
 
     def test_zero_context_fallback(self):
-        """With no predictions, should fall back to zero-context + tool."""
+        """With no predictions, should fall back to core-rules-only zero-context
+        (the keyword-search tool and its usage instructions were retired,
+        Task 24R Stage 1)."""
         p = create_provider(predicted_keywords=None)
         result = p.get_agent_context("click button", "assembler")
-        assert "keyword_search" in result.context.lower() or "KEYWORD SEARCH" in result.context
+        assert "CORE RULES" in result.context
+        assert "keyword_search" not in result.context.lower()
 
-    def test_full_context_fallback(self):
-        """Full context fallback for identifier role."""
+    def test_full_context_fallback_unknown_role(self):
+        """Unknown roles fall back to code_assembly_context with a warning
+        (the 'identifier' branch was removed in Task 16 — it was dead code)."""
         p = create_provider()
-        result = p.get_agent_context("find element", "identifier")
-        # Identifier gets minimal guidance in fallback
+        result = p.get_agent_context("find element", "unknown-role")
         assert len(result.context) > 0
         assert isinstance(result, AgentContextResult)
 

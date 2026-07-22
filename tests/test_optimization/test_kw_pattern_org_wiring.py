@@ -127,7 +127,7 @@ def test_feedback_loop_passes_org_id_to_pattern_learner(in_memory_db):
 
 def _stub_library_context():
     ctx = MagicMock()
-    ctx.library_name = "SeleniumLibrary"
+    ctx.library_name = "Browser"
     ctx.core_rules = "# Core rules stub"
     ctx.planning_context = "# Planning context stub"
     ctx.code_assembly_context = "# Assembly context stub"

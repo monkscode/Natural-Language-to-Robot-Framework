@@ -109,6 +109,153 @@ class TestIdentifiedElement:
         assert elem.dropdown_framework == ""
         assert elem.select_id is None
 
+    def test_date_picker_field_accepted(self):
+        """datepicker_framework must be accepted so the Pydantic model does
+        not strip flatpickr metadata before it reaches the Code Assembler
+        (Task D, G4 — same pipe as dropdown_framework/select_id)."""
+        elem = IdentifiedElement(
+            step_description="Set the CDR from date",
+            keyword="Fill Text",
+            locator="id=customer_cdr_from_date",
+            found=True,
+            element_type="date-picker",
+            datepicker_framework="flatpickr",
+            value="2026-07-01",
+        )
+        assert elem.datepicker_framework == "flatpickr"
+
+    def test_date_picker_field_defaults_to_none(self):
+        """Elements that are not date pickers must not require the field."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.datepicker_framework is None
+
+    def test_empty_datepicker_framework_accepted(self):
+        """browser_use_tool sends an empty string for non-widget elements;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Fill username",
+            keyword="Fill Text",
+            locator="id=username",
+            found=True,
+            element_type="input",
+            datepicker_framework="",
+        )
+        assert elem.datepicker_framework == ""
+
+    def test_element_classes_field_accepted(self):
+        """element_classes must be accepted so the Pydantic model does not
+        strip the observed class list before it reaches the Code Assembler
+        (Task G, G7 — the classes the locator engine saw on the field at
+        locate time, i.e. AFTER the preceding steps ran; on ASTPP the
+        empty-form Save has happened, so 'invalid' is in the list)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator='input[name="email"]',
+            found=True,
+            element_type="input",
+            element_classes="text field medium form-control invalid",
+        )
+        assert elem.element_classes == "text field medium form-control invalid"
+
+    def test_element_classes_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.element_classes is None
+
+    def test_empty_element_classes_accepted(self):
+        """Elements with no class attribute come back as empty string;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator='input[name="email"]',
+            found=True,
+            element_type="input",
+            element_classes="",
+        )
+        assert elem.element_classes == ""
+
+    def test_aria_invalid_field_accepted(self):
+        """aria_invalid must be accepted so the Pydantic model does not
+        strip the observed ARIA state before it reaches the Code Assembler
+        (Task G aria pipe — for sites that mark invalid fields via ARIA
+        instead of a CSS class, the assembler emits a Get Attribute
+        assertion instead of the placeholder)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            aria_invalid="true",
+        )
+        assert elem.aria_invalid == "true"
+
+    def test_aria_invalid_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.aria_invalid is None
+
+    def test_empty_aria_invalid_accepted(self):
+        """Elements without the attribute come back as empty string;
+        the model must accept it without coercing to None."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            aria_invalid="",
+        )
+        assert elem.aria_invalid == ""
+
+    def test_parent_classes_field_accepted(self):
+        """parent_classes must be accepted so the Pydantic model does not
+        strip the parent's observed class list (Task G parent scan —
+        Bootstrap 3 marks invalid fields on the PARENT div while the
+        field's own list stays clean; the assembler asserts one level up
+        via `${locator} >> xpath=..`)."""
+        elem = IdentifiedElement(
+            step_description="Verify the Email field shows an error",
+            keyword="Get Classes",
+            locator="id=email",
+            found=True,
+            element_type="input",
+            element_classes="form-control",
+            parent_classes="form-group has-error",
+        )
+        assert elem.parent_classes == "form-group has-error"
+
+    def test_parent_classes_defaults_to_none(self):
+        """Steps that are not state verifications must not require it."""
+        elem = IdentifiedElement(
+            step_description="Click submit",
+            keyword="Click",
+            locator="id=submit-btn",
+            found=True,
+            element_type="button",
+        )
+        assert elem.parent_classes is None
+
 
 class TestAssemblyOutput:
     """Tests for AssemblyOutput model."""

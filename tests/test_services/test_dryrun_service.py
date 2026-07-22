@@ -198,6 +198,44 @@ class TestValidateAndRepair:
         assert out["repair_usage"] == {}
         mock_rc.ensure_image.assert_not_called()  # §8.4 — no executor hop for a skip
 
+    def test_assembled_checkpoint_pushed_at_gate_entry(self):
+        """The 80% '✅ Test code assembled' checkpoint is pushed when the gate
+        starts. The event-bus TaskCompletedEvent for the assembler is lost to a
+        handler race (CrewAI bus runs sync handlers in a ThreadPoolExecutor),
+        so the gate — which by definition runs after the crew returned — is the
+        deterministic place to emit it."""
+        from queue import Queue
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            ds.validate_and_repair("rid", "code", "gemini", "m", q)
+
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        second = q.get(timeout=1)
+        assert "Preparing verification environment" in second["message"]
+
+    def test_assembled_checkpoint_pushed_even_when_gate_skipped(self):
+        """DRYRUN_ENABLED=false still means the assembler finished — the 80%
+        checkpoint must not depend on the gate actually running."""
+        from queue import Queue, Empty
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings(enabled=False)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client"):
+            out = ds.validate_and_repair("rid", "*** Settings ***\n", "gemini", "m", q)
+
+        assert out["dryrun_status"] == "skipped"
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
     @pytest.mark.parametrize("code", ["", "   \n\t  "])
     def test_empty_code_skips_without_container(self, code):
         with patch.object(ds, "settings", self._settings()), \

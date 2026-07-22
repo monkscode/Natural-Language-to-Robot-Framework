@@ -449,7 +449,8 @@ class CleanedLLMWrapper(LLM):
         return cleaned
 
 
-def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
+def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
+            response_format=None):
     """
     Get a CleanedLLMWrapper instance for the given provider and model.
 
@@ -479,6 +480,12 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
                     "qwen2.5-coder:14b"). The provider prefix is prepended here.
         api_key: API key for Gemini models (optional, falls back to GEMINI_API_KEY
                  env var). Not used for Vertex AI or local Ollama models.
+        response_format: Optional Pydantic model class for provider-enforced
+                 structured output (Task 22). Forwarded to the wrapper ONLY
+                 when LiteLLM's capability table says the routed model supports
+                 response schemas (vertex/gemini: yes; ollama: no) — otherwise
+                 silently dropped so unsupported providers keep the legacy
+                 free-text contract with the guardrail salvage net.
 
     Returns:
         CleanedLLMWrapper instance ready for use with CrewAI agents
@@ -506,6 +513,28 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
 
     routed_model = resolve_model_string(model_provider, model_name)
 
+    # Task 22 provider gate: only forward response_format where the routed
+    # model actually supports schema enforcement — CrewAI raises ValueError at
+    # call time otherwise (crewai llm.py supports_response_schema check).
+    if response_format is not None:
+        try:
+            from litellm.utils import supports_response_schema
+            if not supports_response_schema(model=routed_model):
+                logger.info(
+                    f"📋 response_format requested but {routed_model} has no "
+                    f"schema support — using legacy free-text contract"
+                )
+                response_format = None
+        except Exception as e:
+            logger.warning(
+                f"📋 response_format capability check failed for {routed_model} "
+                f"({type(e).__name__}: {e}) — using legacy free-text contract"
+            )
+            response_format = None
+    # Omit the kwarg entirely when unset so the wrapper call shape (and the
+    # tests asserting it) stays identical for legacy callers.
+    schema_kwargs = {"response_format": response_format} if response_format is not None else {}
+
     if model_provider == "local":
         # LiteLLM routes "ollama/<model>" to the Ollama HTTP API.
         # OLLAMA_API_BASE env var controls the server URL:
@@ -523,6 +552,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             is_litellm=True,  # No routing effect — __new__ override bypasses LLM.__new__
                               # entirely. Kept for documentation clarity only.
             num_retries=3,    # LiteLLM internal retry for transient API errors.
+            **schema_kwargs,
         )
 
     if model_provider == "vertex":
@@ -533,6 +563,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             model=routed_model,
             num_retries=3,
             is_litellm=True,
+            **schema_kwargs,
         )
 
     # model_provider == "gemini" — Google AI Studio.
@@ -544,4 +575,5 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
         model=routed_model,
         num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
         is_litellm=True,
+        **schema_kwargs,
     )

@@ -147,8 +147,10 @@ class TestCreateWorkflowSpan:
                 pass
 
     def test_custom_library_type(self):
+        """library_type is a free-form telemetry attribute — any string is
+        recorded as-is (it documents what a run used, it is not validated)."""
         from src.backend.core.observability import create_workflow_span
         with create_workflow_span(
-            "wf-lib", "query", "vertex", "gemini-2.5-flash", library_type="selenium"
+            "wf-lib", "query", "vertex", "gemini-2.5-flash", library_type="custom-lib"
         ):
             pass

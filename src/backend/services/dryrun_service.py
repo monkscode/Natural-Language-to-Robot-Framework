@@ -398,15 +398,15 @@ def _repair_usage_dict(repair_crew, model_name: str) -> dict:
 
 
 def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
-                      model_name, library_type=None) -> tuple:
+                      model_name) -> tuple:
     """Top-level Assembler repair mini-crew. Returns (task_output, usage_dict).
 
     Builds FRESH RobotAgents + RobotTasks (never reuses the main-crew instances —
     §2.4). The single assembler agent has allow_delegation=False; the crew has NO
     step/task callbacks, output_log_file=None, and is NOT registered in
     progress_events — its bus events route nowhere and are safely dropped (§8.5).
-    Library context is resolved from settings.ROBOT_LIBRARY when library_type is
-    None so the repair agent knows Browser-vs-Selenium keywords (§8.2). The repaired
+    Library context is resolved from settings.ROBOT_LIBRARY so the repair agent
+    knows the Browser Library keywords (§8.2). The repaired
     code is read DIRECTLY from crew.tasks[0].output (no in-crew delegation).
 
     Pure repair step — pushes no progress itself; the caller (validate_and_repair)
@@ -417,14 +417,12 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     from src.backend.crew_ai.tasks import RobotTasks
     from src.backend.crew_ai.library_context import get_library_context
 
-    if library_type is None:
-        library_type = settings.ROBOT_LIBRARY
-    library_context = get_library_context(library_type)
+    library_context = get_library_context(settings.ROBOT_LIBRARY)
 
     # FRESH instances — own CleanedLLMWrapper + monitor, so the MAIN crew's
     # calculate_usage_metrics()/llm_monitor never see these repair calls (no
-    # double-count; §5). No keyword_search tool: the assembler relies on
-    # library_context for keyword knowledge (§8.2).
+    # double-count; §5). The assembler relies on library_context for keyword
+    # knowledge (§8.2).
     agents = RobotAgents(model_provider, model_name, library_context)
     tasks = RobotTasks(library_context)
     assembler = agents.code_assembler_agent()
@@ -514,6 +512,13 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     learning DB; only the real Docker run feeds learning.
     """
     repair_usage: dict = {}
+
+    # The assembler's 80% checkpoint. Its TaskCompletedEvent is lost to the
+    # event-bus handler race (see progress_events._on_task_started); the gate
+    # runs strictly after the crew returned, so this is the deterministic
+    # emission point. Pushed before the skip check — a disabled gate does not
+    # change the fact that assembly finished.
+    _push_progress(progress_queue, "✅ Test code assembled", 80)
 
     # §8.4 — skip the gate (and never spawn a container) when disabled or empty.
     if not settings.DRYRUN_ENABLED or not robot_code or not robot_code.strip():

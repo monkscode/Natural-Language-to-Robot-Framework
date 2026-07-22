@@ -9,7 +9,10 @@ Purpose: Guardrails intercept and fix LLM output before it reaches CrewAI's
 Tests cover:
   _extract_json_by_key: valid JSON, embedded in text, multiple candidates
   assembly_output_guardrail: valid JSON, RF code extraction, no code
-  identification_output_guardrail: valid steps, missing steps
+
+(identification_output_guardrail was deleted in Task 16 together with the
+element-identifier LLM agent — the merged steps are now built by
+deterministic Python and need no output repair.)
 """
 
 import pytest
@@ -17,7 +20,6 @@ import json
 from src.backend.crew_ai.tasks import (
     _extract_json_by_key,
     assembly_output_guardrail,
-    identification_output_guardrail,
 )
 
 
@@ -85,25 +87,20 @@ class TestAssemblyOutputGuardrail:
         assert isinstance(result, str)  # Feedback message
 
 
-class TestIdentificationOutputGuardrail:
-    """Tests for identification_output_guardrail."""
+class TestStepsKeyExtraction:
+    """_extract_json_by_key with 'steps' is still used by crew.py's plan
+    extraction fallback (_extract_plan_steps) — keep it covered."""
 
-    def test_valid_steps(self):
-        """Valid JSON with 'steps' key passes."""
+    def test_valid_steps_extracted(self):
         output = json.dumps({
             "steps": [
-                {"step_description": "Click login", "keyword": "Click Element", "locator": "id=login", "found": True}
+                {"step_description": "Click login", "keyword": "Click Element"}
             ]
         })
-        from unittest.mock import MagicMock
-        task_out = MagicMock(raw=output)
-        is_valid, result = identification_output_guardrail(task_out)
-        assert is_valid is True
+        result = _extract_json_by_key(output, "steps", "PlanOutput")
+        assert result is not None
+        assert json.loads(result)["steps"][0]["keyword"] == "Click Element"
 
-    def test_missing_steps_key(self):
-        """JSON without 'steps' key → fails with feedback."""
+    def test_missing_steps_key_returns_none(self):
         output = json.dumps({"elements": []})
-        from unittest.mock import MagicMock
-        task_out = MagicMock(raw=output)
-        is_valid, result = identification_output_guardrail(task_out)
-        assert is_valid is False
+        assert _extract_json_by_key(output, "steps", "PlanOutput") is None

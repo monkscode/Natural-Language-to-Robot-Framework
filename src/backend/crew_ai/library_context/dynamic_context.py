@@ -260,9 +260,9 @@ class DynamicLibraryDocumentation:
         return context
     
     def _get_generic_locator_guide(self) -> str:
-        """Fallback locator guide if extraction fails."""
-        if self.library_name == 'Browser':
-            return """
+        """Fallback locator guide if extraction fails. Browser Library is the
+        only supported target (Task 11/E8)."""
+        return """
 **BROWSER LIBRARY LOCATOR FORMATS:**
 - id=<value>          → Find by ID
 - text=<value>        → Find by visible text
@@ -270,14 +270,6 @@ class DynamicLibraryDocumentation:
 - data-testid=<value> → Find by test ID
 - <css_selector>      → CSS selector (no prefix)
 - xpath=<expression>  → XPath (no prefix)
-"""
-        else:  # SeleniumLibrary
-            return """
-**SELENIUMLIBRARY LOCATOR FORMATS:**
-- id=<value>          → Find by ID
-- name=<value>        → Find by name
-- xpath=<expression>  → Find by XPath
-- css=<selector>      → Find by CSS
 """
 
 

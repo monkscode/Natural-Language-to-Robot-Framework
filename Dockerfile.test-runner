@@ -9,7 +9,6 @@ FROM ${BASE_IMAGE}
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     robotframework \
-    robotframework-seleniumlibrary \
     "robotframework-browser[bb]" && \
     rfbrowser install chromium && \
     test -d /opt/playwright-browsers && \

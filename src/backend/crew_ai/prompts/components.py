@@ -25,8 +25,9 @@ class PromptComponents:
     Components are organized into categories:
     - SHARED: Rules used across multiple tasks
     - PLANNING: Specific to plan_steps_task
-    - IDENTIFICATION: Specific to identify_elements_task
     - ASSEMBLY: Specific to assemble_code_task
+    (IDENTIFICATION components were removed in Task 16 — element
+    identification is deterministic Python now, see element_identification.py)
     """
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -88,32 +89,6 @@ Element descriptions must be SPECIFIC and include SPATIAL/CONTEXTUAL clues to he
    - This ensures the actual clickable input control is targeted, not just text
 """
 
-    LOCATOR_USAGE_RULES = """
-⚠️ **CRITICAL LOCATOR USAGE RULE** ⚠️
-When mapping locators to steps:
-1. Use ONLY the 'best_locator' value from locator_mapping
-2. DO NOT analyze or select from 'all_locators' array
-3. DO NOT override with your own preference
-4. DO NOT second-guess the locator selection
-5. The 'best_locator' has already been:
-   - AI-detected with vision on actual page
-   - Validated with Playwright (unique & working)
-   - Scored by quality (ID=100, text=65, XPath=18)
-   - Re-ranked to select optimal option
-6. Even if you see a 'better' locator in all_locators, IGNORE IT
-7. Your ONLY job is to copy best_locator values to steps
-
-Process:
-- Go through each test step again
-- If step needed a locator (e.g., elem_1, elem_2, elem_3):
-  * Add 'locator' key to that step's JSON
-  * Use the 'best_locator' value EXACTLY from locator_mapping
-  * DO NOT modify, analyze, or substitute the locator
-  * ALSO add 'element_type' from the response (e.g., 'input', 'select')
-- If step didn't need a locator (Open Browser, Close Browser):
-  * Leave it as-is (no locator key needed)
-"""
-
     # ═══════════════════════════════════════════════════════════════════════════
     # ASSEMBLY COMPONENTS - Used in assemble_code_task
     # ═══════════════════════════════════════════════════════════════════════════
@@ -122,100 +97,64 @@ Process:
 --- CRITICAL: VARIABLE DECLARATION RULES ---
 1. **ALWAYS include *** Variables *** section** (even if empty)
 2. **Declare ALL variables before use:**
-   - If Open Browser step has 'browser' key → ${browser}    <value from step>
-   - If Open Browser step has 'options' key → ${options}    <value from step>
+   - Browser init step → ${browser}    <value from step>, ${headless}    <value from step>
    - For each element with locator → ${elem_X_locator}    <locator value>
    - For Get Text results → ${variable_name}    (no initial value needed)
 
 3. **Variable Naming Convention:**
-   - Browser config: ${browser}, ${options}
+   - Browser config: ${browser}, ${headless}
    - Element locators: ${search_box_locator}, ${product_name_locator}
    - Retrieved values: ${product_name}, ${product_price}, ${result}
-
-4. **Extracting Values from Steps:**
-   - Look for 'browser' key in Open Browser step → use as ${browser} value
-   - Look for 'options' key in Open Browser step → use as ${options} value
-   - Look for 'locator' key in each step → declare as ${elem_X_locator}
 
 **Example Variable Extraction:**
 If you receive:
 ```json
 {
-  "keyword": "Open Browser",
+  "keyword": "New Browser",
   "value": "https://www.flipkart.com",
-  "browser": "chrome",
-  "options": "add_argument('--headless')"
+  "browser": "chromium",
+  "headless": "True"
 }
 ```
 You MUST declare:
 ```robot
 *** Variables ***
-${browser}    chrome
-${options}    add_argument('--headless')
+${browser}    chromium
+${headless}    True
 ```
 """
 
-    USE_PROVIDED_LOCATORS_RULES = """
---- CRITICAL: USE PROVIDED LOCATORS EXACTLY (NO EXCEPTIONS) ---
+    LOCATOR_RULES = """
+--- CRITICAL: LOCATOR RULES (USE PROVIDED LOCATORS EXACTLY) ---
 ⚠️ **MOST IMPORTANT RULE FOR LOCATORS** ⚠️
 
-The locators provided have been:
-- Found by AI vision on the actual webpage
-- Validated to work correctly
-- Scored and prioritized (ID > data-testid > name > aria-label > text > XPath)
-- Selected as the BEST option for stability
+The locators provided have been found by AI vision on the actual webpage,
+validated to work, and scored for stability. Your job is code assembly,
+not locator optimization.
 
-**YOU MUST:**
-1. Copy the EXACT locator value from the 'locator' field
-2. DO NOT modify, improve, or convert the locator
-3. DO NOT change id=X to xpath=//*[@id='X']
-4. DO NOT change any locator format
-5. If you think a locator is wrong, USE IT ANYWAY and add a comment
-
-**WHY THIS IS CRITICAL:**
-- The locator was validated on the actual page
-- Changing it will break the test
-- The scoring system already selected the best option
-- Your job is code assembly, not locator optimization
-
-**EXAMPLES:**
-✅ CORRECT:
-Input: {"locator": "id=submit-btn"}
-Output: ${submit_locator}    id=submit-btn
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "id=submit-btn"}
-Output: ${submit_locator}    xpath=//*[@id='submit-btn']  ← WRONG!
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "xpath=//button[1]"}
-Output: ${submit_locator}    id=submit-btn  ← WRONG! Use provided XPath!
-
-❌ WRONG (DO NOT DO THIS):
-Input: {"locator": "name=q"}
-Output: ${search_locator}    id=search-box  ← WRONG! Use provided name locator!
-
-⚠️ REMEMBER: Locators are pre-validated and pre-scored. DO NOT modify them! ⚠️
-"""
-
-    LOCATOR_MAPPING_RULES = """
---- LOCATOR MAPPING RULES ---
-For each step that needs a locator:
+**For each step that needs a locator:**
 1. Check if 'locator' key exists and 'found' is true
-2. If found: Declare locator as variable and use it EXACTLY as provided
+2. If found: declare the locator as a variable and copy the EXACT value
+   from the 'locator' field
+   - DO NOT modify, improve, or convert the locator
+   - DO NOT change id=X to xpath=//*[@id='X'] or any other format
+   - If you think a locator is wrong, USE IT ANYWAY and add a comment
 3. If NOT found (found=false or error present):
    a. Add comment: # WARNING: Locator not found for <element_description>
    b. Use placeholder: xpath=//PLACEHOLDER_FOR_<element_id>
    c. Still generate syntactically valid code
+   d. The action step itself stays a LIVE keyword call using the placeholder
+      variable — NEVER comment out the step. Only the WARNING lines are
+      comments; a commented-out step erases the repair surface
 
 **Example for found locator:**
 ```robot
 *** Variables ***
-${search_box_locator}    id=search-input  # ← Use EXACT value from 'locator' field
+${search_box_locator}    id=search-input  # ← EXACT value from 'locator' field
 
 *** Test Cases ***
 Test
-    Input Text    ${search_box_locator}    shoes
+    Fill Text    ${search_box_locator}    shoes
 ```
 
 **Example for missing locator:**
@@ -228,6 +167,34 @@ Test
     # WARNING: Locator not found for 'first product name'
     # Manual intervention required: Inspect page and update locator
     ${product_name}=    Get Text    ${product_locator}
+```
+
+❌ WRONG (DO NOT DO THIS):
+Input: {"locator": "id=submit-btn"}
+Output: ${submit_locator}    xpath=//*[@id='submit-btn']  ← WRONG! Copy it EXACTLY.
+"""
+
+    STABILITY_WARNING_RULES = """
+--- LOCATOR STABILITY WARNINGS ---
+Each step may carry a 'stability' field ('stable', 'volatile', or 'positional')
+— the locator engine's verdict on whether the locator survives a fresh session.
+
+**Rule:** When a step's 'stability' is present and NOT 'stable', add a comment
+line directly ABOVE that step:
+`# WARNING: locator for '<element_description>' is <stability> — may break in a fresh session`
+
+**CRITICAL:** Still use the provided locator exactly as provided. The warning
+is disclosure for the human reviewer, NOT permission to modify, substitute,
+or skip the locator. Steps with stability 'stable' (or no stability field)
+get NO warning comment.
+
+**Example:**
+*Input Step:*
+`{"keyword": "Click", "element_description": "submit button", "locator": "xpath=//div[4]/center/input[1]", "stability": "positional"}`
+*Output Code:*
+```robot
+    # WARNING: locator for 'submit button' is positional — may break in a fresh session
+    Click    ${submit_button_locator}
 ```
 """
 
@@ -263,9 +230,9 @@ If a step in the context contains the keys `condition_type` and `condition_value
 
 **Example:**
 *Input Step:*
-`{"keyword": "Input Text", "locator": "id=discount-code", "value": "SAVE10", "condition_type": "IF", "condition_value": "${total} > 100"}`
+`{"keyword": "Fill Text", "locator": "id=discount-code", "value": "SAVE10", "condition_type": "IF", "condition_value": "${total} > 100"}`
 *Output Code:*
-`    Run Keyword If    ${total} > 100    Input Text    id=discount-code    SAVE10`
+`    Run Keyword If    ${total} > 100    Fill Text    id=discount-code    SAVE10`
 """
 
     LOOP_HANDLING = """
@@ -303,10 +270,10 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 
 **Simple Loop Example:**
 *Input Step:*
-`{"keyword": "Click Element", "loop_type": "FOR", "loop_source": "@{links}"}`
+`{"keyword": "Click", "loop_type": "FOR", "loop_source": "@{links}"}`
 *Output Code:*
 `    FOR    ${link}    IN    @{links}`
-`        Click Element    ${link}`
+`        Click    ${link}`
 `    END`
 
 **Key Rules:**
@@ -471,15 +438,192 @@ Output:
 ⚠️ **CRITICAL**: Check the 'element_type' field for radio/checkbox elements!
 
 Modern CSS frameworks often HIDE the actual input element with CSS.
-Standard 'Click' may FAIL because the input is not visible.
+Standard 'Click' may FAIL because the input is not visible (Click has NO
+force option).
 
 **When element_type is 'radio' or 'checkbox':**
-1. Use keyword_search tool to search for 'click hidden element force'
-2. The tool will return the correct keyword with force=True option
-3. Use that keyword syntax in your generated code
+Use Check Checkbox with force=True — it checks a checkbox or SELECTS a radio
+button even when the input itself is hidden:
+```robot
+    Check Checkbox    ${locator}    force=True
+```
+To untick a checkbox, same pattern with Uncheck Checkbox:
+```robot
+    Uncheck Checkbox    ${locator}    force=True
+```
 
 **When element_type is something else (button, link, div, etc.):**
 Use standard Click keyword.
+"""
+
+    FILE_UPLOAD_HANDLING = """
+--- HANDLING FILE UPLOADS (element_type='file-upload') ---
+⚠️ **CRITICAL**: When a step's element has element_type='file-upload', the locator
+points at the real `<input type="file">`. That input is usually HIDDEN behind a
+styled browse button — this is EXPECTED and correct: hidden file inputs are legal
+targets for the upload keyword. Do NOT try to make it visible, do NOT click any
+styled browse button instead.
+
+**NEVER use Click on a file-upload element.** Clicking opens the browser's NATIVE
+file dialog, which Robot Framework cannot control — the test hangs until timeout.
+
+**ALWAYS use Upload File By Selector:**
+```robot
+Upload File By Selector    ${locator}    <file path>
+```
+
+**File path rules:**
+- If the step provides a file name or path value, use it.
+- If the step names NO file, declare a placeholder variable so the user can fill
+  in real test data before running:
+```robot
+*** Variables ***
+# TODO: replace with the real file to upload
+${UPLOAD_FILE}    ${CURDIR}${/}test_data.csv
+```
+  and use `${UPLOAD_FILE}` as the file path argument.
+
+*Example 1 — hidden file input, file named in the step:*
+Input: `{"locator": "id=customer_import_mapper", "element_type": "file-upload", "value": "customers.csv"}`
+Output:
+```robot
+    Upload File By Selector    id=customer_import_mapper    ${CURDIR}${/}customers.csv
+```
+
+*Example 2 — no file named in the step:*
+Input: `{"locator": "input[type=\\"file\\"][name=\\"ratedeck_csv\\"]", "element_type": "file-upload"}`
+Output:
+```robot
+    Upload File By Selector    input[type="file"][name="ratedeck_csv"]    ${UPLOAD_FILE}
+```
+"""
+
+    DATE_PICKER_HANDLING = """
+--- HANDLING DATE PICKERS (element_type='date-picker') ---
+⚠️ **CRITICAL**: Check `datepicker_framework` for date-picker elements!
+
+Widget date pickers (flatpickr) render READONLY inputs — typing is disabled by
+design and values are set via a calendar overlay. `Fill Text` waits for the
+input to become editable and FAILS with a timeout, every run. The input being
+readonly is EXPECTED and correct — do NOT try Fill Text on it, do NOT try to
+remove the readonly attribute, do NOT click through the calendar overlay.
+
+**When datepicker_framework='flatpickr':**
+The flatpickr instance lives on the input element as `el._flatpickr`. Set the
+date through the widget's own API — ONE Evaluate JavaScript line, no clicking,
+no calendar navigation:
+```robot
+Evaluate JavaScript    ${locator}    (el) => { const fp = el._flatpickr; if (fp) fp.setDate('${value}', true); }
+```
+- `setDate(value, true)` updates the widget state AND fires the change event.
+- flatpickr parses the value with the instance's own date format; a date-only
+  value like '2026-07-01' is accepted even when the widget shows date+time.
+
+**When datepicker_framework='native' or missing (plain input[type=date]):**
+Native date inputs are editable — use Fill Text with an ISO date (YYYY-MM-DD):
+```robot
+Fill Text    ${locator}    2026-07-01
+```
+
+--- EXAMPLES ---
+
+*Example 1 - flatpickr (readonly input, ASTPP CDR report filter):*
+Input: `{"keyword": "Fill Text", "element_description": "From Date filter", "locator": "id=customer_cdr_from_date", "element_type": "date-picker", "datepicker_framework": "flatpickr", "value": "2026-07-01"}`
+Output:
+```robot
+    Evaluate JavaScript    id=customer_cdr_from_date    (el) => { const fp = el._flatpickr; if (fp) fp.setDate('2026-07-01', true); }
+```
+
+*Example 2 - native date input:*
+Input: `{"locator": "id=dob", "element_type": "date-picker", "datepicker_framework": "native", "value": "1990-05-15"}`
+Output:
+```robot
+    Fill Text    id=dob    1990-05-15
+```
+"""
+
+    STATE_VERIFICATION_HANDLING = """
+--- HANDLING STATE VERIFICATION (keyword='Get Classes' / 'Get Attribute') ---
+A Get Classes step verifies a field's state (shows an error / invalid /
+highlighted) via its CSS classes. The step carries `element_classes`: the
+class list the locator engine OBSERVED on the element at locate time —
+captured after the preceding steps had already run, so for "click Save,
+then verify the field shows an error" the observed list is the field IN its
+error state. This is real evidence from the live page. Decide from it —
+never from guesswork.
+
+**Decision rule (strict order):**
+1. Pick the STATE MARKER from `element_classes`: a class qualifies ONLY if
+   it contains 'invalid', 'error', 'danger', or 'warning' (e.g. `invalid`,
+   `is-invalid`, `has-error`, `ng-invalid`, `text-danger`).
+   Base/layout/skin classes NEVER qualify — `form-control`, `text`, `field`,
+   `medium`, `input`, `btn`, `row` are always on the element, error or not;
+   asserting one produces a test that passes forever even when validation
+   breaks.
+2. If the step's 'value' names a state word, treat it as a cross-check
+   only: use it if it appears in the observed `element_classes`; if it does
+   not appear there, use the marker found by rule 1 instead and add a
+   comment noting the user's word was not observed on the element.
+3. If NO class qualifies but the observed `aria_invalid` is 'true', the
+   site marks the state via ARIA instead of a CSS class — assert the
+   attribute:
+```robot
+    Get Attribute    ${locator}    aria-invalid    ==    true
+```
+4. If still nothing, apply the SAME marker vocabulary to the observed
+   `parent_classes` — Bootstrap-3-era sites mark the WRAPPER div, not
+   the field (`form-group has-error` around a clean `form-control`
+   input). Assert one level up by chaining the parent step onto the
+   field's locator:
+```robot
+    Get Classes    ${locator} >> xpath=..    contains    <marker>
+```
+5. If none of the observed evidence (element classes, aria-invalid,
+   parent classes) shows a state marker, do NOT pick anything else.
+   Emit a loud placeholder that FAILS until a human fills it, with the
+   observed classes listed so they can pick in seconds:
+```robot
+    # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
+    # to this state. Observed on this element: <element_classes>;
+    # on its parent: <parent_classes>
+    Get Classes    ${locator}    contains    EXPECTED_STATE_CLASS
+```
+
+**Generated line (rules 1 and 2):**
+```robot
+    Get Classes    ${locator}    contains    <marker>
+```
+
+For `Get Attribute` steps (the user named a specific attribute):
+```robot
+    Get Attribute    ${locator}    <attribute>    ==    <expected>
+```
+
+--- EXAMPLES ---
+
+*Example 1 — auto-pick (ASTPP customer form, verified live 2026-07-09):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "input[name=\\"email\\"]", "element_classes": "text field medium form-control invalid"}`
+Output ('invalid' is the only error-family token; 'form-control' is base):
+```robot
+    Get Classes    input[name="email"]    contains    invalid
+```
+
+*Example 2 — marker on the parent (Bootstrap 3 convention):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control", "aria_invalid": "", "parent_classes": "form-group has-error"}`
+Output ('has-error' observed one level up; the field's own list is clean):
+```robot
+    Get Classes    id=email >> xpath=..    contains    has-error
+```
+
+*Example 3 — no marker observed anywhere (unrecognizable state class):*
+Input: `{"keyword": "Get Classes", "element_description": "Email input field", "locator": "id=email", "element_classes": "form-control fld-x2", "aria_invalid": "", "parent_classes": "form-wrap"}`
+Output:
+```robot
+    # TODO: replace EXPECTED_STATE_CLASS with the class your app applies
+    # to this state. Observed on this element: form-control fld-x2;
+    # on its parent: form-wrap
+    Get Classes    id=email    contains    EXPECTED_STATE_CLASS
+```
 """
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -527,9 +671,8 @@ User query: "search for shoes on Flipkart and get first product name and price"
 
     SEARCH_OPTIMIZATION_RULES = """
 --- SEARCH OPTIMIZATION RULES ---
-*   For search operations: After `Input Text` into search box, use `Press Keys` with `Enter` (Enter key) instead of finding/clicking a search button.
-*   Modern websites (Flipkart, Amazon, Google, etc.) trigger search on Enter press.
-*   This is faster, more reliable, and reduces element identification overhead.
+*   DEFAULT for search operations: after `Input Text` into the search box, use `Press Keys` with `Enter` instead of finding and clicking a search button. Most sites trigger search on Enter, and it removes one element to identify.
+*   EXCEPTION: if the user explicitly asks to click a search/submit button, plan that click — the user's explicit instructions always win.
 """
 
     PLANNING_CONDITIONAL_LOGIC = """
@@ -542,6 +685,32 @@ For validation steps that require comparison (like price checks), structure the 
 Example for price validation:
 1. Get Text from price element -> store in variable
 2. Validate with Should Be True and condition_expression like "${float(product_price.replace('₹', '').replace(',', '')) < 9999}"
+"""
+
+    PLANNING_STATE_VERIFICATION = """
+--- VERIFYING A FIELD'S STATE (shows an error / disabled / highlighted) ---
+When the user wants to verify a field's CONDITION — "the Email field shows an
+error", "the field is marked invalid", "the button is disabled", "the row is
+highlighted" — that is an ELEMENT-STATE check, not a text check.
+
+Many sites (server-rendered apps especially) signal these states ONLY by
+adding a CSS class to the field. There is often NO error message text
+anywhere on the page — so do NOT plan a step to read an error message.
+
+*   Target the field itself: element_description = the field the user named
+    (e.g. "Email input field in the customer form"), NOT a message element.
+*   Use keyword `Get Classes` for state checks (error/invalid/highlighted).
+*   Use keyword `Get Attribute` only when the user names a specific
+    attribute (e.g. "verify aria-invalid is true").
+*   Put the user's own state word in 'value' if they used one (e.g. user
+    says "marked invalid" → value = "invalid"); leave value empty for vague
+    phrasings like "shows an error". Later stages fill it from what the
+    browser actually observes on the field — never from a guess.
+
+Example — "Click Save without filling anything and verify the Email field
+shows an error":
+1. Click Element → Save button in the customer form
+2. Get Classes → Email input field in the customer form   (no value)
 """
 
     PLANNING_LOOP_HANDLING = """
@@ -560,74 +729,16 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
 6.  When generating a browser initialization step, you MUST include library-specific parameters:
 {browser_init_placeholder}
-7.  **CRITICAL**: For ANY search operation (Google, Flipkart, Amazon, etc.), after "Input Text" step, use "Press Keys" with value "Enter" instead of generating a separate "Click Element" step for search button. This applies to ALL websites.
-8.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
+7.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # IDENTIFICATION COMPONENTS - Used in identify_elements_task
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    FORM_ELEMENT_HANDLING = """
-⚠️ **CRITICAL FORM ELEMENT HANDLING** ⚠️
-When the description mentions checkboxes, radio buttons, or toggle switches:
-- ALWAYS request the actual INPUT element, NOT the label text!
-- Modify description to explicitly target the input control:
-  * 'checkbox 1' → 'the checkbox INPUT element next to text "checkbox 1"'
-  * 'remember me checkbox' → 'the checkbox INPUT element for "remember me"'
-  * 'male radio button' → 'the radio button INPUT element for "male"'
-  * 'agree to terms' → 'the checkbox INPUT element for "agree to terms"'
-- This ensures BrowserUse finds the clickable <input> element, not just the text label
-- Text labels alone cannot be checked/unchecked - only input elements can!
-"""
-
-    SPATIAL_CONTEXT_PRESERVATION = """
-⚠️ CRITICAL: Preserve the FULL element description from the plan, including ALL spatial hints like:
-- Location context: 'in header', 'in main content', 'in sidebar', 'in footer'
-- Relative position: 'below the image', 'next to the button', 'above the form'
-- Exclusions: 'not in sidebar', 'not in filters', 'not in navigation'
-- Container: 'in the results list', 'in the form', 'in the dialog'
-These spatial clues help vision AI accurately locate the correct element!
-"""
-
-    BATCH_TOOL_FORMAT = """
---- CRITICAL OUTPUT RULE ---
-
-⚠️ MOST IMPORTANT: You MUST output the tool call in EXACTLY this format:
-
-Action: batch_browser_automation
-Action Input: {"elements": [...], "url": "...", "user_query": "..."}
-
-CRITICAL FORMATTING RULES:
-1. The line 'Action: batch_browser_automation' must have NOTHING else on it
-2. Do NOT add any text before, after, or on the same line as 'Action:'
-3. Do NOT add backticks, quotes, or any other characters after 'batch_browser_automation'
-4. The next line must be 'Action Input:' followed by a JSON dictionary
-5. Action Input must be a DICTIONARY { } NOT an array [ ]
-
-✅ CORRECT FORMAT:
-Action: batch_browser_automation
-Action Input: {"elements": [{"id": "elem_1", "description": "search box", "action": "input"}], "url": "https://example.com", "user_query": "search for items"}
-
-❌ WRONG FORMATS (DO NOT DO THIS):
-Action: batch_browser_automation` and `Action Input` using...  ← WRONG! Extra text on Action line
-Action: batch_browser_automation`  ← WRONG! Backtick at end
-First I need to... Action: batch_browser_automation  ← WRONG! Text before Action
-Action Input: [{"elements": [...]}]  ← WRONG! Array instead of dictionary
-
-REMEMBER:
-- Action line = ONLY 'Action: batch_browser_automation'
-- Action Input = ONE dictionary starting with { and ending with }
-- The 'elements' key INSIDE the dictionary contains the array
-- NO explanations, NO thinking, NO extra text
-
-Structure of Action Input:
-{
-  "elements": [array of elements],  ← Array is INSIDE the dictionary
-  "url": "...",
-  "user_query": "..."
-}
-"""
+    # NOTE: the IDENTIFICATION COMPONENTS (FORM_ELEMENT_HANDLING,
+    # SPATIAL_CONTEXT_PRESERVATION, BATCH_TOOL_FORMAT) were removed in Task 16
+    # together with identify_elements_task. The one real rule they carried —
+    # the checkbox/radio/toggle description rewrite — is now code:
+    # element_identification.rewrite_form_description(). Descriptions are
+    # forwarded verbatim by build_elements(), and there is no LLM tool call
+    # left to format.
 
     # ═══════════════════════════════════════════════════════════════════════════
     # ASSEMBLY OUTPUT RULES
@@ -645,20 +756,7 @@ Your task: Generate Robot Framework code and return as JSON.
 1. Final Answer must be a JSON object with "code" key
 2. "code" value: Complete Robot Framework code with \\n for newlines
 3. No markdown, no explanatory text - just the JSON
-
---- KEYWORD SYNTAX LOOKUP (CRITICAL) ---
-⚠️ Use 'keyword_search' tool for unfamiliar keywords.
-
-**BEFORE generating code for unfamiliar keywords:**
-1. Call keyword_search with the EXACT keyword name
-2. Check returned syntax: argument count and order
-3. If tool shows <arg1> <arg2> <arg3>, use SEPARATE arguments (4 spaces between)
-4. If step value has 'x=y' format, check if tool expects 2 separate args
-
-**Pattern Recognition:**
-- 'attr=value' → likely: Keyword    ${loc}    attr    value (3 args)
-- 'just_text' → likely: Keyword    ${loc}    just_text (2 args)
-- When unsure → ALWAYS search first
+4. For price/numeric validations: use Evaluate to convert strings to numbers
 
 **FORBIDDEN in Final Answer:**
 - Markdown code blocks (```json, ```)
@@ -667,15 +765,4 @@ Your task: Generate Robot Framework code and return as JSON.
 
 **CORRECT Example:**
 {"code": "*** Settings ***\\nLibrary    Browser\\n\\n*** Variables ***\\n${browser}    chromium\\n\\n*** Test Cases ***\\nGenerated Test\\n    New Browser    ${browser}    headless=True\\n    Close Browser"}
-"""
-
-    ASSEMBLY_FORMAT_RULES = """
---- OUTPUT FORMAT ---
-Final Answer must be: {"code": "<robot_code>"}
-
-1. Code must start with *** Settings ***
-2. Use \\n for newlines
-3. End with last test keyword (e.g., Close Browser)
-4. No explanatory text in code value
-5. For price/numeric validations: use Evaluate to convert strings to numbers
 """

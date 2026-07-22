@@ -24,14 +24,17 @@ Scope:
   - Workflow completion: success → complete event
   - run_agentic_workflow gemini key missing → early error event
 
-The crew is now 3 tasks (planner, identifier, assembler); the LLM validator
-(old task[3]) was replaced by the deterministic robot --dryrun gate.
+Task 16: run_crew returns the single-task ASSEMBLER crew (the pipeline is two
+single-task kickoffs around the deterministic element stage); delivered code
+comes from tasks[-1]. The LLM validator was replaced earlier by the
+deterministic robot --dryrun gate.
 """
 
 import os
 import json
 import asyncio
 import threading
+import uuid
 import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
@@ -62,9 +65,9 @@ def _make_run_crew_result(
     json_dict_code=None,
     raw_code=None,
 ):
-    """Build the 5-tuple returned by run_crew() — a 3-task crew (planner,
-    identifier, assembler). Delivered code comes from task[2] (the assembler)."""
-    # ---- task[2]: robot code output ----
+    """Build the 5-tuple returned by run_crew() — the single-task ASSEMBLER
+    crew (Task 16). Delivered code comes from tasks[-1] (the assembler)."""
+    # ---- tasks[-1]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
         task2.output.pydantic = MagicMock(code=pydantic_code)
@@ -79,9 +82,9 @@ def _make_run_crew_result(
         task2.output.json_dict = None
         task2.output.raw = raw_code if raw_code is not None else VALID_ROBOT_CODE
 
-    # ---- crew (3 tasks; validator removed) ----
+    # ---- assembler crew (one task) ----
     crew = MagicMock()
-    crew.tasks = [MagicMock(), MagicMock(), task2]
+    crew.tasks = [task2]
     usage = MagicMock(
         total_tokens=200, prompt_tokens=160,
         completion_tokens=40, successful_requests=8
@@ -543,6 +546,21 @@ class TestWorkflowCompletionPaths:
             events = list(run_agentic_workflow("query", "gemini", "model"))
 
         assert any(e.get("status") == "error" for e in events)
+
+    @pytest.mark.parametrize("exc", [RuntimeError("LLM offline"), ValueError("bad json")])
+    def test_error_event_carries_workflow_id(self, exc):
+        """Error events carry workflow_id so the bench can detach failed runs —
+        their pre-failure LLM calls are already recorded in llm_traces."""
+        with patch("src.backend.services.workflow_service.run_crew",
+                   side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("query", "gemini", "model"))
+
+        error = next(e for e in events if e.get("status") == "error")
+        uuid.UUID(error["workflow_id"])  # present and a real UUID
 
     def test_gemini_missing_api_key_yields_early_error(self):
         """When GEMINI_API_KEY is absent, an error event is yielded before run_crew()."""

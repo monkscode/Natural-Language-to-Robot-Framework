@@ -136,6 +136,68 @@ class TestLocatorMappingFoundEntries:
         )])
         assert mapping["elem_1"]["dropdown_framework"] == ""
 
+    def test_datepicker_framework_forwarded(self, tool):
+        """Task D repair: browser-service returns top-level
+        datepicker_framework='flatpickr' but the locator_mapping builder
+        never copied it — the identify agent was instructed to extract a
+        key that could not exist, so DATE_PICKER_HANDLING never routed to
+        the setDate idiom and Fill Text timed out on readonly inputs.
+        Same silent-drop shape as the Tom Select fields this file guards."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "id=customer_cdr_from_date",
+            element_type="date-picker",
+            datepicker_framework="flatpickr",
+        )])
+        assert mapping["elem_1"]["datepicker_framework"] == "flatpickr"
+
+    def test_datepicker_framework_defaults_to_empty_string_when_absent(self, tool):
+        """Non-datepicker elements omit the key — must default to ''
+        (the contract IdentifiedElement expects)."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        assert mapping["elem_1"]["datepicker_framework"] == ""
+
+    def test_stability_forwarded(self, tool):
+        """Task 16: browser-service returns top-level stability (Task 10's
+        field) but the locator_mapping builder never copied it — the same
+        silent-drop shape as datepicker_framework (fixed 4ef8379). Without
+        this the Assembler can never emit the volatile-locator WARNING."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "xpath=//div[4]/input",
+            stability="volatile",
+        )])
+        assert mapping["elem_1"]["stability"] == "volatile"
+
+    def test_stability_defaults_to_stable_when_absent(self, tool):
+        """Older browser-service responses omit stability — default to
+        'stable' (the same default browser-service itself uses in its
+        re-ranker) so absent never fires a false volatile warning."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        assert mapping["elem_1"]["stability"] == "stable"
+
+    def test_astpp_flags_forwarded(self, tool):
+        """Task 16: visibility_filtered / row_anchored / row_anchor_ambiguous
+        (ASTPP B/A flags) are emitted top-level by browser-service only when
+        True — forward them so the Assembler side can see them."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "xpath=//tr[td[text()='Cierra']]//a",
+            visibility_filtered=True,
+            row_anchored=True,
+            row_anchor_ambiguous=True,
+        )])
+        entry = mapping["elem_1"]
+        assert entry["visibility_filtered"] is True
+        assert entry["row_anchored"] is True
+        assert entry["row_anchor_ambiguous"] is True
+
+    def test_astpp_flags_default_to_false_when_absent(self, tool):
+        """browser-service omits the flags when False — the mapping must
+        carry explicit False, not a missing key."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        entry = mapping["elem_1"]
+        assert entry["visibility_filtered"] is False
+        assert entry["row_anchored"] is False
+        assert entry["row_anchor_ambiguous"] is False
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""

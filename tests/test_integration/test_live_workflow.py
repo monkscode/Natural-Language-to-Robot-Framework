@@ -32,12 +32,36 @@ pytestmark = pytest.mark.integration
 SERVICE_URL = "http://localhost:5000"
 
 
+LIVE_TEST_EMAIL = "live-test@bench.local"
+
+
 def _auth_headers() -> dict:
-    """Bearer token for the live backend (same secret via src/backend/.env)."""
+    """Bearer token for the live backend, backed by a REAL users row.
+
+    require_user re-validates every presented token against the users table
+    (row exists, status='active', token_version matches), so a token minted
+    for a made-up identity is rejected with 401. Upsert a dedicated active
+    user row via the same DATABASE_URL the backend uses, then mint the token
+    from that row's actual id/token_version — equivalent to a real login.
+    """
+    import psycopg
     from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.core.config import settings
+
+    with psycopg.connect(settings.DATABASE_URL, autocommit=True) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO users (email, display_name, role, status)
+            VALUES (%s, 'Live Test', 'user', 'active')
+            ON CONFLICT (email) DO UPDATE
+                SET status = 'active', is_active = TRUE
+            RETURNING id, email, role, display_name, token_version
+            """,
+            (LIVE_TEST_EMAIL,),
+        ).fetchone()
     token = create_access_token(
-        {"id": "live-test", "email": "live-test@local", "role": "user",
-         "display_name": "Live Test"}
+        {"id": row[0], "email": row[1], "role": row[2],
+         "display_name": row[3], "token_version": row[4]}
     )
     return {"Authorization": f"Bearer {token}"}
 

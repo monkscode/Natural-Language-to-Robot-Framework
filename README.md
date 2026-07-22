@@ -6,14 +6,15 @@
 ![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-purple.svg)
 
-**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, execute infinitely—even if your application changes!
+**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, run repeatedly — and when your application changes, regenerate the test from the same plain-English description.
 
 ```
 "Open Flipkart and search for shoes and then get the first product name"
                             ↓
-        [4 AI Agents Working Together]
+   [AI planning + real-browser element detection + code generation,
+        gated by a deterministic Robot Framework validation]
                             ↓
-    ✅ Working Robot Framework Test (Can run forever)
+        ✅ Working, validated Robot Framework Test
 ```
 
 ## 🚀 What Can Mark 1 Do For You?
@@ -27,7 +28,7 @@
 ### 📝 Write Once, Execute Infinitely
 - **Reusable Tests** - Generate test code once, run it 1000 times
 - **Environment Agnostic** - Same test works on dev, staging, and production
-- **No Re-recording Needed** - Unlike traditional record-and-playback tools, AI keeps up with UI changes
+- **No Re-recording Needed** - Unlike traditional record-and-playback tools, when the UI changes you regenerate from the same plain-English description instead of re-recording
 - **Cost Efficient** - Setup overhead paid once, then unlimited test runs
 
 ### 🧠 Gets Smarter Over Time
@@ -120,9 +121,15 @@ python tools/browser_use_service.py
 ```
 **Pro Tip:** Be specific about what you want. Mention exact elements like "first product name" or "search button in header".
 
+### Example 3: Sites With a One-Time Popup After Login
+```
+"Go to https://yourapp.example.com, type admin in the username field, type admin in the password field, click the Sign In button, wait 5 seconds for the dashboard to load, go to the reports page, and click the Filter button"
+```
+**Why the wait step?** Some sites show an announcement or welcome popup exactly once per login, on the first page that finishes rendering. A short wait right after login lets that popup appear and expire on the dashboard — before your real steps run — instead of blocking a click later in the test. Two rules: put the wait immediately after login, and make sure a navigation to another page follows it. Persistent popups (cookie banners, consent dialogs) don't need this trick — just mention them as a step ("accept the cookie banner") and they are automated like any other click.
+
 **In Technical Terms:**
 
-Mark 1 uses a **multi-agent AI system** to transform your natural language into working tests:
+Mark 1 uses **AI agents combined with deterministic validation** to transform your natural language into working tests:
 
 ```
 Your Query → [AI Processing] → Robot Framework Code → Execution → Results
@@ -161,7 +168,6 @@ mark-1/
 
 ## 📚 Documentation
 
-- **[Library Switching Guide](docs/LIBRARY_SWITCHING_GUIDE.md)** - Switch between Browser Library & Selenium ⭐
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Environment variables and settings
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Fix common issues
 - **[FAQ](docs/FAQ.md)** - Frequently asked questions
@@ -192,7 +198,7 @@ ${pinned_project_name_locator}    id=892238219
 Generated Test
     [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
-    New Context    viewport=None
+    New Context    viewport={'width': 1920, 'height': 1080}
     New Page    ${url}
     ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
     Log    Retrieved Pinned project name: ${pinned_project_name}
@@ -200,8 +206,6 @@ Generated Test
 ```
 
 **Result:** Working test + detailed HTML report in ~20 seconds.
-
-**Note:** Code format depends on your `ROBOT_LIBRARY` setting (browser or selenium).
 
 ## 🛠️ Configuration
 
@@ -220,7 +224,7 @@ APP_PORT=5000
 BROWSER_USE_SERVICE_URL=http://localhost:4999
 BROWSER_USE_TIMEOUT=900
 
-# Robot Framework Library (selenium or browser)
+# Robot Framework Library (only 'browser' is supported)
 ROBOT_LIBRARY=browser
 ```
 
@@ -230,14 +234,13 @@ For detailed configuration options, see the [Configuration Guide](docs/CONFIGURA
 
 ### 🎯 Robot Framework Library Support
 
-Mark 1 supports **two Robot Framework libraries** for test execution:
+Mark 1 generates **Browser Library (Playwright)** tests:
 
-#### Browser Library (Playwright) - **Recommended** ⭐
 ```env
 ROBOT_LIBRARY=browser
 ```
 
-**Benefits:**
+**Why Browser Library:**
 - ✅ **2-3x faster** test execution
 - ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
 - ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
@@ -245,21 +248,8 @@ ROBOT_LIBRARY=browser
 - ✅ **Powerful locators** - Text-based, role-based, and traditional selectors
 - ✅ **Consistent validation** - Same engine (Playwright) for generation and execution
 
-**When to use:** New projects, modern websites, performance-critical tests
-
-#### SeleniumLibrary - **Legacy Support**
-```env
-ROBOT_LIBRARY=selenium
-```
-
-**Benefits:**
-- ✅ **Mature and stable** - Battle-tested library
-- ✅ **Wide compatibility** - Works with older websites
-- ✅ **Familiar syntax** - Traditional Selenium approach
-
-**When to use:** Existing projects, legacy websites, Selenium expertise
-
-**Switching is easy:** Just change `ROBOT_LIBRARY` in your `.env` file and restart Mark 1!
+**SeleniumLibrary is not supported** — the locator pipeline emits Playwright-only
+syntax, so `ROBOT_LIBRARY=selenium` fails fast at startup.
 
 ## 🐛 Troubleshooting
 

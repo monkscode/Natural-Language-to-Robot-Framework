@@ -184,7 +184,7 @@ curl "http://localhost:5000/api/admin/traces/workflow/d8083b13-61cf-45ff-9a6d-13
 ```
 
 This tells you:
-- How many LLM calls the 4-agent pipeline made in total
+- How many LLM calls the generation pipeline made in total
 - The full cost of a single test generation run
 - Which agent was expensive (large prompt_tokens = wide context)
 - Which call was slow (high duration_ms)

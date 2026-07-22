@@ -24,13 +24,42 @@ set -a
 source src/backend/.env
 set +a
 
-# --- Local-dev overrides (run.sh process only, never containers) ---
-# These override values from src/backend/.env for processes launched by this script.
-# Docker Compose reads src/backend/.env directly and does NOT source run.sh, so the
-# on-disk value (BROWSER_HEADLESS=true) remains authoritative for containers.
-export BROWSER_HEADLESS=false
-export LOG_FORMAT=console          # human-readable colored logs
-# export CREWAI_VERBOSE=true         # show agent reasoning in console
+# --- Mode: dev (default) or bench ("./run.sh bench") ---
+# Both modes are process-env overlays on src/backend/.env — the file is never
+# edited. Docker Compose reads src/backend/.env directly and does NOT source
+# run.sh, so the on-disk values remain authoritative for containers.
+MODE="${1:-dev}"
+if [ "$MODE" != "dev" ] && [ "$MODE" != "bench" ]; then
+    echo "Usage: ./run.sh [bench]"
+    exit 1
+fi
+
+if [ "$MODE" = "bench" ]; then
+    # Bench pins (bench/README.md): a baseline is only comparable to runs
+    # pinned the same way.
+    export OPTIMIZATION_ENABLED=false
+    export BROWSER_HEADLESS=true
+    export LOG_FORMAT=json
+    # Refuse to start over a live stack — otherwise the address-in-use error
+    # is buried in a child process log and the bench hits mixed pins.
+    # netstat portability: Windows prints "LISTENING", Linux/macOS "LISTEN";
+    # macOS separates the port with "." not ":"; -o is Windows/Linux-only.
+    for port in 5000 4999 4998; do
+        if netstat -an | grep "LISTEN" | grep -Eq "[:.]${port}[[:space:]]"; then
+            echo "Error: port ${port} already in use — is the dev stack still running? Stop it first."
+            exit 1
+        fi
+    done
+    echo "=============================================================="
+    echo "  BENCH MODE: learning OFF, headless browser, JSON logs,"
+    echo "  frontend skipped. src/backend/.env untouched."
+    echo "=============================================================="
+else
+    # Local-dev overrides (run.sh process only, never containers)
+    export BROWSER_HEADLESS=false
+    export LOG_FORMAT=console          # human-readable colored logs
+    # export CREWAI_VERBOSE=true         # show agent reasoning in console
+fi
 
 # Support both APP_PORT (new) and PORT (legacy) variables with a sane default
 APP_PORT="${APP_PORT:-${PORT:-5000}}"
@@ -90,8 +119,8 @@ if [ -z "$PG_READY" ]; then
     exit 1
 fi
 
-# --- React SPA dev server (Vite, :5173) ---
-if [ ! -d "src/frontend-react/node_modules" ]; then
+# --- React SPA dev server (Vite, :5173) — dev mode only ---
+if [ "$MODE" != "bench" ] && [ ! -d "src/frontend-react/node_modules" ]; then
     echo "Installing frontend dependencies (first run)..."
     (cd src/frontend-react && npm install)
 fi
@@ -109,13 +138,19 @@ UVICORN_PID=$!
 python tools/browser_use_service.py > bus.log 2>&1 &
 BROWSER_SERVICE_PID=$!
 
-# vite.js is run with node directly (not 'npm run dev') and exec'd so the PID
-# we kill on exit is the actual dev-server process, not a wrapper around it.
-(cd src/frontend-react && exec node node_modules/vite/bin/vite.js) > frontend.log 2>&1 &
-FRONTEND_PID=$!
+PIDS=("$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID")
+
+if [ "$MODE" != "bench" ]; then
+    # vite.js is run with node directly (not 'npm run dev') and exec'd so the PID
+    # we kill on exit is the actual dev-server process, not a wrapper around it.
+    (cd src/frontend-react && exec node node_modules/vite/bin/vite.js) > frontend.log 2>&1 &
+    PIDS+=("$!")
+fi
 
 echo ""
-echo "  React SPA (validate here):  http://localhost:5173"
+if [ "$MODE" != "bench" ]; then
+    echo "  React SPA (validate here):  http://localhost:5173"
+fi
 echo "  FastAPI backend (API only):  http://localhost:${APP_PORT}"
 echo "  BrowserUse service:          http://localhost:4999/health"
 echo "  Postgres:                    localhost:5432 (container nlrf-postgres)"
@@ -125,13 +160,20 @@ echo "  Press Ctrl+C to stop everything (Postgres container stays up)."
 echo ""
 
 cleanup() {
-    kill "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+    kill "${PIDS[@]}" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
-wait -n "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID"
-EXIT_CODE=$?
+if ((BASH_VERSINFO[0] >= 4)); then
+    # Bash 4+: block until the first background service exits.
+    wait -n "${PIDS[@]}"
+    EXIT_CODE=$?
+else
+    # macOS ships Bash 3.2, which lacks `wait -n`: block until all exit.
+    wait "${PIDS[@]}"
+    EXIT_CODE=$?
+fi
 cleanup
-wait "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+wait "${PIDS[@]}" 2>/dev/null || true
 exit "$EXIT_CODE"

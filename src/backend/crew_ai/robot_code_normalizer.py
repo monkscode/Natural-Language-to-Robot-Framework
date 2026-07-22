@@ -29,11 +29,11 @@ Scope rules (conservative: no rewrite beats a wrong rewrite):
     - Full-line comments and `...` continuations: preserved verbatim.
 
 Runs AFTER the Code Assembler returns. Complements the prompt guidance in
-`library_context/browser_context.py` and `library_context/selenium_context.py` as a
-belt-and-suspenders guarantee, since the LLM occasionally ignores prompt rules.
+`library_context/browser_context.py` as a belt-and-suspenders guarantee, since
+the LLM occasionally ignores prompt rules.
 
 Referenced by:
-    src.backend.services.workflow_service._run_crew_thread (after tasks[2] extraction)
+    src.backend.services.workflow_service._run_crew_thread (after tasks[-1] extraction)
 """
 
 import logging

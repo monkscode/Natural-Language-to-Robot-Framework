@@ -3,7 +3,7 @@ Enhanced Browser Use Service - Main Application Entry Point
 
 This service provides a Flask-based API for browser automation and web element locator extraction.
 It uses browser-use library with vision AI for intelligent element identification and generates
-robust, validated locators for test automation frameworks (Robot Framework, Selenium).
+robust, validated locators for Robot Framework Browser Library (Playwright).
 
 Architecture:
     - API Layer: Flask routes and request/response handling (browser_service.api)
