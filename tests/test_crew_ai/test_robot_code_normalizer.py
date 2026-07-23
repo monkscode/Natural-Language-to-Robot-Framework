@@ -6,7 +6,10 @@ the legitimate rewrite cases it must keep working.
 
 import pytest
 
-from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
+from src.backend.crew_ai.robot_code_normalizer import (
+    ensure_browser_timeout,
+    normalize_robot_code,
+)
 
 
 @pytest.mark.parametrize(
@@ -164,3 +167,88 @@ def test_fast_path_returns_input_when_no_selector_chars():
 def test_none_and_empty():
     assert normalize_robot_code("") == ""
     assert normalize_robot_code(None) is None
+
+
+# ---------------------------------------------------------------------------
+# ensure_browser_timeout — the Browser Library import defaults to 10s, which is
+# the single largest failure cause in the bench corpus (33 nav timeouts, every
+# one exactly 10000ms). Verified against the runner image's libdoc
+# (Browser 19.14.2): the init signature starts `*_`, so `timeout` is
+# keyword-only, and `New Page` has no timeout parameter — only the global reaches it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        (
+            "Bare import gains the timeout",
+            "*** Settings ***\nLibrary    Browser\n",
+            "*** Settings ***\nLibrary    Browser    timeout=30s\n",
+        ),
+        (
+            "Import that already declares a timeout is left alone",
+            "*** Settings ***\nLibrary    Browser    timeout=10s\n",
+            "*** Settings ***\nLibrary    Browser    timeout=10s\n",
+        ),
+        (
+            "Import carrying other arguments is left alone (conservative)",
+            "*** Settings ***\nLibrary    Browser    strict=False\n",
+            "*** Settings ***\nLibrary    Browser    strict=False\n",
+        ),
+        (
+            "Aliased import is left alone",
+            "*** Settings ***\nLibrary    Browser    AS    B\n",
+            "*** Settings ***\nLibrary    Browser    AS    B\n",
+        ),
+        (
+            "SeleniumLibrary import untouched",
+            "*** Settings ***\nLibrary    SeleniumLibrary\n",
+            "*** Settings ***\nLibrary    SeleniumLibrary\n",
+        ),
+        (
+            "Submodule import is a different library — untouched",
+            "*** Settings ***\nLibrary    Browser.Playwright\n",
+            "*** Settings ***\nLibrary    Browser.Playwright\n",
+        ),
+        (
+            "No Settings block at all — nothing to inject into",
+            "*** Test Cases ***\nMy Test\n    Log    hi",
+            "*** Test Cases ***\nMy Test\n    Log    hi",
+        ),
+        (
+            "CRLF line endings survive intact",
+            "*** Settings ***\r\nLibrary    Browser\r\nLibrary    Collections\r\n",
+            "*** Settings ***\r\nLibrary    Browser    timeout=30s\r\nLibrary    Collections\r\n",
+        ),
+        (
+            "Tab-separated import",
+            "*** Settings ***\nLibrary\tBrowser\n",
+            "*** Settings ***\nLibrary\tBrowser    timeout=30s\n",
+        ),
+        (
+            "Trailing whitespace on the import line",
+            "*** Settings ***\nLibrary    Browser   \n",
+            "*** Settings ***\nLibrary    Browser    timeout=30s\n",
+        ),
+        (
+            "Empty string",
+            "",
+            "",
+        ),
+    ],
+)
+def test_ensure_browser_timeout(label, source, expected):
+    assert ensure_browser_timeout(source) == expected, label
+
+
+def test_ensure_browser_timeout_is_idempotent():
+    """The dryrun repair path re-runs the whole pipeline, so a second pass must
+    not stack a second `timeout=` onto an import the first pass already fixed."""
+    once = ensure_browser_timeout("*** Settings ***\nLibrary    Browser\n")
+    assert ensure_browser_timeout(once) == once
+    assert once.count("timeout=") == 1
+
+
+def test_ensure_browser_timeout_none():
+    assert ensure_browser_timeout(None) is None

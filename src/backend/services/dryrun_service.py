@@ -43,7 +43,7 @@ import requests as _requests
 
 from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
-from src.backend.crew_ai.robot_code_normalizer import normalize_robot_code
+from src.backend.crew_ai.robot_code_normalizer import ensure_browser_timeout, normalize_robot_code
 from src.backend.core.artifact_store import get_artifact_store
 from src.backend.services.docker_service import (
     IMAGE_TAG,
@@ -163,6 +163,12 @@ def extract_and_normalize_robot_code(task_output) -> str:
         if robot_code.endswith(pattern):
             robot_code = robot_code[:-len(pattern)].strip()
             logger.info(f"✅ Stripped trailing JSON artifact: {pattern}")
+
+    # Step 4: Raise the Browser Library timeout ceiling off its 10s import default.
+    # Runs here, after the Settings block is resolved, so BOTH the generation path
+    # and the dryrun repair path get it — a repair pass that skipped this would
+    # hand back code with the timeout stripped out again.
+    robot_code = ensure_browser_timeout(robot_code)
 
     return robot_code
 

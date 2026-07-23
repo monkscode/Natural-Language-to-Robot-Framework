@@ -163,6 +163,51 @@ _LOCATOR_KEYWORDS: dict[str, tuple[int, ...]] = {
 }
 
 
+# Browser Library's import default is `timeout=10s` (verified against the runner
+# image's libdoc, Browser 19.14.2). Every timeout in the bench failure corpus is
+# exactly 10000ms, and 0 of 797 generated tests set a timeout, so the default
+# stands everywhere. 30s is a ceiling, not a wait: `get_timeout()` returns it as an
+# upper bound and Playwright proceeds the instant the element is actionable, so
+# passing runs are unaffected.
+#
+# The import is the only lever that reaches navigation: `New Page(url, wait_until)`
+# has no timeout parameter and accounts for 26 of 33 navigation-timeout failures.
+_BROWSER_TIMEOUT = "30s"
+
+# Matches ONLY a bare `Library  Browser` import — the line must end right after the
+# library name. An import that already carries arguments (`timeout=`, `AS`, or
+# anything else) is left untouched, which makes the injection idempotent across the
+# dryrun repair path's second pass. `Browser.Playwright` is a different library and
+# is excluded by the end-of-line anchor. `\r` is captured so CRLF files survive.
+_BARE_BROWSER_IMPORT_RE = re.compile(r"^(Library[ \t]+Browser)[ \t]*(\r?)$", re.MULTILINE)
+
+
+def ensure_browser_timeout(robot_code: str) -> str:
+    """Emit `timeout=30s` on a bare `Library    Browser` import.
+
+    Deterministic rather than a prompt rule: an assembler instruction would cost
+    tokens on every run and be honoured inconsistently.
+
+    Leaves the code unchanged when the import already carries any argument, when
+    the import is absent, or when the suite uses SeleniumLibrary.
+
+    Args:
+        robot_code: The Robot Framework source as a string.
+
+    Returns:
+        The same string with the timeout argument appended to a bare Browser import.
+    """
+    if not robot_code:
+        return robot_code
+
+    injected, count = _BARE_BROWSER_IMPORT_RE.subn(
+        rf"\1    timeout={_BROWSER_TIMEOUT}\2", robot_code
+    )
+    if count:
+        logger.info(f"Browser timeout: set timeout={_BROWSER_TIMEOUT} on the Browser import")
+    return injected
+
+
 def normalize_robot_code(robot_code: str) -> str:
     """
     Prefix bare CSS selectors in Robot Framework code with `css=`.
