@@ -559,12 +559,21 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         # Auth is handled automatically: VERTEXAI_CREDENTIALS, VERTEXAI_PROJECT,
         # and VERTEXAI_LOCATION are read from os.environ by LiteLLM (loaded via python-dotenv).
         logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {routed_model}")
-        return CleanedLLMWrapper(
+        llm = CleanedLLMWrapper(
             model=routed_model,
             num_retries=3,
             is_litellm=True,
             **schema_kwargs,
         )
+        # Vertex flipped gemini-3.5-flash to server-side thinking-ON (2026-07-18),
+        # inflating completion tokens 4-6x and burning TPM/RPD quota. crewai's
+        # LLM.__init__ has its own same-named `thinking` param (Anthropic-oriented)
+        # that is never stored or forwarded, so passing thinking=... as a
+        # constructor kwarg above would silently no-op. additional_params is the
+        # only attribute _prepare_completion_params forwards untouched to LiteLLM,
+        # which does map "thinking" to Vertex's thinkingConfig.thinkingBudget.
+        llm.additional_params["thinking"] = {"type": "enabled", "budget_tokens": 0}
+        return llm
 
     # model_provider == "gemini" — Google AI Studio.
     # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses

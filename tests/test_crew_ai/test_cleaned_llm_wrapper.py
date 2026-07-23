@@ -124,6 +124,41 @@ class TestGetLlm:
             assert call_kwargs["model"] == "vertex_ai/gemini-2.5-flash"
             assert "api_key" not in call_kwargs
 
+    def test_get_llm_vertex_disables_thinking_budget(self):
+        """Vertex flipped gemini-3.5-flash to server-side thinking-ON (2026-07-18),
+        inflating completion tokens 4-6x and burning TPM/RPD quota. crewai's own
+        LLM.__init__ has a same-named `thinking` constructor param that is never
+        stored or forwarded (verified against the pinned crewai==1.8.1 source), so
+        the override must land in additional_params post-construction — that's
+        the only path LLM._prepare_completion_params forwards untouched to LiteLLM.
+        """
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict(os.environ, {"VERTEXAI_CREDENTIALS": "creds.json",
+                                      "VERTEXAI_PROJECT": "test-project",
+                                      "VERTEXAI_LOCATION": "us-central1"}):
+            llm = get_llm(model_provider="vertex", model_name="gemini-3.5-flash")
+
+        assert llm.additional_params["thinking"] == {"type": "enabled", "budget_tokens": 0}
+
+    def test_get_llm_gemini_does_not_disable_thinking_budget(self):
+        """The thinking-ON flip is Vertex-specific (probe-verified 2026-07-18) —
+        Google AI Studio isn't touched, so gemini provider must stay untouched."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            llm = get_llm(model_provider="gemini", model_name="gemini-3.5-flash")
+
+        assert "thinking" not in llm.additional_params
+
+    def test_get_llm_local_does_not_disable_thinking_budget(self):
+        """Ollama models have no Vertex thinking-budget concept — must stay untouched."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        llm = get_llm(model_provider="local", model_name="llama3")
+
+        assert "thinking" not in llm.additional_params
+
     @pytest.mark.parametrize("bad_provider", ["openai", "anthropic", "gemni", "", "GEMINI", "gpt-4"])
     def test_unsupported_provider_raises_value_error(self, bad_provider):
         """Unknown model_provider values must raise ValueError immediately, not silently route."""
