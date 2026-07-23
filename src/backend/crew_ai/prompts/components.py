@@ -303,7 +303,7 @@ plural one to avoid the loop.
 3. Use `Should Contain` for text validation (NOT `Should Be True 'X' in 'Y'`)
 4. Use `${element}` as the loop variable inside FOR
 5. On `element_type: "collection"`, pick the keyword by cardinality (table above)
-5. Always close with `END`
+6. Always close with `END`
 """
 
     DROPDOWN_HANDLING = """
