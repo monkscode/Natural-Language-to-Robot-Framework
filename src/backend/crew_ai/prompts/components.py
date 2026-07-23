@@ -276,11 +276,33 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 `        Click    ${link}`
 `    END`
 
+**⚠️ CRITICAL: `element_type: "collection"` — the locator matches MANY**
+
+A step tagged `"element_type": "collection"` has a locator that resolves to
+several elements (e.g. `ol > li` matching 20 books). Browser Library resolves
+STRICTLY: pointing a single-element keyword at it raises
+`strict mode violation: locator resolved to N elements` at run time. `--dryrun`
+does NOT catch this — it never evaluates the locator.
+
+Resolve by CARDINALITY, not by the keyword the planner happened to write:
+
+| Planner asked for | On a collection step, generate |
+|---|---|
+| `Get Text` (read them all) | `Get Elements` + FOR loop, `Get Text ${element}` inside |
+| `Get Attribute` (read them all) | `Get Elements` + FOR loop, `Get Attribute ${element}` inside |
+| `Click` (act on ONE of many) | narrow the locator to the intended row first, THEN `Click` |
+| `Get Element Count` | use it AS-IS — it takes a many-match selector by design |
+
+Use the `Get Elements` + FOR pattern shown above for the read cases. `Get
+Elements` is the ONLY bulk-read keyword Browser Library has — never invent a
+plural one to avoid the loop.
+
 **Key Rules:**
 1. Use `@{variable}` (list notation) for Get Elements return value
 2. Exit on empty/whitespace: `Exit For Loop If    len($text.strip()) == 0`
 3. Use `Should Contain` for text validation (NOT `Should Be True 'X' in 'Y'`)
 4. Use `${element}` as the loop variable inside FOR
+5. On `element_type: "collection"`, pick the keyword by cardinality (table above)
 5. Always close with `END`
 """
 

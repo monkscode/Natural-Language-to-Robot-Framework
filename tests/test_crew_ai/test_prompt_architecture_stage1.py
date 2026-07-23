@@ -295,6 +295,42 @@ class TestCheckboxRadioConcreteSyntax:
         assert "checkbox" in body
 
 
+class TestCollectionCardinalityRules:
+    """The block is now gated on element_type == "collection" too, so it has
+    to answer the question that gating raises: what do you do with a locator
+    that matches many when the planner asked for a singular keyword?
+
+    Verified against the runner image's own libdoc (Browser Library):
+      Get Text          -> resolves strictly, one element
+      Get Attribute     -> resolves strictly, one element
+      Get Elements      -> returns the list (the collection read)
+      Get Element Count -> takes a multi-match selector BY DESIGN
+    """
+
+    def test_names_the_strict_resolving_keywords(self):
+        body = PromptComponents.LOOP_HANDLING
+        assert "strict mode violation" in body
+        assert "Get Text" in body
+        assert "Get Attribute" in body
+
+    def test_points_collections_at_get_elements(self):
+        body = PromptComponents.LOOP_HANDLING
+        assert "Get Elements" in body
+
+    def test_does_not_forbid_get_element_count(self):
+        """Get Element Count is CORRECT on a many-match selector — it counts
+        them. A blanket 'never point a singular keyword at a collection' rule
+        would push the assembler off the one keyword that is right here."""
+        body = PromptComponents.LOOP_HANDLING
+        assert "Get Element Count" in body
+
+    def test_does_not_invent_get_texts(self):
+        """`Get Texts` does NOT exist in Browser Library (checked against the
+        runner image's libdoc). It is the obvious wrong guess for a bulk read,
+        so the guidance must never suggest it."""
+        assert "Get Texts" not in PromptComponents.LOOP_HANDLING
+
+
 class TestWrongLibraryGhosts:
 
     def test_loop_examples_use_browser_click(self):
