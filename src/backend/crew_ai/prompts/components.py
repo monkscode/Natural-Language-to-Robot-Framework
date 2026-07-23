@@ -276,12 +276,34 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 `        Click    ${link}`
 `    END`
 
+**⚠️ CRITICAL: `element_type: "collection"` — the locator matches MANY**
+
+A step tagged `"element_type": "collection"` has a locator that resolves to
+several elements (e.g. `ol > li` matching 20 books). Browser Library resolves
+STRICTLY: pointing a single-element keyword at it raises
+`strict mode violation: locator resolved to N elements` at run time. `--dryrun`
+does NOT catch this — it never evaluates the locator.
+
+Resolve by CARDINALITY, not by the keyword the planner happened to write:
+
+| Planner asked for | On a collection step, generate |
+|---|---|
+| `Get Text` (read them all) | `Get Elements` + FOR loop, `Get Text ${element}` inside |
+| `Get Attribute` (read them all) | `Get Elements` + FOR loop, `Get Attribute ${element}` inside |
+| `Click` (act on ONE of many) | narrow the locator to the intended row first, THEN `Click` |
+| `Get Element Count` | use it AS-IS — it takes a many-match selector by design |
+
+Use the `Get Elements` + FOR pattern shown above for the read cases. `Get
+Elements` is the ONLY bulk-read keyword Browser Library has — never invent a
+plural one to avoid the loop.
+
 **Key Rules:**
 1. Use `@{variable}` (list notation) for Get Elements return value
 2. Exit on empty/whitespace: `Exit For Loop If    len($text.strip()) == 0`
 3. Use `Should Contain` for text validation (NOT `Should Be True 'X' in 'Y'`)
 4. Use `${element}` as the loop variable inside FOR
-5. Always close with `END`
+5. On `element_type: "collection"`, pick the keyword by cardinality (table above)
+6. Always close with `END`
 """
 
     DROPDOWN_HANDLING = """
@@ -307,6 +329,26 @@ Dropdowns come in 4 templates, each requiring different Robot Framework keywords
 Use standard Select Options By keyword:
 ```robot
 Select Options By    ${dropdown_locator}    label    Option Text
+```
+
+**⚠️ VERIFYING A SELECTION — `Get Selected Options` RETURN SHAPE**
+
+`Get Selected Options    ${locator}    <option_attribute>` returns the values of
+that ONE attribute (default `label`) — **a flat list of strings**, NOT a list of
+objects. `${selected}[0]` is already the text, e.g. `"Option 2"`. There is no
+`[label]` to index into it and no dictionary to read from it. `--dryrun` does NOT
+catch this — it never evaluates variables.
+
+```robot
+# CORRECT — index the list, or let the keyword assert for you
+${selected}=    Get Selected Options    ${dropdown_locator}
+Should Be Equal    ${selected}[0]    Option 2
+Get Selected Options    ${dropdown_locator}    label    ==    Option 2
+
+# WRONG — every one of these treats a string as an object
+${x}=    Set Variable    ${selected}[0][label]
+${x}=    Get From Dictionary    ${selected}[0]    label
+${x}=    Get From Dictionary    ${selected}[0]    text
 ```
 
 **TYPE 2: Combobox Input (element_type='input', typically role='combobox')**

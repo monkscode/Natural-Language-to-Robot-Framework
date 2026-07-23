@@ -423,6 +423,25 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert not out.endswith('"}')
 
+    def test_browser_timeout_injected(self):
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+
+    def test_browser_timeout_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path, so a repair pass must not strip or double the injected timeout."""
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert second == first
+        assert second.count("timeout=") == 1
+
+    def test_selenium_suite_untouched(self):
+        raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "timeout=" not in out
+
 
 # ---------------------------------------------------------------------------
 # run_dryrun_in_container — security hardening (Phase 4)

@@ -295,6 +295,84 @@ class TestCheckboxRadioConcreteSyntax:
         assert "checkbox" in body
 
 
+class TestCollectionCardinalityRules:
+    """The block is now gated on element_type == "collection" too, so it has
+    to answer the question that gating raises: what do you do with a locator
+    that matches many when the planner asked for a singular keyword?
+
+    Verified against the runner image's own libdoc (Browser Library):
+      Get Text          -> resolves strictly, one element
+      Get Attribute     -> resolves strictly, one element
+      Get Elements      -> returns the list (the collection read)
+      Get Element Count -> takes a multi-match selector BY DESIGN
+    """
+
+    def test_names_the_strict_resolving_keywords(self):
+        body = PromptComponents.LOOP_HANDLING
+        assert "strict mode violation" in body
+        assert "Get Text" in body
+        assert "Get Attribute" in body
+
+    def test_points_collections_at_get_elements(self):
+        body = PromptComponents.LOOP_HANDLING
+        assert "Get Elements" in body
+
+    def test_does_not_forbid_get_element_count(self):
+        """Get Element Count is CORRECT on a many-match selector — it counts
+        them. A blanket 'never point a singular keyword at a collection' rule
+        would push the assembler off the one keyword that is right here."""
+        body = PromptComponents.LOOP_HANDLING
+        assert "Get Element Count" in body
+
+    def test_does_not_invent_get_texts(self):
+        """`Get Texts` does NOT exist in Browser Library (checked against the
+        runner image's libdoc). It is the obvious wrong guess for a bulk read,
+        so the guidance must never suggest it."""
+        assert "Get Texts" not in PromptComponents.LOOP_HANDLING
+
+
+class TestGetSelectedOptionsReturnShape:
+    """Same family as the collection-cardinality bug: the assembler guessing a
+    Browser Library keyword's contract instead of being told it.
+
+    Verified against the runner image's own libdoc (Browser 19.14.2):
+      Get Selected Options(selector, option_attribute=label, assertion_operator=None,
+                           *assertion_expected, message=None) -> list[str | int]
+
+    It returns that ATTRIBUTE's values — a flat list of strings. Three of the nine
+    bench runs that used the keyword assumed a list of objects instead:
+    `${sel}[0][label]`, `Get From Dictionary ${sel}[0] text`, and
+    `Get From Dictionary ${sel}[0] label`. `--dryrun` cannot catch any of them —
+    it never evaluates variables.
+    """
+
+    def test_states_the_return_shape(self):
+        body = PromptComponents.DROPDOWN_HANDLING
+        assert "Get Selected Options" in body
+        assert "list of strings" in body
+
+    def test_rules_out_dict_access_in_every_observed_form(self):
+        """Naming only the `[0][label]` index form would miss two of the three
+        real failures, which reached for Get From Dictionary instead."""
+        body = PromptComponents.DROPDOWN_HANDLING
+        assert "[label]" in body
+        assert "Get From Dictionary" in body
+
+    def test_keeps_the_keywords_own_assertion_idiom_legal(self):
+        """Get Selected Options takes an assertion_operator. Guidance must state
+        the shape, not ban the assertion form the keyword ships with."""
+        body = PromptComponents.DROPDOWN_HANDLING
+        assert "==" in body
+
+    def test_guidance_is_not_in_the_always_on_context(self):
+        """library_context is the assembler's always-on system prompt. This fact
+        costs tokens only on dropdown runs, matching the Task 24R F1/F2 dedup that
+        moved the Tom Select recipe out of that context and into this block."""
+        from src.backend.crew_ai.library_context import get_library_context
+
+        assert "Get Selected Options" not in get_library_context("browser").code_assembly_context
+
+
 class TestWrongLibraryGhosts:
 
     def test_loop_examples_use_browser_click(self):

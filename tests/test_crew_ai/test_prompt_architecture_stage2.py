@@ -270,6 +270,37 @@ class TestTriggerTable:
         steps = [_step_with(loop_source="the main menu")]
         assert select_conditional_blocks(steps) == ["LOOP_HANDLING"]
 
+    @pytest.mark.parametrize("keyword", [
+        "Get Text", "Get Attribute", "Click", "Get Element Count",
+    ])
+    def test_collection_element_triggers_loop_block(self, keyword):
+        """element_type == "collection" needs LOOP_HANDLING whatever the keyword.
+
+        The service classifies a multi-match element as a collection and
+        merge_locators staples that onto the step, but the planner emits a
+        SINGULAR keyword for it ("get the titles of all books" -> Get Text).
+        Routing only on loop_type/loop_source/"Get Elements" withheld the
+        block from 6 of the 8 strict-mode failures in bench history — every
+        one of them carrying element_type=collection in the prompt already.
+        Browser's Get Text/Get Attribute/Click resolve strictly, so a
+        20-match locator raises "strict mode violation" at run time, which
+        --dryrun cannot see.
+
+        Every sibling trigger (_needs_dropdown, _needs_checkbox_radio,
+        _needs_file_upload, _needs_date_picker) already routes on
+        element_type; this completes the pattern rather than adding one.
+        """
+        steps = _simple_steps() + [
+            _step_with(element_type="collection", keyword=keyword)
+        ]
+        assert "LOOP_HANDLING" in select_conditional_blocks(steps)
+
+    def test_collection_trigger_tolerates_case_drift(self):
+        """Same reason as test_triggers_tolerate_case_drift: element_type
+        falls back to the DOM tagName, so casing is not guaranteed."""
+        steps = [_step_with(element_type="COLLECTION", keyword="Get Text")]
+        assert "LOOP_HANDLING" in select_conditional_blocks(steps)
+
     def test_found_false_placeholder_step_needs_no_blocks(self):
         """found:false steps carry only plan fields + found=False — the
         placeholder contract lives in LOCATOR_RULES (core, always sent)."""

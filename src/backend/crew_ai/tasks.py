@@ -244,8 +244,21 @@ def _needs_loop(step: dict) -> bool:
     # Either loop key is enough, mirroring _needs_conditional: LOOP_HANDLING
     # routes on loop_type AND loop_source, so a step carrying only one of
     # them still needs the block.
+    #
+    # element_type == "collection" is the third signal, and the one the
+    # planner cannot give us: the service classifies a multi-match element as
+    # a collection, but the planner still emits a SINGULAR keyword for it
+    # ("get the titles of all books" -> Get Text). Browser's Get Text /
+    # Get Attribute / Click resolve strictly, so a 20-match locator raises
+    # "strict mode violation" at run time — invisible to --dryrun. Routing on
+    # the loop keys alone withheld this block from 6 of the 8 strict-mode
+    # failures in bench history, every one of which already carried
+    # element_type=collection in the prompt. Matches how _needs_dropdown,
+    # _needs_checkbox_radio, _needs_file_upload and _needs_date_picker all
+    # route on element_type.
     return (
         bool(step.get("loop_type") or step.get("loop_source"))
+        or _norm(step.get("element_type")) == "collection"
         or _norm(step.get("keyword")) == "get elements"
     )
 
