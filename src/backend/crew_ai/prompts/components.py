@@ -331,6 +331,26 @@ Use standard Select Options By keyword:
 Select Options By    ${dropdown_locator}    label    Option Text
 ```
 
+**⚠️ VERIFYING A SELECTION — `Get Selected Options` RETURN SHAPE**
+
+`Get Selected Options    ${locator}    <option_attribute>` returns the values of
+that ONE attribute (default `label`) — **a flat list of strings**, NOT a list of
+objects. `${selected}[0]` is already the text, e.g. `"Option 2"`. There is no
+`[label]` to index into it and no dictionary to read from it. `--dryrun` does NOT
+catch this — it never evaluates variables.
+
+```robot
+# CORRECT — index the list, or let the keyword assert for you
+${selected}=    Get Selected Options    ${dropdown_locator}
+Should Be Equal    ${selected}[0]    Option 2
+Get Selected Options    ${dropdown_locator}    label    ==    Option 2
+
+# WRONG — every one of these treats a string as an object
+${x}=    Set Variable    ${selected}[0][label]
+${x}=    Get From Dictionary    ${selected}[0]    label
+${x}=    Get From Dictionary    ${selected}[0]    text
+```
+
 **TYPE 2: Combobox Input (element_type='input', typically role='combobox')**
 These are searchable/filterable dropdowns. Use Fill Text + Enter pattern:
 ```robot
