@@ -179,7 +179,20 @@ _BROWSER_TIMEOUT = "30s"
 # anything else) is left untouched, which makes the injection idempotent across the
 # dryrun repair path's second pass. `Browser.Playwright` is a different library and
 # is excluded by the end-of-line anchor. `\r` is captured so CRLF files survive.
-_BARE_BROWSER_IMPORT_RE = re.compile(r"^(Library[ \t]+Browser)[ \t]*(\r?)$", re.MULTILINE)
+#
+# The casing is asymmetric on purpose — measured in the runner image, not assumed:
+#   `library    Browser`  imports fine (the SETTING name is case-insensitive)
+#   `Library    browser`  dies with ModuleNotFoundError: No module named 'browser'
+#                         (the LIBRARY name is a Python module — case-sensitive)
+# The separator is RF's cell rule (2+ spaces or a tab), the same rule _CELL_SPLIT_RE
+# encodes below. `Library Browser` with one space is not an import at all — RF reads
+# it as a setting literally named "Library Browser" and errors — so it is left alone
+# rather than rewritten into something equally broken.
+# Possessive quantifiers per this module's convention (see _CELL_SPLIT_RE): every
+# quantifier is non-backtracking, so the match is linear regardless of input.
+_BARE_BROWSER_IMPORT_RE = re.compile(
+    r"^((?i:Library)(?:[ \t]{2,}+|\t++)Browser)[ \t]*+(\r?)$", re.MULTILINE
+)
 
 
 def ensure_browser_timeout(robot_code: str) -> str:

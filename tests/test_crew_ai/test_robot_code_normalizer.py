@@ -226,6 +226,32 @@ def test_none_and_empty():
             "*** Settings ***\nLibrary\tBrowser\n",
             "*** Settings ***\nLibrary\tBrowser    timeout=30s\n",
         ),
+        # Robot Framework's real grammar, measured in the runner image rather than
+        # assumed: the SETTING name is case-insensitive (`library    Browser` imports
+        # fine), the LIBRARY name is not (`Library    browser` dies with
+        # ModuleNotFoundError: No module named 'browser'), and a cell separator is
+        # 2+ spaces or a tab (`Library Browser` is read as a setting literally named
+        # "Library Browser" and errors).
+        (
+            "Lowercase setting name is valid Robot Framework",
+            "*** Settings ***\nlibrary    Browser\n",
+            "*** Settings ***\nlibrary    Browser    timeout=30s\n",
+        ),
+        (
+            "Uppercase setting name is valid Robot Framework",
+            "*** Settings ***\nLIBRARY    Browser\n",
+            "*** Settings ***\nLIBRARY    Browser    timeout=30s\n",
+        ),
+        (
+            "Lowercase library name is a DIFFERENT (broken) import — untouched",
+            "*** Settings ***\nLibrary    browser\n",
+            "*** Settings ***\nLibrary    browser\n",
+        ),
+        (
+            "Single-space separator is not a library import at all — untouched",
+            "*** Settings ***\nLibrary Browser\n",
+            "*** Settings ***\nLibrary Browser\n",
+        ),
         (
             "Trailing whitespace on the import line",
             "*** Settings ***\nLibrary    Browser   \n",
@@ -252,3 +278,14 @@ def test_ensure_browser_timeout_is_idempotent():
 
 def test_ensure_browser_timeout_none():
     assert ensure_browser_timeout(None) is None
+
+
+def test_ensure_browser_timeout_yields_to_a_continuation_argument():
+    """`Library    Browser` followed by `...    timeout=5s` is one import with the
+    timeout on a continuation line. Measured in the runner image: Robot Framework
+    accepts the resulting duplicate and the LATER value wins (Set Browser Timeout
+    reported `5 seconds`), so a pre-existing intent is never overridden."""
+    src = "*** Settings ***\nLibrary    Browser\n...    timeout=5s\n"
+    assert ensure_browser_timeout(src) == (
+        "*** Settings ***\nLibrary    Browser    timeout=30s\n...    timeout=5s\n"
+    )
