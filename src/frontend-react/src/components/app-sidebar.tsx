@@ -25,7 +25,6 @@ import {
   History,
   BarChart2,
   Brain,
-  LayoutGrid,
   Settings,
   LogOut,
   MonitorSmartphone,
@@ -60,7 +59,6 @@ const NAV_PLATFORM: NavItem[] = [
   { title: 'History', url: '/history', icon: History, admin: false },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
   { title: 'Learning', url: '/learning', icon: Brain, admin: true },
-  { title: 'Templates', url: '/templates', icon: LayoutGrid, admin: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
   { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]

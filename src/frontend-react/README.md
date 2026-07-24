@@ -65,7 +65,6 @@ src/frontend-react/
 │       ├── GeneratePage.tsx       Main feature: NL → Robot Framework
 │       ├── HistoryPage.tsx        Past test runs table
 │       ├── MetricsPage.tsx        Analytics dashboard
-│       ├── TemplatesPage.tsx      Saved templates
 │       ├── SettingsPage.tsx       AI + RF + server config
 │       └── auth/
 │           ├── LoginPage.tsx      shadcn login-03 pattern
