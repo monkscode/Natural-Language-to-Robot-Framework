@@ -9,7 +9,6 @@ import { AppHeader } from '@/components/app-header'
 import GeneratePage from '@/pages/GeneratePage'
 import HistoryPage from '@/pages/HistoryPage'
 import MetricsPage from '@/pages/MetricsPage'
-import TemplatesPage from '@/pages/TemplatesPage'
 import SettingsPage from '@/pages/SettingsPage'
 import LearningPage from '@/pages/LearningPage'
 import LoginPage from '@/pages/auth/LoginPage'
@@ -46,7 +45,6 @@ const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JS
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
   { path: '/learning', admin: true, node: <LearningPage /> },
-  { path: '/templates', admin: true, node: <TemplatesPage /> },
   { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
   { path: '/team', orgAdmin: true, node: <TeamPage /> },
@@ -130,7 +128,6 @@ export default function App() {
               {/* Admin-only pages (gated inside KeepAlivePages) */}
               <Route path="/metrics"   element={null} />
               <Route path="/learning"  element={null} />
-              <Route path="/templates" element={null} />
               <Route path="/settings"  element={null} />
               <Route path="/access" element={null} />
               <Route path="/team"   element={null} />

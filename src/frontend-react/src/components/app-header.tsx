@@ -1,7 +1,6 @@
 import { useLocation } from 'react-router-dom'
 import { SidebarTrigger } from '@/components/ui/sidebar'
 import { Separator } from '@/components/ui/separator'
-import { Button } from '@/components/ui/button'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -10,7 +9,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from '@/components/ui/breadcrumb'
-import { Sun, Moon, Monitor, Zap, Bell } from 'lucide-react'
+import { Sun, Moon, Monitor, Zap } from 'lucide-react'
 import { useTheme } from '@/components/theme-provider'
 import { cn } from '@/lib/utils'
 
@@ -19,7 +18,6 @@ const PAGE_LABELS: Record<string, string> = {
   '/history':   'History',
   '/metrics':   'Metrics',
   '/learning':  'Learning',
-  '/templates': 'Templates',
   '/settings':  'Settings',
   '/docs':      'Documentation',
 }
@@ -51,7 +49,7 @@ export function AppHeader() {
         </Breadcrumb>
       </div>
 
-      {/* Right: theme controls + notifications */}
+      {/* Right: theme controls */}
       <div className="flex items-center gap-1.5">
 
         {/* Light / Dark / System toggle */}
@@ -94,12 +92,6 @@ export function AppHeader() {
           <Zap className="h-3 w-3" />
           {theme === 'neo' ? 'Pro' : 'Neo'}
         </button>
-
-        <Separator orientation="vertical" className="mx-0.5 h-4" />
-
-        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Notifications">
-          <Bell className="h-4 w-4" />
-        </Button>
       </div>
     </header>
   )
