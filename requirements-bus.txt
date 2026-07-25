@@ -1,0 +1,21 @@
+# Manifest for venv-bus/ — the isolated venv that runs tools/browser_use_service.py.
+#
+# WHY A SEPARATE VENV: browser-use exact-pins its dependency tree
+# (openai==2.16.0, mcp==1.26.0, pydantic==2.12.5, google-genai==1.65.0, ...).
+# Those pins are unsatisfiable next to crewai's requirements, so browser-use
+# must NEVER be installed into the backend venv. This mirrors production:
+# Dockerfile.browser-service already builds without crewai.
+#
+# Versions pinned to the working set verified on 2026-07-18 (traceloop-sdk excepted — see its line).
+browser-use==0.12.6
+playwright==1.57.0          # locator validation uses the Playwright Python API directly
+Flask==3.1.2                # HTTP service shell (gunicorn is Docker-only)
+requests==2.32.5
+PyYAML==6.0.3               # needed by src.backend.core.config, imported by the entrypoint
+pydantic-settings==2.10.1
+python-dotenv==1.2.1
+structlog==25.5.0           # JSON structured logging (Enhancement #4)
+traceloop-sdk==0.62.1       # OTel instrumentation (Enhancement #3), Grafana-stack only.
+# NOT 0.45.6: it pins posthog<4, unsatisfiable next to browser-use's posthog==7.7.0.
+# 0.62.1 dropped the posthog pin and resolves clean (verified 2026-07-20). Bus-only;
+# the backend venv keeps traceloop-sdk==0.45.6 from its own lockfile.
