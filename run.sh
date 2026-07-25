@@ -95,8 +95,22 @@ else
     echo "Installing dependencies..."
     pip install uv
     uv pip install -r src/backend/requirements.txt
-    playwright install chromium
-    rfbrowser install chromium
+    uv pip install pytest pytest-asyncio pytest-cov
+fi
+
+# --- Browser-use service venv (isolated — see requirements-bus.txt header) ---
+BUS_VENV_DIR="venv-bus"
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    BUS_PY="$BUS_VENV_DIR/Scripts/python.exe"
+else
+    BUS_PY="$BUS_VENV_DIR/bin/python"
+fi
+if [ ! -f "$BUS_PY" ]; then
+    echo "Creating browser-service virtual environment..."
+    [ -d "$BUS_VENV_DIR" ] && rm -rf "$BUS_VENV_DIR"
+    python -m venv "$BUS_VENV_DIR"
+    "$BUS_PY" -m pip install -r requirements-bus.txt
+    "$BUS_PY" -m playwright install chromium
 fi
 
 # --- Postgres (auth + learning stack live here as of Phase 4) ---
@@ -135,7 +149,7 @@ echo "Starting the application..."
 python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
 UVICORN_PID=$!
 
-python tools/browser_use_service.py > bus.log 2>&1 &
+"$BUS_PY" tools/browser_use_service.py > bus.log 2>&1 &
 BROWSER_SERVICE_PID=$!
 
 PIDS=("$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID")
