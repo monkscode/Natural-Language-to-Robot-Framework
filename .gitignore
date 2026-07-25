@@ -36,7 +36,10 @@ tmpclaude-*
 
 # Ignore the database content
 chroma_db/
-data/
+data/*
+# ...except pre-generated libdocs: the app reads these instead of importing
+# robotframework, the same way the FastAPI image does.
+!data/libdocs/
 logs/temp_metrics
 # Postgres data volume (auth/users DB) + React build output
 pgdata/
