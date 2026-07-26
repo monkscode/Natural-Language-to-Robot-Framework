@@ -113,3 +113,54 @@ class TestExtractMetricsFields:
     def test_every_extracted_key_is_a_csv_column(self):
         f = extract_metrics_fields(self._metrics_data())
         assert set(f) <= set(CSV_COLUMNS)
+
+class TestPhaseTimingColumns:
+    """identify_s phase breakdown (2026-07-26 efficiency check).
+
+    build_csv_row raises on unknown keys by design, so CSV_COLUMNS and
+    extract_metrics_fields must move together or the bench dies on row one.
+    """
+
+    def test_extract_metrics_fields_flattens_phase_timings(self):
+        data = {
+            "crewai_tokens": 7214, "browser_use_tokens": 34428,
+            "phase_timings": {
+                "submit_s": 0.05, "queue_s": 0.01, "session_setup_s": 3.2,
+                "agent_setup_s": 0.4, "agent_run_s": 20.76,
+                "postprocess_s": 0.9, "poll_wait_s": 0.95,
+            },
+            "agent_diagnostics": {
+                "agent_steps": 7, "dom_elements_max": 2143,
+                "dom_elements_median": 1876, "llm_429_count": 2, "retry_lost_s": 3.4,
+            },
+        }
+        fields = extract_metrics_fields(data)
+        assert fields["session_setup_s"] == 3.2
+        assert fields["poll_wait_s"] == 0.95
+        assert fields["llm_429_count"] == 2
+        assert fields["dom_elements_max"] == 2143
+
+    def test_extract_metrics_fields_handles_missing_phase_timings(self):
+        """Pre-instrumentation rows and failed runs give empty cells, not crashes."""
+        fields = extract_metrics_fields({"crewai_tokens": 100})
+        assert fields["session_setup_s"] is None
+        assert fields["llm_429_count"] is None
+
+    def test_new_columns_are_declared_in_csv_columns(self):
+        """build_csv_row raises on unknown keys — these must move together."""
+        for col in ("submit_s", "queue_s", "session_setup_s", "agent_setup_s",
+                    "agent_run_s", "postprocess_s", "poll_wait_s", "agent_steps",
+                    "dom_elements_max", "dom_elements_median", "llm_429_count",
+                    "retry_lost_s"):
+            assert col in CSV_COLUMNS
+
+    def test_build_csv_row_accepts_the_new_fields(self):
+        """End-to-end guard: extract -> build must not raise on unknown keys."""
+        fields = extract_metrics_fields({
+            "phase_timings": {"poll_wait_s": 0.9},
+            "agent_diagnostics": {"agent_steps": 3},
+        })
+        row = build_csv_row(fields)
+        assert row["poll_wait_s"] == 0.9
+        assert row["agent_steps"] == 3
+        assert row["session_setup_s"] == ""     # None becomes an empty cell

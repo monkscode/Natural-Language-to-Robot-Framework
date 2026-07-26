@@ -336,6 +336,12 @@ CSV_COLUMNS = (
     "locator_timer_count", "locator_latency_ms_median", "locator_latency_ms_p90",
     # duplicate-lookup telemetry (parked for Task 15)
     "probe_total", "probe_unique", "duplicate_lookup_rate",
+    # identify_s phase breakdown (2026-07-26 efficiency check)
+    "submit_s", "queue_s", "session_setup_s", "agent_setup_s", "agent_run_s",
+    "postprocess_s", "poll_wait_s",
+    # agent diagnostics
+    "agent_steps", "dom_elements_max", "dom_elements_median",
+    "llm_429_count", "retry_lost_s",
 )
 
 
@@ -363,6 +369,8 @@ def extract_metrics_fields(data):
     + formatting errors detected); the runner adds dryrun repairs on top.
     """
     cleaning = data.get("llm_cleaning_stats") or {}
+    timings = data.get("phase_timings") or {}
+    diagnostics = data.get("agent_diagnostics") or {}
     return {
         "llm_calls": data.get("total_llm_calls", 0),
         "llm_tokens": data.get("crewai_tokens", 0) + data.get("browser_use_tokens", 0),
@@ -377,6 +385,20 @@ def extract_metrics_fields(data):
         "locator_success_rate": data.get("success_rate", 0.0),
         "flake_retries": (cleaning.get("empty_response_retries", 0)
                           + cleaning.get("formatting_errors_detected", 0)),
+        # identify_s phase breakdown — None (empty cell) on pre-instrumentation
+        # rows and failed runs, which carry no phase data by construction.
+        "submit_s": timings.get("submit_s"),
+        "queue_s": timings.get("queue_s"),
+        "session_setup_s": timings.get("session_setup_s"),
+        "agent_setup_s": timings.get("agent_setup_s"),
+        "agent_run_s": timings.get("agent_run_s"),
+        "postprocess_s": timings.get("postprocess_s"),
+        "poll_wait_s": timings.get("poll_wait_s"),
+        "agent_steps": diagnostics.get("agent_steps"),
+        "dom_elements_max": diagnostics.get("dom_elements_max"),
+        "dom_elements_median": diagnostics.get("dom_elements_median"),
+        "llm_429_count": diagnostics.get("llm_429_count"),
+        "retry_lost_s": diagnostics.get("retry_lost_s"),
     }
 
 
