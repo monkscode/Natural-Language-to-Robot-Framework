@@ -766,6 +766,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
                 # Per-element approach metrics for pattern analysis
                 element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
+
+                # identify_s phase breakdown (2026-07-26 efficiency check)
+                phase_timings=browser_metrics.get('phase_timings'),
+                agent_diagnostics=browser_metrics.get('agent_diagnostics'),
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword

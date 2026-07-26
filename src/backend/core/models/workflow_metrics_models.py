@@ -114,6 +114,15 @@ class WorkflowMetricsBase(
     # Per-element approach metrics for pattern analysis
     element_approach_metrics: Optional[List[Dict[str, Any]]] = None
 
+    # identify_s phase breakdown (2026-07-26 efficiency check). Keys are fixed:
+    # submit_s, queue_s, session_setup_s, agent_setup_s, agent_run_s,
+    # postprocess_s, poll_wait_s. None on failed runs and pre-2026-07 rows.
+    phase_timings: Optional[Dict[str, float]] = None
+
+    # Agent-history diagnostics: agent_steps, dom_elements_max,
+    # dom_elements_median, llm_429_count, retry_lost_s.
+    agent_diagnostics: Optional[Dict[str, Any]] = None
+
 
 class WorkflowMetrics(WorkflowMetricsBase):
     """

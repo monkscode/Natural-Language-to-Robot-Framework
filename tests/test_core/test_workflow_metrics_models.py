@@ -196,3 +196,54 @@ class TestOptimizationFallbackUsed:
         }
         m = WorkflowMetrics.from_dict(old_record)
         assert m.optimization_fallback_used is False
+
+
+# ===================================================================
+# identify_s phase instrumentation (2026-07-26 efficiency check)
+# ===================================================================
+
+class TestPhaseTimings:
+    """The model sets extra='ignore', so an undeclared key is dropped silently —
+    no error, just an empty CSV column six steps downstream. These are the guard.
+    """
+
+    def _make_metrics(self, **kwargs):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        defaults = {
+            "workflow_id": "wf-1",
+            "url": "https://example.com",
+            "total_llm_calls": 5,
+            "total_cost": 0.0586,
+            "execution_time": 20.76,
+            "timestamp": datetime.now(),
+        }
+        defaults.update(kwargs)
+        return WorkflowMetrics(**defaults)
+
+    def test_phase_timings_survives_round_trip(self):
+        """extra='ignore' silently drops undeclared keys — this is the guard."""
+        timings = {
+            "submit_s": 0.05, "queue_s": 0.01, "session_setup_s": 3.2,
+            "agent_setup_s": 0.4, "agent_run_s": 20.76, "postprocess_s": 0.9,
+            "poll_wait_s": 4.37,
+        }
+        diagnostics = {
+            "agent_steps": 7, "dom_elements_max": 2143, "dom_elements_median": 1876,
+            "llm_429_count": 2, "retry_lost_s": 3.4,
+        }
+        m = self._make_metrics(
+            phase_timings=timings, agent_diagnostics=diagnostics
+        )
+        data = m.to_dict()
+        assert data["phase_timings"] == timings
+        assert data["agent_diagnostics"] == diagnostics
+
+    def test_phase_timings_defaults_to_none_when_absent(self):
+        """Older rows and failed runs carry no timings — must not raise."""
+        m = self._make_metrics(
+            workflow_id="wf-2", url=None, total_llm_calls=0,
+            total_cost=0.0, execution_time=0.0,
+        )
+        assert m.phase_timings is None
+        assert m.agent_diagnostics is None
+        assert m.to_dict()["phase_timings"] is None
