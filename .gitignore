@@ -56,6 +56,11 @@ node_modules/
 coverage/
 
 docs/tasks/
+# Owner rule: plans and specs live on disk only, never committed. Enforced here
+# so `git add -A` cannot sweep them in. docs/superpowers/acceptance/ is
+# deliberately NOT ignored — it is tracked.
+docs/superpowers/plans/
+docs/superpowers/specs/
 .agents/workflows/development-workflow.md
 tasks/*
 logs/crewai.log.txt
