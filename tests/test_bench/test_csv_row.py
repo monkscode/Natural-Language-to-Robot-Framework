@@ -194,3 +194,26 @@ class TestPhaseTimingColumns:
         assert row["llm_calls_actual"] == 3
         assert row["session_setup_s"] == ""     # None becomes an empty cell
         assert row["llm_coverage_gap"] == ""    # unmeasured coverage is visible
+
+
+class TestReportMetrics:
+    """NUMERIC_METRICS and CSV_COLUMNS drift silently: a metric with no column
+    reports as '-' forever and nobody notices it was never measured."""
+
+    def test_every_reported_metric_has_a_csv_column(self):
+        from bench.report import NUMERIC_METRICS
+
+        assert set(NUMERIC_METRICS) <= set(CSV_COLUMNS)
+
+    def test_the_agent_run_split_is_reported(self):
+        from bench.report import NUMERIC_METRICS
+
+        for metric in ("llm_total_s", "llm_max_s", "llm_calls_actual",
+                       "steps_total_s", "llm_coverage_gap",
+                       "browser_use_llm_calls"):
+            assert metric in NUMERIC_METRICS
+
+    def test_agent_steps_is_no_longer_reported(self):
+        from bench.report import NUMERIC_METRICS
+
+        assert "agent_steps" not in NUMERIC_METRICS

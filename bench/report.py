@@ -30,8 +30,11 @@ NUMERIC_METRICS = (
     # identify_s phase breakdown (2026-07-26 efficiency check)
     "submit_s", "queue_s", "session_setup_s", "agent_setup_s", "agent_run_s",
     "postprocess_s", "poll_wait_s",
-    "agent_steps", "dom_elements_max", "dom_elements_median",
+    "dom_elements_max", "dom_elements_median",
     "llm_429_count", "retry_lost_s",
+    # agent_run_s split (2026-07-26)
+    "llm_total_s", "llm_max_s", "llm_calls_actual", "steps_total_s",
+    "llm_coverage_gap", "browser_use_llm_calls",
 )
 
 GUARDRAILS = ("locator_success_rate", "flake_retries")
