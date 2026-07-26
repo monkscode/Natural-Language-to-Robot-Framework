@@ -340,8 +340,17 @@ CSV_COLUMNS = (
     "submit_s", "queue_s", "session_setup_s", "agent_setup_s", "agent_run_s",
     "postprocess_s", "poll_wait_s",
     # agent diagnostics
-    "agent_steps", "dom_elements_max", "dom_elements_median",
+    "dom_elements_max", "dom_elements_median",
     "llm_429_count", "retry_lost_s",
+    # agent_run_s split (2026-07-26). Raw measurements only — derive
+    # step_non_llm_s = steps_total_s - llm_total_s and
+    # agent_overhead_s = agent_run_s - steps_total_s at analysis time.
+    "llm_total_s", "llm_max_s", "llm_calls_actual", "steps_total_s",
+    "llm_coverage_gap",
+    # The browser-use step count, replacing the removed agent_steps. Despite
+    # the name this is len(agent_result.history), not an API-call count —
+    # llm_calls_actual is the API-call count and differs whenever a step retries.
+    "browser_use_llm_calls",
 )
 
 
@@ -394,11 +403,20 @@ def extract_metrics_fields(data):
         "agent_run_s": timings.get("agent_run_s"),
         "postprocess_s": timings.get("postprocess_s"),
         "poll_wait_s": timings.get("poll_wait_s"),
-        "agent_steps": diagnostics.get("agent_steps"),
         "dom_elements_max": diagnostics.get("dom_elements_max"),
         "dom_elements_median": diagnostics.get("dom_elements_median"),
         "llm_429_count": diagnostics.get("llm_429_count"),
         "retry_lost_s": diagnostics.get("retry_lost_s"),
+        "llm_total_s": diagnostics.get("llm_total_s"),
+        "llm_max_s": diagnostics.get("llm_max_s"),
+        "llm_calls_actual": diagnostics.get("llm_calls_actual"),
+        "steps_total_s": diagnostics.get("steps_total_s"),
+        # An empty cell here means coverage could not be checked at all — not
+        # that it was clean. Treat it exactly like a positive gap.
+        "llm_coverage_gap": diagnostics.get("llm_coverage_gap"),
+        # Top-level, not under agent_diagnostics: it is a pre-existing
+        # WorkflowMetrics field (BrowserUseTokenBreakdown:31).
+        "browser_use_llm_calls": data.get("browser_use_llm_calls"),
     }
 
 

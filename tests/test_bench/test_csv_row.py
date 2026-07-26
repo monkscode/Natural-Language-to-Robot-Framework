@@ -130,8 +130,10 @@ class TestPhaseTimingColumns:
                 "postprocess_s": 0.9, "poll_wait_s": 0.95,
             },
             "agent_diagnostics": {
-                "agent_steps": 7, "dom_elements_max": 2143,
-                "dom_elements_median": 1876, "llm_429_count": 2, "retry_lost_s": 3.4,
+                "dom_elements_max": 2143, "dom_elements_median": 1876,
+                "llm_429_count": 2, "retry_lost_s": 3.4,
+                "llm_total_s": 14.2, "llm_max_s": 8.1, "llm_calls_actual": 3,
+                "steps_total_s": 18.9, "llm_coverage_gap": 0,
             },
         }
         fields = extract_metrics_fields(data)
@@ -139,28 +141,56 @@ class TestPhaseTimingColumns:
         assert fields["poll_wait_s"] == 0.95
         assert fields["llm_429_count"] == 2
         assert fields["dom_elements_max"] == 2143
+        assert fields["llm_total_s"] == 14.2
+        assert fields["llm_max_s"] == 8.1
+        assert fields["llm_calls_actual"] == 3
+        assert fields["steps_total_s"] == 18.9
+        assert fields["llm_coverage_gap"] == 0
 
     def test_extract_metrics_fields_handles_missing_phase_timings(self):
         """Pre-instrumentation rows and failed runs give empty cells, not crashes."""
         fields = extract_metrics_fields({"crewai_tokens": 100})
         assert fields["session_setup_s"] is None
         assert fields["llm_429_count"] is None
+        assert fields["llm_total_s"] is None
+        assert fields["llm_coverage_gap"] is None
+
+    def test_agent_steps_is_gone_from_the_schema(self):
+        """It duplicated browser_use_llm_calls exactly on 30/30 rows.
+        Historical baselines still load: extract uses .get() throughout."""
+        assert "agent_steps" not in CSV_COLUMNS
+        assert "agent_steps" not in extract_metrics_fields(
+            {"agent_diagnostics": {"agent_steps": 3}}
+        )
+
+    def test_the_step_count_survives_as_browser_use_llm_calls(self):
+        """agent_steps was the ONLY isolated browser-use step count in the CSV —
+        llm_calls is total_llm_calls, which conflates crewai and browser-use
+        (workflow_service.py:737). Dropping agent_steps without this would lose
+        the step distribution the 2026-07-26 baseline records."""
+        fields = extract_metrics_fields({"browser_use_llm_calls": 3})
+        assert fields["browser_use_llm_calls"] == 3
+        assert "browser_use_llm_calls" in CSV_COLUMNS
 
     def test_new_columns_are_declared_in_csv_columns(self):
         """build_csv_row raises on unknown keys — these must move together."""
         for col in ("submit_s", "queue_s", "session_setup_s", "agent_setup_s",
-                    "agent_run_s", "postprocess_s", "poll_wait_s", "agent_steps",
+                    "agent_run_s", "postprocess_s", "poll_wait_s",
                     "dom_elements_max", "dom_elements_median", "llm_429_count",
-                    "retry_lost_s"):
+                    "retry_lost_s", "llm_total_s", "llm_max_s",
+                    "llm_calls_actual", "steps_total_s", "llm_coverage_gap",
+                    "browser_use_llm_calls"):
             assert col in CSV_COLUMNS
 
     def test_build_csv_row_accepts_the_new_fields(self):
         """End-to-end guard: extract -> build must not raise on unknown keys."""
         fields = extract_metrics_fields({
             "phase_timings": {"poll_wait_s": 0.9},
-            "agent_diagnostics": {"agent_steps": 3},
+            "agent_diagnostics": {"llm_total_s": 14.2, "llm_calls_actual": 3},
         })
         row = build_csv_row(fields)
         assert row["poll_wait_s"] == 0.9
-        assert row["agent_steps"] == 3
+        assert row["llm_total_s"] == 14.2
+        assert row["llm_calls_actual"] == 3
         assert row["session_setup_s"] == ""     # None becomes an empty cell
+        assert row["llm_coverage_gap"] == ""    # unmeasured coverage is visible

@@ -119,8 +119,9 @@ class WorkflowMetricsBase(
     # postprocess_s, poll_wait_s. None on failed runs and pre-2026-07 rows.
     phase_timings: Optional[Dict[str, float]] = None
 
-    # Agent-history diagnostics: agent_steps, dom_elements_max,
-    # dom_elements_median, llm_429_count, retry_lost_s.
+    # Agent-history diagnostics: dom_elements_max, dom_elements_median,
+    # llm_429_count, retry_lost_s, llm_total_s, llm_max_s, llm_calls_actual,
+    # steps_total_s, llm_coverage_gap. Historical rows also carry agent_steps.
     agent_diagnostics: Optional[Dict[str, Any]] = None
 
 
