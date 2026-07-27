@@ -156,6 +156,45 @@ class TestExtractPlanUrl:
                  _step("Input Text", description="search box", value="Cierra")]
         assert extract_plan_url(steps) is None
 
+    def test_about_blank_is_skipped_for_the_real_url(self):
+        """Measured on 4 of 897 captured runs (q08/q09/q10): the planner emits
+        'New Page -> about:blank' and then 'Go To -> <real url>'. First-match
+        wins, so the real URL was discarded and the agent was told to open
+        https://about:blank. The browser-use LLM silently repaired it on 3 of 3
+        runs by reading the URL out of the goal text — a net that disappears
+        once navigation moves to Agent(initial_actions=...)."""
+        steps = [
+            _step("New Page", value="about:blank"),
+            _step("Go To", value="https://books.toscrape.com"),
+        ]
+        assert extract_plan_url(steps) == "https://books.toscrape.com"
+
+    def test_about_blank_alone_yields_no_url(self):
+        """No real URL anywhere is a loud skip (found:false placeholders), not
+        a navigation to a blank page."""
+        assert extract_plan_url([_step("New Page", value="about:blank")]) is None
+
+    def test_value_with_trailing_junk_is_trimmed_to_the_url(self):
+        """Measured once: value 'https://sujal.astppbilling.org/    commit'.
+        strip() only touches the ends, so the junk rode through into
+        NavigateAction."""
+        steps = [_step("New Page", value="https://example.org/    commit")]
+        assert extract_plan_url(steps) == "https://example.org/"
+
+    def test_bare_hostname_on_a_navigation_step_is_still_returned(self):
+        """The planner's own prompt example is 'Open Browser -> Flipkart'.
+        A bare hostname is a URL the downstream normalizer can complete;
+        only values that cannot be one are rejected."""
+        steps = [_step("Open Browser", value="books.toscrape.com")]
+        assert extract_plan_url(steps) == "books.toscrape.com"
+
+    def test_prose_on_a_navigation_step_is_rejected(self):
+        """'the login page' is not a URL. Returning it produces
+        https://the login page — a guaranteed navigation failure with no
+        agent left to correct it."""
+        steps = [_step("New Page", value="the login page")]
+        assert extract_plan_url(steps) is None
+
 
 # ─── FORM_ELEMENT_HANDLING port (port checklist #3) ──────────────────────────
 

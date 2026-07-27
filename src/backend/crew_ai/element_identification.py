@@ -115,6 +115,10 @@ _VALUE_ACTIONS = frozenset({"input", "select"})
 # Steps whose value is the page URL (port checklist #2).
 _NAVIGATION_KEYWORDS = frozenset({"open browser", "new page", "go to"})
 
+# Schemes that name no page we can navigate to. about:blank is the planner's
+# own filler and it hid the real URL that arrived one step later.
+_NON_NAVIGABLE_SCHEMES = ("about:", "data:", "javascript:", "file:", "chrome:")
+
 
 def _normalize_keyword(keyword: str | None) -> str:
     return " ".join((keyword or "").split()).lower()
@@ -158,26 +162,57 @@ def action_for_keyword(keyword: str) -> str:
     return _prefix_action(normalized) or "get_text"
 
 
+def _url_candidate(value: Any) -> str | None:
+    """The URL hiding in a step's value, or None when there isn't one.
+
+    Only the first whitespace-delimited token is considered: planner values
+    sometimes carry trailing prose that strip() cannot reach (one captured
+    run: "https://sujal.astppbilling.org/    commit"). An explicit http(s)
+    URL or a bare dotted hostname qualifies — the browser service completes
+    the scheme. A non-navigable scheme or a word with no dot does not.
+    """
+    tokens = (value or "").strip().split()
+    if not tokens:
+        return None
+    candidate = tokens[0]
+    lowered = candidate.lower()
+    if lowered.startswith(("http://", "https://")):
+        return candidate
+    if lowered.startswith(_NON_NAVIGABLE_SCHEMES):
+        return None
+    return candidate if "." in candidate else None
+
+
 def extract_plan_url(steps: list[Any]) -> str | None:
-    """The URL is the first navigation step's value — nothing is guessed.
+    """The URL is the first navigation step that carries one — nothing is guessed.
+
+    A navigation step whose value is not a URL is skipped rather than
+    trusted: on 4 of 897 captured runs the planner emitted
+    "New Page -> about:blank" and put the real URL on the next step, so
+    first-value-wins discarded it and the agent was told to open
+    https://about:blank. It reached the right page anyway — the browser-use
+    LLM overrode the instruction and read the URL out of the goal text on 3
+    of 3 runs. That repair is undeclared model behaviour, not a contract, and
+    it is the only reason the defect never showed. The guard belongs here,
+    where it is deterministic.
 
     Fallback: the planner's keyword vocabulary is a free string, so the URL
     sometimes rides on a non-navigation step (bench 2026-07-11 q03: keyword
     "New Browser", value=<url> — the whitelist miss skipped the browser call
     and every element got a found:false placeholder). If no navigation step
-    carries a value, the first *literal* URL among the step values is taken;
+    carries one, the first *literal* URL among the step values is taken;
     non-URL values (browser names, input text) are never eligible.
     """
     dict_steps = [_as_dict(step) for step in steps]
     for step in dict_steps:
         if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
-            value = (step.get("value") or "").strip()
-            if value:
-                return value
+            candidate = _url_candidate(step.get("value"))
+            if candidate:
+                return candidate
     for step in dict_steps:
-        value = (step.get("value") or "").strip()
-        if value.lower().startswith(("http://", "https://")):
-            return value
+        candidate = _url_candidate(step.get("value"))
+        if candidate and candidate.lower().startswith(("http://", "https://")):
+            return candidate
     return None
 
 
