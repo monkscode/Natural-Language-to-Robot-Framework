@@ -301,12 +301,17 @@ class CleanedLLMWrapper(LLM):
     def get_workflow_usage(self) -> dict:
         """Return this wrapper's lifetime usage with cost — the workflow totals.
 
-        Reads BaseLLM._token_usage exactly once. Crew.calculate_usage_metrics()
-        must NOT be used for workflow totals: it adds the shared LLM instance's
-        _token_usage once per agent, so a 3-agent crew reports 3x the real
-        tokens/calls/cost. One wrapper per workflow makes this exact. Does not
-        reset anything (safe alongside pop_stage_usage, which drains a separate
-        accumulator). Never raises; returns zeroed usage on any failure.
+        Reads BaseLLM._token_usage exactly once, then prices it via LiteLLM —
+        the same pricing path as pop_stage_usage(), so the per-workflow total
+        and the sum of the per-stage figures agree.
+
+        Preferred over Crew.calculate_usage_metrics() for workflow totals: that
+        adds the shared LLM instance's _token_usage once per agent in the crew,
+        so it is only correct while the crew stays single-agent (it reported 3x
+        on the old 3-agent crew). One wrapper per workflow makes this exact
+        regardless of crew shape. Does not reset anything (safe alongside
+        pop_stage_usage, which drains a separate accumulator). Never raises;
+        returns zeroed usage on any failure.
         """
         try:
             u = self._token_usage
@@ -433,21 +438,28 @@ class CleanedLLMWrapper(LLM):
         BaseLLM._token_usage is updated synchronously inside LLM.call (same
         thread), so diffing it around the call captures exactly this call's
         usage — including empty-response retries, which still cost money.
+
+        Accounting is best-effort on BOTH sides of the call: _token_usage is a
+        BaseLLM attribute, so anything that constructs this wrapper without
+        BaseLLM.__init__ has no counters to diff. Skip accounting there rather
+        than letting a metrics read take down the LLM call.
         """
-        before = dict(self._token_usage)
+        counters = getattr(self, "_token_usage", None)
+        before = dict(counters) if isinstance(counters, dict) else None
         try:
             return self._call_impl(messages, *args, **kwargs)
         finally:
             try:
-                after = self._token_usage
-                d_prompt = after["prompt_tokens"] - before["prompt_tokens"]
-                d_completion = after["completion_tokens"] - before["completion_tokens"]
-                d_calls = after["successful_requests"] - before["successful_requests"]
-                if d_prompt or d_completion or d_calls:
-                    self._stage_usage["prompt_tokens"] += d_prompt
-                    self._stage_usage["completion_tokens"] += d_completion
-                    self._stage_usage["tokens"] += d_prompt + d_completion
-                    self._stage_usage["llm_calls"] += d_calls
+                if before is not None:
+                    after = self._token_usage
+                    d_prompt = after["prompt_tokens"] - before["prompt_tokens"]
+                    d_completion = after["completion_tokens"] - before["completion_tokens"]
+                    d_calls = after["successful_requests"] - before["successful_requests"]
+                    if d_prompt or d_completion or d_calls:
+                        self._stage_usage["prompt_tokens"] += d_prompt
+                        self._stage_usage["completion_tokens"] += d_completion
+                        self._stage_usage["tokens"] += d_prompt + d_completion
+                        self._stage_usage["llm_calls"] += d_calls
             except Exception:
                 pass  # accounting must never break an LLM call
 
@@ -545,7 +557,8 @@ class CleanedLLMWrapper(LLM):
         return cleaned
 
 
-def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None):
+def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
+            response_format=None):
     """
     Get a CleanedLLMWrapper instance for the given provider and model.
 
@@ -575,6 +588,12 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
                     "qwen2.5-coder:14b"). The provider prefix is prepended here.
         api_key: API key for Gemini models (optional, falls back to GEMINI_API_KEY
                  env var). Not used for Vertex AI or local Ollama models.
+        response_format: Optional Pydantic model class for provider-enforced
+                 structured output (Task 22). Forwarded to the wrapper ONLY
+                 when LiteLLM's capability table says the routed model supports
+                 response schemas (vertex/gemini: yes; ollama: no) — otherwise
+                 silently dropped so unsupported providers keep the legacy
+                 free-text contract with the guardrail salvage net.
 
     Returns:
         CleanedLLMWrapper instance ready for use with CrewAI agents
@@ -602,6 +621,28 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
 
     routed_model = resolve_model_string(model_provider, model_name)
 
+    # Task 22 provider gate: only forward response_format where the routed
+    # model actually supports schema enforcement — CrewAI raises ValueError at
+    # call time otherwise (crewai llm.py supports_response_schema check).
+    if response_format is not None:
+        try:
+            from litellm.utils import supports_response_schema
+            if not supports_response_schema(model=routed_model):
+                logger.info(
+                    f"📋 response_format requested but {routed_model} has no "
+                    f"schema support — using legacy free-text contract"
+                )
+                response_format = None
+        except Exception as e:
+            logger.warning(
+                f"📋 response_format capability check failed for {routed_model} "
+                f"({type(e).__name__}: {e}) — using legacy free-text contract"
+            )
+            response_format = None
+    # Omit the kwarg entirely when unset so the wrapper call shape (and the
+    # tests asserting it) stays identical for legacy callers.
+    schema_kwargs = {"response_format": response_format} if response_format is not None else {}
+
     if model_provider == "local":
         # LiteLLM routes "ollama/<model>" to the Ollama HTTP API.
         # OLLAMA_API_BASE env var controls the server URL:
@@ -619,17 +660,28 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
             is_litellm=True,  # No routing effect — __new__ override bypasses LLM.__new__
                               # entirely. Kept for documentation clarity only.
             num_retries=3,    # LiteLLM internal retry for transient API errors.
+            **schema_kwargs,
         )
 
     if model_provider == "vertex":
         # Auth is handled automatically: VERTEXAI_CREDENTIALS, VERTEXAI_PROJECT,
         # and VERTEXAI_LOCATION are read from os.environ by LiteLLM (loaded via python-dotenv).
         logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {routed_model}")
-        return CleanedLLMWrapper(
+        llm = CleanedLLMWrapper(
             model=routed_model,
             num_retries=3,
             is_litellm=True,
+            **schema_kwargs,
         )
+        # Vertex flipped gemini-3.5-flash to server-side thinking-ON (2026-07-18),
+        # inflating completion tokens 4-6x and burning TPM/RPD quota. crewai's
+        # LLM.__init__ has its own same-named `thinking` param (Anthropic-oriented)
+        # that is never stored or forwarded, so passing thinking=... as a
+        # constructor kwarg above would silently no-op. additional_params is the
+        # only attribute _prepare_completion_params forwards untouched to LiteLLM,
+        # which does map "thinking" to Vertex's thinkingConfig.thinkingBudget.
+        llm.additional_params["thinking"] = {"type": "enabled", "budget_tokens": 0}
+        return llm
 
     # model_provider == "gemini" — Google AI Studio.
     # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
@@ -640,4 +692,5 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None)
         model=routed_model,
         num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
         is_litellm=True,
+        **schema_kwargs,
     )

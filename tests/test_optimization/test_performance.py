@@ -506,9 +506,9 @@ def test_concurrent_read_write(in_memory_em):
                 ).fetchone()[0]
                 read_results.append(count)
                 # Count should always be >= seed count (5)
-                assert count >= 5, (
-                    f"Reader {thread_id}: count={count} < seed=5"
-                )
+                if count < 5:
+                    errors.append(f"Reader {thread_id}: count={count} < seed=5")
+                    break
                 time.sleep(0.005)
 
             tc.close()
@@ -613,123 +613,10 @@ def test_concurrent_engine_learns(in_memory_em):
 
 
 # ===================================================================
-# Category 6: LRU Cache Tests (KeywordSearchTool)
+# Categories 6 (LRU cache) and 6b (schema validation) were deleted with
+# the retired keyword-search tool (Task 24R Stage 1) — they tested
+# keyword_search_tool.py, which no longer exists.
 # ===================================================================
-
-class MockVectorStoreSimple:
-    """Mock KeywordVectorStore that returns named results for LRU testing."""
-
-    def __init__(self):
-        self.call_count = 0
-
-    def search(self, library_name, query, top_k=3):
-        self.call_count += 1
-        return [{"name": query, "args": [], "description": f"desc-{query}", "similarity": 0.9}]
-
-
-def make_search_tool(vector_store=None):
-    """Create KeywordSearchTool with mock vector store."""
-    from src.backend.crew_ai.optimization.keyword_search_tool import KeywordSearchTool
-    store = vector_store or MockVectorStoreSimple()
-    return KeywordSearchTool(library_name="Browser", vector_store=store), store
-
-
-class TestLRUCache:
-
-    def test_cache_hit_skips_search(self):
-        """Cache hit should return without calling vector store."""
-        tool, store = make_search_tool()
-        tool._run("click button")
-        tool._run("click button")
-        assert store.call_count == 1, "Second call should use cache"
-
-    def test_lru_eviction_order(self):
-        """LRU should evict least-recently-used, not first-inserted."""
-        tool, store = make_search_tool()
-
-        # Fill cache to capacity (100 entries)
-        for i in range(100):
-            tool._run(f"query_{i}")
-
-        assert store.call_count == 100
-
-        # Access query_0 (moves it to end = most-recently-used)
-        tool._run("query_0")
-        assert store.call_count == 100, "query_0 should be a cache hit"
-
-        # Insert a new entry — should evict query_1 (now the LRU), NOT query_0
-        tool._run("new_query")
-        assert store.call_count == 101
-
-        # query_0 should still be cached (was recently accessed)
-        tool._run("query_0")
-        assert store.call_count == 101, "query_0 should still be cached after LRU eviction"
-
-        # query_1 should have been evicted (was the LRU entry)
-        tool._run("query_1")
-        assert store.call_count == 102, "query_1 should have been evicted"
-
-    def test_cache_size_respects_limit(self):
-        """Cache should never exceed 100 entries."""
-        tool, store = make_search_tool()
-
-        for i in range(150):
-            tool._run(f"query_{i}")
-
-        assert len(tool._cache) == 100, f"Cache size should be 100, got {len(tool._cache)}"
-
-
-# ===================================================================
-# Category 6b: KeywordSearchTool Schema Validation (Issue #3 fix)
-# ===================================================================
-#
-# Before the fix, CrewAI's auto-schema builder used only __annotations__
-# from _run(), ignoring Python default values. Pydantic then treated
-# `top_k: int` as required, causing 4+ wasted LLM retry calls per workflow.
-# These tests pin the correct schema behaviour so a regression is caught.
-
-class TestKeywordSearchToolSchema:
-
-    def _schema(self):
-        from src.backend.crew_ai.optimization.keyword_search_tool import KeywordSearchToolSchema
-        return KeywordSearchToolSchema
-
-    def test_top_k_optional_when_omitted(self):
-        """Omitting top_k must not raise — this was the exact failing call."""
-        instance = self._schema()(query="click a button")
-        assert instance.top_k == 3
-
-    def test_top_k_default_is_3(self):
-        """Default value must be 3, matching the _run signature."""
-        assert self._schema().model_fields["top_k"].default == 3
-
-    def test_explicit_top_k_accepted(self):
-        """An explicit top_k value must override the default."""
-        instance = self._schema()(query="find element", top_k=10)
-        assert instance.top_k == 10
-
-    def test_query_is_required(self):
-        """query must remain required — omitting it must raise ValidationError."""
-        with pytest.raises(Exception):
-            self._schema()(top_k=5)
-
-    def test_tool_uses_explicit_schema(self):
-        """Tool.args_schema must be KeywordSearchToolSchema, not the auto-generated placeholder."""
-        from unittest.mock import MagicMock
-        from src.backend.crew_ai.optimization.keyword_search_tool import (
-            KeywordSearchTool,
-            KeywordSearchToolSchema,
-        )
-        tool = KeywordSearchTool(library_name="Browser", vector_store=MagicMock())
-        assert tool.args_schema is KeywordSearchToolSchema
-
-    def test_field_descriptions_populated(self):
-        """Both fields must have non-None descriptions visible to the LLM."""
-        fields = self._schema().model_fields
-        assert fields["query"].description is not None
-        assert fields["top_k"].description is not None
-        assert "default" in fields["top_k"].description.lower()
-
 
 # ===================================================================
 # Category 7: Thread-Safe Circuit Breaker Tests

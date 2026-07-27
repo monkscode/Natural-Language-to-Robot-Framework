@@ -198,6 +198,44 @@ class TestValidateAndRepair:
         assert out["repair_usage"] == {}
         mock_rc.ensure_image.assert_not_called()  # §8.4 — no executor hop for a skip
 
+    def test_assembled_checkpoint_pushed_at_gate_entry(self):
+        """The 80% '✅ Test code assembled' checkpoint is pushed when the gate
+        starts. The event-bus TaskCompletedEvent for the assembler is lost to a
+        handler race (CrewAI bus runs sync handlers in a ThreadPoolExecutor),
+        so the gate — which by definition runs after the crew returned — is the
+        deterministic place to emit it."""
+        from queue import Queue
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            ds.validate_and_repair("rid", "code", "gemini", "m", q)
+
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        second = q.get(timeout=1)
+        assert "Preparing verification environment" in second["message"]
+
+    def test_assembled_checkpoint_pushed_even_when_gate_skipped(self):
+        """DRYRUN_ENABLED=false still means the assembler finished — the 80%
+        checkpoint must not depend on the gate actually running."""
+        from queue import Queue, Empty
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings(enabled=False)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client"):
+            out = ds.validate_and_repair("rid", "*** Settings ***\n", "gemini", "m", q)
+
+        assert out["dryrun_status"] == "skipped"
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
     @pytest.mark.parametrize("code", ["", "   \n\t  "])
     def test_empty_code_skips_without_container(self, code):
         with patch.object(ds, "settings", self._settings()), \
@@ -384,6 +422,25 @@ class TestExtractAndNormalize:
         raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi" + '"}'
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert not out.endswith('"}')
+
+    def test_browser_timeout_injected(self):
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+
+    def test_browser_timeout_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path, so a repair pass must not strip or double the injected timeout."""
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert second == first
+        assert second.count("timeout=") == 1
+
+    def test_selenium_suite_untouched(self):
+        raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "timeout=" not in out
 
 
 # ---------------------------------------------------------------------------

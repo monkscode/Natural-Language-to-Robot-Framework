@@ -1,32 +1,33 @@
 """Real-time progress event bridge between CrewAI's event bus and the SSE queue.
 
-Registers 6 handlers on crewai_event_bus at module import time (once per process).
+Registers 4 handlers on crewai_event_bus at module import time (once per process).
 Handlers are no-ops when no workflow is registered for the event's task_id, so
 they carry zero cost when idle.
 
 Per-workflow routing is managed via module-level dicts guarded by a single Lock.
 All dict operations are O(1) — lock hold time is microseconds.
 
-Referenced by: src/backend/crew_ai/crew.py (register_workflow, unregister_workflow)
+Referenced by: src/backend/crew_ai/crew.py (register_workflow, register_task,
+unregister_workflow, push_stage_progress)
 Depends on: crewai.events.crewai_event_bus, queue.Queue
 
 Design decisions:
 - Handlers registered ONCE at module import — crewai_event_bus has no remove_handler().
   Per-workflow routing uses dict lookups instead of per-workflow handler registration.
 - Task events carry event.task (Task object), NOT event.task_id (which stays None for
-  task events). Tool and LLM events carry event.task_id (set from from_task arg).
+  task events). LLM events carry event.task_id (set from from_task arg).
 - Progress only moves forward. Out-of-order or retry events are silently discarded.
 - Only the first LLMCallStartedEvent per task produces a message (suppresses retries).
-- Only the first ToolUsageStartedEvent and ToolUsageFinishedEvent per task produce
-  messages (suppresses multi-call tool retries).
 - Every handler body is wrapped in try/except — a handler crash must never propagate
   into CrewAI's pipeline.
-- ToolUsageFinishedEvent.output is a string (str(dict)) in the text-based tool path
-  (tool_usage.py calls _format_result → str() before emitting). Element count
-  extraction uses ast.literal_eval to parse the stringified dict.
+- Task 16: the element-identification stage is deterministic Python (no CrewAI task,
+  no tool events) — it pushes its own index-1 events (22/30/55/60) via
+  push_stage_progress, and the assembler task (built after the stage, since its
+  description embeds the merged steps) is registered late via register_task. The
+  old ToolUsage handlers were removed with the element-identifier agent: the batch
+  tool is now called directly, so those events never fire.
 """
 
-import ast
 import logging
 import threading
 from queue import Queue
@@ -36,10 +37,6 @@ from crewai.events.types.task_events import (
     TaskCompletedEvent,
     TaskFailedEvent,
     TaskStartedEvent,
-)
-from crewai.events.types.tool_usage_events import (
-    ToolUsageFinishedEvent,
-    ToolUsageStartedEvent,
 )
 from crewai.events.types.llm_events import LLMCallStartedEvent
 
@@ -66,17 +63,16 @@ _current_progress: dict[str, int] = {}
 # workflow_id → set of task indices that have already shown an LLM call message
 _llm_call_seen: dict[str, set[int]] = {}
 
-# workflow_id → set of task indices that have already shown a tool-started message
-_tool_usage_seen: dict[str, set[int]] = {}
-
-# workflow_id → set of task indices that have already shown a tool-finished message
-_tool_finished_seen: dict[str, set[int]] = {}
-
 # ---------------------------------------------------------------------------
 # User-facing message tables — no internal names, no technical details
 # ---------------------------------------------------------------------------
 
-# Crew is a 3-task pipeline (planner=0, identifier=1, assembler=2). The old
+# The pipeline keeps its 3 stage indices (planner=0, element stage=1,
+# assembler=2) even though only 0 and 2 are CrewAI tasks — index 1 is the
+# deterministic python stage (element_identification), which pushes its own
+# 22/30/55/60 events via push_stage_progress. The index-1 entries below feed
+# the ladder (_push_task_ladder) so the assembler's start still synthesizes
+# "elements identified" if the stage's own 60 push was lost. The old
 # validator (index 3) was replaced by the dryrun gate, which drives its own
 # verify/repair/100% progress via direct queue.put from workflow_service.
 _TASK_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
@@ -87,18 +83,20 @@ _TASK_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
 
 _LLM_STARTED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("📋 Breaking down test into steps...", 8),
-    # task 1 (Element Identifier) uses a tool — LLM message skipped in favour of tool messages
+    # index 1 is the deterministic element stage — no LLM calls happen there
     2: ("💻 Generating test script...", 65),
 }
 
+# Index 2 (the assembler) has NO entry on purpose: 80 is pushed by the dryrun
+# gate (dryrun_service.validate_and_repair) with a raw queue.put, which runs
+# after unregister_workflow() and so bypasses the forward-only dedup below.
+# Keeping an entry here would let a TaskCompletedEvent that won its race emit
+# the same line a second time. Index 2 is the last task, so the ladder never
+# synthesizes it either — one emitter, no duplicates.
 _TASK_COMPLETED_MESSAGES: dict[int, tuple[str, int]] = {
     0: ("✅ Test steps planned successfully", 20),
     1: ("✅ All page elements identified", 60),
-    2: ("✅ Test code assembled", 80),
 }
-
-# Only this tool name produces user-facing messages
-_BROWSER_TOOL_NAME = "batch_browser_automation"
 
 # ---------------------------------------------------------------------------
 # Public API — called from crew.py around crew.kickoff()
@@ -124,9 +122,38 @@ def register_workflow(
             _task_to_workflow[task_id] = workflow_id
         _current_progress[workflow_id] = 0
         _llm_call_seen[workflow_id] = set()
-        _tool_usage_seen[workflow_id] = set()
-        _tool_finished_seen[workflow_id] = set()
     logger.debug("Registered workflow %s with %d tasks", workflow_id, len(task_id_map))
+
+
+def register_task(workflow_id: str, task_id: str, task_index: int) -> None:
+    """Add one task to an already-registered workflow.
+
+    Task 16: the assembler task is constructed AFTER the deterministic element
+    stage (its description embeds the merged steps), so it cannot be part of
+    the initial register_workflow call. No-op when the workflow is not
+    registered (progress_queue=None path or already unregistered).
+    """
+    with _lock:
+        if workflow_id not in _workflow_queues:
+            return
+        _workflow_task_map[workflow_id][task_id] = task_index
+        _task_to_workflow[task_id] = workflow_id
+    logger.debug("Registered task %s (index %d) for workflow %s", task_id, task_index, workflow_id)
+
+
+def push_stage_progress(workflow_id: str, message: str, progress: int) -> None:
+    """Push a progress event from a non-CrewAI pipeline stage.
+
+    Task 16: the deterministic element stage has no CrewAI task, so it pushes
+    its own SSE events through the same forward-only bookkeeping the event
+    handlers use (a later task-ladder push then dedups cleanly against these).
+    No-op for unregistered workflows.
+    """
+    with _lock:
+        queue = _workflow_queues.get(workflow_id)
+    if queue is None:
+        return
+    _push_if_forward(workflow_id, queue, message, progress)
 
 
 def unregister_workflow(workflow_id: str) -> None:
@@ -138,8 +165,6 @@ def unregister_workflow(workflow_id: str) -> None:
         _workflow_queues.pop(workflow_id, None)
         _current_progress.pop(workflow_id, None)
         _llm_call_seen.pop(workflow_id, None)
-        _tool_usage_seen.pop(workflow_id, None)
-        _tool_finished_seen.pop(workflow_id, None)
     logger.debug("Unregistered workflow %s", workflow_id)
 
 
@@ -186,8 +211,28 @@ def _push_if_forward(
         if progress <= current:
             return
         _current_progress[workflow_id] = progress
+        # Enqueue under the same lock: racing handlers would otherwise deliver
+        # advancing values out of order (state monotonic, delivery not).
+        queue.put({"status": "running", "message": message, "progress": progress})
 
-    queue.put({"status": "running", "message": message, "progress": progress})
+
+def _push_task_ladder(workflow_id: str, queue: Queue, task_index: int) -> None:
+    """Push the checkpoints implied by ANY event of this task: the previous
+    task's completion, then this task's start.
+
+    The bus runs sync handlers in a ThreadPoolExecutor, so handlers for
+    in-order events race each other; whichever loses is discarded forever by
+    the forward-only guard (observed live: completions 20/60/80 always lost,
+    task-2's start 62 sometimes lost to its own llm-started 65). Every handler
+    calls this before pushing its own event, so the winner of any race emits
+    the missing rungs itself — _push_if_forward dedups the repeats.
+    """
+    prev_entry = _TASK_COMPLETED_MESSAGES.get(task_index - 1)
+    if prev_entry is not None:
+        _push_if_forward(workflow_id, queue, prev_entry[0], prev_entry[1])
+    start_entry = _TASK_STARTED_MESSAGES.get(task_index)
+    if start_entry is not None:
+        _push_if_forward(workflow_id, queue, start_entry[0], start_entry[1])
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +255,10 @@ def _on_task_started(source, event: TaskStartedEvent) -> None:
         if queue is None or task_index is None:
             return
 
-        entry = _TASK_STARTED_MESSAGES.get(task_index)
-        if entry is None:
-            return
-        message, progress = entry
-        _push_if_forward(workflow_id, queue, message, progress)
+        # The ladder covers the previous task's completion AND this start; the
+        # real (late) TaskCompletedEvent handler stays registered as a no-op
+        # dedup. See _push_task_ladder for the race this defeats.
+        _push_task_ladder(workflow_id, queue, task_index)
     except Exception:
         logger.exception("Error in _on_task_started handler")
 
@@ -277,6 +321,9 @@ def _on_llm_call_started(source, event: LLMCallStartedEvent) -> None:
         if queue is None or task_index is None:
             return
 
+        # Emit any rungs this handler may have outraced (see _push_task_ladder).
+        _push_task_ladder(workflow_id, queue, task_index)
+
         # Deduplicate: only first LLM call per task shows a message
         with _lock:
             seen = _llm_call_seen.get(workflow_id)
@@ -295,77 +342,8 @@ def _on_llm_call_started(source, event: LLMCallStartedEvent) -> None:
         logger.exception("Error in _on_llm_call_started handler")
 
 
-@crewai_event_bus.on(ToolUsageStartedEvent)
-def _on_tool_started(source, event: ToolUsageStartedEvent) -> None:
-    """Push a navigation message when the browser tool starts. Ignores other tools."""
-    try:
-        if event.tool_name != _BROWSER_TOOL_NAME:
-            return
-
-        # Tool events have event.task_id set (from from_task arg in ToolUsageEvent.__init__)
-        workflow_id, queue, task_index = _resolve(event.task_id)
-        if queue is None or task_index is None:
-            return
-
-        # Only first tool invocation per task produces a message
-        with _lock:
-            seen = _tool_usage_seen.get(workflow_id)
-            if seen is None:
-                return
-            if task_index in seen:
-                return
-            seen.add(task_index)
-
-        _push_if_forward(workflow_id, queue, "🌐 Navigating to website and detecting elements...", 30)
-    except Exception:
-        logger.exception("Error in _on_tool_started handler")
-
-
-@crewai_event_bus.on(ToolUsageFinishedEvent)
-def _on_tool_finished(source, event: ToolUsageFinishedEvent) -> None:
-    """Push element count when the browser tool finishes. Ignores other tools."""
-    try:
-        if event.tool_name != _BROWSER_TOOL_NAME:
-            return
-
-        workflow_id, queue, task_index = _resolve(event.task_id)
-        if queue is None or task_index is None:
-            return
-
-        # Only first finished event per task produces a message
-        with _lock:
-            seen = _tool_finished_seen.get(workflow_id)
-            if seen is None:
-                return
-            if task_index in seen:
-                return
-            seen.add(task_index)
-
-        # Extract element count from tool output.
-        # In the text-based tool path (our pipeline), CrewAI's tool_usage.py calls
-        # _format_result() → str(result) BEFORE emitting ToolUsageFinishedEvent,
-        # so event.output is a string representation of the dict, not a dict.
-        # We parse it back to extract the element count.
-        count: int | None = None
-        output = event.output
-
-        # Text-based path: output is str(dict), parse it back
-        if isinstance(output, str):
-            try:
-                output = ast.literal_eval(output)
-            except (ValueError, SyntaxError):
-                pass
-
-        if isinstance(output, dict):
-            summary = output.get("summary", {})
-            if isinstance(summary, dict):
-                count = summary.get("total_elements")
-
-        message = (
-            f"📍 Found {count} elements on the page"
-            if count is not None
-            else "📍 Page elements detected"
-        )
-        _push_if_forward(workflow_id, queue, message, 55)
-    except Exception:
-        logger.exception("Error in _on_tool_finished handler")
+# NOTE: the ToolUsageStartedEvent / ToolUsageFinishedEvent handlers were
+# removed in Task 16. They only ever produced messages for
+# batch_browser_automation, and that tool is no longer invoked through a
+# CrewAI agent — the deterministic element stage calls it directly and pushes
+# the equivalent 30/55 events via push_stage_progress.

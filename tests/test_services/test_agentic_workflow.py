@@ -24,17 +24,22 @@ Scope:
   - Workflow completion: success → complete event
   - run_agentic_workflow gemini key missing → early error event
 
-The crew is now 3 tasks (planner, identifier, assembler); the LLM validator
-(old task[3]) was replaced by the deterministic robot --dryrun gate.
+Task 16: run_crew returns the single-task ASSEMBLER crew (the pipeline is two
+single-task kickoffs around the deterministic element stage); delivered code
+comes from tasks[-1]. The LLM validator was replaced earlier by the
+deterministic robot --dryrun gate.
 """
 
 import os
 import json
 import asyncio
 import threading
+import uuid
 import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
+
+from src.backend.core.workflow_metrics import calculate_crewai_cost
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +67,11 @@ def _make_run_crew_result(
     json_dict_code=None,
     raw_code=None,
 ):
-    """Build the 5-tuple returned by run_crew() — a 3-task crew (planner,
-    identifier, assembler). Delivered code comes from task[2] (the assembler)."""
-    # ---- task[2]: robot code output ----
+    """Build the 5-tuple returned by run_crew() — the single-task ASSEMBLER
+    crew (Task 16). Delivered code comes from tasks[-1] (the assembler); the
+    5th element is the shared CleanedLLMWrapper, whose get_workflow_usage() is
+    the single source of CrewAI workflow tokens/calls/cost."""
+    # ---- tasks[-1]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
         task2.output.pydantic = MagicMock(code=pydantic_code)
@@ -79,19 +86,22 @@ def _make_run_crew_result(
         task2.output.json_dict = None
         task2.output.raw = raw_code if raw_code is not None else VALID_ROBOT_CODE
 
-    # ---- crew (3 tasks; validator removed) ----
+    # ---- assembler crew (one task) ----
     crew = MagicMock()
-    crew.tasks = [MagicMock(), MagicMock(), task2]
-    usage = MagicMock(
-        total_tokens=200, prompt_tokens=160,
-        completion_tokens=40, successful_requests=8
+    crew.tasks = [task2]
+
+    # Shared CleanedLLMWrapper stand-in. get_workflow_usage() is priced through
+    # the real calculate_crewai_cost so tests that recompute expected costs
+    # (e.g. test_repair_cost_folded_into_crewai_and_total_metrics) stay exact.
+    shared_llm = MagicMock()
+    shared_llm.get_workflow_usage.return_value = calculate_crewai_cost(
+        {'total_tokens': 200, 'prompt_tokens': 160,
+         'completion_tokens': 40, 'successful_requests': 8},
+        model_name="gemini-2.5-flash",
     )
-    crew.calculate_usage_metrics.return_value = usage
+    shared_llm._monitor.get_numeric_stats.return_value = {}
 
-    llm_monitor = MagicMock()
-    llm_monitor.get_numeric_stats.return_value = {}
-
-    return (MagicMock(), crew, None, {}, llm_monitor)
+    return (MagicMock(), crew, None, {}, shared_llm)
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
@@ -544,6 +554,21 @@ class TestWorkflowCompletionPaths:
 
         assert any(e.get("status") == "error" for e in events)
 
+    @pytest.mark.parametrize("exc", [RuntimeError("LLM offline"), ValueError("bad json")])
+    def test_error_event_carries_workflow_id(self, exc):
+        """Error events carry workflow_id so the bench can detach failed runs —
+        their pre-failure LLM calls are already recorded in llm_traces."""
+        with patch("src.backend.services.workflow_service.run_crew",
+                   side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("query", "gemini", "model"))
+
+        error = next(e for e in events if e.get("status") == "error")
+        uuid.UUID(error["workflow_id"])  # present and a real UUID
+
     def test_gemini_missing_api_key_yields_early_error(self):
         """When GEMINI_API_KEY is absent, an error event is yielded before run_crew()."""
         with patch("src.backend.services.workflow_service.run_crew") as mock_run_crew, \
@@ -610,10 +635,11 @@ class TestWorkflowCompletionPaths:
         ws._hint_metadata_cache.pop(workflow_id, None)
 
     def test_metrics_collection_failure_does_not_abort_workflow(self):
-        """If calculate_usage_metrics() fails, the workflow still completes."""
+        """If workflow usage extraction fails, the workflow still completes."""
         result = _make_run_crew_result()
-        # Make calculate_usage_metrics raise
-        result[1].calculate_usage_metrics.side_effect = Exception("metrics error")
+        # Make the shared wrapper's usage read raise. The real wrapper never
+        # raises by design, but the metrics block must stay non-fatal regardless.
+        result[4].get_workflow_usage.side_effect = Exception("metrics error")
 
         events = _run_workflow(crew_result=result)
         # Should still complete — metrics failures are non-fatal

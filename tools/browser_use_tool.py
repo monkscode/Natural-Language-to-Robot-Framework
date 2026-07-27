@@ -221,31 +221,12 @@ class BatchBrowserUseTool(BaseTool):
     args_schema: Type[BaseModel] = BatchBrowserUseToolInput
 
     def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
-        """Execute batch browser automation to find multiple elements in one session."""
+        """Execute batch browser automation to find multiple elements in one session.
 
-        # CRITICAL FIX: Handle case where CrewAI/LLM passes malformed input
-        # Sometimes the input is wrapped incorrectly or duplicated
-        # Expected: elements = [{"id": "elem_1", ...}, {"id": "elem_2", ...}]
-        # Sometimes get: elements = [{"elements": [...], "url": "...", "user_query": "..."}]
-
-        if isinstance(elements, list) and len(elements) > 0:
-            first_item = elements[0]
-
-            # Check if first item is actually a full request dict (malformed input)
-            if isinstance(first_item, dict) and 'elements' in first_item and 'url' in first_item:
-                logger.warning(
-                    "⚠️ Detected malformed input - extracting correct data from nested structure")
-                logger.warning(
-                    f"   Received: {type(elements)} with {len(elements)} items")
-
-                # Extract the actual data from the first (and likely only valid) entry
-                actual_data = first_item
-                elements = actual_data.get('elements', [])
-                url = actual_data.get('url', url)
-                user_query = actual_data.get('user_query', user_query)
-
-                logger.info(
-                    f"✅ Extracted correct data: {len(elements)} elements, URL: {url}")
+        Since Task 16 the only production caller is the deterministic element
+        stage (element_identification._default_run_tool) — no LLM builds this
+        input anymore, so the old malformed-Action-Input repair path is gone.
+        """
 
         # Identity is sourced from contextvars (bound by the generation thread),
         # NEVER from LLM-supplied tool args. Fails open to (None, None, None).
@@ -462,6 +443,14 @@ class BatchBrowserUseTool(BaseTool):
                             "element_type": elem_result.get("element_type"),
                             "dropdown_framework": elem_result.get("dropdown_framework", ""),
                             "select_id": elem_result.get("select_id"),
+                            "datepicker_framework": elem_result.get("datepicker_framework", ""),
+                            # "stable" default mirrors browser-service's own
+                            # re-ranker default — absent must never read as volatile.
+                            "stability": elem_result.get("stability", "stable"),
+                            # ASTPP flags are emitted top-level only when True.
+                            "visibility_filtered": elem_result.get("visibility_filtered", False),
+                            "row_anchored": elem_result.get("row_anchored", False),
+                            "row_anchor_ambiguous": elem_result.get("row_anchor_ambiguous", False),
                         }
                     else:
                         locator_mapping[element_id] = {

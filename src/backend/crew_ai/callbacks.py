@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 # Agent role → dashboard stage name. Keys are matched as substrings of the
 # TaskOutput.agent role string (see agents.py role= definitions).
+# Only two LLM agents remain since Task 16 — the element-identification stage
+# is deterministic now and never fires a task callback, so there is no
+# "identifier" stage here.
 _AGENT_STAGE_MAP = {
     "Planner": "planner",
-    "Locator Specialist": "identifier",
     "Code Generator": "assembler",
 }
 

@@ -577,26 +577,31 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             logging.error("Orchestrator: GEMINI_API_KEY not found for gemini provider.")
-            yield {"status": "error", "message": "GEMINI_API_KEY not found."}
+            yield {"status": "error", "message": "GEMINI_API_KEY not found.",
+                   "workflow_id": workflow_id}
             return
 
     elif model_provider == "vertex":
         creds_path = os.getenv("VERTEXAI_CREDENTIALS")
         if not creds_path:
             logging.error("Orchestrator: VERTEXAI_CREDENTIALS not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file."}
+            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not os.path.exists(creds_path):
             logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
-            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file."}
+            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_PROJECT:
             logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_LOCATION:
             logging.error("Orchestrator: VERTEXAI_LOCATION not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
 
     # Run CrewAI workflow with real-time progress events.
@@ -614,23 +619,26 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY,
                                   org_id=org_id, user_id=user_id):
-            # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
-            # task is now the Assembler — there is no validator verdict). Unused here;
-            # delivered code is read from crew_with_results.tasks[2] below.
+            # run_crew's first element is the assembler crew kickoff's CrewOutput
+            # (the terminal task is the Assembler — there is no validator verdict).
+            # Unused here; delivered code is read from crew_with_results.tasks[-1]
+            # below. Since Task 16, crew_with_results is the ASSEMBLER crew (the
+            # pipeline is two single-task kickoffs around the deterministic
+            # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, shared_llm = run_crew(
-                natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
+                natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
             _store_hint_metadata(workflow_id, hint_metadata)
 
-        # Extract robot code from task[2] (Code Assembler — the terminal crew task)
-        # and apply the shared normalization pipeline (also used by the dryrun repair
-        # path) so both normalize identically.
-        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[2].output)
+        # Extract robot code from tasks[-1] (Code Assembler — the terminal task of
+        # the assembler crew) and apply the shared normalization pipeline (also used
+        # by the dryrun repair path) so both normalize identically.
+        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[-1].output)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -653,13 +661,21 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # ============================================
         try:
             # 1. Extract CrewAI metrics from the shared LLM wrapper — read ONCE.
-            # Do NOT use crew_with_results.calculate_usage_metrics(): it adds the
-            # shared LLM's _token_usage once per agent, so this 3-agent crew
-            # reported 3x the real tokens/calls/cost — the workflow_completed
-            # totals then disagreed with the task_completed per-agent events
-            # (Grafana "Cost per workflow" vs "Cost per Agent" mismatch).
-            # get_workflow_usage() reads the same counters exactly once and
-            # prices them via LiteLLM, matching how per-agent costs are priced.
+            # shared_llm is agents.llm; the planner and assembler wrappers are
+            # separate instances (Task 22 gave the planner its own
+            # response_format) that ALIAS one _token_usage dict
+            # (RobotAgents.__init__), so this single read covers both kickoffs.
+            #
+            # Preferred over crew_with_results.calculate_usage_metrics(): that
+            # sums the shared accumulator once per agent in the crew, so it is
+            # only correct while the returned crew stays single-agent, and it
+            # prices through a separate path. get_workflow_usage() reads the
+            # counters directly and prices them via LiteLLM — the same way the
+            # per-agent task_completed events are priced, which is what keeps
+            # the Grafana "Cost per workflow" and "Cost per Agent" panels in
+            # agreement. The authoritative call count is in "📊 Final LLM Stats"
+            # (crew.py), from shared_llm._monitor — incremented exactly once per
+            # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
             crewai_metrics = (
                 shared_llm.get_workflow_usage() if shared_llm is not None
                 else {'llm_calls': 0, 'cost': 0.0, 'tokens': 0,
@@ -847,7 +863,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                    resolution=resolve_hint(type(e).__name__, str(e)))
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}"}
+        # workflow_id lets the bench detach a failed run — its pre-failure LLM
+        # calls are already recorded in llm_traces.
+        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+               "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
@@ -858,7 +877,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}"}
+        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+               "workflow_id": workflow_id}
     
 
 

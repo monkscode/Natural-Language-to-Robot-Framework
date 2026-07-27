@@ -1,13 +1,17 @@
 from crewai import Crew, Process
 from src.backend.crew_ai.agents import RobotAgents
-from src.backend.crew_ai.tasks import RobotTasks
+from pydantic import ValidationError
+from src.backend.crew_ai.tasks import RobotTasks, PlanOutput, _extract_json_by_key
+from src.backend.crew_ai.element_identification import identify_elements
 from src.backend.crew_ai.llm_output_cleaner import LLMOutputCleaner
 from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from datetime import datetime
+import json
 import os
 import re
+import time
 import logging
 import threading
 
@@ -67,47 +71,94 @@ def _rotate_crewai_log():
         logger.warning(f"📂 Log rotation skipped due to OS error: {e}")
 
 
-def extract_url_from_query(query: str) -> str:
+# TLDs accepted as the final label of a bare hostname. Curated rather than
+# exhaustive: accepting any TLD-shaped ending would mint domains out of
+# filenames ("test.py" — .py is Paraguay's TLD).
+_ALLOWED_TLDS = frozenset({
+    "com", "in", "org", "net", "co", "io", "ai", "app", "dev", "tech",
+    "uk", "us", "au", "ca", "de", "fr", "eu", "jp",
+})
+
+_FULL_URL_RE = re.compile(r'https?://[^\s]+', re.IGNORECASE)
+_HOSTNAME_RE = re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b')
+
+
+def extract_url_from_query(query: str) -> str | None:
     """
-    Dynamically extract URL from user query using regex patterns.
-    Returns the URL if found, otherwise returns a generic placeholder.
+    Extract a URL from the user query, if one is actually present.
+
+    Full URLs with protocol are returned as written. Bare dotted hostnames
+    (example.com, portal.mycompany.co.uk) are returned as https://<hostname>
+    when their final label is a known TLD; the whole hostname is captured so
+    multi-label domains are never truncated to an earlier label.
+
+    Returns None when the query names no URL. Never guesses: the result
+    feeds metrics and the learning store's domain keys, where a fabricated
+    domain poisons persistent state while None only means generic (unscoped)
+    hints for this one run.
     """
-    # Pattern 1: Full URLs with protocol (http:// or https://)
-    url_pattern = r'https?://[^\s]+'
-    match = re.search(url_pattern, query, re.IGNORECASE)
+    match = _FULL_URL_RE.search(query)
     if match:
         url = match.group(0).rstrip('.,;!?')  # Remove trailing punctuation
         logger.info(f"Extracted full URL from query: {url}")
         return url
 
-    # Pattern 2: Domain names with common TLDs (www.example.com, example.in, etc.)
-    domain_pattern = r'\b(?:www\.)?([a-zA-Z0-9-]+\.(?:com|in|org|net|co|io|ai|app|dev|tech))\b'
-    match = re.search(domain_pattern, query, re.IGNORECASE)
-    if match:
-        domain = match.group(0)
-        # Add https:// if not present
-        url = f"https://{domain}" if not domain.startswith('http') else domain
-        logger.info(f"Extracted domain from query and constructed URL: {url}")
-        return url
+    for candidate in _HOSTNAME_RE.finditer(query):
+        hostname = candidate.group(0).lower()
+        if hostname.rsplit('.', 1)[-1] in _ALLOWED_TLDS:
+            url = f"https://{hostname}"
+            logger.info(
+                f"Extracted domain from query and constructed URL: {url}")
+            return url
 
-    # Pattern 3: Website names without TLD (e.g., "on flipkart", "amazon", "google")
-    # Try to extract potential website name and construct URL
-    website_pattern = r'\b(?:on|from|at|in|visit|go to|open)\s+([a-zA-Z0-9]+)\b'
-    match = re.search(website_pattern, query, re.IGNORECASE)
-    if match:
-        website_name = match.group(1).lower()
-        # Common TLD is .com, user can be more specific if needed
-        url = f"https://www.{website_name}.com"
-        logger.info(
-            f"Inferred website name '{website_name}' and constructed URL: {url}")
-        return url
-
-    # If no URL found, return placeholder - let the popup analyzer handle it
-    logger.warning("No URL found in query, returning placeholder")
-    return "website mentioned in query"
+    logger.info("No URL in query; proceeding without domain scoping")
+    return None
 
 
-def run_crew(query: str, model_provider: str, model_name: str, library_type: str | None = None, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
+def _validated_plan_steps(raw_steps: list) -> list:
+    """Re-validate fallback-path steps through PlanOutput.
+
+    The pydantic path is already validated by CrewAI's converter; the
+    json_dict/raw fallbacks hand back dicts exactly as the LLM emitted them —
+    key drift (a hallucinated 'locator', a missing 'keyword', a numeric
+    'value') must fail HERE, before the browser call is paid for, not
+    mid-merge after it. Same outcome as a planner task failure.
+    """
+    try:
+        return list(PlanOutput(steps=raw_steps).steps)
+    except ValidationError as e:
+        raise ValueError(f"Planner output failed validation: {e}") from e
+
+
+def _extract_plan_steps(task_output) -> list:
+    """Extract the planned steps from the planner task's output.
+
+    Prefers the already-validated pydantic model (the normal path — CrewAI's
+    converter ran during kickoff), then json_dict, then the same raw-JSON
+    extraction the guardrails use. Raises when nothing parses or validates:
+    with no plan there is nothing to identify or assemble, so failing the
+    workflow here is correct (same outcome as a planner task failure).
+    """
+    pydantic_output = getattr(task_output, "pydantic", None)
+    steps = getattr(pydantic_output, "steps", None)
+    if steps is not None:
+        return list(steps)
+
+    json_dict = getattr(task_output, "json_dict", None)
+    if isinstance(json_dict, dict) and isinstance(json_dict.get("steps"), list):
+        return _validated_plan_steps(json_dict["steps"])
+
+    raw = getattr(task_output, "raw", "") or ""
+    extracted = _extract_json_by_key(raw, "steps", "PlanOutput")
+    if extracted:
+        parsed_steps = json.loads(extracted).get("steps")
+        if isinstance(parsed_steps, list):
+            return _validated_plan_steps(parsed_steps)
+
+    raise ValueError("Planner output contained no parsable steps")
+
+
+def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
 
@@ -115,43 +166,42 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         query: User's natural language test description
         model_provider: "local", "gemini", or "vertex"
         model_name: Model identifier
-        library_type: "selenium" or "browser" (optional, defaults to config setting)
         workflow_id: Unique workflow identifier for metrics tracking
 
     Architecture Note:
     - Popup handling is done contextually by BrowserUse agents, not as a separate step.
-    - Library context is loaded dynamically based on ROBOT_LIBRARY config setting.
+    - Library context comes from settings.ROBOT_LIBRARY (browser-only since Task 11/E8).
     - Optimization system (pattern learning, ChromaDB) can be enabled via OPTIMIZATION_ENABLED config.
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
     from src.backend.crew_ai.library_context import get_library_context
 
-    # Use provided library_type or fall back to config setting
-    if library_type is None:
-        library_type = settings.ROBOT_LIBRARY
-
-    logger.info(f"🔧 Loading library context for: {library_type}")
-    library_context = get_library_context(library_type)
+    logger.info(f"🔧 Loading library context for: {settings.ROBOT_LIBRARY}")
+    library_context = get_library_context(settings.ROBOT_LIBRARY)
     logger.info(
         f"✅ Loaded {library_context.library_name} context with dynamic keywords")
 
     # Initialize metrics for optimization tracking
     optimization_metrics = None
+    query_url = None
     if settings.OPTIMIZATION_ENABLED:
+        # Extracted ONCE and reused by the hint lookups below: the metrics
+        # row's domain and the domain-scoped hints must agree, and a second
+        # call is pure overhead (regex re-scan + a duplicate log line).
+        query_url = extract_url_from_query(query)
         # Create a temporary metrics object for tracking optimization metrics
         # This will be merged with the main workflow metrics later
         optimization_metrics = WorkflowMetrics(
             workflow_id=workflow_id or "temp",
             timestamp=datetime.now(),
-            url=extract_url_from_query(query),
+            url=query_url,
             total_llm_calls=0,
             total_cost=0.0,
             execution_time=0.0
         )
     
     # Initialize optimization system if enabled
-    keyword_search_tool = None
     smart_provider = None
     baseline_context_tokens = 0
     optimized_context_tokens = 0
@@ -259,14 +309,19 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             baseline_context = library_context.code_assembly_context
             baseline_context_tokens = count_tokens(baseline_context, token_model)
             
-            # Get optimized contexts for ALL agents
-            # URL extracted once, passed to all agents for domain-scoped hints
-            url = extract_url_from_query(query)
-            logger.info("🎯 Generating optimized contexts for all agents...")
-            planner_result = smart_provider.get_agent_context(query, "planner", url=url)
-            assembler_result = smart_provider.get_agent_context(query, "assembler", url=url)
+            # Optimized context for the assembler; hints for BOTH agents.
+            # URL extracted once, passed to all agents for domain-scoped hints.
+            # The planner call is hints_only: its agent ships static minimal
+            # context by design (RobotAgents has no planner context slot), so
+            # building Tier-1/2 context for it was dead weight — a vector
+            # search + keyword-doc fetches per run for a string nothing read,
+            # plus a phantom "Planner=N tokens" context-size log.
+            logger.info("🎯 Generating optimized contexts...")
+            planner_result = smart_provider.get_agent_context(
+                query, "planner", url=query_url, hints_only=True)
+            assembler_result = smart_provider.get_agent_context(
+                query, "assembler", url=query_url)
 
-            planner_context = planner_result.context
             assembler_context = assembler_result.context
 
             # Capture hint metadata for FeedbackLoop integration
@@ -316,12 +371,12 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             if assembler_result.hint_text:
                 hint_context["assembler"] = assembler_result.hint_text
 
-            # Calculate total optimized tokens
-            planner_tokens = count_tokens(planner_context, token_model)
+            # Calculate total optimized tokens (assembler only — the planner
+            # ships no optimized context, so there is nothing to count)
             assembler_tokens = count_tokens(assembler_context, token_model)
             optimized_context_tokens = assembler_tokens  # For backward compatibility metric
 
-            logger.info(f"📊 Context sizes: Planner={planner_tokens}, Assembler={assembler_tokens}")
+            logger.info(f"📊 Context size: Assembler={assembler_tokens} tokens")
             
             # Track context reduction (using assembler as reference)
             if optimization_metrics:
@@ -336,9 +391,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                     f"({abs(pct):.1f}% {direction})"
                 )
             
-            # Get keyword search tool
-            keyword_search_tool = smart_provider.get_keyword_search_tool()
-            
             logger.info("✅ Optimization system initialized successfully for ALL agents")
             if feedback_loop is not None:
                 feedback_loop._optimization_init_ok = True
@@ -346,9 +398,7 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
             logger.warning("⚠️ Falling back to baseline behavior (full context)")
-            planner_context = None
             assembler_context = None
-            keyword_search_tool = None
             smart_provider = None
             optimization_metrics = None
             hint_context = {}
@@ -358,7 +408,6 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
                 feedback_loop._optimization_init_ok = False
     else:
         logger.info("ℹ️ Optimization system disabled (OPTIMIZATION_ENABLED=False)")
-        planner_context = None
         assembler_context = None
         hint_context = {}
 
@@ -368,68 +417,106 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
         model_name,
         library_context,
         assembler_context=assembler_context,
-        keyword_search_tool=keyword_search_tool,
-        planner_context=planner_context,
     )
     tasks = RobotTasks(library_context, hint_context=hint_context)
 
-    # Define Agents (removed popup_strategy_agent - let BrowserUse handle popups contextually)
-    # The CrewAI LLM validator agent was removed in favour of a deterministic
-    # `robot --dryrun` gate (see src/backend/services/dryrun_service.py). The crew
-    # now ends at the Code Assembler — delivered code comes from tasks[2].
+    # Task 16 pipeline: two single-task kickoffs around a deterministic Python
+    # stage — Planner (LLM) → element_identification (plain Python + ONE
+    # batch_browser_automation call) → Assembler (LLM). The element-identifier
+    # LLM agent was deleted: its whole job (which steps need locators, the URL,
+    # element specs, the batch call, copying the locator contract onto steps)
+    # was mechanical rule-following, now code. The CrewAI LLM validator agent
+    # was removed earlier in favour of the deterministic `robot --dryrun` gate
+    # (see src/backend/services/dryrun_service.py). Delivered code comes from
+    # the assembler crew's tasks[-1].
     step_planner_agent = agents.step_planner_agent()
-    element_identifier_agent = agents.element_identifier_agent()
     code_assembler_agent = agents.code_assembler_agent()
 
-    # Define Tasks (removed popup analysis - focus only on user's explicit query)
     plan_steps = tasks.plan_steps_task(step_planner_agent, query)
-    identify_elements = tasks.identify_elements_task(element_identifier_agent)
-    assemble_code = tasks.assemble_code_task(code_assembler_agent)
 
-    # Register real-time progress event routing (no-op when progress_queue is None)
+    # Register real-time progress event routing (no-op when progress_queue is
+    # None). The assembler task is registered later (register_task) — it can
+    # only be built after the element stage, since its description embeds the
+    # merged steps. Stage indices stay 0/1/2: index 1 is the python stage,
+    # which pushes its own events via push_stage_progress.
     if progress_queue is not None:
-        from src.backend.crew_ai.progress_events import register_workflow, unregister_workflow
-        register_workflow(workflow_id, progress_queue, {
-            str(plan_steps.id): 0,
-            str(identify_elements.id): 1,
-            str(assemble_code.id): 2,
-        })
+        from src.backend.crew_ai.progress_events import (
+            register_workflow,
+            register_task,
+            unregister_workflow,
+            push_stage_progress,
+        )
+        register_workflow(workflow_id, progress_queue, {str(plan_steps.id): 0})
 
-    # Rotate crewai.log if it exceeds size limit (before creating the Crew)
+    # Rotate crewai.log if it exceeds size limit (before creating the Crews)
     _rotate_crewai_log()
 
     # Pass the shared LLM wrapper so the task callback can drain its per-stage
     # usage accumulator → real per-agent tokens/cost on task_completed events.
     step_callback, task_callback = get_crew_callbacks(llm=agents.llm)
 
-    # Create and run the crew
-    crew = Crew(
-        agents=[step_planner_agent, element_identifier_agent,
-                code_assembler_agent],
-        tasks=[plan_steps, identify_elements, assemble_code],
-        process=Process.sequential,
-        verbose=True,
-        output_log_file=CREWAI_LOG_FILE,
-        step_callback=step_callback,
-        task_callback=task_callback,
-        embedder=None,  # Disable automatic knowledge/embedding system
-    )
+    def _make_crew(agent, task):
+        return Crew(
+            agents=[agent],
+            tasks=[task],
+            process=Process.sequential,
+            verbose=True,
+            output_log_file=CREWAI_LOG_FILE,
+            step_callback=step_callback,
+            task_callback=task_callback,
+            embedder=None,  # Disable automatic knowledge/embedding system
+        )
+
+    planner_crew = _make_crew(step_planner_agent, plan_steps)
 
     logger.info("🚀 Starting CrewAI workflow execution...")
-    logger.info("🔄 Sequential 3-agent pipeline (planner → identifier → assembler)")
+    logger.info("🔄 2-agent pipeline (planner → deterministic element stage → assembler)")
     logger.info(
         f"📊 LLM Output Cleaner Status: {agents.llm._monitor.get_stats()}")
 
     try:
         try:
-            result = crew.kickoff()
+            planner_crew.kickoff()
+            plan_step_dicts = _extract_plan_steps(plan_steps.output)
+
+            # ── Deterministic element stage (Task 16) ──
+            # ONE batch tool call, full contract merged onto the steps; tool
+            # error or found:false degrade to the Assembler's placeholder
+            # path inside identify_elements — it never raises for those.
+            on_progress = None
+            if progress_queue is not None:
+                on_progress = (lambda progress, message:
+                               push_stage_progress(workflow_id, message, progress))
+            stage_started = time.time()
+            identification = identify_elements(
+                plan_step_dicts, query, on_progress=on_progress)
+            logger.info(
+                "⏱️ Deterministic element stage finished in %.1fs — %s",
+                time.time() - stage_started, identification["summary"],
+            )
+
+            assemble_code = tasks.assemble_code_task(
+                code_assembler_agent,
+                json.dumps({"steps": identification["steps"]}),
+            )
+            if progress_queue is not None:
+                register_task(workflow_id, str(assemble_code.id), 2)
+
+            assembler_crew = _make_crew(code_assembler_agent, assemble_code)
+            result = assembler_crew.kickoff()
+
             logger.info("✅ CrewAI workflow completed successfully")
             logger.info("🏁 Crew execution finished")
             # agents.llm._monitor is the authoritative call count: incremented once per
             # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
+            # (The planner has its own wrapper instance since Task 22, but it
+            # aliases agents.llm's _monitor AND _token_usage — see
+            # RobotAgents.__init__ — so both stages accumulate into one place.)
             # Workflow token/cost totals come from agents.llm.get_workflow_usage()
-            # (read once in workflow_service) — never from crew.calculate_usage_metrics(),
-            # which sums the shared LLM instance once per agent (3x inflation).
+            # (read once in workflow_service), which reads that shared
+            # _token_usage accumulator directly and prices it via LiteLLM — the
+            # same way per-agent task_completed costs are priced, so the Grafana
+            # "Cost per workflow" and "Cost per Agent" panels agree.
             logger.info(f"📊 Final LLM Stats: {agents.llm._monitor.get_stats()}")
 
             # NOTE: Pattern learning is NOT done here!
@@ -449,9 +536,13 @@ def run_crew(query: str, model_provider: str, model_name: str, library_type: str
             # progress bar (frontend hides at >=100%) while the gate is still
             # verifying/repairing. See dryrun_service.validate_and_repair (prog-2).
 
-            # The shared CleanedLLMWrapper: workflow_service reads authoritative
-            # workflow usage (get_workflow_usage) and cleaning stats (._monitor).
-            return result, crew, optimization_metrics, hint_metadata, agents.llm
+            # The ASSEMBLER crew is returned: workflow_service reads delivered
+            # code from its tasks[-1].output.
+            # The 5th element is the shared CleanedLLMWrapper (not just its
+            # _monitor): workflow_service reads authoritative workflow usage
+            # from it via get_workflow_usage(), and cleaning stats via
+            # ._monitor. Its _token_usage accumulator covers both kickoffs.
+            return result, assembler_crew, optimization_metrics, hint_metadata, agents.llm
 
         except Exception as e:
             error_msg = str(e)

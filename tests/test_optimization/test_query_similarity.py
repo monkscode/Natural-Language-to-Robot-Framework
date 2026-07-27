@@ -637,7 +637,9 @@ class TestSelectionTraceOverlay:
             _insert_nl_hint(in_memory_em, i, t, f"anchor {i}")
         provider = _make_provider(in_memory_em, holdout=False)
         mock_struct = MagicMock()
-        mock_struct.get_hints.return_value = [f"structural hint {j}" for j in range(5)]
+        mock_struct.get_intent_rules.return_value = list(range(5))
+        mock_struct.format_hints.return_value = [
+            f"structural hint {j}" for j in range(5)]
         provider._get_structural_engine = lambda: mock_struct
         result = provider.get_agent_context("any query", "planner", "http://x.com")
         trace = result.selection_trace

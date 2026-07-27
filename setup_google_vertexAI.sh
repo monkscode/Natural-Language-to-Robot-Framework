@@ -11,6 +11,20 @@
 # If it is not installed yet, the script does NOT fail: it waits while you
 # install it, then continues automatically in the same window.
 # Full walkthrough (incl. organization-policy fixes): docs/VERTEX_AI_SETUP_GUIDE.md
+#
+# ⚠️  SCOPE: local development only.
+# A downloaded service-account JSON key is a long-lived credential sitting on
+# disk — the highest-risk credential form Google Cloud offers. Do NOT ship this
+# key to production. There, authenticate without a key file:
+#   • Workload Identity Federation (GitHub Actions, other clouds, on-prem)
+#   • An attached service account / ADC (Cloud Run, GKE, GCE)
+#   • Short-lived credentials injected by your deployment's secret manager
+#
+# Rotating or revoking this key (do this immediately if it ever leaks):
+#   gcloud iam service-accounts keys list   --iam-account="$SA_EMAIL" --managed-by=user
+#   gcloud iam service-accounts keys delete KEY_ID --iam-account="$SA_EMAIL"
+# Deleting the key disables it in IAM within minutes; delete the local
+# credentials.json too, then re-run this script to mint a replacement.
 
 set -euo pipefail
 
@@ -84,14 +98,68 @@ fi
     --member="serviceAccount:${SA_EMAIL}" \
     --role="roles/aiplatform.user"
 
-# Download the key into the current directory
-# If this fails with FAILED_PRECONDITION, your organization blocks service-account
-# keys — see docs/VERTEX_AI_SETUP_GUIDE.md §4 for the fix.
-"$GCLOUD" iam service-accounts keys create credentials.json \
-    --iam-account="$SA_EMAIL" \
-    --project="$PROJECT_ID"
+# Get a key into the current directory.
+#
+# `keys create` is NOT idempotent: it mints a brand-new key in IAM every time
+# and overwrites the local file without asking. Re-running this script would
+# therefore leave a trail of still-active keys behind and eventually hit the
+# 10-keys-per-service-account limit. So reuse a valid existing key, and only
+# mint a new one when there is nothing usable on disk.
+KEY_FILE="credentials.json"
+
+# True when credentials.json belongs to THIS service account and its key is
+# still active in IAM (a key deleted server-side leaves a dead file behind).
+existing_key_is_usable() {
+    [ -f "$KEY_FILE" ] || return 1
+    grep -q "\"client_email\"[[:space:]]*:[[:space:]]*\"${SA_EMAIL}\"" "$KEY_FILE" 2>/dev/null || return 1
+    local key_id
+    key_id=$(sed -n 's/.*"private_key_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$KEY_FILE" | head -n 1)
+    [ -n "$key_id" ] || return 1
+    "$GCLOUD" iam service-accounts keys describe "$key_id" \
+        --iam-account="$SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1
+}
+
+if existing_key_is_usable; then
+    echo "ℹ️  Reusing the existing $KEY_FILE — its key is still active in IAM."
+    echo "   To rotate: delete $KEY_FILE (and the old key, see below), then re-run."
+else
+    if [ -f "$KEY_FILE" ]; then
+        echo "⚠️  $KEY_FILE exists but is not a live key for $SA_EMAIL — replacing it."
+    fi
+    # If this fails with FAILED_PRECONDITION, your organization blocks service-account
+    # keys — see docs/VERTEX_AI_SETUP_GUIDE.md §4 for the fix.
+    "$GCLOUD" iam service-accounts keys create "$KEY_FILE" \
+        --iam-account="$SA_EMAIL" \
+        --project="$PROJECT_ID"
+fi
+
+# Old keys stay active until they are explicitly deleted. Surface them rather
+# than deleting anything automatically — another machine or CI job may still
+# be using one.
+KEY_COUNT=$("$GCLOUD" iam service-accounts keys list \
+    --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
+    --managed-by=user --format="value(name)" 2>/dev/null \
+    | grep -c . || true)
+KEY_COUNT=$(echo "${KEY_COUNT:-0}" | tr -d '[:space:]')
+if [ "${KEY_COUNT:-0}" -gt 1 ] 2>/dev/null; then
+    echo ""
+    echo "⚠️  $SA_EMAIL now has $KEY_COUNT active user-managed keys (limit: 10)."
+    echo "   Delete the ones you no longer use:"
+    echo "     gcloud iam service-accounts keys list --iam-account=$SA_EMAIL --managed-by=user"
+    echo "     gcloud iam service-accounts keys delete KEY_ID --iam-account=$SA_EMAIL"
+fi
 
 echo ""
-echo "✅ Done! credentials.json created in: $(pwd)"
-echo "➡️  Set VERTEXAI_PROJECT=$PROJECT_ID in src/backend/.env"
-echo "⚠️  Never commit credentials.json to Git (it is already in .gitignore)."
+echo "✅ Done! $KEY_FILE is ready in: $(pwd)"
+echo "➡️  In src/backend/.env set:"
+echo "      MODEL_PROVIDER=vertex"
+echo "      VERTEXAI_PROJECT=$PROJECT_ID"
+echo "      VERTEXAI_LOCATION=<your region, e.g. us-central1>"
+echo "      VERTEXAI_CREDENTIALS=credentials.json   # already the default; in Docker the"
+echo "                                              # vertex compose override replaces it"
+echo "                                              # with the in-container path"
+echo "⚠️  Never commit $KEY_FILE to Git (it is already in .gitignore)."
+echo "⚠️  This key is for LOCAL DEVELOPMENT. In production use Workload Identity"
+echo "   Federation, an attached service account, or secret-manager injection."
+echo "   If it ever leaks, revoke it:"
+echo "     gcloud iam service-accounts keys delete KEY_ID --iam-account=$SA_EMAIL"

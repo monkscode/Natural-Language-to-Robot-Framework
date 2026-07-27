@@ -16,6 +16,16 @@ from src.backend.core.config import settings
 from src.backend.services.workflow_service import get_active_workflow_count
 
 
+def _pins() -> dict:
+    """Comparability pins read by the bench preflight (bench/README.md)."""
+    return {
+        "optimization_enabled": settings.OPTIMIZATION_ENABLED,
+        "model_provider": settings.MODEL_PROVIDER,
+        "online_model": settings.ONLINE_MODEL,
+        "dryrun_enabled": settings.DRYRUN_ENABLED,
+    }
+
+
 async def health_check():
     """Health check handler for Docker health monitoring (/health)."""
     active = get_active_workflow_count()
@@ -26,6 +36,7 @@ async def health_check():
         "active_workflows": active,
         "max_workflows": max_wf,
         "available_slots": max(0, max_wf - active),
+        "pins": _pins(),
     }
 
 
@@ -39,4 +50,5 @@ async def api_health_check():
         "active_workflows": active,
         "max_workflows": max_wf,
         "available_slots": max(0, max_wf - active),
+        "pins": _pins(),
     }

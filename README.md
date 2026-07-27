@@ -55,7 +55,9 @@ cd Natural-Language-to-Robot-Framework
 
 ### 2. Create your Vertex AI credentials
 
-Mark 1 authenticates to Google Cloud Vertex AI with a **service account key** (`credentials.json`). The one-time setup script below creates it for you.
+For local development, Mark 1 authenticates to Google Cloud Vertex AI with a **service account key** (`credentials.json`). The one-time setup script below creates it for you.
+
+> ⚠️ **This JSON-key workflow is for local development only.** A downloaded service-account key is a long-lived credential sitting on disk, and `.gitignore` only protects you from committing it — not from host compromise or exfiltration from a container. For production, authenticate without a key file: [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation), an attached service account / [ADC](https://cloud.google.com/docs/authentication/application-default-credentials) on Cloud Run, GKE or GCE, or short-lived credentials injected by your deployment's secret manager.
 
 > 🧰 **Prerequisite — the [gcloud CLI](https://cloud.google.com/sdk/docs/install):** Google's command-line tool, which the script uses to talk to your Google Cloud account. If you don't have it yet, install it from the [official install page](https://cloud.google.com/sdk/docs/install) (pick your OS and follow the steps). Forgot to install it? No problem — the script detects that, shows you the link, and waits while you install instead of failing.
 
@@ -67,6 +69,16 @@ bash setup_google_vertexAI.sh
 It logs you in (`gcloud init`), picks up your project ID automatically, enables the Vertex AI API, creates a `vertex-ai-sa` service account with the **Vertex AI User** role, and downloads its key as `credentials.json` into the repo root. The full manual walkthrough (including fixes for organization-policy blocks) is in the [Vertex AI Setup Guide](docs/VERTEX_AI_SETUP_GUIDE.md).
 
 > ⚠️ **Never commit `credentials.json` to Git** — it is already listed in `.gitignore`. If key creation fails with `FAILED_PRECONDITION`, your organization blocks service-account keys; see [§4 of the setup guide](docs/VERTEX_AI_SETUP_GUIDE.md#4-overcoming-the-secure-by-default-json-key-block) for the fix.
+>
+> **Rotating or revoking the key** (do this immediately if it ever leaks):
+>
+> ```bash
+> SA_EMAIL="vertex-ai-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+> gcloud iam service-accounts keys list --iam-account="$SA_EMAIL" --managed-by=user
+> gcloud iam service-accounts keys delete KEY_ID --iam-account="$SA_EMAIL"
+> ```
+>
+> Deleting the key disables it in IAM within minutes. Delete the local `credentials.json` too, then re-run the setup script to mint a replacement. Re-running the script on its own reuses a still-valid key rather than piling up new ones.
 
 ### 3. Create the two config files
 
@@ -116,7 +128,7 @@ Your generated tests, logs, and database live in local folders (`./robot_tests`,
 Open **[http://localhost:3000](http://localhost:3000)** and **create an account** — you'll land straight on the **Generate** page. Then:
 
 1. Enter a description:
-   ```
+   ```text
    Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
 2. Click **Generate & Run** and watch the agents work. ✨
@@ -124,18 +136,28 @@ Open **[http://localhost:3000](http://localhost:3000)** and **create an account*
 
 > **Pro tip:** Be specific about elements — "first product name" or "search button in the header" beats vague phrasing. Another query to try: `Go to Wikipedia and search for Agentic AI`.
 
+#### Sites with a one-time popup after login
+
+Some sites show an announcement or welcome popup exactly once per login, on the first page that finishes rendering. Add a short wait right after the login step so the popup appears and expires on the landing page — before your real steps run — instead of blocking a click later in the test:
+
+```text
+Go to https://yourapp.example.com, type admin in the username field, type admin in the password field, click the Sign In button, wait 5 seconds for the dashboard to load, go to the reports page, and click the Filter button
+```
+
+Two rules: put the wait immediately after login, and make sure a navigation to another page follows it. Persistent popups (cookie banners, consent dialogs) don't need this trick — just mention them as a step ("accept the cookie banner") and they are automated like any other click.
+
 ---
 
 ## 🧠 How It Works
 
-Mark 1 uses a **multi-agent AI system**: your plain-English request is broken into precise steps, a live headless browser detects the real page elements, and the agents generate validated, production-ready Robot Framework code that runs in a clean, throwaway Docker container. You get working test code, detailed HTML reports with step-by-step logs, real-time progress, and locators that hold up on dynamic sites.
+Mark 1 uses **AI agents combined with deterministic validation**: your plain-English request is broken into precise steps, a live headless browser detects the real page elements, and the agents generate Robot Framework code that is then gated by a deterministic `robot --dryrun` check before it runs in a clean, throwaway Docker container. You get working test code, detailed HTML reports with step-by-step logs, real-time progress, and locators that hold up on dynamic sites.
 
 Want the deep dive? See the [Architecture Documentation](docs/ARCHITECTURE.md).
 
 ### Example output
 
 **Input:**
-```
+```text
 Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
 ```
 
@@ -155,7 +177,7 @@ ${pinned_project_name_locator}    id=892238219
 Generated Test
     [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
-    New Context    viewport=None
+    New Context    viewport={'width': 1920, 'height': 1080}
     New Page    ${url}
     ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
     Log    Retrieved Pinned project name: ${pinned_project_name}
@@ -164,7 +186,13 @@ Generated Test
 
 ---
 
-> 🔒 **Deploying to production?** The defaults are tuned for local use. Before exposing Mark 1 publicly, set a strong `JWT_SECRET_KEY`, `COOKIE_SECURE=true`, and `ENVIRONMENT=production` in `src/backend/.env`. See the [Configuration Guide](docs/CONFIGURATION.md) for the full hardening checklist.
+> 🔒 **Deploying to production?** The defaults are tuned for local use. Before exposing Mark 1 publicly:
+>
+> - Set a strong `JWT_SECRET_KEY`, `COOKIE_SECURE=true`, and `ENVIRONMENT=production` in `src/backend/.env`.
+> - **Drop the `credentials.json` key file.** The Quick Start's JSON key is a local-development shortcut. In production use [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation), an attached service account / ADC (Cloud Run, GKE, GCE), or short-lived credentials injected by your secret manager — none of which leave a long-lived key on disk.
+> - If you must ship a key, scope it to `roles/aiplatform.user` only, mount it read-only, and put it on a rotation schedule with a documented revocation path (see step 2 above).
+>
+> See the [Configuration Guide](docs/CONFIGURATION.md) for the full hardening checklist.
 
 
 ---

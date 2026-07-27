@@ -18,10 +18,17 @@ def test_identity_from_context_empty_when_unbound():
     assert _identity_from_context() == (None, None, None)
 
 
-def test_element_task_prompt_does_not_inject_workflow_id():
-    # The LLM must no longer be the source of workflow_id — the brittle prompt
-    # injection (tasks.py ~422/~480) is gone now that the tool reads it from contextvars.
-    from src.backend.crew_ai.tasks import RobotTasks
-    tasks = RobotTasks()
-    desc = tasks.identify_elements_task(agent=None).description
-    assert "workflow_id" not in desc
+def test_element_payload_does_not_carry_workflow_id():
+    # The tool payload must never be the source of workflow_id — the tool reads
+    # identity from contextvars. Task 16 replaced the identify LLM task with the
+    # deterministic builder, so the guard now sits on the element specs it builds.
+    from src.backend.crew_ai.element_identification import build_elements
+    steps = [
+        {"keyword": "Open Browser", "value": "https://example.com", "step_description": "open"},
+        {"keyword": "Input Text", "element_description": "search box",
+         "value": "shoes", "step_description": "type"},
+    ]
+    elements, _ = build_elements(steps)
+    assert elements, "expected at least one element spec"
+    for element in elements:
+        assert "workflow_id" not in element

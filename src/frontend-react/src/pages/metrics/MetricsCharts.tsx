@@ -17,7 +17,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 export interface MetricsRow {
   workflow_id: string
-  url: string
+  // null when the run's query named no URL (backend never fabricates one)
+  url: string | null
   timestamp: string
   total_llm_calls: number
   total_cost: number
@@ -90,8 +91,9 @@ const COST_CHARTS = [
   { key: 'time-distribution', label: 'Execution Time Distribution' },
 ] as const
 
-function domainOf(url: string): string {
-  try { return new URL(url).hostname.replace(/^www\./, '') || 'unknown' } catch { return url?.slice(0, 30) || 'unknown' }
+function domainOf(url: string | null): string {
+  if (!url) return 'unknown'
+  try { return new URL(url).hostname.replace(/^www\./, '') || 'unknown' } catch { return url.slice(0, 30) || 'unknown' }
 }
 
 const shortTime = (iso: string) =>

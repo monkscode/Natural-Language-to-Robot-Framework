@@ -99,7 +99,9 @@ class WorkflowMetricsBase(
     """
     # Core identifiers
     workflow_id: str
-    url: str
+    # None when the user query named no URL (extract_url_from_query returns
+    # None rather than guessing a domain — Task 14).
+    url: Optional[str] = None
     
     # Overall metrics (totals)
     total_llm_calls: int
@@ -237,17 +239,9 @@ class WorkflowMetrics(WorkflowMetricsBase):
         return cls.model_validate(data)
     
     # Tracking methods
-    def track_keyword_search(self, latency_ms: float, returned_keywords: List[str]) -> None:
-        """Track keyword search performance."""
-        self.keyword_search_stats["calls"] += 1
-        self.keyword_search_stats["total_latency_ms"] += latency_ms
-        self.keyword_search_stats["avg_latency_ms"] = (
-            self.keyword_search_stats["total_latency_ms"] / 
-            self.keyword_search_stats["calls"]
-        )
-        all_kws = self.keyword_search_stats["returned_keywords"] + returned_keywords
-        self.keyword_search_stats["returned_keywords"] = list(dict.fromkeys(all_kws))
-    
+    # NOTE: track_keyword_search was removed with the retired keyword-search
+    # tool (its sole caller; 0 recorded calls ever). The keyword_search_stats
+    # FIELD stays — historical rows carry it and the frontend column reads it.
     def track_pattern_learning(self, predicted: bool, keyword_count: int) -> None:
         """Track pattern learning usage."""
         self.pattern_learning_stats["prediction_used"] = predicted
