@@ -503,6 +503,12 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 register_task(workflow_id, str(assemble_code.id), 2)
 
             assembler_crew = _make_crew(code_assembler_agent, assemble_code)
+            # Restart the task-duration clock: the deterministic element stage
+            # ran between the planner's callback and this kickoff, and without
+            # this its wall time would be reported as assembler agent time on
+            # the Grafana per-stage duration panel.
+            if hasattr(task_callback, "mark_stage_start"):
+                task_callback.mark_stage_start()
             result = assembler_crew.kickoff()
 
             logger.info("✅ CrewAI workflow completed successfully")

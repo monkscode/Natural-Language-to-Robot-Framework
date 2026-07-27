@@ -174,9 +174,16 @@ class TestRunCrewReturnShape:
         authoritative workflow usage via get_workflow_usage() and cleaning
         stats via ._monitor."""
         agents_mock = _make_agents_mock()
+        # Assert the monitor against a separately named object. Since
+        # out[4] is agents_mock.llm, `out[4]._monitor is agents_mock.llm._monitor`
+        # holds for ANY value — a tautology that verifies nothing.
+        sentinel_monitor = MagicMock(name="sentinel_monitor")
+        agents_mock.llm._monitor = sentinel_monitor
+
         out, _ = _run_crew_with_mocks(agents_mock=agents_mock)
+
         assert out[4] is agents_mock.llm
-        assert out[4]._monitor is agents_mock.llm._monitor
+        assert out[4]._monitor is sentinel_monitor
 
     def test_two_crews_one_kickoff_each(self):
         """Task 16: planner crew + assembler crew, each kicked off once."""

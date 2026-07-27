@@ -54,6 +54,21 @@ class RobotAgents:
         # keeps the planner's calls/tokens/cost in that single read — without
         # this line they silently vanish from metrics and pricing.
         self.planner_llm._token_usage = self.llm._token_usage
+        # Same reasoning for the per-stage accumulator behind the Grafana
+        # per-agent panels: callbacks.make_task_callback drains ONLY the wrapper
+        # it was handed (agents.llm). Without this alias the planner's tokens
+        # accumulate into a dict nobody reads, so the per-stage figures would no
+        # longer add up to get_workflow_usage()'s total — the exact agreement
+        # this instrumentation exists to guarantee.
+        #
+        # getattr, not attribute access: CleanedLLMWrapper.__init__ always seeds
+        # _stage_usage, so this is present in production — but agent
+        # construction must not blow up for a caller that supplies a bare LLM
+        # (or a test double) without it. Metrics wiring never breaks the crew;
+        # same rule as the accounting guard in CleanedLLMWrapper.call().
+        _stage_usage = getattr(self.llm, "_stage_usage", None)
+        if _stage_usage is not None:
+            self.planner_llm._stage_usage = _stage_usage
         self.library_context = library_context
 
         # NOTE: the keyword-search tool was RETIRED (Task 24R Stage 1,

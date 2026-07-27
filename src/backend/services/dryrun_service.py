@@ -570,8 +570,10 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             # repair hold the bar (progress=None) so it never moves backwards.
             _push_progress(progress_queue, "🔬 Verifying generated test...",
                            88 if attempt == 0 else None)
-            last_result = runner_exec_client.dryrun(run_id, code)
+            # Counted before the call, not after: a dryrun that times out or
+            # raises was still attempted, and the "unverified" event should say so.
             dryruns_run += 1
+            last_result = runner_exec_client.dryrun(run_id, code)
 
             if last_result["passed"]:
                 logger.info("🔬 DRYRUN: passed for run_id=%s (attempt %d)", run_id, attempt)
@@ -582,11 +584,13 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             if attempt < settings.MAX_DRYRUN_FIXES:
                 _push_progress(progress_queue, "🔧 Fixing test code...", 92)
                 try:
+                    # Counted before the call for the same reason as dryruns_run:
+                    # a repair that raises was still attempted and paid for.
+                    repairs_run += 1
                     task_output, attempt_usage = repair_robot_code(
                         run_id, code, last_result["errors"],
                         model_provider, model_name,
                     )
-                    repairs_run += 1
                     # Count the repair cost as soon as it is known, before
                     # extraction, so it is not lost if extraction later fails.
                     _accumulate_usage(repair_usage, attempt_usage)

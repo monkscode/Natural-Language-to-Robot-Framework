@@ -92,10 +92,12 @@ class TestPlannerStructuredOutput:
         # against BaseLLM) accepts the mocks
         plain_llm = MagicMock(name="plain", spec=CleanedLLMWrapper)
         planner_llm = MagicMock(name="planner", spec=CleanedLLMWrapper)
-        # _monitor and _token_usage are instance attributes (set in __init__),
-        # invisible to spec= — seed them so the sharing wiring can read them
+        # _monitor, _token_usage and _stage_usage are instance attributes (set
+        # in __init__), invisible to spec= — seed them so the sharing wiring can
+        # read them
         plain_llm._monitor = MagicMock(name="monitor")
         plain_llm._token_usage = {}
+        plain_llm._stage_usage = {}
         mock_get_llm.side_effect = [plain_llm, planner_llm]
 
         agents = RobotAgents("vertex", "gemini-2.5-flash")
@@ -137,8 +139,18 @@ class TestPlannerStructuredOutput:
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
             "successful_requests": 0, "cached_prompt_tokens": 0,
         }
+        # CleanedLLMWrapper.__init__ seeds this one; also invisible to spec=
+        plain_llm._stage_usage = {
+            "llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "tokens": 0,
+        }
         mock_get_llm.side_effect = [plain_llm, planner_llm]
 
         agents = RobotAgents("vertex", "gemini-2.5-flash")
 
         assert agents.planner_llm._token_usage is agents.llm._token_usage
+        # Same requirement for the per-stage accumulator: callbacks drain only
+        # agents.llm, so without this alias the planner's tokens never reach a
+        # task_completed event and the per-stage figures stop summing to the
+        # workflow total.
+        assert agents.planner_llm._stage_usage is agents.llm._stage_usage

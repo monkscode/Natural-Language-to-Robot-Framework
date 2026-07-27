@@ -172,7 +172,11 @@ def _extract_json_by_key(raw: str, required_key: str, log_prefix: str) -> Option
         return json.dumps(best['data'])
 
 
-@_track_guardrail("assembly_output")
+# NOT decorated here: this same function is attached to BOTH assemble_code_task
+# and repair_code_task, and the repair mini-crew runs inside the same workflow.
+# A single hard-coded name would let a repair-pass invocation reset or inflate
+# the main assembler's attempt total. Each attachment site wraps it with its own
+# _track_guardrail(name) instead, keeping the two series apart.
 def assembly_output_guardrail(result: TaskOutput) -> Tuple[bool, Any]:
     """
     Guardrail for assemble_code_task that fixes output format without retry.
@@ -598,7 +602,8 @@ class RobotTasks:
             ),
             agent=agent,
             output_pydantic=AssemblyOutput,
-            guardrail=assembly_output_guardrail,  # Fixes format without retry
+            # Fixes format without retry. Tracked as "assembly_output".
+            guardrail=_track_guardrail("assembly_output")(assembly_output_guardrail),
         )
 
     def repair_code_task(self, agent, robot_code: str, dryrun_errors: str) -> Task:
@@ -649,7 +654,9 @@ class RobotTasks:
             ),
             agent=agent,
             output_pydantic=AssemblyOutput,
-            guardrail=assembly_output_guardrail,  # same format-fixer as the main assembler
+            # Same format-fixer as the main assembler, but tracked separately as
+            # "repair_output" so repair attempts never skew the assembler series.
+            guardrail=_track_guardrail("repair_output")(assembly_output_guardrail),
         )
 
     # NOTE: analyze_popup_strategy_task has been REMOVED

@@ -285,12 +285,17 @@ class CleanedLLMWrapper(LLM):
     def pop_stage_usage(self) -> dict:
         """Return usage accumulated since the last drain, with cost, and reset.
 
+        Resets the accumulator IN PLACE rather than rebinding it: RobotAgents
+        aliases planner_llm._stage_usage to this same dict so the planner's
+        calls land in the drain, and rebinding here would silently detach that
+        alias after the first task boundary.
+
         Never raises; returns zeroed usage on any failure.
         """
         try:
-            usage = self._stage_usage
-            self._stage_usage = {"llm_calls": 0, "prompt_tokens": 0,
-                                 "completion_tokens": 0, "tokens": 0}
+            usage = dict(self._stage_usage)
+            self._stage_usage.update(llm_calls=0, prompt_tokens=0,
+                                     completion_tokens=0, tokens=0)
             usage["cost"] = self._cost_for(
                 usage["prompt_tokens"], usage["completion_tokens"])
             return usage

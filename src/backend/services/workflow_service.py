@@ -569,7 +569,20 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     )
 
     _t0 = time.time()
-    emit_event("workflow_started", query=natural_language_query[:200])
+    # The raw query is deliberately NOT emitted here. emit_event merges user_id
+    # and org_id from structlog contextvars into every record, so including the
+    # query would pair an identified user with their own free-text input in a
+    # log stream that Promtail ships to Loki and retains. workflow_id already
+    # joins this event back to application.log when the text is needed.
+    emit_event("workflow_started")
+
+    def _fail_config(error: str) -> None:
+        """Terminal event for a config guard that short-circuits before the
+        main try block — without it the run leaves a dangling workflow_started
+        and every started-vs-completed panel skews permanently."""
+        emit_event("workflow_failed", duration_s=round(time.time() - _t0, 2),
+                   error_type="ConfigurationError", error=error,
+                   resolution=resolve_hint("ConfigurationError", error))
 
     # Start with welcome message
     yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
@@ -577,6 +590,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             logging.error("Orchestrator: GEMINI_API_KEY not found for gemini provider.")
+            _fail_config("GEMINI_API_KEY not found")
             yield {"status": "error", "message": "GEMINI_API_KEY not found.",
                    "workflow_id": workflow_id}
             return
@@ -585,21 +599,25 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         creds_path = os.getenv("VERTEXAI_CREDENTIALS")
         if not creds_path:
             logging.error("Orchestrator: VERTEXAI_CREDENTIALS not set for vertex provider.")
+            _fail_config("VERTEXAI_CREDENTIALS not set")
             yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file.",
                    "workflow_id": workflow_id}
             return
         if not os.path.exists(creds_path):
             logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
+            _fail_config("Vertex AI credentials file not found")
             yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file.",
                    "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_PROJECT:
             logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
+            _fail_config("VERTEXAI_PROJECT not set")
             yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI.",
                    "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_LOCATION:
             logging.error("Orchestrator: VERTEXAI_LOCATION not set for vertex provider.")
+            _fail_config("VERTEXAI_LOCATION not set")
             yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI.",
                    "workflow_id": workflow_id}
             return
@@ -659,6 +677,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # ============================================
         # NEW: Collect and merge metrics
         # ============================================
+        # Payload for the terminal workflow_completed event. Filled in inside the
+        # metrics block below but emitted OUTSIDE it: metrics/DB failures there
+        # are swallowed by design (see
+        # test_metrics_collection_failure_does_not_abort_workflow), and a run
+        # that still delivers code must never be left without a terminal event.
+        _completed_fields: dict = {}
         try:
             # 1. Extract CrewAI metrics from the shared LLM wrapper — read ONCE.
             # shared_llm is agents.llm; the planner and assembler wrappers are
@@ -797,8 +821,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             logging.info(f"   Total LLM calls: {unified_metrics.total_llm_calls} (CrewAI: {unified_metrics.crewai_llm_calls}, Browser-use: {unified_metrics.browser_use_llm_calls})")
             logging.info(f"   Total cost: ${unified_metrics.total_cost:.4f} (CrewAI: ${unified_metrics.crewai_cost:.4f}, Browser-use: ${unified_metrics.browser_use_cost:.4f})")
 
-            # Grafana events — one tool_used per browser-tool run (locator success
-            # rate panel) and one workflow_completed carrying the unified totals.
+            # Grafana events — one tool_used per browser-tool run (locator
+            # success rate panel).
             if browser_metrics:
                 emit_event(
                     "tool_used",
@@ -807,29 +831,37 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                     elements_processed=browser_metrics.get('elements_processed', 0),
                     custom_action_usage=browser_metrics.get('custom_action_usage_count', 0),
                 )
-            emit_event(
-                "workflow_completed",
-                duration_s=round(time.time() - _t0, 2),
-                total_cost=round(unified_metrics.total_cost, 6),
-                total_tokens=unified_metrics.crewai_tokens + unified_metrics.browser_use_tokens,
-                total_llm_calls=unified_metrics.total_llm_calls,
-                crewai_cost=unified_metrics.crewai_cost,
-                crewai_tokens=unified_metrics.crewai_tokens,
-                crewai_llm_calls=unified_metrics.crewai_llm_calls,
-                browser_use_cost=unified_metrics.browser_use_cost,
-                browser_use_tokens=unified_metrics.browser_use_tokens,
-                browser_use_llm_calls=unified_metrics.browser_use_llm_calls,
-                success_rate=unified_metrics.success_rate,
-                total_elements=unified_metrics.total_elements,
-                successful_elements=unified_metrics.successful_elements,
-                failed_elements=unified_metrics.failed_elements,
-                dryrun_status=gate["dryrun_status"],
-                url=unified_metrics.url,
-            )
+            _completed_fields = {
+                "total_cost": round(unified_metrics.total_cost, 6),
+                "total_tokens": unified_metrics.crewai_tokens + unified_metrics.browser_use_tokens,
+                "total_llm_calls": unified_metrics.total_llm_calls,
+                "crewai_cost": unified_metrics.crewai_cost,
+                "crewai_tokens": unified_metrics.crewai_tokens,
+                "crewai_llm_calls": unified_metrics.crewai_llm_calls,
+                "browser_use_cost": unified_metrics.browser_use_cost,
+                "browser_use_tokens": unified_metrics.browser_use_tokens,
+                "browser_use_llm_calls": unified_metrics.browser_use_llm_calls,
+                "success_rate": unified_metrics.success_rate,
+                "total_elements": unified_metrics.total_elements,
+                "successful_elements": unified_metrics.successful_elements,
+                "failed_elements": unified_metrics.failed_elements,
+                "url": unified_metrics.url,
+            }
 
         except Exception as metrics_error:
             logging.error(f"❌ Failed to record unified metrics: {metrics_error}", exc_info=True)
             _safe_delete_temp_metrics(workflow_id)
+
+        # Terminal event, on the delivery path — one per workflow_started, no
+        # matter how the metrics block above fared. metrics_ok lets a panel
+        # exclude runs whose totals are missing rather than reading them as zero.
+        emit_event(
+            "workflow_completed",
+            duration_s=round(time.time() - _t0, 2),
+            dryrun_status=gate["dryrun_status"],
+            metrics_ok=bool(_completed_fields),
+            **_completed_fields,
+        )
 
         # Calculate stats for success message
         lines = len(robot_code.split('\n'))

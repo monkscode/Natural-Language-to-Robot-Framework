@@ -118,11 +118,20 @@ def make_task_callback(step_logger: logging.Logger, llm=None):
     the first task's elapsed measures time from kickoff start to first
     task completion (i.e., the planner agent's actual duration).
 
+    Since Task 16 the two crew kickoffs are NOT contiguous: the deterministic
+    element stage (one batch browser-automation call, often tens of seconds)
+    runs between them. Measuring plain wall time between callbacks would bill
+    that entirely to the assembler. crew.py therefore calls
+    `task_callback.mark_stage_start()` immediately before the assembler kickoff
+    to restart the clock, so duration_s stays agent time.
+
     llm: the workflow's shared CleanedLLMWrapper. Its per-stage usage
     accumulator is drained at every task boundary — sequential execution means
     everything accumulated since the previous task completed belongs to this
     task — giving real per-agent tokens AND cost on task_completed events
     (TaskOutput.token_usage is not populated in this CrewAI version).
+    Token attribution is unaffected by mark_stage_start: the element stage
+    makes no LLM calls through this wrapper, so nothing is discarded.
     """
     state = {"last_ts": datetime.now()}
 
@@ -170,6 +179,13 @@ def make_task_callback(step_logger: logging.Logger, llm=None):
         except Exception:
             logger.debug("task_completed event emission failed", exc_info=True)
 
+    def mark_stage_start():
+        """Restart the duration clock. Call right before a crew kickoff that is
+        NOT contiguous with the previous task callback, so wall time spent
+        between stages is not billed to the next agent."""
+        state["last_ts"] = datetime.now()
+
+    _callback.mark_stage_start = mark_stage_start
     return _callback
 
 

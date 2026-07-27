@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,17 +48,54 @@ logger = logging.getLogger(__name__)
 
 _EVENTS_FILE = Path("logs") / "events.log"
 
+# Promtail tails this file; rotation keeps a long-lived backend from filling the
+# disk. Same scheme as _rotate_crewai_log() in crew.py.
+_EVENTS_MAX_BYTES = 20 * 1024 * 1024   # 20MB
+_EVENTS_BACKUP_COUNT = 5               # 5 backups = 120MB ceiling
+
 _lock = threading.Lock()
 _events_fh = None
 
-# PYTEST_CURRENT_TEST is set by pytest for the duration of each test (absent
-# otherwise) — the standard way to detect "running under the test suite"
-# without an explicit fixture at every call site.
-_UNDER_PYTEST = "PYTEST_CURRENT_TEST" in os.environ
+
+def _under_pytest() -> bool:
+    """True when running under the test suite. Checked at CALL time.
+
+    NOT an import-time snapshot: pytest sets PYTEST_CURRENT_TEST per test item
+    (setup/call/teardown) and does NOT set it during collection — which is when
+    this module first gets imported, via workflow_service. A module-level
+    snapshot is therefore False for the entire run, the guard never fires, and
+    mock workflows land in the real, Promtail-scraped events.log.
+    The sys.modules check also covers emissions from outside a test item
+    (import side effects, session-scoped fixtures).
+    """
+    return "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+
+
+def _rotate_if_needed() -> None:
+    """Roll events.log over when it exceeds the size cap. Caller holds _lock."""
+    global _events_fh
+    try:
+        if _events_fh is not None:
+            if _events_fh.tell() < _EVENTS_MAX_BYTES:
+                return
+            _events_fh.close()
+            _events_fh = None
+        elif not _EVENTS_FILE.exists() or _EVENTS_FILE.stat().st_size < _EVENTS_MAX_BYTES:
+            return
+
+        for i in range(_EVENTS_BACKUP_COUNT - 1, 0, -1):
+            src = _EVENTS_FILE.with_suffix(f".log.{i}")
+            if src.exists():
+                src.replace(_EVENTS_FILE.with_suffix(f".log.{i + 1}"))
+        if _EVENTS_FILE.exists():
+            _EVENTS_FILE.replace(_EVENTS_FILE.with_suffix(".log.1"))
+    except Exception:
+        logger.debug("events.log rotation failed", exc_info=True)
 
 
 def _get_fh():
     global _events_fh
+    _rotate_if_needed()
     if _events_fh is None:
         _EVENTS_FILE.parent.mkdir(exist_ok=True)
         _events_fh = open(_EVENTS_FILE, "a", encoding="utf-8", buffering=1)
@@ -71,7 +109,7 @@ def emit_event(event: str, **fields) -> None:
     directly in the real, Promtail-scraped events.log and pollute the Grafana
     dashboards with mock workflow data every time the suite runs.
     """
-    if _UNDER_PYTEST:
+    if _under_pytest():
         return
     try:
         # Opportunistically merge bound workflow context (workflow_id, model_name,
@@ -154,9 +192,18 @@ class ErrorEventHandler(logging.Handler):
             if record.name == logger.name:
                 return  # never recurse on our own failures
             error_msg = record.getMessage()[:300]
-            emit_event("error", source=record.name, error_type=record.levelname,
+            # record.levelname is only ever ERROR/CRITICAL, so it cannot group
+            # anything on the live error feed. exc_info carries the real class
+            # on any logger.exception()/logger.error(..., exc_info=True) call —
+            # which is also what resolve_hint's type-name patterns
+            # (KeyboardInterrupt, timeout, ...) are written to match.
+            exc_type = (record.exc_info[0].__name__
+                        if record.exc_info and record.exc_info[0]
+                        else record.levelname)
+            emit_event("error", source=record.name, error_type=exc_type,
+                       level=record.levelname,
                        error=error_msg,
-                       resolution=resolve_hint(record.levelname, error_msg))
+                       resolution=resolve_hint(exc_type, error_msg))
         except Exception:
             pass
 
@@ -166,23 +213,39 @@ class ErrorEventHandler(logging.Handler):
 # ---------------------------------------------------------------------------
 # CrewAI retries a task internally when a guardrail returns (False, ...), so a
 # guardrail function has no view of its own attempt count. Track invocations
-# per guardrail name here: each call is one attempt; a pass emits
-# guardrail_passed with the total and resets. Workflows run one crew at a
-# time per process, so a plain per-process counter is accurate in practice.
+# here: each call is one attempt; a pass emits guardrail_passed with the total
+# and clears the entry.
+#
+# Keyed by (workflow_id, guardrail) rather than the bare name. Both dimensions
+# matter: concurrent workflows share this process, and the same guardrail
+# function is attached at more than one call site within a single workflow
+# (assemble_code_task and repair_code_task both use assembly_output_guardrail),
+# so callers pass distinct names for distinct sites. Entries are popped on
+# pass so the dict does not grow for the process lifetime.
 
 _guardrail_attempts: dict = {}
 _guardrail_lock = threading.Lock()
 
 
+def _current_workflow_id() -> str:
+    """Bound workflow_id, or "" outside a workflow. Never raises."""
+    try:
+        import structlog.contextvars
+        return str(structlog.contextvars.get_contextvars().get("workflow_id", ""))
+    except Exception:
+        return ""
+
+
 def record_guardrail_result(guardrail: str, passed: bool) -> None:
     """Record one guardrail invocation and emit the matching event. Never raises."""
     try:
+        key = (_current_workflow_id(), guardrail)
         with _guardrail_lock:
-            attempts = _guardrail_attempts.get(guardrail, 0) + 1
+            attempts = _guardrail_attempts.get(key, 0) + 1
             if passed:
-                _guardrail_attempts[guardrail] = 0
+                _guardrail_attempts.pop(key, None)
             else:
-                _guardrail_attempts[guardrail] = attempts
+                _guardrail_attempts[key] = attempts
         if passed:
             emit_event("guardrail_passed", guardrail=guardrail, attempts=attempts)
         else:

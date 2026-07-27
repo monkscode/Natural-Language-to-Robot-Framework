@@ -54,6 +54,15 @@ VALID_ROBOT_CODE = (
     "    New Page    https://example.com\n"
 )
 
+# Usage the mocked crew reports. total_cost is supplied on purpose: without it
+# calculate_crewai_cost falls back to LiteLLM's pricing catalog, which would tie
+# these unit tests to the shipped price list and the "gemini-2.5-flash" alias.
+# Shared with the tests that recompute expected costs so both stay in step.
+CREW_USAGE = {
+    'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
+    'successful_requests': 8, 'total_cost': 0.00123,
+}
+
 # Default dryrun gate stub — passthrough that delivers the code unchanged.
 # The gate's real behaviour (Docker, repair loop, cost) is covered in
 # test_dryrun_service.py; here we only verify run_agentic_workflow's wiring.
@@ -95,9 +104,7 @@ def _make_run_crew_result(
     # (e.g. test_repair_cost_folded_into_crewai_and_total_metrics) stay exact.
     shared_llm = MagicMock()
     shared_llm.get_workflow_usage.return_value = calculate_crewai_cost(
-        {'total_tokens': 200, 'prompt_tokens': 160,
-         'completion_tokens': 40, 'successful_requests': 8},
-        model_name="gemini-2.5-flash",
+        CREW_USAGE, model_name="gemini-2.5-flash",
     )
     shared_llm._monitor.get_numeric_stats.return_value = {}
 
@@ -502,11 +509,8 @@ class TestWorkflowCompletionPaths:
         from src.backend.core.workflow_metrics import calculate_crewai_cost
 
         # Baseline crewai metrics from the mocked crew usage (200 tokens, 8 calls).
-        base = calculate_crewai_cost(
-            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
-             'successful_requests': 8},
-            model_name="gemini-2.5-flash",
-        )
+        # Same CREW_USAGE the fixture prices, so the two cannot drift apart.
+        base = calculate_crewai_cost(CREW_USAGE, model_name="gemini-2.5-flash")
         repair_usage = {'llm_calls': 2, 'cost': 0.004, 'tokens': 50,
                         'prompt_tokens': 40, 'completion_tokens': 10}
 

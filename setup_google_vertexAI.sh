@@ -133,20 +133,33 @@ else
         --project="$PROJECT_ID"
 fi
 
-# Old keys stay active until they are explicitly deleted. Surface them rather
+# Old keys stay usable until they are explicitly deleted. Surface them rather
 # than deleting anything automatically — another machine or CI job may still
 # be using one.
-KEY_COUNT=$("$GCLOUD" iam service-accounts keys list \
-    --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
-    --managed-by=user --format="value(name)" 2>/dev/null \
-    | grep -c . || true)
-KEY_COUNT=$(echo "${KEY_COUNT:-0}" | tr -d '[:space:]')
-if [ "${KEY_COUNT:-0}" -gt 1 ] 2>/dev/null; then
+#
+# The listing is captured separately from the count so a gcloud failure
+# (permission or API error) is reported instead of silently reading as "0 keys",
+# which would suppress the warning exactly when it matters. --filter drops
+# disabled keys so the number matches what the message claims.
+KEY_LIST=""
+if KEY_LIST=$("$GCLOUD" iam service-accounts keys list \
+        --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
+        --managed-by=user --filter="disabled=false" \
+        --format="value(name)" 2>/dev/null); then
+    KEY_COUNT=$(printf '%s' "$KEY_LIST" | grep -c . || true)
+    KEY_COUNT=$(printf '%s' "${KEY_COUNT:-0}" | tr -d '[:space:]')
+    if [ "${KEY_COUNT:-0}" -gt 1 ]; then
+        echo ""
+        echo "⚠️  $SA_EMAIL now has $KEY_COUNT enabled user-managed keys (limit: 10)."
+        echo "   Delete the ones you no longer use:"
+        echo "     gcloud iam service-accounts keys list --iam-account=$SA_EMAIL --managed-by=user"
+        echo "     gcloud iam service-accounts keys delete KEY_ID --iam-account=$SA_EMAIL"
+    fi
+else
     echo ""
-    echo "⚠️  $SA_EMAIL now has $KEY_COUNT active user-managed keys (limit: 10)."
-    echo "   Delete the ones you no longer use:"
+    echo "⚠️  Could not list existing keys for $SA_EMAIL (permission or API error)."
+    echo "   Check the key count yourself before creating more — the limit is 10:"
     echo "     gcloud iam service-accounts keys list --iam-account=$SA_EMAIL --managed-by=user"
-    echo "     gcloud iam service-accounts keys delete KEY_ID --iam-account=$SA_EMAIL"
 fi
 
 echo ""
