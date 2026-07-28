@@ -17,7 +17,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from bench.bench_lib import compare_pins, compare_summaries, load_meta, summarize_rows
+from bench.bench_lib import compare_pins, compare_summaries, load_meta, step_budget_exhausted, summarize_rows
 
 NUMERIC_METRICS = (
     "plan_s", "identify_s", "assemble_s", "dryrun_s", "exec_s", "total_s",
@@ -72,10 +72,54 @@ def measured_rows(rows: list[dict], column: str) -> list[dict]:
     return [r for r in rows if (r.get(column) or "") != ""]
 
 
+def _coerce_int(s: str | None) -> int | None:
+    """Safely coerce a CSV string to int or None.
+
+    Empty string, missing value, or non-numeric are treated the same — None.
+    """
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
 def exhaustion_counts(rows: list[dict]) -> tuple[int, int]:
-    """(runs that consumed their whole step budget, runs that could be scored)."""
-    measured = measured_rows(rows, "step_budget_exhausted")
-    return sum(1 for r in measured if r["step_budget_exhausted"] == "1"), len(measured)
+    """(runs that consumed their whole step budget, runs that could be scored).
+
+    A row is counted if:
+    - It has a stored step_budget_exhausted value (stored always wins), or
+    - It can be derived from total_elements and browser_use_llm_calls
+
+    If derivation is not possible (missing or non-numeric inputs), the row
+    is unmeasurable and does not count.
+    """
+    hits = 0
+    measured = 0
+
+    for r in rows:
+        # Stored value always wins when present and non-empty
+        stored = (r.get("step_budget_exhausted") or "").strip()
+        if stored:
+            measured += 1
+            if stored == "1":
+                hits += 1
+            continue
+
+        # Try to derive from total_elements and browser_use_llm_calls
+        total_elements = _coerce_int(r.get("total_elements"))
+        browser_use_calls = _coerce_int(r.get("browser_use_llm_calls"))
+
+        # Use the existing function to derive; it returns 1, 0, or None
+        derived = step_budget_exhausted(total_elements, browser_use_calls)
+
+        if derived is not None:
+            measured += 1
+            if derived == 1:
+                hits += 1
+
+    return hits, measured
 
 
 def miss_counts(rows: list[dict]) -> tuple[int, int]:

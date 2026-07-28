@@ -167,6 +167,46 @@ class TestReportRates:
 
         assert exhaustion_counts([{"step_budget_exhausted": "0"}]) == (0, 1)
 
+    def test_derives_from_elements_and_calls_when_column_absent(self):
+        """Pre-existing baselines lack step_budget_exhausted; derive from stored metrics.
+        This is the shape of every baseline before this feature shipped."""
+        from bench.report import exhaustion_counts
+
+        rows = [{"total_elements": "5", "browser_use_llm_calls": "25"}]
+        assert exhaustion_counts(rows) == (1, 1)
+
+    def test_derives_clean_run_when_column_absent(self):
+        """Same derivation, but the run is clean (below the cap)."""
+        from bench.report import exhaustion_counts
+
+        rows = [{"total_elements": "5", "browser_use_llm_calls": "8"}]
+        assert exhaustion_counts(rows) == (0, 1)
+
+    def test_stored_value_beats_derivation(self):
+        """When step_budget_exhausted is recorded, it is the source of truth,
+        even if the derived value would differ."""
+        from bench.report import exhaustion_counts
+
+        # Stored says clean (0), but cap would be 25, so 25 would trigger derivation
+        rows = [
+            {"step_budget_exhausted": "0", "total_elements": "5", "browser_use_llm_calls": "25"}
+        ]
+        assert exhaustion_counts(rows) == (0, 1)
+
+    def test_unmeasurable_when_browser_use_calls_absent(self):
+        """2026-07-26 main baseline lacks browser_use_llm_calls; cannot derive."""
+        from bench.report import exhaustion_counts
+
+        rows = [{"total_elements": "5"}]
+        assert exhaustion_counts(rows) == (0, 0)
+
+    def test_unmeasurable_when_browser_use_calls_non_numeric(self):
+        """A malformed cell (e.g. 'n/a' or corruption) must not crash a report."""
+        from bench.report import exhaustion_counts
+
+        rows = [{"total_elements": "5", "browser_use_llm_calls": "n/a"}]
+        assert exhaustion_counts(rows) == (0, 0)
+
 
 class TestPairedMissRate:
     """Counts rows, never a median.
