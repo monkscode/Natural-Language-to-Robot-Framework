@@ -319,6 +319,35 @@ def span_durations(lines, start_marker, end_marker):
 # CSV schema
 # ---------------------------------------------------------------------------
 
+# The browser service caps its agent at `1 + (len(elements) * 3) + 1 + 8` steps
+# (tools/browser_service/tasks/workflow.py:538) and never reports that cap, so
+# the formula is mirrored here. TestCrossRepoDrift asserts the two still agree.
+STEP_BUDGET_PER_ELEMENT = 3
+STEP_BUDGET_BASE = 10
+
+
+def step_budget_cap(total_elements: int) -> int:
+    """The browser-use max_steps the agent ran under, for `total_elements`."""
+    return STEP_BUDGET_PER_ELEMENT * total_elements + STEP_BUDGET_BASE
+
+
+def step_budget_exhausted(
+    total_elements: int | None, browser_use_llm_calls: int | None
+) -> int | None:
+    """1 when the run consumed its whole step budget, 0 when it did not.
+
+    None when it cannot be told — a run with no element count never reached
+    element identification, and reporting that as "did not exhaust" would be a
+    false green. Same convention as llm_coverage_gap.
+
+    `>=`, not `==`: three runs in the captured corpus recorded one step past
+    their cap, because browser-use increments its step counter in two places.
+    """
+    if not total_elements or browser_use_llm_calls is None:
+        return None
+    return int(browser_use_llm_calls >= step_budget_cap(total_elements))
+
+
 CSV_COLUMNS = (
     # identity
     "query_id", "query", "repeat", "workflow_id", "started_at",
@@ -351,6 +380,11 @@ CSV_COLUMNS = (
     # the name this is len(agent_result.history), not an API-call count —
     # llm_calls_actual is the API-call count and differs whenever a step retries.
     "browser_use_llm_calls",
+    # Derived from the two lines above: did this run burn its entire browser-use
+    # step budget. 1 / 0 / empty, where empty means it could not be scored.
+    # Read it beside the unresolved-elements count, never alone — see the design
+    # doc section 7A.
+    "step_budget_exhausted",
 )
 
 
@@ -417,6 +451,9 @@ def extract_metrics_fields(data):
         # Top-level, not under agent_diagnostics: it is a pre-existing
         # WorkflowMetrics field (BrowserUseTokenBreakdown:31).
         "browser_use_llm_calls": data.get("browser_use_llm_calls"),
+        "step_budget_exhausted": step_budget_exhausted(
+            data.get("total_elements"), data.get("browser_use_llm_calls")
+        ),
     }
 
 
