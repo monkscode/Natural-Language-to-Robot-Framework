@@ -131,3 +131,110 @@ class TestCrossRepoDrift:
             "step_budget_cap() in bench/bench_lib.py mirrors it and must be "
             "updated, or step_budget_exhausted silently reports the wrong thing."
         )
+
+
+class TestReportRates:
+    def test_counts_hits_over_measured_rows(self):
+        from bench.report import exhaustion_counts
+
+        rows = [
+            {"step_budget_exhausted": "1"},
+            {"step_budget_exhausted": "0"},
+            {"step_budget_exhausted": "1"},
+        ]
+        assert exhaustion_counts(rows) == (2, 3)
+
+    def test_empty_cells_shrink_the_denominator(self):
+        from bench.report import exhaustion_counts
+
+        rows = [
+            {"step_budget_exhausted": "1"},
+            {"step_budget_exhausted": ""},
+            {"step_budget_exhausted": ""},
+        ]
+        assert exhaustion_counts(rows) == (1, 1)
+
+    def test_a_baseline_without_the_column_measures_nothing(self):
+        """Every baseline before 4b91756 lacks it, so DictReader yields no key
+        at all. Missing key and empty cell must take the same path."""
+        from bench.report import exhaustion_counts
+
+        rows = [{"total_s": "27.8"}, {"total_s": "31.2"}]
+        assert exhaustion_counts(rows) == (0, 0)
+
+    def test_zero_is_measured_not_missing(self):
+        from bench.report import exhaustion_counts
+
+        assert exhaustion_counts([{"step_budget_exhausted": "0"}]) == (0, 1)
+
+
+class TestPairedMissRate:
+    """Counts rows, never a median.
+
+    On the 07-28 ASTPP set failed_elements has median 0.0 while four rows had
+    misses — the same disease that let locator_success_rate read green at 22%
+    failure.
+    """
+
+    def test_counts_rows_above_zero(self):
+        from bench.report import miss_counts
+
+        rows = [
+            {"failed_elements": "0"},
+            {"failed_elements": "3"},
+            {"failed_elements": "0"},
+            {"failed_elements": "2"},
+        ]
+        assert miss_counts(rows) == (2, 4)
+
+    def test_a_median_of_zero_still_reports_the_misses(self):
+        rows = [{"failed_elements": "0"}] * 14 + [{"failed_elements": "3"}] * 4
+        from statistics import median
+
+        from bench.report import miss_counts
+
+        assert median([float(r["failed_elements"]) for r in rows]) == 0.0
+        assert miss_counts(rows) == (4, 18)
+
+    def test_float_formatting_is_accepted(self):
+        from bench.report import miss_counts
+
+        assert miss_counts([{"failed_elements": "3.0"}]) == (1, 1)
+
+
+class TestRateLines:
+    def test_shows_the_percentage_when_everything_is_measured(self):
+        """Asserts content, not column padding — a spacing tweak is not a bug."""
+        from bench.report import rate_line
+
+        line = rate_line("budget exhausted", 4, 18, 18)
+        assert line.strip().startswith("budget exhausted")
+        assert "4/18 measured (22.2%)" in line
+        assert "unmeasurable" not in line
+
+    def test_flags_unmeasurable_rows_when_some_are_missing(self):
+        from bench.report import rate_line
+
+        assert "2 rows unmeasurable" in rate_line("budget exhausted", 1, 16, 18)
+
+    def test_reports_nothing_measured_rather_than_zero_percent(self):
+        from bench.report import rate_line
+
+        line = rate_line("budget exhausted", 0, 0, 30)
+        assert "0/0 measured" in line
+        assert "30 rows unmeasurable" in line
+
+    def test_compare_labels_an_unmeasurable_baseline(self):
+        """0/0 beside 4/18 reads as a regression when the baseline was simply
+        never measured."""
+        from bench.report import compare_rate_line
+
+        line = compare_rate_line("budget exhausted", (0, 0), (4, 18))
+        assert "not comparable" in line
+        assert "baseline" in line
+
+    def test_compare_shows_both_sides_when_both_are_measured(self):
+        from bench.report import compare_rate_line
+
+        line = compare_rate_line("budget exhausted", (4, 18), (0, 18))
+        assert "4/18" in line and "0/18" in line

@@ -62,8 +62,56 @@ def pass_rate(rows: list[dict]) -> float:
     return round(passed / n * 100, 1) if n else 0.0
 
 
+def measured_rows(rows: list[dict], column: str) -> list[dict]:
+    """Rows where `column` was actually recorded.
+
+    A missing key (a baseline predating the column) and an empty cell (a run
+    that could not be scored) are the same thing, and neither may count as a
+    zero.
+    """
+    return [r for r in rows if (r.get(column) or "") != ""]
+
+
+def exhaustion_counts(rows: list[dict]) -> tuple[int, int]:
+    """(runs that consumed their whole step budget, runs that could be scored)."""
+    measured = measured_rows(rows, "step_budget_exhausted")
+    return sum(1 for r in measured if r["step_budget_exhausted"] == "1"), len(measured)
+
+
+def miss_counts(rows: list[dict]) -> tuple[int, int]:
+    """(runs finishing with an unresolved element, runs that could be scored).
+
+    Read beside exhaustion_counts and never without it: a change that makes the
+    agent give up early instead of looping drives exhaustion to zero while this
+    number stays put. A count, not a median — the median reads 0.0 on a set
+    where a fifth of the runs lost elements.
+    """
+    measured = measured_rows(rows, "failed_elements")
+    return sum(1 for r in measured if float(r["failed_elements"]) > 0), len(measured)
+
+
+def rate_line(label: str, hits: int, measured: int, total: int) -> str:
+    if not measured:
+        return f"   {label:<24} 0/0 measured ({total} rows unmeasurable)"
+    pct = hits / measured * 100
+    tail = f"  [{total - measured} rows unmeasurable]" if measured < total else ""
+    return f"   {label:<24} {hits}/{measured} measured ({pct:.1f}%){tail}"
+
+
+def compare_rate_line(label: str, base: tuple[int, int], cand: tuple[int, int]) -> str:
+    b_hits, b_n = base
+    c_hits, c_n = cand
+    if not b_n or not c_n:
+        side = "baseline" if not b_n else "candidate"
+        return f"   {label:<24} not comparable — {side} has no measured rows"
+    return (f"   {label:<24} {b_hits}/{b_n} ({b_hits / b_n * 100:.1f}%) → "
+            f"{c_hits}/{c_n} ({c_hits / c_n * 100:.1f}%)")
+
+
 def print_summary(rows: list[dict], title: str) -> None:
     print(f"\n== {title} ({len(rows)} runs, pass rate {pass_rate(rows)}%) ==")
+    print(rate_line("budget exhausted", *exhaustion_counts(rows), len(rows)))
+    print(rate_line("runs w/ unresolved elems", *miss_counts(rows), len(rows)))
     s = summarize_rows(rows, NUMERIC_METRICS)
     print(f"{'metric':<28} {'n':>4} {'median':>12} {'p90':>12}")
     for metric in NUMERIC_METRICS:
@@ -85,6 +133,10 @@ def print_compare(base_rows: list[dict], cand_rows: list[dict]) -> None:
     c = compare_summaries(base, cand)
     print(f"\n== baseline vs candidate (medians; pass rate "
           f"{pass_rate(base_rows)}% → {pass_rate(cand_rows)}%) ==")
+    print(compare_rate_line("budget exhausted",
+                            exhaustion_counts(base_rows), exhaustion_counts(cand_rows)))
+    print(compare_rate_line("runs w/ unresolved elems",
+                            miss_counts(base_rows), miss_counts(cand_rows)))
     print(f"{'metric':<28} {'baseline':>12} {'candidate':>12} {'delta':>12} {'pct':>8}")
     for metric in NUMERIC_METRICS:
         d = c[metric]
