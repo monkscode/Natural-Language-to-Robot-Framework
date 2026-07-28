@@ -322,6 +322,10 @@ def span_durations(lines, start_marker, end_marker):
 # The browser service caps its agent at `1 + (len(elements) * 3) + 1 + 8` steps
 # (tools/browser_service/tasks/workflow.py:538) and never reports that cap, so
 # the formula is mirrored here. TestCrossRepoDrift asserts the two still agree.
+# No CSV on disk stores step_budget_exhausted yet, so every existing baseline is
+# scored by read-time derivation (bench/report.py exhaustion_counts) using
+# whatever these constants are at read time — changing them retroactively
+# re-scores every baseline CSV that lacks the stored column, not just new runs.
 STEP_BUDGET_PER_ELEMENT = 3
 STEP_BUDGET_BASE = 10
 

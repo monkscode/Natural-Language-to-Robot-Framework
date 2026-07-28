@@ -17,7 +17,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from bench.bench_lib import compare_pins, compare_summaries, load_meta, step_budget_exhausted, summarize_rows
+from bench.bench_lib import _coerce, compare_pins, compare_summaries, load_meta, step_budget_exhausted, summarize_rows
 
 NUMERIC_METRICS = (
     "plan_s", "identify_s", "assemble_s", "dryrun_s", "exec_s", "total_s",
@@ -129,9 +129,25 @@ def miss_counts(rows: list[dict]) -> tuple[int, int]:
     agent give up early instead of looping drives exhaustion to zero while this
     number stays put. A count, not a median — the median reads 0.0 on a set
     where a fifth of the runs lost elements.
+
+    A non-numeric or empty failed_elements cell is unmeasurable, exactly like
+    exhaustion_counts — a malformed cell must not crash a report.
+
+    This figure undercounts on browser-service builds retired before
+    2026-07-25 (successful + failed != total on 47 of 913 captured rows, every
+    one reading failed_elements = 0 while elements were genuinely missed) — it
+    is only trustworthy for runs captured on or after that date.
     """
-    measured = measured_rows(rows, "failed_elements")
-    return sum(1 for r in measured if float(r["failed_elements"]) > 0), len(measured)
+    hits = 0
+    measured = 0
+    for r in measured_rows(rows, "failed_elements"):
+        val = _coerce(r["failed_elements"])
+        if val is None:
+            continue
+        measured += 1
+        if val > 0:
+            hits += 1
+    return hits, measured
 
 
 def rate_line(label: str, hits: int, measured: int, total: int) -> str:

@@ -129,7 +129,10 @@ class TestCrossRepoDrift:
         assert expression == "1+(len(elements)*3)+1+8", (
             f"browser-service step budget changed to `{match.group(1).strip()}`. "
             "step_budget_cap() in bench/bench_lib.py mirrors it and must be "
-            "updated, or step_budget_exhausted silently reports the wrong thing."
+            "updated, or step_budget_exhausted silently reports the wrong thing. "
+            "Updating the constants also retroactively re-scores every baseline "
+            "CSV that lacks a stored step_budget_exhausted column, since those "
+            "rows are derived at read time with whatever constants are current."
         )
 
 
@@ -241,6 +244,14 @@ class TestPairedMissRate:
 
         assert miss_counts([{"failed_elements": "3.0"}]) == (1, 1)
 
+    def test_non_numeric_cell_is_unmeasurable_not_a_crash(self):
+        """A malformed cell (e.g. 'n/a' or corruption) must not crash a
+        report — the same guarantee exhaustion_counts already has."""
+        from bench.report import miss_counts
+
+        rows = [{"failed_elements": "n/a"}, {"failed_elements": "2"}]
+        assert miss_counts(rows) == (1, 1)
+
 
 class TestRateLines:
     def test_shows_the_percentage_when_everything_is_measured(self):
@@ -278,3 +289,32 @@ class TestRateLines:
 
         line = compare_rate_line("budget exhausted", (4, 18), (0, 18))
         assert "4/18" in line and "0/18" in line
+
+
+class TestPairedLinesArePrinted:
+    """The unresolved-elements line is non-optional beside the exhaustion
+    line (design doc §5.2/§7 A): exhaustion alone is gameable by a fix that
+    makes the agent quit early instead of looping. Nothing today calls
+    print_summary or print_compare, so deleting either print() leaves the
+    rest of the bench suite green — lock both call sites here."""
+
+    ROWS = [
+        {"test_status": "passed", "step_budget_exhausted": "1", "failed_elements": "2"},
+        {"test_status": "passed", "step_budget_exhausted": "0", "failed_elements": "0"},
+    ]
+
+    def test_print_summary_shows_both_lines(self, capsys):
+        from bench.report import print_summary
+
+        print_summary(self.ROWS, "test.csv")
+        out = capsys.readouterr().out
+        assert "budget exhausted" in out
+        assert "runs w/ unresolved elems" in out
+
+    def test_print_compare_shows_both_lines(self, capsys):
+        from bench.report import print_compare
+
+        print_compare(self.ROWS, self.ROWS)
+        out = capsys.readouterr().out
+        assert "budget exhausted" in out
+        assert "runs w/ unresolved elems" in out

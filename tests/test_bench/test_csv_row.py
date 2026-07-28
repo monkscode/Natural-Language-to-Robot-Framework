@@ -217,3 +217,19 @@ class TestReportMetrics:
         from bench.report import NUMERIC_METRICS
 
         assert "agent_steps" not in NUMERIC_METRICS
+
+    def test_step_budget_exhausted_is_not_a_numeric_metric(self):
+        """1/0/empty is a rate, not a metric — a median over it is meaningless.
+        It is reported by exhaustion_counts/rate_line instead (see the
+        step-budget-exhausted design doc, §5.2)."""
+        from bench.report import NUMERIC_METRICS
+
+        assert "step_budget_exhausted" not in NUMERIC_METRICS
+
+    def test_guardrails_exclude_step_budget_exhausted(self):
+        """One corpus run exhausted its step budget and still passed — a hard
+        gate on this family was already shown to fail the main bench (design
+        doc §5.3). GUARDRAILS must stay exactly these two."""
+        from bench.report import GUARDRAILS
+
+        assert GUARDRAILS == ("locator_success_rate", "flake_retries")
