@@ -10,6 +10,7 @@ exception — just a silently wrong keyword choice.
 All external calls are mocked; no browser-service or network required.
 """
 
+import inspect
 from unittest.mock import patch, MagicMock
 import pytest
 from tools.browser_use_tool import BatchBrowserUseTool, BrowserUseAPI
@@ -317,15 +318,18 @@ class TestPollInstrumentation:
         monkeypatch.setenv("BROWSER_USE_CHECK_INTERVAL", "0.5")
         assert _resolve_check_interval() == 0.5
 
-    def test_poll_clock_separates_grid_waits_from_network_retries(self):
-        """Network-retry backoff is error recovery, not grid waste — excluded."""
-        from tools.browser_use_tool import _PollClock
-        clock = _PollClock()
-        clock.add_grid_wait(1.0)
-        clock.add_grid_wait(1.0)
-        clock.add_network_retry_wait(4.0)
-        assert clock.poll_wait_s == 2.0
-        assert clock.network_retry_s == 4.0
+    def test_network_retry_backoff_is_not_accumulated_anywhere(self):
+        """Network-retry backoff is error recovery, not grid waste.
+
+        It used to be summed into a _PollClock.network_retry_s field that no
+        production code ever read — dead by the repo's own rule. The
+        separation now comes from only the grid sleeps incrementing
+        poll_wait_s, so nothing needs to hold the retry total."""
+        import tools.browser_use_tool as tool
+
+        assert not hasattr(tool, "_PollClock")
+        source = inspect.getsource(tool)
+        assert "network_retry_s" not in source
 
     def test_merge_phase_timings_combines_service_and_backend_spans(self):
         from tools.browser_use_tool import _merge_phase_timings

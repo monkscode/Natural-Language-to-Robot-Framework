@@ -80,29 +80,15 @@ def _resolve_check_interval() -> float:
     return float(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "1.0"))
 
 
-class _PollClock:
-    """Separates poll-grid waiting from error-recovery waiting.
-
-    poll_wait_s is the number the efficiency check cares about: time the backend
-    spent asleep after the browser service had already finished. Network-retry
-    backoff is a different thing and must not inflate it.
-    """
-
-    def __init__(self) -> None:
-        self.poll_wait_s: float = 0.0
-        self.network_retry_s: float = 0.0
-
-    def add_grid_wait(self, seconds: float) -> None:
-        self.poll_wait_s += seconds
-
-    def add_network_retry_wait(self, seconds: float) -> None:
-        self.network_retry_s += seconds
-
-
 def _merge_phase_timings(service_timings, *, submit_s: float, poll_wait_s: float) -> dict:
     """Service-side spans plus the two the backend owns.
 
     service_timings is None when the browser service predates this change.
+
+    poll_wait_s OVERLAPS every service-side span rather than partitioning
+    alongside them — the backend is asleep on the poll grid for the whole time
+    the service is working. Do not sum the seven keys and expect identify_s;
+    the grid tail is poll_wait_s minus the sum of the service spans.
     """
     merged = dict(service_timings or {})
     merged["submit_s"] = submit_s
@@ -387,7 +373,10 @@ class BatchBrowserUseTool(BaseTool):
         # Poll for results
         logger.info(f"Polling for batch task {task_id} results...")
         start_time = time.time()
-        poll_clock = _PollClock()
+        # Total time asleep on the poll grid. Accumulates the requested
+        # interval at every poll, so it overlaps the service-side spans
+        # rather than partitioning with them.
+        poll_wait_s = 0.0
         last_status = None
         # Local counter for transient network errors (connection refused during cleanup).
         # Isolated per _run() call — zero shared state, multi-user safe.
@@ -458,7 +447,7 @@ class BatchBrowserUseTool(BaseTool):
                         'phase_timings': _merge_phase_timings(
                             summary.get('phase_timings'),
                             submit_s=submit_s,
-                            poll_wait_s=poll_clock.poll_wait_s,
+                            poll_wait_s=poll_wait_s,
                         ),
                         'agent_diagnostics': summary.get('agent_diagnostics'),
                     }
@@ -533,7 +522,7 @@ class BatchBrowserUseTool(BaseTool):
                         f"Batch task still {current_status}... Elapsed: {elapsed:.1f}s")
 
                 time.sleep(check_interval)
-                poll_clock.add_grid_wait(check_interval)
+                poll_wait_s += check_interval
 
             elif current_status == "error":
                 error_message = status_response.get("message", "Unknown error")
@@ -559,7 +548,6 @@ class BatchBrowserUseTool(BaseTool):
                         f"waiting {wait_secs}s): {error_message}"
                     )
                     time.sleep(wait_secs)
-                    poll_clock.add_network_retry_wait(wait_secs)
                     continue  # retry the poll
 
                 # Real task failure OR network retries exhausted
@@ -579,7 +567,7 @@ class BatchBrowserUseTool(BaseTool):
                 }
             else:
                 time.sleep(check_interval)
-                poll_clock.add_grid_wait(check_interval)
+                poll_wait_s += check_interval
 
         # Timeout
         logger.error(f"Batch task {task_id} timed out after {timeout} seconds")
