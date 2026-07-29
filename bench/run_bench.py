@@ -296,6 +296,45 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
     return build_csv_row(fields)
 
 
+def existing_header(out_path: Path) -> list[str] | None:
+    """The header already in `out_path`, or None if there isn't one."""
+    try:
+        with open(out_path, newline="", encoding="utf-8") as f:
+            return next(csv.reader(f), None)
+    except FileNotFoundError:
+        return None
+
+
+def gate_schema(out_path: Path) -> None:
+    """Refuse to append rows written against a different column set.
+
+    DictWriter writes by CURRENT fieldnames and only emits a header for a new
+    file, so appending to an older CSV silently misaligns every value after
+    the first schema difference. `agent_steps` was removed from the middle of
+    CSV_COLUMNS, so appending one current row to an agent_steps-era baseline
+    made dom_elements_max read the step count, llm_429_count read
+    dom_elements_median, and six values fall into DictReader's restkey — no
+    exception, no warning, just a plausible-looking CSV that is wrong.
+
+    Same shape and tone as the pin gate below: a bench that cannot be trusted
+    must fail loudly before it burns an hour of wall clock.
+    """
+    header = existing_header(out_path)
+    if header is None or header == list(CSV_COLUMNS):
+        return
+    missing = [c for c in CSV_COLUMNS if c not in header]
+    extra = [c for c in header if c not in CSV_COLUMNS]
+    # ASCII only: this message is the last thing the process does, and a
+    # cp1252 stderr would turn a clear refusal into a UnicodeEncodeError.
+    sys.exit(
+        f"error: {out_path} was written with a different CSV schema. Appending "
+        f"would misalign every column after the first difference.\n"
+        f"  columns it lacks:  {missing or '(none)'}\n"
+        f"  columns it has that we no longer write: {extra or '(none)'}\n"
+        f"Use a fresh --out path."
+    )
+
+
 def append_row(out_path: Path, row: dict) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not out_path.exists()
@@ -397,6 +436,7 @@ def main() -> int:
 
     _log(f"target={args.base_url}  queries={len(queries)}  repeats={args.repeats}")
 
+    gate_schema(out_path)
     gate_pins(args, out_path)
 
     # autocommit: each DELETE/SELECT stands alone; a failed capture must not

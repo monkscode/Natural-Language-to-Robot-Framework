@@ -233,3 +233,63 @@ class TestReportMetrics:
         from bench.report import GUARDRAILS
 
         assert GUARDRAILS == ("locator_success_rate", "flake_retries")
+
+
+class TestAppendSchemaGate:
+    """`--out` appends, so a CSV written under an older schema must be refused.
+
+    DictWriter writes by current fieldnames and only emits a header for a new
+    file. `agent_steps` was removed from the MIDDLE of CSV_COLUMNS, so
+    appending one current row to an agent_steps-era baseline shifted every
+    diagnostic after the removal point onto the wrong column with no error.
+    """
+
+    def _write(self, tmp_path, header):
+        path = tmp_path / "candidate.csv"
+        path.write_text(",".join(header) + "\n", encoding="utf-8")
+        return path
+
+    def test_matching_schema_is_allowed(self, tmp_path):
+        from bench.run_bench import gate_schema
+
+        gate_schema(self._write(tmp_path, list(CSV_COLUMNS)))
+
+    def test_a_new_file_is_allowed(self, tmp_path):
+        from bench.run_bench import gate_schema
+
+        gate_schema(tmp_path / "does-not-exist.csv")
+
+    def test_an_agent_steps_era_header_is_refused(self, tmp_path):
+        """The exact shape that corrupted silently: agent_steps sitting
+        between poll_wait_s and dom_elements_max."""
+        from bench.run_bench import gate_schema
+
+        header = list(CSV_COLUMNS)
+        header.insert(header.index("dom_elements_max"), "agent_steps")
+        with pytest.raises(SystemExit) as exc:
+            gate_schema(self._write(tmp_path, header))
+        assert "agent_steps" in str(exc.value)
+
+    def test_a_pre_instrumentation_header_is_refused(self, tmp_path):
+        """A 33-column baseline: every new value would land in the restkey."""
+        from bench.run_bench import gate_schema
+
+        header = [c for c in CSV_COLUMNS if c not in {
+            "submit_s", "queue_s", "session_setup_s", "agent_setup_s",
+            "agent_run_s", "postprocess_s", "poll_wait_s",
+        }]
+        with pytest.raises(SystemExit) as exc:
+            gate_schema(self._write(tmp_path, header))
+        assert "queue_s" in str(exc.value)
+
+    def test_a_real_pre_change_baseline_is_refused(self, tmp_path):
+        """Not a synthetic header — the oldest baseline actually on disk."""
+        from pathlib import Path
+
+        from bench.run_bench import gate_schema
+
+        baseline = Path(__file__).resolve().parents[2] / "bench" / "baselines" / "2026-07-03-baseline.csv"
+        if not baseline.exists():
+            pytest.skip(f"baseline absent ({baseline})")
+        with pytest.raises(SystemExit):
+            gate_schema(baseline)
