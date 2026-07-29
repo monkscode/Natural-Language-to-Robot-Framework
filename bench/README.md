@@ -14,9 +14,37 @@ against the baseline produced here. Guardrails that must never regress:
 | LLM calls / tokens / cost, locator success | the run's `workflow_metrics` Postgres row (deliberate deviation from `mark1-enhancements/00-OVERVIEW.md` §8 log-scraping — approved) |
 | flake retries | `llm_cleaning_stats` (empty_response_retries + formatting_errors_detected) from the metrics row **+** dryrun repair rounds ("🔧 Fixing test code..." SSE events); repairs also get their own `dryrun_repairs` column |
 | cold start / cleanup / per-element locator latency / duplicate-lookup rate | browser-service `logs/browser_use.log` (structlog JSON by default, console format when `LOG_FORMAT=console` — both parsed), offset-based read per run |
+| identify-phase breakdown (`submit_s`, `queue_s`, `session_setup_s`, `agent_setup_s`, `agent_run_s`, `postprocess_s`, `poll_wait_s`) | `phase_timings` on the metrics row. The service owns the five middle spans; the backend owns `submit_s` and `poll_wait_s` |
+| agent diagnostics (`dom_elements_max/median`, `llm_429_count`, `retry_lost_s`, `llm_total_s`, `llm_max_s`, `llm_calls_actual`, `steps_total_s`, `llm_coverage_gap`) | `agent_diagnostics` on the metrics row, extracted from the browser-use agent history |
+| `browser_use_llm_calls` | the metrics row. Despite the name this is `len(agent_result.history)` — a STEP count. `llm_calls_actual` is the API-call count and differs whenever a step retries. Replaced the removed `agent_steps` column |
+| `step_budget_exhausted` | derived: `browser_use_llm_calls >= 3 * total_elements + 10`. `1`/`0`/empty, where empty means it could not be scored |
 
 Stage precision is **±1s** — the server's SSE drain loop polls once per
 second. Accepted in the approved design; medians over ≥3 repeats absorb it.
+
+**`poll_wait_s` is not a partition member.** It accumulates the poll interval
+on every iteration, so it overlaps all five service-side spans rather than
+sitting beside them. Summing the seven columns does not reconstruct
+`identify_s`; the grid tail is `poll_wait_s` minus the sum of the service spans.
+
+**`llm_calls` changed meaning on `c4df7d0`.** Before it, the browser-use
+contribution to `total_llm_calls` was a step count; after it, the measured
+API-call count (`llm_calls_actual`). Across 178 captured rows carrying both,
+177 agree and one differs by 1 — so the series stays broadly comparable, but a
+one-call delta across that boundary is a definition change, not a regression.
+
+**`--out` refuses to append to a CSV written under a different schema.**
+`agent_steps` was removed from the middle of the column list, and DictWriter
+writes by current fieldnames without re-reading the header — appending across
+that boundary silently shifted every later diagnostic onto the wrong column.
+`gate_schema` now exits first. Use a fresh `--out` path.
+
+Read **budget exhausted** and **runs w/ unresolved elems** together, never
+alone: a change that makes the agent give up early instead of looping drives
+exhaustion to zero while the miss count stays put. The miss count is scored as
+`successful_elements < total_elements`, not from `failed_elements`, which
+pre-2026-07-25 browser-service builds write as `0` while genuinely losing
+elements.
 
 The `LOCATOR_TIMER` log line comes from browser-service
 (`agent/actions.py`, around the `find_unique_locator_at_coordinates` call) and
