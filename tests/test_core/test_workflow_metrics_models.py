@@ -247,3 +247,27 @@ class TestPhaseTimings:
         assert m.phase_timings is None
         assert m.agent_diagnostics is None
         assert m.to_dict()["phase_timings"] is None
+
+    def test_a_none_span_does_not_discard_the_whole_metrics_row(self):
+        """The browser service is versioned separately and already uses None
+        for "not measured" (llm_coverage_gap). Dict[str, float] raised
+        ValidationError on such a span — and because WorkflowMetrics is built
+        inside a try/except that swallows it, the run lost cost, tokens and
+        element counts too, not just the timings."""
+        m = self._make_metrics(phase_timings={"queue_s": None, "agent_run_s": 20.7})
+        assert m.phase_timings["queue_s"] is None
+        assert m.phase_timings["agent_run_s"] == 20.7
+
+    def test_the_response_model_carries_both_new_dicts(self):
+        """WorkflowMetricsResponse inherits both fields, but
+        from_workflow_metrics enumerates fields explicitly — omitting them
+        made GET /api/workflow-metrics/ always return null for a field the
+        schema advertises."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetricsResponse
+
+        timings = {"submit_s": 0.05, "agent_run_s": 20.76}
+        diagnostics = {"llm_calls_actual": 6, "llm_coverage_gap": None}
+        m = self._make_metrics(phase_timings=timings, agent_diagnostics=diagnostics)
+        resp = WorkflowMetricsResponse.from_workflow_metrics(m)
+        assert resp.phase_timings == timings
+        assert resp.agent_diagnostics == diagnostics
