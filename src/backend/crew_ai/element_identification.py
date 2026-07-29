@@ -168,8 +168,18 @@ def _url_candidate(value: Any) -> str | None:
     Only the first whitespace-delimited token is considered: planner values
     sometimes carry trailing prose that strip() cannot reach (one captured
     run: "https://sujal.astppbilling.org/    commit"). An explicit http(s)
-    URL or a bare dotted hostname qualifies — the browser service completes
-    the scheme. A non-navigable scheme or a word with no dot does not.
+    URL qualifies outright; a non-navigable scheme never does — the browser
+    service completes a missing scheme (prompts/workflow.py:106), so
+    "about:blank" would otherwise become a real navigation target.
+
+    A scheme-less value qualifies when it carries a dot OR is the whole value
+    on its own. Token count is what separates a site name from prose:
+    "Flipkart" is one token, "the login page" is three. A dot alone cannot
+    tell them apart, and requiring one rejected the planner's own shipped
+    exemplar ("Open Browser -> Flipkart", prompts/components.py:699) — which
+    returns None and skips the browser call entirely, handing every element a
+    found:false placeholder. No bench query is scheme-less, so the 96.7% gate
+    cannot see that class of failure; it has to be held here.
     """
     tokens = (value or "").strip().split()
     if not tokens:
@@ -180,14 +190,18 @@ def _url_candidate(value: Any) -> str | None:
         return candidate
     if lowered.startswith(_NON_NAVIGABLE_SCHEMES):
         return None
-    return candidate if "." in candidate else None
+    if "." in candidate:
+        return candidate
+    return candidate if len(tokens) == 1 else None
 
 
 def extract_plan_url(steps: list[Any]) -> str | None:
     """The URL is the first navigation step that carries one — nothing is guessed.
 
-    A navigation step whose value is not a URL is skipped rather than
-    trusted: on 4 of 897 captured runs the planner emitted
+    A navigation step whose value cannot name a page — a non-navigable
+    scheme, or prose — is skipped rather than trusted (see _url_candidate for
+    exactly what qualifies; a scheme-less single token still does). On 4 of
+    897 captured runs the planner emitted
     "New Page -> about:blank" and put the real URL on the next step, so
     first-value-wins discarded it and the agent was told to open
     https://about:blank. It reached the right page anyway — the browser-use

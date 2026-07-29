@@ -188,11 +188,37 @@ class TestExtractPlanUrl:
         steps = [_step("Open Browser", value="books.toscrape.com")]
         assert extract_plan_url(steps) == "books.toscrape.com"
 
+    def test_dotless_site_name_on_a_navigation_step_is_returned(self):
+        """The literal exemplar shipped in the planner prompt
+        (prompts/components.py:699, labelled CORRECT) is
+        'Open Browser -> Flipkart' — a site name with no dot. Rejecting it
+        makes extract_plan_url return None, which skips the browser call
+        entirely (element_identification.py:462) and hands every element a
+        found:false placeholder. PlannedStep has no browser field, so a
+        navigation step's value is always the destination."""
+        steps = [_step("Open Browser", value="Flipkart")]
+        assert extract_plan_url(steps) == "Flipkart"
+
+    def test_scheme_less_host_port_is_returned(self):
+        """Same class as the exemplar: no dot, still a real destination."""
+        steps = [_step("New Page", value="localhost:3000")]
+        assert extract_plan_url(steps) == "localhost:3000"
+
     def test_prose_on_a_navigation_step_is_rejected(self):
         """'the login page' is not a URL. Returning it produces
         https://the login page — a guaranteed navigation failure with no
-        agent left to correct it."""
+        agent left to correct it.
+
+        Multi-token is what separates prose from a bare site name: 'Flipkart'
+        is one token, 'the login page' is three. A dot alone cannot tell them
+        apart, and requiring one rejected the shipped exemplar."""
         steps = [_step("New Page", value="the login page")]
+        assert extract_plan_url(steps) is None
+
+    def test_dotless_first_token_of_prose_is_rejected(self):
+        """The trailing-junk trim takes tokens[0], so prose must not survive
+        it: 'Flipkart homepage' would otherwise navigate to https://Flipkart."""
+        steps = [_step("New Page", value="Flipkart homepage")]
         assert extract_plan_url(steps) is None
 
 
