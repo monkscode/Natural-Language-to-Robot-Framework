@@ -248,6 +248,16 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
     and arity without resolving selectors, so `css=id=searchBox` passes the gate
     and fails only at runtime.
 
+    Scope note — this deliberately departs from the cell-position discipline
+    described in the module docstring. `normalize_robot_code` walks cells so it
+    only ever rewrites locator arguments, because a bare `#` is legitimate data
+    elsewhere. `css=<strategy>=` is not: it is not valid CSS, not a valid Robot
+    locator, and not plausible prose, so there is no position in the file where
+    it is correct and no cell walk is needed to protect one. The trade is a
+    substitution that would also rewrite the sequence inside a
+    `[Documentation]` line or an assertion value — accepted, because that
+    string cannot occur there in generated output.
+
     Args:
         robot_code: The Robot Framework source as a string.
 

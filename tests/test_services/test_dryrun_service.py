@@ -406,6 +406,37 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "\n" in out and "\\n" not in out
 
+    def test_redundant_css_prefix_is_stripped_by_the_pipeline(self):
+        """The strip is only worth anything if it is actually wired in here.
+
+        `css=id=searchBox` is not valid CSS — Playwright rejects it with
+        `Unexpected token "=" while parsing css selector` — and the dryrun gate
+        cannot catch it, because dryrun checks keyword names and arity without
+        resolving selectors. Without this test, deleting the
+        strip_redundant_css_prefix call from the pipeline leaves the whole
+        suite green.
+        """
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    css=id=searchBox\n"
+               "    Fill Text    css=xpath=//input[@name='q']    shoes")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "css=id=searchBox" not in out
+        assert "id=searchBox" in out
+        assert "css=xpath=" not in out
+        assert "xpath=//input[@name='q']" in out
+
+    def test_genuine_css_selectors_survive_the_pipeline(self):
+        """The strip must not touch real CSS: an attribute selector contains
+        `=` but does not start with a strategy name followed by `=`."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    css=#searchBox\n"
+               "    Click    css=input[id=foo]\n"
+               "    Click    css=[data-x=y]")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "css=#searchBox" in out
+        assert "css=input[id=foo]" in out
+        assert "css=[data-x=y]" in out
+
     def test_multiple_settings_blocks_uses_last(self):
         raw = ("*** Settings ***\nLibrary    OldLib\n\n"
                "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n    Log    hi\n")
