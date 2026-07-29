@@ -23,6 +23,7 @@ import json
 import math
 import re
 import statistics
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -175,12 +176,17 @@ def coerce(value):
 
 
 def summarize_rows(rows, metrics):
-    """Per-metric {'median', 'p90', 'n'} over rows (dicts; strings tolerated)."""
+    """Per-metric {'median', 'p90', 'n', 'sum'} over rows (strings tolerated).
+
+    'sum' is None — not 0 — when no row carried a usable value, so a column
+    the CSV predates reads as unmeasured rather than as a measured zero.
+    """
     out = {}
     for metric in metrics:
         vals = [v for v in (coerce(r.get(metric)) for r in rows) if v is not None]
         med, p90 = median_p90(vals)
-        out[metric] = {"median": med, "p90": p90, "n": len(vals)}
+        out[metric] = {"median": med, "p90": p90, "n": len(vals),
+                       "sum": sum(vals) if vals else None}
     return out
 
 
@@ -200,12 +206,73 @@ def compare_summaries(baseline, candidate):
         c = candidate.get(metric, {})
         median_delta, median_pct = _delta_pct(b.get("median"), c.get("median"))
         p90_delta, p90_pct = _delta_pct(b.get("p90"), c.get("p90"))
+        sum_delta, sum_pct = _delta_pct(b.get("sum"), c.get("sum"))
         out[metric] = {
             "baseline_median": b.get("median"), "candidate_median": c.get("median"),
             "median_delta": median_delta, "median_pct": median_pct,
             "baseline_p90": b.get("p90"), "candidate_p90": c.get("p90"),
             "p90_delta": p90_delta, "p90_pct": p90_pct,
+            "baseline_sum": b.get("sum"), "candidate_sum": c.get("sum"),
+            "sum_delta": sum_delta, "sum_pct": sum_pct,
             "baseline_n": b.get("n", 0), "candidate_n": c.get("n", 0),
+        }
+    return out
+
+
+def query_ids(rows):
+    """The set of query_id values present in `rows` (blank/absent → '?')."""
+    return {(r.get("query_id") or "?") for r in rows}
+
+
+def _median_by_query(rows, metric):
+    """Per-query median of `metric`. A query with no usable value is absent."""
+    groups = defaultdict(list)
+    for r in rows:
+        v = coerce(r.get(metric))
+        if v is not None:
+            groups[(r.get("query_id") or "?")].append(v)
+    return {q: statistics.median(vals) for q, vals in groups.items()}
+
+
+def compare_by_query(base_rows, cand_rows, metrics):
+    """Paired per-query comparison: per metric, each query's median in each run.
+
+    The bench runs a fixed query list, so every candidate row has a matching
+    baseline row. Comparing them pairwise is the only reading of this bench
+    that survives both of its distortions.
+
+    A pooled median across all rows sits on a cluster boundary — the queries
+    span ~31k to ~69k tokens — and flips on noise: the 2026-07-29 pair moved
+    +14.2% while every per-query median was flat within ±0.7%. A pooled sum is
+    just as fragile in the other direction: one runaway run (q06 repeat 3,
+    180,035 tokens against a ~46,700 typical) moved the total by more than the
+    entire real difference, printing −8.2% on two runs that were the same.
+
+    Per metric: {'per_query': {qid: {'baseline', 'candidate', 'pct'}},
+    'paired_pct', 'up', 'down', 'n_paired'}. 'paired_pct' is the median of the
+    per-query percent changes — median, not mean, or the outlier this exists to
+    survive would come straight back in. A query whose baseline median is 0 has
+    no defined percentage; it is still listed, but it does not reach the median
+    (failed_elements and llm_429_count are all-zero this way, and the totals
+    line is what carries their signal).
+    """
+    out = {}
+    for metric in metrics:
+        base = _median_by_query(base_rows, metric)
+        cand = _median_by_query(cand_rows, metric)
+        per_query = {}
+        pcts = []
+        for q in sorted(set(base) & set(cand)):
+            _, pct = _delta_pct(base[q], cand[q])
+            per_query[q] = {"baseline": base[q], "candidate": cand[q], "pct": pct}
+            if pct is not None:
+                pcts.append(pct)
+        out[metric] = {
+            "per_query": per_query,
+            "paired_pct": statistics.median(pcts) if pcts else None,
+            "up": sum(1 for p in pcts if p > 0),
+            "down": sum(1 for p in pcts if p < 0),
+            "n_paired": len(per_query),
         }
     return out
 

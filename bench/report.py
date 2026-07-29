@@ -5,6 +5,12 @@ Usage (from the repo root):
     python -m bench.report bench/baselines/2026-07-03-baseline.csv
     python -m bench.report bench/baselines/2026-07-03-baseline.csv candidate.csv
     python -m bench.report <csv> --by-query        # per-query breakdown
+    python -m bench.report <base> <cand> --by-query   # per-query comparison
+
+Single-CSV mode summarises one run with median + p90 — descriptive of that run
+and safe. Compare mode does NOT use the pooled median: on this bench it reads
+the boundary between token-size clusters and flips on noise. It reports totals
+beside a paired per-query reading instead; see compare_by_query in bench_lib.
 
 Guardrail metrics (must never regress vs the frozen baseline, per plan
 00-INDEX.md): locator_success_rate, pass rate (test_status == 'passed'),
@@ -19,9 +25,11 @@ from pathlib import Path
 
 from bench.bench_lib import (
     coerce,
+    compare_by_query,
     compare_pins,
     compare_summaries,
     load_meta,
+    query_ids,
     step_budget_exhausted,
     summarize_rows,
 )
@@ -45,6 +53,11 @@ NUMERIC_METRICS = (
 )
 
 GUARDRAILS = ("locator_success_rate", "flake_retries")
+
+# Metrics that get the full per-query breakdown under --by-query. The compact
+# table already carries every metric; these three are the ones a bench decision
+# actually turns on, and 43 metrics x 10 queries is 430 lines nobody reads.
+HEADLINE_METRICS = ("llm_tokens", "llm_cost_usd", "total_s")
 
 
 def load_rows(path: str) -> list[dict]:
@@ -176,25 +189,81 @@ def print_by_query(rows: list[dict]) -> None:
         print_summary(groups[query_id], f"query {query_id}")
 
 
+def sign_disagreement(total_pct: float | None, paired_pct: float | None) -> bool:
+    """True when the totals and the paired reading point opposite ways.
+
+    That disagreement is the alarm: it means one runaway run, or one cluster
+    boundary, is driving a reading. Zero on either side is 'did not move', not
+    a contradiction.
+    """
+    if total_pct is None or paired_pct is None:
+        return False
+    if total_pct == 0 or paired_pct == 0:
+        return False
+    return (total_pct > 0) != (paired_pct > 0)
+
+
+def _print_pairing_note(base_rows: list[dict], cand_rows: list[dict]) -> None:
+    base_ids, cand_ids = query_ids(base_rows), query_ids(cand_rows)
+    if not base_ids & cand_ids:
+        print("\n!! NO SHARED QUERIES — the two runs have no query_id in common, "
+              "so paired% cannot be computed and the totals below span "
+              "different query sets !!")
+        return
+    unpaired = sorted(base_ids ^ cand_ids)
+    if unpaired:
+        print(f"\nnote: {len(unpaired)} unpaired query id(s) excluded from "
+              f"paired% (totals still span every row): {', '.join(unpaired)}")
+
+
 def print_compare(base_rows: list[dict], cand_rows: list[dict]) -> None:
-    base = summarize_rows(base_rows, NUMERIC_METRICS)
-    cand = summarize_rows(cand_rows, NUMERIC_METRICS)
-    c = compare_summaries(base, cand)
-    print(f"\n== baseline vs candidate (medians; pass rate "
+    totals = compare_summaries(summarize_rows(base_rows, NUMERIC_METRICS),
+                               summarize_rows(cand_rows, NUMERIC_METRICS))
+    paired = compare_by_query(base_rows, cand_rows, NUMERIC_METRICS)
+    print(f"\n== baseline vs candidate (totals + paired per-query; pass rate "
           f"{pass_rate(base_rows)}% → {pass_rate(cand_rows)}%) ==")
     print(compare_rate_line("budget exhausted",
                             exhaustion_counts(base_rows), exhaustion_counts(cand_rows)))
     print(compare_rate_line("runs w/ unresolved elems",
                             miss_counts(base_rows), miss_counts(cand_rows)))
-    print(f"{'metric':<28} {'baseline':>12} {'candidate':>12} {'delta':>12} {'pct':>8}")
+    _print_pairing_note(base_rows, cand_rows)
+    print(f"\n{'metric':<28}{'base_total':>13}{'cand_total':>13}"
+          f"{'total%':>9}{'paired%':>9}{'q+/q-':>8}{'n':>4}")
     for metric in NUMERIC_METRICS:
-        d = c[metric]
-        pct = f"{d['median_pct']:+.1f}%" if d["median_pct"] is not None else "-"
-        print(f"{metric:<28} {_fmt(d['baseline_median']):>12} "
-              f"{_fmt(d['candidate_median']):>12} "
-              f"{_fmt(d['median_delta']):>12} {pct:>8}")
-    print("\nguardrails (must hold or improve): "
+        t, p = totals[metric], paired[metric]
+        total_pct, paired_pct = t["sum_pct"], p["paired_pct"]
+        tp = f"{total_pct:+.1f}%" if total_pct is not None else "-"
+        pp = f"{paired_pct:+.1f}%" if paired_pct is not None else "-"
+        split = f"{p['up']}/{p['down']}"
+        mark = "  <>" if sign_disagreement(total_pct, paired_pct) else ""
+        print(f"{metric:<28}{_fmt(t['baseline_sum']):>13}"
+              f"{_fmt(t['candidate_sum']):>13}{tp:>9}{pp:>9}"
+              f"{split:>8}{p['n_paired']:>4}{mark}")
+    print("\npaired% is the median of the per-query changes — the reading to "
+          "trust. total% is the cross-check: '<>' marks the two pointing "
+          "opposite ways, which means one run or one query is driving it.")
+    print("guardrails (must hold or improve): "
           + ", ".join(GUARDRAILS) + ", pass rate")
+
+
+def print_by_query_compare(base_rows: list[dict], cand_rows: list[dict]) -> None:
+    paired = compare_by_query(base_rows, cand_rows, HEADLINE_METRICS)
+    totals = compare_summaries(summarize_rows(base_rows, HEADLINE_METRICS),
+                               summarize_rows(cand_rows, HEADLINE_METRICS))
+    for metric in HEADLINE_METRICS:
+        d = paired[metric]
+        print(f"\nper-query detail: {metric}")
+        if not d["per_query"]:
+            print("   no shared queries with a value for this metric")
+            continue
+        for query_id, v in d["per_query"].items():
+            pct = f"{v['pct']:+.1f}%" if v["pct"] is not None else "-"
+            print(f"   {query_id:<10}{_fmt(v['baseline']):>13} → "
+                  f"{_fmt(v['candidate']):>13}{pct:>9}")
+        total_pct = totals[metric]["sum_pct"]
+        pp = f"{d['paired_pct']:+.1f}%" if d["paired_pct"] is not None else "-"
+        tp = f"{total_pct:+.1f}%" if total_pct is not None else "-"
+        print(f"   {'paired median':<10}{pp:>35}      total {tp}")
 
 
 def print_pin_check(base_csv: str, cand_csv: str) -> None:
@@ -217,7 +286,8 @@ def main() -> int:
     parser.add_argument("csv", nargs="+",
                         help="one CSV → summary; two CSVs → baseline vs candidate")
     parser.add_argument("--by-query", action="store_true",
-                        help="per-query breakdown (single-CSV mode)")
+                        help="per-query breakdown: every metric in single-CSV "
+                             "mode, the headline metrics in compare mode")
     args = parser.parse_args()
 
     if len(args.csv) > 2:
@@ -229,8 +299,11 @@ def main() -> int:
         if args.by_query:
             print_by_query(rows)
     else:
+        cand_rows = load_rows(args.csv[1])
         print_pin_check(args.csv[0], args.csv[1])
-        print_compare(rows, load_rows(args.csv[1]))
+        print_compare(rows, cand_rows)
+        if args.by_query:
+            print_by_query_compare(rows, cand_rows)
     return 0
 
 
