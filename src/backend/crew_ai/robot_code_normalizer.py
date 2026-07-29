@@ -221,6 +221,52 @@ def ensure_browser_timeout(robot_code: str) -> str:
     return injected
 
 
+# Robot Framework locator strategies that the identify stage and the assembler
+# both emit. A cell of the form `css=<strategy>=value` is the assembler applying
+# the "always prefix CSS selectors with css=" prompt rule to a locator that
+# already carries a strategy prefix. The result is never valid CSS — Playwright
+# rejects it with `Unexpected token "=" while parsing css selector` — so the
+# redundant `css=` is always safe to drop.
+#
+# The strategy name must sit immediately after `css=` and be followed by `=`,
+# which is what keeps genuine CSS untouched: `css=[data-x=y]` starts with `[`,
+# `css=input[id=foo]` starts with `input`, and `css=idx=5` fails because `id`
+# is not followed by `=`. `css=` is included in the alternation because
+# `css=css=#foo` is the same mistake applied to an already-css locator.
+_REDUNDANT_CSS_PREFIX_RE = re.compile(
+    r"css=(?=(?:id|xpath|text|role|data-testid|css)=)"
+)
+
+
+def strip_redundant_css_prefix(robot_code: str) -> str:
+    """Drop a `css=` prefix that was stacked onto an already-prefixed locator.
+
+    Deterministic counterpart to the prompt carve-out in
+    `library_context/browser_context.py`: the prompt lowers how often the model
+    makes this mistake, this guarantees the mistake never reaches the runner.
+    The `robot --dryrun` gate cannot cover it — dryrun validates keyword names
+    and arity without resolving selectors, so `css=id=searchBox` passes the gate
+    and fails only at runtime.
+
+    Args:
+        robot_code: The Robot Framework source as a string.
+
+    Returns:
+        The same string with every `css=<strategy>=` collapsed to `<strategy>=`.
+        Returns the input unchanged when it contains no `css=` at all.
+    """
+    if not robot_code or "css=" not in robot_code:
+        return robot_code
+
+    stripped, count = _REDUNDANT_CSS_PREFIX_RE.subn("", robot_code)
+    if count:
+        logger.info(
+            f"Locator normalizer: dropped {count} redundant `css=` prefix(es) "
+            "from already-prefixed locator(s)"
+        )
+    return stripped
+
+
 def normalize_robot_code(robot_code: str) -> str:
     """
     Prefix bare CSS selectors in Robot Framework code with `css=`.

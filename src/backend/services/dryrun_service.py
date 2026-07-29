@@ -43,7 +43,11 @@ import requests as _requests
 
 from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
-from src.backend.crew_ai.robot_code_normalizer import ensure_browser_timeout, normalize_robot_code
+from src.backend.crew_ai.robot_code_normalizer import (
+    ensure_browser_timeout,
+    normalize_robot_code,
+    strip_redundant_css_prefix,
+)
 from src.backend.core.artifact_store import get_artifact_store
 from src.backend.services.docker_service import (
     IMAGE_TAG,
@@ -118,6 +122,10 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # Prefix bare CSS selectors (#id, .class) with `css=` so RF does not parse them
     # as comments (see robot_code_normalizer for full rationale).
     robot_code = normalize_robot_code(robot_code)
+
+    # Drop a `css=` the assembler stacked onto an already-prefixed locator
+    # (`css=id=searchBox`). Never valid CSS, and dryrun cannot catch it.
+    robot_code = strip_redundant_css_prefix(robot_code)
 
     # Step 1: Handle multiple Settings blocks (LLM might output code multiple times)
     settings_matches = list(re.finditer(
