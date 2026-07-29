@@ -17,7 +17,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from bench.bench_lib import _coerce, compare_pins, compare_summaries, load_meta, step_budget_exhausted, summarize_rows
+from bench.bench_lib import (
+    coerce,
+    compare_pins,
+    compare_summaries,
+    load_meta,
+    step_budget_exhausted,
+    summarize_rows,
+)
 
 NUMERIC_METRICS = (
     "plan_s", "identify_s", "assemble_s", "dryrun_s", "exec_s", "total_s",
@@ -62,58 +69,34 @@ def pass_rate(rows: list[dict]) -> float:
     return round(passed / n * 100, 1) if n else 0.0
 
 
-def measured_rows(rows: list[dict], column: str) -> list[dict]:
-    """Rows where `column` was actually recorded.
-
-    A missing key (a baseline predating the column) and an empty cell (a run
-    that could not be scored) are the same thing, and neither may count as a
-    zero.
-    """
-    return [r for r in rows if (r.get(column) or "") != ""]
-
-
-def _coerce_int(s: str | None) -> int | None:
-    """Safely coerce a CSV string to int or None.
-
-    Empty string, missing value, or non-numeric are treated the same — None.
-    """
-    if not s:
-        return None
-    try:
-        return int(s)
-    except (ValueError, TypeError):
-        return None
-
-
 def exhaustion_counts(rows: list[dict]) -> tuple[int, int]:
     """(runs that consumed their whole step budget, runs that could be scored).
 
-    A row is counted if:
-    - It has a stored step_budget_exhausted value (stored always wins), or
-    - It can be derived from total_elements and browser_use_llm_calls
+    A stored step_budget_exhausted value wins; otherwise the flag is derived
+    from total_elements and browser_use_llm_calls, so baselines predating the
+    column are still scored. A row whose inputs are missing or non-numeric is
+    unmeasurable and counts toward neither total.
 
-    If derivation is not possible (missing or non-numeric inputs), the row
-    is unmeasurable and does not count.
+    Every cell goes through coerce(), including the stored one. Scoring the
+    stored cell by string equality treated "1.0" — what a spreadsheet or a
+    pandas round-trip leaves behind — as measured-and-clean, silently turning
+    a real hit into a green reading while the derive path six lines below
+    rejected the same garbage.
     """
     hits = 0
     measured = 0
 
     for r in rows:
-        # Stored value always wins when present and non-empty
-        stored = (r.get("step_budget_exhausted") or "").strip()
-        if stored:
+        stored = coerce(r.get("step_budget_exhausted"))
+        if stored is not None:
             measured += 1
-            if stored == "1":
+            if stored == 1:
                 hits += 1
             continue
 
-        # Try to derive from total_elements and browser_use_llm_calls
-        total_elements = _coerce_int(r.get("total_elements"))
-        browser_use_calls = _coerce_int(r.get("browser_use_llm_calls"))
-
-        # Use the existing function to derive; it returns 1, 0, or None
-        derived = step_budget_exhausted(total_elements, browser_use_calls)
-
+        derived = step_budget_exhausted(
+            coerce(r.get("total_elements")), coerce(r.get("browser_use_llm_calls"))
+        )
         if derived is not None:
             measured += 1
             if derived == 1:
@@ -130,22 +113,28 @@ def miss_counts(rows: list[dict]) -> tuple[int, int]:
     number stays put. A count, not a median — the median reads 0.0 on a set
     where a fifth of the runs lost elements.
 
-    A non-numeric or empty failed_elements cell is unmeasurable, exactly like
-    exhaustion_counts — a malformed cell must not crash a report.
+    Scored as successful_elements < total_elements, NOT from failed_elements.
+    Browser-service builds retired before 2026-07-25 write failed_elements = 0
+    while genuinely missing elements (successful + failed != total on 47 of 913
+    captured rows), so the failed_elements reading printed 0/18 on
+    astpp-2026-07-18-collapse-gate.csv where 9 of the 18 runs really did lose
+    an element — and in compare mode it turned a 28-point improvement into a
+    displayed 22-point regression. The two columns agree on every row captured
+    after that date and both exist in every baseline on disk, so this reading
+    is strictly better everywhere.
 
-    This figure undercounts on browser-service builds retired before
-    2026-07-25 (successful + failed != total on 47 of 913 captured rows, every
-    one reading failed_elements = 0 while elements were genuinely missed) — it
-    is only trustworthy for runs captured on or after that date.
+    A row missing either column, or holding a non-numeric cell, is
+    unmeasurable — a malformed cell must not crash a report.
     """
     hits = 0
     measured = 0
-    for r in measured_rows(rows, "failed_elements"):
-        val = _coerce(r["failed_elements"])
-        if val is None:
+    for r in rows:
+        total = coerce(r.get("total_elements"))
+        successful = coerce(r.get("successful_elements"))
+        if total is None or successful is None:
             continue
         measured += 1
-        if val > 0:
+        if successful < total:
             hits += 1
     return hits, measured
 

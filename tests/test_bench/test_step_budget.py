@@ -47,10 +47,25 @@ class TestStepBudgetExhausted:
         assert step_budget_exhausted(elements, steps) == 0
 
     def test_does_not_fire_one_step_short_of_the_cap(self):
-        """cap-1 is a DIFFERENT mechanism: the agent called done voluntarily.
+        """cap-1 is treated as a DIFFERENT mechanism: the agent called done
+        voluntarily.
 
-        Across the 913 captured runs, 12 rows sit here and none of them lost an
-        element. Counting them would sweep in unrelated failures.
+        The original justification here — "12 rows sit at cap-1 and none of
+        them lost an element" — was measured with failed_elements, the column
+        pre-2026-07-25 builds write as 0 while genuinely losing elements. Read
+        with successful_elements < total_elements over the 1063 derivable rows
+        in bench/runs, the picture inverts:
+
+            <= cap-2   1017 rows    21 real misses    2.1%
+            cap-1        12 rows    11 real misses   91.7%
+            >= cap       34 rows    34 real misses  100.0%
+
+        So cap-1 is 44x the base rate and close to at-cap, and the current
+        threshold misses 11 of 45 budget-related failures. The threshold is
+        left at >= cap deliberately: moving it re-scores every baseline CSV
+        that lacks a stored step_budget_exhausted column, including the
+        accepted pre-Phase-2 gate baseline. Read the exhaustion line beside
+        the unresolved-elements line, which does catch these 11.
         """
         assert step_budget_cap(4) == 22
         assert step_budget_exhausted(4, 21) == 0
@@ -137,7 +152,7 @@ class TestCrossRepoDrift:
 
 
 class TestReportRates:
-    def test_counts_hits_over_measured_rows(self):
+    def test_counts_hits_over_scoreable_rows(self):
         from bench.report import exhaustion_counts
 
         rows = [
@@ -146,6 +161,25 @@ class TestReportRates:
             {"step_budget_exhausted": "1"},
         ]
         assert exhaustion_counts(rows) == (2, 3)
+
+    def test_a_float_formatted_stored_flag_is_still_a_hit(self):
+        """A spreadsheet or pandas round-trip rewrites "1" as "1.0". String
+        equality scored that as measured-and-clean — a real hit read as
+        green, while the derive path rejected the same shape."""
+        from bench.report import exhaustion_counts
+
+        assert exhaustion_counts([{"step_budget_exhausted": "1.0"}]) == (1, 1)
+        assert exhaustion_counts([{"step_budget_exhausted": "0.0"}]) == (0, 1)
+
+    def test_a_garbage_stored_flag_is_unmeasurable_not_clean(self):
+        """Anything that is not a number cannot be scored. Counting it as
+        "measured, not exhausted" inflates the denominator with rows that
+        were never read, which is the silent-green failure this whole pair
+        of counters exists to prevent."""
+        from bench.report import exhaustion_counts
+
+        assert exhaustion_counts([{"step_budget_exhausted": "n/a"}]) == (0, 0)
+        assert exhaustion_counts([{"step_budget_exhausted": "True"}]) == (0, 0)
 
     def test_empty_cells_shrink_the_denominator(self):
         from bench.report import exhaustion_counts
@@ -211,8 +245,12 @@ class TestReportRates:
         assert exhaustion_counts(rows) == (0, 0)
 
 
+def _elems(total, successful):
+    return {"total_elements": total, "successful_elements": successful}
+
+
 class TestPairedMissRate:
-    """Counts rows, never a median.
+    """Counts rows, never a median, and scores successful < total.
 
     On the 07-28 ASTPP set failed_elements has median 0.0 while four rows had
     misses — the same disease that let locator_success_rate read green at 22%
@@ -222,35 +260,47 @@ class TestPairedMissRate:
     def test_counts_rows_above_zero(self):
         from bench.report import miss_counts
 
-        rows = [
-            {"failed_elements": "0"},
-            {"failed_elements": "3"},
-            {"failed_elements": "0"},
-            {"failed_elements": "2"},
-        ]
+        rows = [_elems("5", "5"), _elems("5", "2"), _elems("4", "4"), _elems("4", "2")]
         assert miss_counts(rows) == (2, 4)
 
     def test_a_median_of_zero_still_reports_the_misses(self):
-        rows = [{"failed_elements": "0"}] * 14 + [{"failed_elements": "3"}] * 4
+        rows = [_elems("5", "5")] * 14 + [_elems("5", "2")] * 4
         from statistics import median
 
         from bench.report import miss_counts
 
-        assert median([float(r["failed_elements"]) for r in rows]) == 0.0
+        assert median([0.0] * 14 + [3.0] * 4) == 0.0
         assert miss_counts(rows) == (4, 18)
 
     def test_float_formatting_is_accepted(self):
         from bench.report import miss_counts
 
-        assert miss_counts([{"failed_elements": "3.0"}]) == (1, 1)
+        assert miss_counts([_elems("5.0", "2.0")]) == (1, 1)
 
     def test_non_numeric_cell_is_unmeasurable_not_a_crash(self):
         """A malformed cell (e.g. 'n/a' or corruption) must not crash a
         report — the same guarantee exhaustion_counts already has."""
         from bench.report import miss_counts
 
-        rows = [{"failed_elements": "n/a"}, {"failed_elements": "2"}]
+        rows = [_elems("n/a", "2"), _elems("5", "2")]
         assert miss_counts(rows) == (1, 1)
+
+    def test_failed_elements_is_not_the_scoring_basis(self):
+        """Pre-2026-07-25 browser-service builds write failed_elements = 0
+        while genuinely losing elements. Scoring on that column printed
+        0/18 on astpp-2026-07-18-collapse-gate.csv where 9 runs really did
+        lose one, and inverted a 28-point improvement into a displayed
+        22-point regression."""
+        from bench.report import miss_counts
+
+        rows = [{"total_elements": "5", "successful_elements": "2", "failed_elements": "0"}]
+        assert miss_counts(rows) == (1, 1)
+
+    def test_a_row_missing_either_column_is_unmeasurable(self):
+        from bench.report import miss_counts
+
+        assert miss_counts([{"total_elements": "5"}]) == (0, 0)
+        assert miss_counts([{"successful_elements": "5"}]) == (0, 0)
 
 
 class TestRateLines:
@@ -294,13 +344,16 @@ class TestRateLines:
 class TestPairedLinesArePrinted:
     """The unresolved-elements line is non-optional beside the exhaustion
     line (design doc §5.2/§7 A): exhaustion alone is gameable by a fix that
-    makes the agent quit early instead of looping. Nothing today calls
-    print_summary or print_compare, so deleting either print() leaves the
-    rest of the bench suite green — lock both call sites here."""
+    makes the agent quit early instead of looping. Only report.main() calls
+    print_summary/print_compare and no other test covers them, so deleting
+    either print() would leave the rest of the bench suite green — lock both
+    call sites here."""
 
     ROWS = [
-        {"test_status": "passed", "step_budget_exhausted": "1", "failed_elements": "2"},
-        {"test_status": "passed", "step_budget_exhausted": "0", "failed_elements": "0"},
+        {"test_status": "passed", "step_budget_exhausted": "1",
+         "total_elements": "5", "successful_elements": "3"},
+        {"test_status": "passed", "step_budget_exhausted": "0",
+         "total_elements": "5", "successful_elements": "5"},
     ]
 
     def test_print_summary_shows_both_lines(self, capsys):

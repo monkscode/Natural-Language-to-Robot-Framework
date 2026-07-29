@@ -153,8 +153,14 @@ def median_p90(values):
     return statistics.median(vals), vals[rank - 1]
 
 
-def _coerce(value):
-    """CSV-tolerant numeric coercion: None/'' → None; numeric strings → float."""
+def coerce(value):
+    """CSV-tolerant numeric coercion: None/'' → None; numeric strings → float.
+
+    Public because bench/report.py scores several columns with it. It was
+    private once and report.py grew a near-clone (`_coerce_int`) that dropped
+    an integer 0 and rejected "5.0" — two readings of the same CSV cell
+    disagreeing inside one file. One coercion, one set of rules.
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -172,7 +178,7 @@ def summarize_rows(rows, metrics):
     """Per-metric {'median', 'p90', 'n'} over rows (dicts; strings tolerated)."""
     out = {}
     for metric in metrics:
-        vals = [v for v in (_coerce(r.get(metric)) for r in rows) if v is not None]
+        vals = [v for v in (coerce(r.get(metric)) for r in rows) if v is not None]
         med, p90 = median_p90(vals)
         out[metric] = {"median": med, "p90": p90, "n": len(vals)}
     return out
@@ -322,10 +328,11 @@ def span_durations(lines, start_marker, end_marker):
 # The browser service caps its agent at `1 + (len(elements) * 3) + 1 + 8` steps
 # (tools/browser_service/tasks/workflow.py:538) and never reports that cap, so
 # the formula is mirrored here. TestCrossRepoDrift asserts the two still agree.
-# No CSV on disk stores step_budget_exhausted yet, so every existing baseline is
-# scored by read-time derivation (bench/report.py exhaustion_counts) using
-# whatever these constants are at read time — changing them retroactively
-# re-scores every baseline CSV that lacks the stored column, not just new runs.
+# Baselines predating the stored step_budget_exhausted column are scored by
+# read-time derivation (bench/report.py exhaustion_counts) using whatever these
+# constants are at read time — changing them retroactively re-scores every such
+# CSV, not just new runs. Rows that DO carry a stored value are read from it and
+# are unaffected.
 STEP_BUDGET_PER_ELEMENT = 3
 STEP_BUDGET_BASE = 10
 
