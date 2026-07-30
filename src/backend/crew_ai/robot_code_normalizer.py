@@ -233,8 +233,16 @@ def ensure_browser_timeout(robot_code: str) -> str:
 # `css=input[id=foo]` starts with `input`, and `css=idx=5` fails because `id`
 # is not followed by `=`. `css=` is included in the alternation because
 # `css=css=#foo` is the same mistake applied to an already-css locator.
+#
+# The match must also START a cell — line start, or immediately after a Robot
+# cell separator (tab, or two spaces). A stacked prefix is only ever the first
+# thing in the locator cell; the same sequence further in is part of a value
+# that was written correctly, and rewriting it silently changes what the test
+# selects. `css=[data-value="css=id=x"]` and `xpath=//div[@a="css=id=y"]` are
+# both valid and are both left alone by the boundary requirement.
 _REDUNDANT_CSS_PREFIX_RE = re.compile(
-    r"css=(?=(?:id|xpath|text|role|data-testid|css)=)"
+    r"(?:^|(?<=\t)|(?<=  ))css=(?=(?:id|xpath|text|role|data-testid|css)=)",
+    re.MULTILINE,
 )
 
 
@@ -248,15 +256,20 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
     and arity without resolving selectors, so `css=id=searchBox` passes the gate
     and fails only at runtime.
 
-    Scope note — this deliberately departs from the cell-position discipline
-    described in the module docstring. `normalize_robot_code` walks cells so it
-    only ever rewrites locator arguments, because a bare `#` is legitimate data
-    elsewhere. `css=<strategy>=` is not: it is not valid CSS, not a valid Robot
-    locator, and not plausible prose, so there is no position in the file where
-    it is correct and no cell walk is needed to protect one. The trade is a
-    substitution that would also rewrite the sequence inside a
-    `[Documentation]` line or an assertion value — accepted, because that
-    string cannot occur there in generated output.
+    Scope note — this does not walk cells the way `normalize_robot_code` does,
+    because it does not need to: `css=<strategy>=` is not valid CSS, not a
+    valid Robot locator and not plausible prose, so a bare match is far less
+    ambiguous than the bare `#` that forces the cell walk there. It does still
+    require the match to START a cell, which is where a stacked prefix can
+    only ever appear. Mid-cell the same sequence is part of a value that was
+    already written correctly, and rewriting it would silently change what the
+    test selects — `css=[data-value="css=id=x"]` is valid CSS and
+    `xpath=//div[@a="css=id=y"]` is a valid xpath.
+
+    What the boundary rule still cannot separate is a cell that is genuinely
+    prose yet starts with the sequence, e.g. a `[Documentation]` value of
+    exactly `css=id=foo`. Telling that from a locator needs the row's keyword,
+    which is the cell walk. Accepted: generated output does not contain it.
 
     Args:
         robot_code: The Robot Framework source as a string.

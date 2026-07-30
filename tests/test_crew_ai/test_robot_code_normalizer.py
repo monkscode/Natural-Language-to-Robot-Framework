@@ -366,6 +366,35 @@ def test_ensure_browser_timeout_yields_to_a_continuation_argument():
             "    Click    css=idx=5",
         ),
         (
+            "A tab separator is a cell boundary too",
+            "\tClick\tcss=id=searchBox",
+            "\tClick\tid=searchBox",
+        ),
+        # --- Mid-cell occurrences: valid content that merely contains the
+        # sequence. Only a match at a cell boundary is the assembler's stacked
+        # prefix; anything further in is part of a value that was already
+        # written correctly. ---
+        (
+            "css=<strategy>= inside a CSS attribute value is valid CSS",
+            '    Click    css=[data-value="css=id=searchBox"]',
+            '    Click    css=[data-value="css=id=searchBox"]',
+        ),
+        (
+            "css=<strategy>= inside an xpath predicate belongs to the xpath",
+            '    Click    xpath=//div[@a="css=id=y"]',
+            '    Click    xpath=//div[@a="css=id=y"]',
+        ),
+        (
+            "css=<strategy>= in prose is not a locator",
+            "    [Documentation]    Never emit css=id=foo from the assembler",
+            "    [Documentation]    Never emit css=id=foo from the assembler",
+        ),
+        (
+            "A single space is not a cell separator",
+            "    Log    the literal css=id=x is not a cell",
+            "    Log    the literal css=id=x is not a cell",
+        ),
+        (
             "Code with no css= at all takes the fast path",
             "*** Settings ***\nLibrary    Browser\n",
             "*** Settings ***\nLibrary    Browser\n",
