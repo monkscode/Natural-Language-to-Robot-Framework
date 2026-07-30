@@ -221,6 +221,52 @@ class TestExtractPlanUrl:
         steps = [_step("New Page", value="Flipkart homepage")]
         assert extract_plan_url(steps) is None
 
+    @pytest.mark.parametrize("value", [
+        "mailto:help@example.com",
+        "tel:+1234567890",
+        "blob:https://example.com/9f8e",
+        "chrome-extension://abcdefg/popup.html",
+        "ws://example.com/socket",
+        "ftp://files.example.com/pub",
+        "view-source:https://example.com",
+    ])
+    def test_a_non_navigable_scheme_is_rejected(self, value):
+        """The old guard blacklisted five schemes by prefix, so every scheme
+        outside the list rode through: 'mailto:help@example.com' qualified on
+        the dot rule and 'tel:+1234567890' on the single-token rule. A scheme
+        the browser cannot open as a page must never win the navigation slot
+        and displace a real URL on a later step."""
+        steps = [_step("New Page", value=value)]
+        assert extract_plan_url(steps) is None
+
+    @pytest.mark.parametrize("value", [
+        "localhost:3000",
+        "127.0.0.1:8080",
+        "example.com:443/path",
+    ])
+    def test_a_host_port_is_not_read_as_a_scheme(self, value):
+        """The regression an allowlist invites. urlsplit('localhost:3000')
+        reports scheme='localhost' and urlsplit('example.com:443/path')
+        reports scheme='example.com', so a naive scheme allowlist would
+        discard exactly the internal destinations this framework is used
+        against. A colon followed by a bare port is a port, not a scheme."""
+        steps = [_step("New Page", value=value)]
+        assert extract_plan_url(steps) == value
+
+    def test_a_non_navigable_scheme_does_not_displace_a_later_url(self):
+        """Same shape as the about:blank defect, one scheme further out."""
+        steps = [
+            _step("New Page", value="mailto:support@example.com"),
+            _step("Go To", value="https://books.toscrape.com"),
+        ]
+        assert extract_plan_url(steps) == "https://books.toscrape.com"
+
+    def test_an_uppercased_scheme_is_still_recognised(self):
+        """Schemes are case-insensitive; the value keeps its original case."""
+        assert extract_plan_url([_step("New Page", value="HTTPS://Example.com/A")]) == \
+            "HTTPS://Example.com/A"
+        assert extract_plan_url([_step("New Page", value="MAILTO:a@b.com")]) is None
+
 
 # ─── FORM_ELEMENT_HANDLING port (port checklist #3) ──────────────────────────
 

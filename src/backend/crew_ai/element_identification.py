@@ -36,6 +36,7 @@ kickoffs). Depends on: tasks.py models, tools.browser_use_tool (lazily).
 """
 
 import logging
+import re
 from typing import Any, Callable
 
 from .tasks import IdentifiedElement, PlannedStep
@@ -115,9 +116,27 @@ _VALUE_ACTIONS = frozenset({"input", "select"})
 # Steps whose value is the page URL (port checklist #2).
 _NAVIGATION_KEYWORDS = frozenset({"open browser", "new page", "go to"})
 
-# Schemes that name no page we can navigate to. about:blank is the planner's
-# own filler and it hid the real URL that arrived one step later.
-_NON_NAVIGABLE_SCHEMES = ("about:", "data:", "javascript:", "file:", "chrome:")
+# The only schemes that name a page the browser can be told to open. This is an
+# allowlist because the blacklist it replaced ("about:", "data:", "javascript:",
+# "file:", "chrome:") leaked every scheme outside those five: mailto: qualified
+# on the dot rule, tel: on the single-token rule, and blob:/chrome-extension:/
+# ws: likewise. about:blank was the measured defect, but nothing about it was
+# special — it was just the one the planner happened to emit.
+_NAVIGABLE_SCHEMES = frozenset({"http", "https"})
+
+# A leading `<scheme>:` per RFC 3986, EXCEPT when the colon is followed by a
+# bare port. That carve-out is the whole difficulty: `urlsplit` reads
+# "localhost:3000" as scheme='localhost' and "example.com:443/path" as
+# scheme='example.com', so a scheme allowlist built on it would discard exactly
+# the internal destinations this framework is pointed at. A port is at most
+# five digits and ends the authority, which separates it from "tel:1234567890".
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(?!\d{1,5}(?:[/?#]|$))")
+
+
+def _explicit_scheme(candidate: str) -> str | None:
+    """The candidate's leading URI scheme, lowercased, or None if it has none."""
+    match = _SCHEME_RE.match(candidate)
+    return match.group(1).lower() if match else None
 
 
 def _normalize_keyword(keyword: str | None) -> str:
@@ -167,10 +186,11 @@ def _url_candidate(value: Any) -> str | None:
 
     Only the first whitespace-delimited token is considered: planner values
     sometimes carry trailing prose that strip() cannot reach (one captured
-    run: "https://sujal.astppbilling.org/    commit"). An explicit http(s)
-    URL qualifies outright; a non-navigable scheme never does — the browser
-    service completes a missing scheme (prompts/workflow.py:106), so
-    "about:blank" would otherwise become a real navigation target.
+    run: "https://sujal.astppbilling.org/    commit"). A value carrying an
+    explicit scheme qualifies only when that scheme is navigable — the browser
+    service completes a *missing* scheme (prompts/workflow.py:106), so
+    "about:blank" or "mailto:sales@x.com" would otherwise be handed to it as a
+    real navigation target. A bare port is not a scheme (see _SCHEME_RE).
 
     A scheme-less value qualifies when it carries a dot OR is the whole value
     on its own. Token count is what separates a site name from prose:
@@ -185,11 +205,9 @@ def _url_candidate(value: Any) -> str | None:
     if not tokens:
         return None
     candidate = tokens[0]
-    lowered = candidate.lower()
-    if lowered.startswith(("http://", "https://")):
-        return candidate
-    if lowered.startswith(_NON_NAVIGABLE_SCHEMES):
-        return None
+    scheme = _explicit_scheme(candidate)
+    if scheme:
+        return candidate if scheme in _NAVIGABLE_SCHEMES else None
     if "." in candidate:
         return candidate
     return candidate if len(tokens) == 1 else None
@@ -225,7 +243,7 @@ def extract_plan_url(steps: list[Any]) -> str | None:
                 return candidate
     for step in dict_steps:
         candidate = _url_candidate(step.get("value"))
-        if candidate and candidate.lower().startswith(("http://", "https://")):
+        if candidate and _explicit_scheme(candidate) in _NAVIGABLE_SCHEMES:
             return candidate
     return None
 
