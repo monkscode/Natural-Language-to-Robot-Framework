@@ -337,7 +337,10 @@ def gate_schema(out_path: Path) -> None:
 
 def append_row(out_path: Path, row: dict) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not out_path.exists()
+    # A zero-byte file counts as new. It reaches here because existing_header
+    # cannot tell it from a missing file, so gate_schema passes it; without
+    # this the header is skipped and the first data row is read back as one.
+    new_file = not out_path.exists() or out_path.stat().st_size == 0
     with open(out_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(CSV_COLUMNS))
         if new_file:

@@ -266,8 +266,9 @@ class TestAppendSchemaGate:
 
         header = list(CSV_COLUMNS)
         header.insert(header.index("dom_elements_max"), "agent_steps")
+        path = self._write(tmp_path, header)
         with pytest.raises(SystemExit) as exc:
-            gate_schema(self._write(tmp_path, header))
+            gate_schema(path)
         assert "agent_steps" in str(exc.value)
 
     def test_a_pre_instrumentation_header_is_refused(self, tmp_path):
@@ -278,9 +279,31 @@ class TestAppendSchemaGate:
             "submit_s", "queue_s", "session_setup_s", "agent_setup_s",
             "agent_run_s", "postprocess_s", "poll_wait_s",
         }]
+        path = self._write(tmp_path, header)
         with pytest.raises(SystemExit) as exc:
-            gate_schema(self._write(tmp_path, header))
+            gate_schema(path)
         assert "queue_s" in str(exc.value)
+
+    def test_an_empty_file_gets_a_header_instead_of_a_headerless_row(self, tmp_path):
+        """A zero-byte --out slipped past both guards. existing_header returns
+        None for it exactly as it does for a missing file, so gate_schema
+        allowed it; append_row then skipped writeheader() because the path
+        exists, and wrote a bare data row. The first data row is then read back
+        as the header, which is the same silent misalignment gate_schema was
+        added to stop.
+
+        Writing the header is the fix rather than refusing: an empty file is
+        not a schema conflict, and there is nothing in it to misalign against.
+        """
+        from bench.run_bench import append_row, gate_schema
+
+        path = tmp_path / "empty.csv"
+        path.write_text("", encoding="utf-8")
+
+        gate_schema(path)
+        append_row(path, {c: "" for c in CSV_COLUMNS})
+
+        assert path.read_text(encoding="utf-8").splitlines()[0] == ",".join(CSV_COLUMNS)
 
     def test_a_real_pre_change_baseline_is_refused(self, tmp_path):
         """Not a synthetic header — the oldest baseline actually on disk."""
