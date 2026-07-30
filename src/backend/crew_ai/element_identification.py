@@ -124,19 +124,44 @@ _NAVIGATION_KEYWORDS = frozenset({"open browser", "new page", "go to"})
 # special — it was just the one the planner happened to emit.
 _NAVIGABLE_SCHEMES = frozenset({"http", "https"})
 
-# A leading `<scheme>:` per RFC 3986, EXCEPT when the colon is followed by a
-# bare port. That carve-out is the whole difficulty: `urlsplit` reads
-# "localhost:3000" as scheme='localhost' and "example.com:443/path" as
-# scheme='example.com', so a scheme allowlist built on it would discard exactly
-# the internal destinations this framework is pointed at. A port is at most
-# five digits and ends the authority, which separates it from "tel:1234567890".
-_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(?!\d{1,5}(?:[/?#]|$))")
+# A leading `<scheme>:` per RFC 3986, and the bare port that has to be told
+# apart from one. `urlsplit` reads "localhost:3000" as scheme='localhost' and
+# "example.com:443/path" as scheme='example.com', so a scheme allowlist built
+# on it would discard exactly the internal destinations this framework is
+# pointed at.
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+_PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
+
+# Schemes to reject even when a bare port is what follows the colon. This is
+# the one shape the port test cannot resolve on structure: `tel` and
+# `localhost` are both valid host labels, so "tel:12345" and "localhost:12345"
+# are the same string shape and only the name separates them.
+#
+# Naming them is a narrow exception, not a return to the blacklist this
+# replaced. The allowlist still decides every value whose payload is not a
+# bare port, which is where an unlisted scheme would otherwise leak; this set
+# only breaks the tie for numeric payloads, and a numeric payload is a
+# telephony idiom. mailto/data/blob are here because a malformed one from a
+# language model is still unmistakably a scheme, not a host.
+_NUMERIC_PAYLOAD_SCHEMES = frozenset({
+    "tel", "sms", "fax", "callto", "mailto", "data", "blob",
+})
 
 
 def _explicit_scheme(candidate: str) -> str | None:
-    """The candidate's leading URI scheme, lowercased, or None if it has none."""
+    """The candidate's leading URI scheme, lowercased, or None if it has none.
+
+    `<label>:<port>` is a host, not a scheme, unless the label is a scheme that
+    takes a numeric payload. Deciding that on payload LENGTH does not work: it
+    rejected "tel:123456" and accepted "tel:12345" on nothing but digit count.
+    """
     match = _SCHEME_RE.match(candidate)
-    return match.group(1).lower() if match else None
+    if not match:
+        return None
+    scheme = match.group(1).lower()
+    if _PORT_RE.match(candidate[match.end():]) and scheme not in _NUMERIC_PAYLOAD_SCHEMES:
+        return None
+    return scheme
 
 
 def _normalize_keyword(keyword: str | None) -> str:

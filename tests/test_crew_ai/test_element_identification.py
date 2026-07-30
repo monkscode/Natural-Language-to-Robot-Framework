@@ -240,9 +240,29 @@ class TestExtractPlanUrl:
         assert extract_plan_url(steps) is None
 
     @pytest.mark.parametrize("value", [
+        "tel:12345", "tel:123456", "tel:1", "tel:+1234567890",
+        "sms:12345", "fax:99999", "callto:12345",
+        "mailto:12345", "data:12345", "blob:12345",
+    ])
+    def test_a_numeric_payload_does_not_disguise_a_scheme(self, value):
+        """The port carve-out reads `<label>:<digits>` as host:port, which is
+        exactly the shape `tel:12345` has. Nothing structural separates the
+        two — `tel` and `localhost` are both valid host labels — so these
+        schemes have to be named.
+
+        Bounding the carve-out by digit count did not hold the line, it just
+        moved it: `tel:123456` was rejected and `tel:12345` accepted, on
+        nothing but payload length. Rejection must not depend on how many
+        digits the planner emitted."""
+        steps = [_step("New Page", value=value)]
+        assert extract_plan_url(steps) is None
+
+    @pytest.mark.parametrize("value", [
         "localhost:3000",
         "127.0.0.1:8080",
         "example.com:443/path",
+        "jenkins:8080",
+        "astpp:8080",
     ])
     def test_a_host_port_is_not_read_as_a_scheme(self, value):
         """The regression an allowlist invites. urlsplit('localhost:3000')
