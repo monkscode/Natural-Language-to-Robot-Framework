@@ -241,7 +241,7 @@ def ensure_browser_timeout(robot_code: str) -> str:
 # selects. `css=[data-value="css=id=x"]` and `xpath=//div[@a="css=id=y"]` are
 # both valid and are both left alone by the boundary requirement.
 _REDUNDANT_CSS_PREFIX_RE = re.compile(
-    r"(?:^|(?<=\t)|(?<=  ))css=(?=(?:id|xpath|text|role|data-testid|css)=)",
+    r"(?:^|(?<=\t)|(?<= {2}))css=(?=(?:id|xpath|text|role|data-testid|css)=)",
     re.MULTILINE,
 )
 
