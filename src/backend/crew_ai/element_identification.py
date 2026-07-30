@@ -137,12 +137,19 @@ _PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
 # `localhost` are both valid host labels, so "tel:12345" and "localhost:12345"
 # are the same string shape and only the name separates them.
 #
-# Naming them is a narrow exception, not a return to the blacklist this
-# replaced. The allowlist still decides every value whose payload is not a
-# bare port, which is where an unlisted scheme would otherwise leak; this set
-# only breaks the tie for numeric payloads, and a numeric payload is a
-# telephony idiom. mailto/data/blob are here because a malformed one from a
-# language model is still unmistakably a scheme, not a host.
+# The set is a judgement about which labels could plausibly be a HOST, not a
+# complete list of non-navigable schemes — it cannot be one, there are some
+# 380 registered schemes and any list would still leak the 381st. It does not
+# need to be: the allowlist decides every value whose payload is not a bare
+# port, so this only breaks the numeric tie.
+#
+# Deliberately absent: ftp, ws, wss, chrome-extension, view-source. Their
+# real syntax carries an authority ("ftp://host/path"), which the allowlist
+# already rejects. Only the authority-less "ftp:12345" reaches here, and that
+# is not a valid URI of any of those schemes — while "ftp:21" and "ws:8080"
+# are entirely ordinary intranet targets. Listing them would trade an input
+# that cannot occur for one that can, and both mistakes cost the same thing:
+# a skipped browser call and found:false on every element.
 _NUMERIC_PAYLOAD_SCHEMES = frozenset({
     "tel", "sms", "fax", "callto", "mailto", "data", "blob",
 })
