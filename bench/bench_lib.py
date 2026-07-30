@@ -23,6 +23,7 @@ import json
 import math
 import re
 import statistics
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -153,8 +154,14 @@ def median_p90(values):
     return statistics.median(vals), vals[rank - 1]
 
 
-def _coerce(value):
-    """CSV-tolerant numeric coercion: None/'' → None; numeric strings → float."""
+def coerce(value):
+    """CSV-tolerant numeric coercion: None/'' → None; numeric strings → float.
+
+    Public because bench/report.py scores several columns with it. It was
+    private once and report.py grew a near-clone (`_coerce_int`) that dropped
+    an integer 0 and rejected "5.0" — two readings of the same CSV cell
+    disagreeing inside one file. One coercion, one set of rules.
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -169,12 +176,17 @@ def _coerce(value):
 
 
 def summarize_rows(rows, metrics):
-    """Per-metric {'median', 'p90', 'n'} over rows (dicts; strings tolerated)."""
+    """Per-metric {'median', 'p90', 'n', 'sum'} over rows (strings tolerated).
+
+    'sum' is None — not 0 — when no row carried a usable value, so a column
+    the CSV predates reads as unmeasured rather than as a measured zero.
+    """
     out = {}
     for metric in metrics:
-        vals = [v for v in (_coerce(r.get(metric)) for r in rows) if v is not None]
+        vals = [v for v in (coerce(r.get(metric)) for r in rows) if v is not None]
         med, p90 = median_p90(vals)
-        out[metric] = {"median": med, "p90": p90, "n": len(vals)}
+        out[metric] = {"median": med, "p90": p90, "n": len(vals),
+                       "sum": sum(vals) if vals else None}
     return out
 
 
@@ -194,12 +206,73 @@ def compare_summaries(baseline, candidate):
         c = candidate.get(metric, {})
         median_delta, median_pct = _delta_pct(b.get("median"), c.get("median"))
         p90_delta, p90_pct = _delta_pct(b.get("p90"), c.get("p90"))
+        sum_delta, sum_pct = _delta_pct(b.get("sum"), c.get("sum"))
         out[metric] = {
             "baseline_median": b.get("median"), "candidate_median": c.get("median"),
             "median_delta": median_delta, "median_pct": median_pct,
             "baseline_p90": b.get("p90"), "candidate_p90": c.get("p90"),
             "p90_delta": p90_delta, "p90_pct": p90_pct,
+            "baseline_sum": b.get("sum"), "candidate_sum": c.get("sum"),
+            "sum_delta": sum_delta, "sum_pct": sum_pct,
             "baseline_n": b.get("n", 0), "candidate_n": c.get("n", 0),
+        }
+    return out
+
+
+def query_ids(rows):
+    """The set of query_id values present in `rows` (blank/absent → '?')."""
+    return {(r.get("query_id") or "?") for r in rows}
+
+
+def _median_by_query(rows, metric):
+    """Per-query median of `metric`. A query with no usable value is absent."""
+    groups = defaultdict(list)
+    for r in rows:
+        v = coerce(r.get(metric))
+        if v is not None:
+            groups[(r.get("query_id") or "?")].append(v)
+    return {q: statistics.median(vals) for q, vals in groups.items()}
+
+
+def compare_by_query(base_rows, cand_rows, metrics):
+    """Paired per-query comparison: per metric, each query's median in each run.
+
+    The bench runs a fixed query list, so every candidate row has a matching
+    baseline row. Comparing them pairwise is the only reading of this bench
+    that survives both of its distortions.
+
+    A pooled median across all rows sits on a cluster boundary — the queries
+    span ~31k to ~69k tokens — and flips on noise: the 2026-07-29 pair moved
+    +14.2% while every per-query median was flat within ±0.7%. A pooled sum is
+    just as fragile in the other direction: one runaway run (q06 repeat 3,
+    180,035 tokens against a ~46,700 typical) moved the total by more than the
+    entire real difference, printing -8.2% on two runs that were the same.
+
+    Per metric: {'per_query': {qid: {'baseline', 'candidate', 'pct'}},
+    'paired_pct', 'up', 'down', 'n_paired'}. 'paired_pct' is the median of the
+    per-query percent changes — median, not mean, or the outlier this exists to
+    survive would come straight back in. A query whose baseline median is 0 has
+    no defined percentage; it is still listed, but it does not reach the median
+    (failed_elements and llm_429_count are all-zero this way, and the totals
+    line is what carries their signal).
+    """
+    out = {}
+    for metric in metrics:
+        base = _median_by_query(base_rows, metric)
+        cand = _median_by_query(cand_rows, metric)
+        per_query = {}
+        pcts = []
+        for q in sorted(set(base) & set(cand)):
+            _, pct = _delta_pct(base[q], cand[q])
+            per_query[q] = {"baseline": base[q], "candidate": cand[q], "pct": pct}
+            if pct is not None:
+                pcts.append(pct)
+        out[metric] = {
+            "per_query": per_query,
+            "paired_pct": statistics.median(pcts) if pcts else None,
+            "up": sum(1 for p in pcts if p > 0),
+            "down": sum(1 for p in pcts if p < 0),
+            "n_paired": len(per_query),
         }
     return out
 
@@ -319,6 +392,40 @@ def span_durations(lines, start_marker, end_marker):
 # CSV schema
 # ---------------------------------------------------------------------------
 
+# The browser service caps its agent at `1 + (len(elements) * 3) + 1 + 8` steps
+# (tools/browser_service/tasks/workflow.py:538) and never reports that cap, so
+# the formula is mirrored here. TestCrossRepoDrift asserts the two still agree.
+# Baselines predating the stored step_budget_exhausted column are scored by
+# read-time derivation (bench/report.py exhaustion_counts) using whatever these
+# constants are at read time — changing them retroactively re-scores every such
+# CSV, not just new runs. Rows that DO carry a stored value are read from it and
+# are unaffected.
+STEP_BUDGET_PER_ELEMENT = 3
+STEP_BUDGET_BASE = 10
+
+
+def step_budget_cap(total_elements: int) -> int:
+    """The browser-use max_steps the agent ran under, for `total_elements`."""
+    return STEP_BUDGET_PER_ELEMENT * total_elements + STEP_BUDGET_BASE
+
+
+def step_budget_exhausted(
+    total_elements: int | None, browser_use_llm_calls: int | None
+) -> int | None:
+    """1 when the run consumed its whole step budget, 0 when it did not.
+
+    None when it cannot be told — a run with no element count never reached
+    element identification, and reporting that as "did not exhaust" would be a
+    false green. Same convention as llm_coverage_gap.
+
+    `>=`, not `==`: three runs in the captured corpus recorded one step past
+    their cap, because browser-use increments its step counter in two places.
+    """
+    if not total_elements or browser_use_llm_calls is None:
+        return None
+    return int(browser_use_llm_calls >= step_budget_cap(total_elements))
+
+
 CSV_COLUMNS = (
     # identity
     "query_id", "query", "repeat", "workflow_id", "started_at",
@@ -336,6 +443,26 @@ CSV_COLUMNS = (
     "locator_timer_count", "locator_latency_ms_median", "locator_latency_ms_p90",
     # duplicate-lookup telemetry (parked for Task 15)
     "probe_total", "probe_unique", "duplicate_lookup_rate",
+    # identify_s phase breakdown (2026-07-26 efficiency check)
+    "submit_s", "queue_s", "session_setup_s", "agent_setup_s", "agent_run_s",
+    "postprocess_s", "poll_wait_s",
+    # agent diagnostics
+    "dom_elements_max", "dom_elements_median",
+    "llm_429_count", "retry_lost_s",
+    # agent_run_s split (2026-07-26). Raw measurements only — derive
+    # step_non_llm_s = steps_total_s - llm_total_s and
+    # agent_overhead_s = agent_run_s - steps_total_s at analysis time.
+    "llm_total_s", "llm_max_s", "llm_calls_actual", "steps_total_s",
+    "llm_coverage_gap",
+    # The browser-use step count, replacing the removed agent_steps. Despite
+    # the name this is len(agent_result.history), not an API-call count —
+    # llm_calls_actual is the API-call count and differs whenever a step retries.
+    "browser_use_llm_calls",
+    # Derived from the two lines above: did this run burn its entire browser-use
+    # step budget. 1 / 0 / empty, where empty means it could not be scored.
+    # Read it beside the unresolved-elements count, never alone — see the design
+    # doc section 7A.
+    "step_budget_exhausted",
 )
 
 
@@ -363,6 +490,8 @@ def extract_metrics_fields(data):
     + formatting errors detected); the runner adds dryrun repairs on top.
     """
     cleaning = data.get("llm_cleaning_stats") or {}
+    timings = data.get("phase_timings") or {}
+    diagnostics = data.get("agent_diagnostics") or {}
     return {
         "llm_calls": data.get("total_llm_calls", 0),
         "llm_tokens": data.get("crewai_tokens", 0) + data.get("browser_use_tokens", 0),
@@ -377,6 +506,32 @@ def extract_metrics_fields(data):
         "locator_success_rate": data.get("success_rate", 0.0),
         "flake_retries": (cleaning.get("empty_response_retries", 0)
                           + cleaning.get("formatting_errors_detected", 0)),
+        # identify_s phase breakdown — None (empty cell) on pre-instrumentation
+        # rows and failed runs, which carry no phase data by construction.
+        "submit_s": timings.get("submit_s"),
+        "queue_s": timings.get("queue_s"),
+        "session_setup_s": timings.get("session_setup_s"),
+        "agent_setup_s": timings.get("agent_setup_s"),
+        "agent_run_s": timings.get("agent_run_s"),
+        "postprocess_s": timings.get("postprocess_s"),
+        "poll_wait_s": timings.get("poll_wait_s"),
+        "dom_elements_max": diagnostics.get("dom_elements_max"),
+        "dom_elements_median": diagnostics.get("dom_elements_median"),
+        "llm_429_count": diagnostics.get("llm_429_count"),
+        "retry_lost_s": diagnostics.get("retry_lost_s"),
+        "llm_total_s": diagnostics.get("llm_total_s"),
+        "llm_max_s": diagnostics.get("llm_max_s"),
+        "llm_calls_actual": diagnostics.get("llm_calls_actual"),
+        "steps_total_s": diagnostics.get("steps_total_s"),
+        # An empty cell here means coverage could not be checked at all — not
+        # that it was clean. Treat it exactly like a positive gap.
+        "llm_coverage_gap": diagnostics.get("llm_coverage_gap"),
+        # Top-level, not under agent_diagnostics: it is a pre-existing
+        # WorkflowMetrics field (BrowserUseTokenBreakdown:31).
+        "browser_use_llm_calls": data.get("browser_use_llm_calls"),
+        "step_budget_exhausted": step_budget_exhausted(
+            data.get("total_elements"), data.get("browser_use_llm_calls")
+        ),
     }
 
 

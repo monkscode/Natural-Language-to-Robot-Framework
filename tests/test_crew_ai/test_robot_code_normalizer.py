@@ -9,6 +9,7 @@ import pytest
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
+    strip_redundant_css_prefix,
 )
 
 
@@ -288,4 +289,153 @@ def test_ensure_browser_timeout_yields_to_a_continuation_argument():
     src = "*** Settings ***\nLibrary    Browser\n...    timeout=5s\n"
     assert ensure_browser_timeout(src) == (
         "*** Settings ***\nLibrary    Browser    timeout=30s\n...    timeout=5s\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# strip_redundant_css_prefix — the assembler prompt says "always prefix CSS
+# selectors with css=", and the model occasionally applies that to a locator
+# that already carries a strategy prefix, emitting `css=id=searchBox`. That is
+# never valid CSS, so Playwright rejects it at runtime:
+#   locator.fill: Unexpected token "=" while parsing css selector "id=searchBox"
+# Measured on the 2026-07-29 bench: all 30/30 runs are handed at least one
+# non-css strategy-prefixed locator (id= x59, xpath= x22, text= x4), and 1 of
+# 30 was mangled this way (q06 rep2). The dryrun gate cannot catch it —
+# `robot --dryrun` validates keyword names and arity without resolving
+# selectors, so the broken locator passes the gate and fails only at runtime.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        (
+            "The q06 rep2 failure verbatim: css= stacked on an id= locator",
+            "${search_box_locator}    css=id=searchBox",
+            "${search_box_locator}    id=searchBox",
+        ),
+        (
+            "css= stacked on xpath=",
+            "    Click    css=xpath=//button[@type='submit']",
+            "    Click    xpath=//button[@type='submit']",
+        ),
+        (
+            "css= stacked on text=",
+            "    Click    css=text=Login",
+            "    Click    text=Login",
+        ),
+        (
+            "css= stacked on role=",
+            "    Click    css=role=button",
+            "    Click    role=button",
+        ),
+        (
+            "css= stacked on data-testid=",
+            "    Click    css=data-testid=submit",
+            "    Click    data-testid=submit",
+        ),
+        (
+            "css= stacked on itself",
+            "    Click    css=css=#submit",
+            "    Click    css=#submit",
+        ),
+        # --- Must NOT be rewritten ---
+        (
+            "A correct css= locator is left alone",
+            "    Fill Text    css=#searchBox    Cierra",
+            "    Fill Text    css=#searchBox    Cierra",
+        ),
+        (
+            "A bare strategy locator is already correct",
+            "${search_box_locator}    id=searchBox",
+            "${search_box_locator}    id=searchBox",
+        ),
+        (
+            "CSS attribute selector containing = is valid CSS",
+            "    Click    css=[data-x=y]",
+            "    Click    css=[data-x=y]",
+        ),
+        (
+            "CSS attribute selector on a tag is valid CSS",
+            "    Click    css=input[id=foo]",
+            "    Click    css=input[id=foo]",
+        ),
+        (
+            "A strategy-like word that is not a strategy is left alone",
+            "    Click    css=idx=5",
+            "    Click    css=idx=5",
+        ),
+        (
+            "A tab separator is a cell boundary too",
+            "\tClick\tcss=id=searchBox",
+            "\tClick\tid=searchBox",
+        ),
+        # --- Mid-cell occurrences: valid content that merely contains the
+        # sequence. Only a match at a cell boundary is the assembler's stacked
+        # prefix; anything further in is part of a value that was already
+        # written correctly. ---
+        (
+            "css=<strategy>= inside a CSS attribute value is valid CSS",
+            '    Click    css=[data-value="css=id=searchBox"]',
+            '    Click    css=[data-value="css=id=searchBox"]',
+        ),
+        (
+            "css=<strategy>= inside an xpath predicate belongs to the xpath",
+            '    Click    xpath=//div[@a="css=id=y"]',
+            '    Click    xpath=//div[@a="css=id=y"]',
+        ),
+        (
+            "css=<strategy>= in prose is not a locator",
+            "    [Documentation]    Never emit css=id=foo from the assembler",
+            "    [Documentation]    Never emit css=id=foo from the assembler",
+        ),
+        (
+            "A single space is not a cell separator",
+            "    Log    the literal css=id=x is not a cell",
+            "    Log    the literal css=id=x is not a cell",
+        ),
+        (
+            "Code with no css= at all takes the fast path",
+            "*** Settings ***\nLibrary    Browser\n",
+            "*** Settings ***\nLibrary    Browser\n",
+        ),
+        (
+            "Empty string",
+            "",
+            "",
+        ),
+    ],
+)
+def test_strip_redundant_css_prefix(label, source, expected):
+    assert strip_redundant_css_prefix(source) == expected, label
+
+
+def test_strip_redundant_css_prefix_is_idempotent():
+    """The dryrun repair path re-runs the whole pipeline, so a second pass over
+    already-stripped code must be a no-op."""
+    once = strip_redundant_css_prefix("    Click    css=id=searchBox")
+    assert strip_redundant_css_prefix(once) == once == "    Click    id=searchBox"
+
+
+def test_strip_redundant_css_prefix_none():
+    assert strip_redundant_css_prefix(None) is None
+
+
+def test_strip_redundant_css_prefix_handles_the_whole_failing_suite():
+    """End-to-end shape of the q06 rep2 file: only the mangled cell changes."""
+    src = (
+        "*** Variables ***\n"
+        "${search_box_locator}    css=id=searchBox\n"
+        "${table_rows_locator}    css=tbody tr\n"
+        "*** Test Cases ***\n"
+        "Verify Web Tables Filtering\n"
+        "    Fill Text    ${search_box_locator}    Cierra\n"
+    )
+    assert strip_redundant_css_prefix(src) == (
+        "*** Variables ***\n"
+        "${search_box_locator}    id=searchBox\n"
+        "${table_rows_locator}    css=tbody tr\n"
+        "*** Test Cases ***\n"
+        "Verify Web Tables Filtering\n"
+        "    Fill Text    ${search_box_locator}    Cierra\n"
     )

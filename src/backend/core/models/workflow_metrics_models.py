@@ -114,6 +114,28 @@ class WorkflowMetricsBase(
     # Per-element approach metrics for pattern analysis
     element_approach_metrics: Optional[List[Dict[str, Any]]] = None
 
+    # identify_s phase breakdown (2026-07-26 efficiency check). Typically
+    # submit_s, queue_s, session_setup_s, agent_setup_s, agent_run_s,
+    # postprocess_s, poll_wait_s — but the browser service owns the span names
+    # and is versioned separately, so the set is not fixed. None on failed runs
+    # and pre-2026-07 rows.
+    #
+    # NOT a partition: poll_wait_s overlaps every service-side span, so summing
+    # these does not reconstruct identify_s.
+    #
+    # Dict[str, Any], matching agent_diagnostics below and the sibling
+    # element_approach_metrics. Dict[str, float] rejects a None the moment the
+    # service adopts the "None means not measured" convention it already uses
+    # for llm_coverage_gap — and because WorkflowMetrics is built inside a
+    # try/except that swallows ValidationError, that would silently discard the
+    # ENTIRE metrics row (cost, tokens, elements), not just the timings.
+    phase_timings: Optional[Dict[str, Any]] = None
+
+    # Agent-history diagnostics: dom_elements_max, dom_elements_median,
+    # llm_429_count, retry_lost_s, llm_total_s, llm_max_s, llm_calls_actual,
+    # steps_total_s, llm_coverage_gap. Historical rows also carry agent_steps.
+    agent_diagnostics: Optional[Dict[str, Any]] = None
+
 
 class WorkflowMetrics(WorkflowMetricsBase):
     """
@@ -303,6 +325,8 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             custom_action_usage_count=m.custom_action_usage_count,
             session_id=m.session_id,
             element_approach_metrics=m.element_approach_metrics,
+            phase_timings=m.phase_timings,
+            agent_diagnostics=m.agent_diagnostics,
             keyword_search_stats=m.keyword_search_stats,
             pattern_learning_stats=m.pattern_learning_stats,
             context_reduction=m.context_reduction,

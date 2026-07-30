@@ -10,6 +10,7 @@ exception — just a silently wrong keyword choice.
 All external calls are mocked; no browser-service or network required.
 """
 
+import inspect
 from unittest.mock import patch, MagicMock
 import pytest
 from tools.browser_use_tool import BatchBrowserUseTool, BrowserUseAPI
@@ -295,3 +296,55 @@ class TestLocatorMappingMixedBatch:
         mapping = _run_mapping(tool, results)
         assert mapping["elem_3"]["found"] is False
         assert "dropdown_framework" not in mapping["elem_3"]
+
+
+# ─── identify_s phase instrumentation (2026-07-26 efficiency check) ──────────
+
+class TestPollInstrumentation:
+    """The backend owns two of the seven identify_s spans: the submit POST and
+    the accumulated poll-grid sleep. It also owns the poll interval, which the
+    2026-07-23 baseline showed was wasting ~2.5s of every run.
+    """
+
+    def test_resolve_check_interval_defaults_to_one_second(self, monkeypatch):
+        """5s grid wasted ~2.5s/run — 28 of 30 bench rows landed on a 5s boundary."""
+        from tools.browser_use_tool import _resolve_check_interval
+        monkeypatch.delenv("BROWSER_USE_CHECK_INTERVAL", raising=False)
+        assert _resolve_check_interval() == 1.0
+
+    def test_resolve_check_interval_accepts_fractional_override(self, monkeypatch):
+        """int() would raise ValueError here — the cast must be float()."""
+        from tools.browser_use_tool import _resolve_check_interval
+        monkeypatch.setenv("BROWSER_USE_CHECK_INTERVAL", "0.5")
+        assert _resolve_check_interval() == 0.5
+
+    def test_network_retry_backoff_is_not_accumulated_anywhere(self):
+        """Network-retry backoff is error recovery, not grid waste.
+
+        It used to be summed into a _PollClock.network_retry_s field that no
+        production code ever read — dead by the repo's own rule. The
+        separation now comes from only the grid sleeps incrementing
+        poll_wait_s, so nothing needs to hold the retry total."""
+        import tools.browser_use_tool as tool
+
+        assert not hasattr(tool, "_PollClock")
+        # Attribute use only, not the bare name: a comment or docstring
+        # recording why the accumulator was removed must not fail this test.
+        source = inspect.getsource(tool)
+        assert "self.network_retry_s" not in source
+        assert "network_retry_s =" not in source
+
+    def test_merge_phase_timings_combines_service_and_backend_spans(self):
+        from tools.browser_use_tool import _merge_phase_timings
+        service = {"queue_s": 0.01, "session_setup_s": 3.2, "agent_run_s": 20.76}
+        merged = _merge_phase_timings(service, submit_s=0.05, poll_wait_s=4.37)
+        assert merged["session_setup_s"] == 3.2
+        assert merged["submit_s"] == 0.05
+        assert merged["poll_wait_s"] == 4.37
+
+    def test_merge_phase_timings_tolerates_missing_service_payload(self):
+        """An un-synced browser-service returns no phase_timings — must not crash."""
+        from tools.browser_use_tool import _merge_phase_timings
+        assert _merge_phase_timings(None, submit_s=0.05, poll_wait_s=4.37) == {
+            "submit_s": 0.05, "poll_wait_s": 4.37,
+        }

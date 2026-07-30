@@ -90,9 +90,12 @@ class BrowserLibraryContext(LibraryContext):
    text > role > data-testid > id > css > xpath
    - text=<value> → Most stable
    - role=<role>[name="<name>"] → Accessibility-first
-   - css=<selector> → Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`).
+   - css=<selector> → Prefix RAW CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`).
      A bare `#` at the start of a variable value or argument is parsed as a Robot Framework
      comment and the locator becomes empty at runtime.
+     NEVER add `css=` to a locator that already carries a strategy prefix
+     (`id=`, `xpath=`, `text=`, `role=`, `data-testid=`) — use it exactly as given.
+     `css=id=searchBox` is not valid CSS and fails at runtime.
 
 6. **COMMON PITFALLS:**
    ❌ Missing viewport config → Elements not found
@@ -211,8 +214,10 @@ Close Browser:
 2. MUST include "New Context    viewport={'width': 1920, 'height': 1080}" for proper element detection
 3. Browser Library uses 'browser' and 'headless' parameters (NOT 'options')
 4. Browser Library auto-waits, so explicit waits are rarely needed
-5. Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`) — a bare `#` at the
-   start of a variable value is parsed as a Robot Framework comment and the locator becomes empty
+5. Prefix RAW CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`) — a bare `#` at the
+   start of a variable value is parsed as a Robot Framework comment and the locator becomes empty.
+   NEVER add `css=` to a locator that already has a strategy prefix (`id=`, `xpath=`, `text=`,
+   `role=`, `data-testid=`) — use it as-is; `css=id=searchBox` is not valid CSS and fails
 6. Text and role selectors are preferred for stability
 
 **KEYWORD REFERENCE:**

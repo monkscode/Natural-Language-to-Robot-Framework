@@ -69,6 +69,33 @@ def _breaker_record_success() -> None:
         _breaker_state["opened_at"] = 0.0
 
 
+def _resolve_check_interval() -> float:
+    """Seconds between browser-service status polls.
+
+    Was 5s, which put every run on a 5-second grid: 28 of 30 rows in the
+    2026-07-23 bench baseline landed on an exact boundary, wasting ~2.5s per run
+    sleeping after the service had already finished. float, not int — a
+    fractional override must not raise.
+    """
+    return float(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "1.0"))
+
+
+def _merge_phase_timings(service_timings, *, submit_s: float, poll_wait_s: float) -> dict:
+    """Service-side spans plus the two the backend owns.
+
+    service_timings is None when the browser service predates this change.
+
+    poll_wait_s OVERLAPS every service-side span rather than partitioning
+    alongside them — the backend is asleep on the poll grid for the whole time
+    the service is working. Do not sum the seven keys and expect identify_s;
+    the grid tail is poll_wait_s minus the sum of the service spans.
+    """
+    merged = dict(service_timings or {})
+    merged["submit_s"] = submit_s
+    merged["poll_wait_s"] = poll_wait_s
+    return merged
+
+
 class BrowserUseAPI:
     """Enhanced API client for Browser Use Service."""
 
@@ -244,7 +271,7 @@ class BatchBrowserUseTool(BaseTool):
             "BROWSER_USE_SERVICE_URL") or settings.BROWSER_USE_SERVICE_URL
         # 15 minutes for batch
         timeout = int(os.environ.get("BROWSER_USE_TIMEOUT", "900"))
-        check_interval = int(os.environ.get("BROWSER_USE_CHECK_INTERVAL", "5"))
+        check_interval = _resolve_check_interval()
 
         # Initialize API client
         api_client = BrowserUseAPI(api_url)
@@ -295,12 +322,14 @@ class BatchBrowserUseTool(BaseTool):
             if user_id:
                 payload["user_id"] = user_id
 
+            _submit_t0 = time.perf_counter()
             response = requests.post(
                 f"{api_url}/workflow",
                 json=payload,
                 timeout=15,
                 headers={'Content-Type': 'application/json'}
             )
+            submit_s = time.perf_counter() - _submit_t0
 
             if response.status_code == 202:
                 result = response.json()
@@ -344,6 +373,10 @@ class BatchBrowserUseTool(BaseTool):
         # Poll for results
         logger.info(f"Polling for batch task {task_id} results...")
         start_time = time.time()
+        # Total time asleep on the poll grid. Accumulates the requested
+        # interval at every poll, so it overlaps the service-side spans
+        # rather than partitioning with them.
+        poll_wait_s = 0.0
         last_status = None
         # Local counter for transient network errors (connection refused during cleanup).
         # Isolated per _run() call — zero shared state, multi-user safe.
@@ -408,7 +441,15 @@ class BatchBrowserUseTool(BaseTool):
                         'session_id': results.get('session_id'),  # Browser session ID
                         'timestamp': time.time(),
                         # Per-element approach metrics for pattern analysis
-                        'element_approach_metrics': summary.get('element_approach_metrics', [])
+                        'element_approach_metrics': summary.get('element_approach_metrics', []),
+                        # identify_s phase breakdown (2026-07-26 efficiency check).
+                        # Service-side spans plus the two the backend owns.
+                        'phase_timings': _merge_phase_timings(
+                            summary.get('phase_timings'),
+                            submit_s=submit_s,
+                            poll_wait_s=poll_wait_s,
+                        ),
+                        'agent_diagnostics': summary.get('agent_diagnostics'),
                     }
                     
                     logger.info("📊 DEBUG: browser_metrics being saved:")
@@ -481,6 +522,7 @@ class BatchBrowserUseTool(BaseTool):
                         f"Batch task still {current_status}... Elapsed: {elapsed:.1f}s")
 
                 time.sleep(check_interval)
+                poll_wait_s += check_interval
 
             elif current_status == "error":
                 error_message = status_response.get("message", "Unknown error")
@@ -525,6 +567,7 @@ class BatchBrowserUseTool(BaseTool):
                 }
             else:
                 time.sleep(check_interval)
+                poll_wait_s += check_interval
 
         # Timeout
         logger.error(f"Batch task {task_id} timed out after {timeout} seconds")

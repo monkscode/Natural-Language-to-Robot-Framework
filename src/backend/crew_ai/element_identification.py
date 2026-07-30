@@ -36,6 +36,7 @@ kickoffs). Depends on: tasks.py models, tools.browser_use_tool (lazily).
 """
 
 import logging
+import re
 from typing import Any, Callable
 
 from .tasks import IdentifiedElement, PlannedStep
@@ -115,6 +116,60 @@ _VALUE_ACTIONS = frozenset({"input", "select"})
 # Steps whose value is the page URL (port checklist #2).
 _NAVIGATION_KEYWORDS = frozenset({"open browser", "new page", "go to"})
 
+# The only schemes that name a page the browser can be told to open. This is an
+# allowlist because the blacklist it replaced ("about:", "data:", "javascript:",
+# "file:", "chrome:") leaked every scheme outside those five: mailto: qualified
+# on the dot rule, tel: on the single-token rule, and blob:/chrome-extension:/
+# ws: likewise. about:blank was the measured defect, but nothing about it was
+# special — it was just the one the planner happened to emit.
+_NAVIGABLE_SCHEMES = frozenset({"http", "https"})
+
+# A leading `<scheme>:` per RFC 3986, and the bare port that has to be told
+# apart from one. `urlsplit` reads "localhost:3000" as scheme='localhost' and
+# "example.com:443/path" as scheme='example.com', so a scheme allowlist built
+# on it would discard exactly the internal destinations this framework is
+# pointed at.
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+_PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
+
+# Schemes to reject even when a bare port is what follows the colon. This is
+# the one shape the port test cannot resolve on structure: `tel` and
+# `localhost` are both valid host labels, so "tel:12345" and "localhost:12345"
+# are the same string shape and only the name separates them.
+#
+# The set is a judgement about which labels could plausibly be a HOST, not a
+# complete list of non-navigable schemes — it cannot be one, there are some
+# 380 registered schemes and any list would still leak the 381st. It does not
+# need to be: the allowlist decides every value whose payload is not a bare
+# port, so this only breaks the numeric tie.
+#
+# Deliberately absent: ftp, ws, wss, chrome-extension, view-source. Their
+# real syntax carries an authority ("ftp://host/path"), which the allowlist
+# already rejects. Only the authority-less "ftp:12345" reaches here, and that
+# is not a valid URI of any of those schemes — while "ftp:21" and "ws:8080"
+# are entirely ordinary intranet targets. Listing them would trade an input
+# that cannot occur for one that can, and both mistakes cost the same thing:
+# a skipped browser call and found:false on every element.
+_NUMERIC_PAYLOAD_SCHEMES = frozenset({
+    "tel", "sms", "fax", "callto", "mailto", "data", "blob",
+})
+
+
+def _explicit_scheme(candidate: str) -> str | None:
+    """The candidate's leading URI scheme, lowercased, or None if it has none.
+
+    `<label>:<port>` is a host, not a scheme, unless the label is a scheme that
+    takes a numeric payload. Deciding that on payload LENGTH does not work: it
+    rejected "tel:123456" and accepted "tel:12345" on nothing but digit count.
+    """
+    match = _SCHEME_RE.match(candidate)
+    if not match:
+        return None
+    scheme = match.group(1).lower()
+    if _PORT_RE.match(candidate[match.end():]) and scheme not in _NUMERIC_PAYLOAD_SCHEMES:
+        return None
+    return scheme
+
 
 def _normalize_keyword(keyword: str | None) -> str:
     return " ".join((keyword or "").split()).lower()
@@ -158,26 +213,70 @@ def action_for_keyword(keyword: str) -> str:
     return _prefix_action(normalized) or "get_text"
 
 
+def _url_candidate(value: Any) -> str | None:
+    """The URL hiding in a step's value, or None when there isn't one.
+
+    Only the first whitespace-delimited token is considered: planner values
+    sometimes carry trailing prose that strip() cannot reach (one captured
+    run: "https://sujal.astppbilling.org/    commit"). A value carrying an
+    explicit scheme qualifies only when that scheme is navigable — the browser
+    service completes a *missing* scheme (prompts/workflow.py:106), so
+    "about:blank" or "mailto:sales@x.com" would otherwise be handed to it as a
+    real navigation target. A bare port is not a scheme (see _SCHEME_RE).
+
+    A scheme-less value qualifies when it carries a dot OR is the whole value
+    on its own. Token count is what separates a site name from prose:
+    "Flipkart" is one token, "the login page" is three. A dot alone cannot
+    tell them apart, and requiring one rejected the planner's own shipped
+    exemplar ("Open Browser -> Flipkart", prompts/components.py:699) — which
+    returns None and skips the browser call entirely, handing every element a
+    found:false placeholder. No bench query is scheme-less, so the 96.7% gate
+    cannot see that class of failure; it has to be held here.
+    """
+    tokens = (value or "").strip().split()
+    if not tokens:
+        return None
+    candidate = tokens[0]
+    scheme = _explicit_scheme(candidate)
+    if scheme:
+        return candidate if scheme in _NAVIGABLE_SCHEMES else None
+    if "." in candidate:
+        return candidate
+    return candidate if len(tokens) == 1 else None
+
+
 def extract_plan_url(steps: list[Any]) -> str | None:
-    """The URL is the first navigation step's value — nothing is guessed.
+    """The URL is the first navigation step that carries one — nothing is guessed.
+
+    A navigation step whose value cannot name a page — a non-navigable
+    scheme, or prose — is skipped rather than trusted (see _url_candidate for
+    exactly what qualifies; a scheme-less single token still does). On 4 of
+    897 captured runs the planner emitted
+    "New Page -> about:blank" and put the real URL on the next step, so
+    first-value-wins discarded it and the agent was told to open
+    https://about:blank. It reached the right page anyway — the browser-use
+    LLM overrode the instruction and read the URL out of the goal text on 3
+    of 3 runs. That repair is undeclared model behaviour, not a contract, and
+    it is the only reason the defect never showed. The guard belongs here,
+    where it is deterministic.
 
     Fallback: the planner's keyword vocabulary is a free string, so the URL
     sometimes rides on a non-navigation step (bench 2026-07-11 q03: keyword
     "New Browser", value=<url> — the whitelist miss skipped the browser call
     and every element got a found:false placeholder). If no navigation step
-    carries a value, the first *literal* URL among the step values is taken;
+    carries one, the first *literal* URL among the step values is taken;
     non-URL values (browser names, input text) are never eligible.
     """
     dict_steps = [_as_dict(step) for step in steps]
     for step in dict_steps:
         if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
-            value = (step.get("value") or "").strip()
-            if value:
-                return value
+            candidate = _url_candidate(step.get("value"))
+            if candidate:
+                return candidate
     for step in dict_steps:
-        value = (step.get("value") or "").strip()
-        if value.lower().startswith(("http://", "https://")):
-            return value
+        candidate = _url_candidate(step.get("value"))
+        if candidate and _explicit_scheme(candidate) in _NAVIGABLE_SCHEMES:
+            return candidate
     return None
 
 

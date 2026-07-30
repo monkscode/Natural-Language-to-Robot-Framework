@@ -728,13 +728,28 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
             avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
 
+            # browser_llm_calls is len(agent_result.history) — a STEP count, not a
+            # call count. They happen to be equal today (all 10 captured runs
+            # carrying both numbers agree), but summing a step count into a field
+            # named total_llm_calls is a category error, and llm_calls_actual is
+            # the measured API-call number the instrumentation cycles added for
+            # exactly this. Only the total is corrected: browser_use_llm_calls and
+            # the per-element average keep the step-count meaning their CSV series
+            # were built on.
+            _diag = browser_metrics.get('agent_diagnostics') or {}
+            _actual = _diag.get('llm_calls_actual') if isinstance(_diag, dict) else None
+            _actual_is_usable = (
+                isinstance(_actual, int) and not isinstance(_actual, bool) and _actual > 0
+            )
+            browser_calls_for_total = _actual if _actual_is_usable else browser_llm_calls
+
             unified_metrics = WorkflowMetrics(
                 workflow_id=workflow_id,
                 timestamp=datetime.now(),
                 url=extract_url_from_query(natural_language_query),
 
                 # Totals
-                total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
+                total_llm_calls=crewai_metrics['llm_calls'] + browser_calls_for_total,
                 total_cost=crewai_metrics['cost'] + browser_actual_cost,
                 execution_time=browser_metrics.get('execution_time', 0),
 
@@ -766,6 +781,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
                 # Per-element approach metrics for pattern analysis
                 element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
+
+                # identify_s phase breakdown (2026-07-26 efficiency check)
+                phase_timings=browser_metrics.get('phase_timings'),
+                agent_diagnostics=browser_metrics.get('agent_diagnostics'),
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword

@@ -636,3 +636,85 @@ class TestWorkflowCompletionPaths:
         events = _run_workflow(crew_result=result)
         # Should still complete — metrics failures are non-fatal
         assert any(e.get("status") == "complete" for e in events)
+
+
+class TestTotalLlmCallsUsesActualCalls:
+    """total_llm_calls must count real API calls, not history items.
+
+    browser_use_llm_calls is len(agent_result.history) — a step count.
+    agent_diagnostics['llm_calls_actual'] is the measured API-call count
+    (len(calls) in the bs agent). The two agree on every captured run today,
+    so this changes no value; it makes the field mean what its name says, and
+    it holds if anything ever adds a history item that costs no call.
+    browser_use_llm_calls keeps the step-count meaning its CSV series uses.
+    """
+
+    BASE_BROWSER = {
+        'llm_calls': 2,
+        'actual_cost': 0.01,
+        'elements_processed': 2,
+        'successful_elements': 2,
+    }
+
+    def _capture_metrics(self, browser_metrics):
+        captured = {}
+
+        def _capture(metrics, **kwargs):
+            captured["m"] = metrics
+
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = browser_metrics
+            mock_coll.return_value.record_workflow.side_effect = _capture
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        return captured["m"]
+
+    def _crewai_calls(self):
+        from src.backend.core.workflow_metrics import calculate_crewai_cost
+        return calculate_crewai_cost(
+            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
+             'successful_requests': 8},
+            model_name="gemini-2.5-flash",
+        )['llm_calls']
+
+    def test_uses_llm_calls_actual_when_positive(self):
+        """The red-to-green case: 2 history items, 1 real API call."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.total_llm_calls == self._crewai_calls() + 1
+
+    def test_browser_use_llm_calls_stays_the_step_count(self):
+        """The CSV series must not move — only the total is corrected."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.browser_use_llm_calls == 2
+
+    def test_avg_llm_calls_per_element_stays_on_the_step_count(self):
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.avg_llm_calls_per_element == 2 / 2
+
+    def test_falls_back_to_step_count_when_diagnostics_absent(self):
+        m = self._capture_metrics(dict(self.BASE_BROWSER))
+        assert m.total_llm_calls == self._crewai_calls() + 2
+
+    def test_falls_back_to_step_count_when_actual_is_zero(self):
+        """Zero means the diagnostic never populated, not 'no calls happened'."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 0}})
+        assert m.total_llm_calls == self._crewai_calls() + 2
+
+    def test_falls_back_to_step_count_when_actual_is_not_an_int(self):
+        """jsonb round-trips are untyped — a string or None must not poison the total."""
+        for bad in ("3", None, 1.5, True):
+            m = self._capture_metrics(
+                {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': bad}})
+            assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
