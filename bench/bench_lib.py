@@ -246,7 +246,7 @@ def compare_by_query(base_rows, cand_rows, metrics):
     +14.2% while every per-query median was flat within ±0.7%. A pooled sum is
     just as fragile in the other direction: one runaway run (q06 repeat 3,
     180,035 tokens against a ~46,700 typical) moved the total by more than the
-    entire real difference, printing −8.2% on two runs that were the same.
+    entire real difference, printing -8.2% on two runs that were the same.
 
     Per metric: {'per_query': {qid: {'baseline', 'candidate', 'pct'}},
     'paired_pct', 'up', 'down', 'n_paired'}. 'paired_pct' is the median of the

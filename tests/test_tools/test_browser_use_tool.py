@@ -328,8 +328,11 @@ class TestPollInstrumentation:
         import tools.browser_use_tool as tool
 
         assert not hasattr(tool, "_PollClock")
+        # Attribute use only, not the bare name: a comment or docstring
+        # recording why the accumulator was removed must not fail this test.
         source = inspect.getsource(tool)
-        assert "network_retry_s" not in source
+        assert "self.network_retry_s" not in source
+        assert "network_retry_s =" not in source
 
     def test_merge_phase_timings_combines_service_and_backend_spans(self):
         from tools.browser_use_tool import _merge_phase_timings
