@@ -368,6 +368,21 @@ class CleanedLLMWrapper(LLM):
           • If every attempt empties, the empty result is returned so CrewAI raises
             its existing "None or empty" error — failures are loud, never silent.
         """
+        # crewai >=1.10 maps task.output_pydantic onto response_model
+        # (agent/core.py:1170), which routes the agent loop through `instructor`
+        # (llm.py:1242). On that path nothing but model/response_model/messages
+        # reaches LiteLLM: the Vertex thinking guard, num_retries, api_key and
+        # base_url are dropped, native response_format is replaced by TOOLS-mode
+        # function calling, and _token_usage stays zero so workflow metrics and
+        # pricing silently read 0. Strip it — but ONLY on the agent-executor path.
+        # crewai's Converter (utilities/converter.py, the salvage step when the
+        # model's raw text fails validation) also passes response_model and has
+        # relied on instructor since 1.8.1; stripping it there costs 3 extra LLM
+        # calls and then raises ConverterError. The executor always passes
+        # from_task/from_agent; the Converter passes neither.
+        if "from_task" in kwargs or "from_agent" in kwargs:
+            kwargs.pop("response_model", None)
+
         from src.backend.core.config import settings  # lazy import: avoids circular import
         max_retries = settings.LLM_EMPTY_RESPONSE_MAX_RETRIES
 
