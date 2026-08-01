@@ -82,6 +82,25 @@ def _warn(msg: str) -> None:
     print(f"[bench] WARNING: {msg}", file=sys.stderr, flush=True)
 
 
+def warn_if_zero_crewai_tokens(data: dict, query_id: str, repeat: int,
+                               workflow_id: str) -> None:
+    """Warn when a run captured no crewai tokens at all.
+
+    crewai_tokens is ~19.9% of the baseline median llm_tokens (7,888.5 of
+    39,722), so a zeroed accumulator reads as a 20% improvement against a
+    flat-or-down token gate — an invisible false pass. The failure mode is
+    exactly zero (crewai 1.15 rerouting the agent loop through instructor),
+    not a small drift, so an equality check is the right shape.
+
+    Deliberately a warning and not a CSV column: adding a column would trip
+    gate_schema against every existing baseline.
+    """
+    if data.get("crewai_tokens", 0) == 0:
+        _warn(f"{query_id} repeat {repeat}: crewai_tokens == 0 for {workflow_id} — "
+              f"the crewai token accumulator is not being written. Do NOT trust "
+              f"llm_tokens/llm_cost_usd from this run.")
+
+
 def fetch_health(url: str) -> dict:
     """GET {url}/health or exit with a clear pointer to ./run.sh bench."""
     try:
@@ -282,6 +301,7 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
         if ident["generation_status"] == "complete":
             data = fetch_metrics_data(conn, workflow_id)
             if data is not None:
+                warn_if_zero_crewai_tokens(data, query_id, repeat, workflow_id)
                 metrics = extract_metrics_fields(data)
                 # Guardrail number: metrics-row flakes + dryrun repair rounds.
                 metrics["flake_retries"] += repairs
