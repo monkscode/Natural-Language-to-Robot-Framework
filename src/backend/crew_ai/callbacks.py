@@ -1,9 +1,15 @@
 """
-CrewAI step and task callbacks for per-step timing observability.
+CrewAI task callbacks for task-level timing observability.
 
-Supplements crewai.log.txt (which only has task start/end entries) with a
-rotating step log that timestamps every agent thought/action/observation cycle.
-This lets you measure per-agent latency by diffing consecutive entries.
+Supplements crewai.log.txt with a rotating log that timestamps every task
+completion, so per-task latency can be measured by diffing consecutive entries.
+
+The log carries task-level entries only. Per-LLM-call latency lives in
+llm_traces.duration_ms — crewai 1.15's Flow AgentExecutor invokes step_callback
+only from its native-tool-calling and tool-execution branches
+(experimental/agent_executor.py:1544/1555/1566/1674), and both our agents are
+tool-less, so a step callback can never fire (probe-verified 2026-08-01:
+0 step firings, 1 task firing).
 
 Log file: logs/crewai_steps.log
 """
@@ -43,49 +49,6 @@ def _get_step_logger() -> logging.Logger:
     step_logger.setLevel(logging.DEBUG)
     step_logger.propagate = False
     return step_logger
-
-
-def make_step_callback(step_logger: logging.Logger):
-    """Return a callback that logs a timestamped entry per agent step.
-
-    Fires once per thought/action/observation cycle. Each entry includes
-    elapsed time from the previous step so you can measure per-LLM-call
-    latency by diffing consecutive lines.
-
-    Handles both AgentAction-style objects (newer CrewAI) and plain strings
-    (older versions) via graceful attribute access.
-    """
-    state = {"last_ts": datetime.now()}
-
-    def _callback(step_output):
-        now = datetime.now()
-        ts = now.strftime("%Y-%m-%d %H:%M:%S")
-        elapsed_str = ""
-        if state["last_ts"] is not None:
-            delta = (now - state["last_ts"]).total_seconds()
-            elapsed_str = f", elapsed={delta:.1f}s"
-        state["last_ts"] = now
-
-        try:
-            if hasattr(step_output, "tool"):
-                agent = getattr(step_output, "agent", "unknown")
-                tool = getattr(step_output, "tool", "")
-                # 'thought' in newer CrewAI, 'log' in older versions
-                thought_raw = getattr(step_output, "thought", getattr(step_output, "log", ""))
-                thought = str(thought_raw)[:80]
-                result = str(getattr(step_output, "result", ""))[:120]
-                line = (
-                    f"{ts}{elapsed_str}: agent={agent!r}, tool={tool!r}, "
-                    f"thought={thought!r}, result={result!r}"
-                )
-            else:
-                line = f"{ts}{elapsed_str}: [step] {str(step_output)[:200]}"
-        except Exception:
-            line = f"{ts}{elapsed_str}: [step_callback] Could not parse step output"
-
-        step_logger.info(line)
-
-    return _callback
 
 
 def make_task_callback(step_logger: logging.Logger):
@@ -128,6 +91,11 @@ def get_crew_callbacks():
     """Return (step_callback, task_callback) ready to pass to Crew().
 
     Single call site so crew.py doesn't need to know about the logger.
+
+    step_callback is always None: the Flow AgentExecutor can only fire it from
+    its tool-calling branches and both our agents are tool-less. The 2-tuple
+    shape is kept so crew.py's unpack and the tests that patch this function
+    stay unchanged; Crew(step_callback=None) is valid.
     """
     step_logger = _get_step_logger()
-    return make_step_callback(step_logger), make_task_callback(step_logger)
+    return None, make_task_callback(step_logger)

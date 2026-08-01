@@ -451,6 +451,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     # Rotate crewai.log if it exceeds size limit (before creating the Crews)
     _rotate_crewai_log()
 
+    # step_callback is always None on crewai 1.15: the Flow AgentExecutor fires
+    # it only from its tool-calling branches and both our agents are tool-less.
+    # crewai_steps.log carries [TASK DONE] entries; per-LLM-call latency lives
+    # in llm_traces.duration_ms.
     step_callback, task_callback = get_crew_callbacks()
 
     def _make_crew(agent, task):
