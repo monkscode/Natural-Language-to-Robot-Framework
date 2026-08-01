@@ -131,6 +131,11 @@ class TestGetLlm:
         stored or forwarded (verified against the pinned crewai==1.8.1 source), so
         the override must land in additional_params post-construction — that's
         the only path LLM._prepare_completion_params forwards untouched to LiteLLM.
+
+        The guard carries Vertex's own thinkingConfig, not LiteLLM's `thinking`
+        shorthand; see test_vertex_thinking_guard_maps_to_a_zero_budget_on_the_wire
+        for why, and prefer that test — it asserts the outcome rather than this
+        key, so it survives the next mapping change.
         """
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
 
@@ -139,7 +144,45 @@ class TestGetLlm:
                                       "VERTEXAI_LOCATION": "us-central1"}):
             llm = get_llm(model_provider="vertex", model_name="gemini-3.5-flash")
 
-        assert llm.additional_params["thinking"] == {"type": "enabled", "budget_tokens": 0}
+        assert llm.additional_params["thinkingConfig"] == {"thinkingBudget": 0}
+
+    @pytest.mark.parametrize("model_name", ["gemini-3.5-flash", "gemini-2.5-flash"])
+    def test_vertex_thinking_guard_maps_to_a_zero_budget_on_the_wire(self, model_name):
+        """The guard is only worth what LiteLLM actually puts on the wire.
+
+        Asserting on additional_params (the tests above) checks our half of the
+        contract and cannot see the other half. litellm 1.94.1 silently stopped
+        honouring thinking={'budget_tokens': 0} for gemini-3.5-flash: its
+        _map_thinking_param treats any "Gemini 3 or newer" model as thinkingLevel-
+        based and emits only includeThoughts=False, so Vertex fell back to
+        server-side thinking-ON. Measured cost of that gap: reasoning tokens ate
+        the 65,535-token output allowance, truncating the planner's JSON to its
+        first step (0 elements identified, vacuous passing tests) or past
+        parsing entirely (max_tokens ConverterError, dead run).
+
+        So assert the OUTCOME, not the mechanism — whatever key we use, the
+        mapped provider params must carry a zero thinking budget for the models
+        we actually run.
+        """
+        from litellm.utils import get_optional_params
+
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict(os.environ, {"VERTEXAI_CREDENTIALS": "creds.json",
+                                      "VERTEXAI_PROJECT": "test-project",
+                                      "VERTEXAI_LOCATION": "us-central1"}):
+            llm = get_llm(model_provider="vertex", model_name=model_name)
+
+        mapped = get_optional_params(
+            model=model_name,
+            custom_llm_provider="vertex_ai",
+            **llm.additional_params,
+        )
+
+        assert mapped.get("thinkingConfig", {}).get("thinkingBudget") == 0, (
+            f"{model_name}: guard did not reach the wire as a zero thinking "
+            f"budget — mapped to {mapped.get('thinkingConfig')!r}"
+        )
 
     def test_get_llm_gemini_does_not_disable_thinking_budget(self):
         """The thinking-ON flip is Vertex-specific (probe-verified 2026-07-18) —
