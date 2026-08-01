@@ -44,6 +44,7 @@ def init_observability() -> bool:
 
     try:
         from traceloop.sdk import Traceloop
+        from traceloop.sdk.instruments import Instruments
 
         # Always capture full prompt/response — customers consent to full data collection.
         os.environ["TRACELOOP_TRACE_CONTENT"] = "true"
@@ -55,6 +56,11 @@ def init_observability() -> bool:
             disable_batch=False,
             exporter=exporter,
             traceloop_sync_enabled=False,  # Don't phone home to Traceloop cloud
+            # traceloop 0.62.1 added a LiteLLM instrumentor and auto-enables it.
+            # The LiteLLM success callback is our single source of truth for LLM
+            # data (see trace_store.py); OTel carries orchestration spans only.
+            # Block it so that stays true by construction, not by coincidence.
+            block_instruments={Instruments.LITELLM},
         )
 
         logger.info(

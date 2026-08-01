@@ -25,12 +25,13 @@ dependencies = [
     "PyYAML",
     # Docker SDK (robot test execution)
     "docker",
-    # crewai 1.8.1 requires openai<1.84.dev0 (openai 1.83.x only).
-    # litellm 1.75.3 is the last version that accepts openai>=1.68.2 (compatible).
-    # litellm 1.75.4+ bumped to openai>=1.99.5 which crewai 1.8.1 blocks.
-    # Upgrade crewai to 1.14.2 (requires openai>=2.0.0) planned separately.
-    "crewai==1.8.1",
-    "litellm==1.75.3",
+    # crewai 1.15.10 requires openai>=2.30,<3, mcp~=1.28.1, pydantic-settings
+    # >=2.14.2 and opentelemetry-*~=1.42; litellm is only a crewai extra
+    # (>=1.84) — we pin it explicitly as our sole LLM transport.
+    # browser-use exact-pins openai==2.16.0 and mcp==1.26.0 — it lives in
+    # venv-bus/ (Phase 1 split); NEVER install browser-use into this venv.
+    "crewai==1.15.10",
+    "litellm==1.94.1",
     # LLM providers
     "google-auth",
     # ChromaDB — uses default ONNX embeddings (no pytorch/sentence-transformers)
@@ -43,7 +44,7 @@ dependencies = [
     "fastembed",
     "posthog>=2.4.0,<8.0.0",
     # LLM Observability — OTel-first (Enhancement #3)
-    "traceloop-sdk>=0.30.0",
+    "traceloop-sdk>=0.62.1",
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",
