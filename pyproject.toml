@@ -17,8 +17,6 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "pydantic-settings",
-    "sse-starlette",
-    "aiohttp",
     "requests",
     # Configuration
     "python-dotenv",
