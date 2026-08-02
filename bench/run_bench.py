@@ -89,8 +89,12 @@ def warn_if_zero_crewai_tokens(data: dict, query_id: str, repeat: int,
     crewai_tokens is ~19.9% of the baseline median llm_tokens (7,888.5 of
     39,722), so a zeroed accumulator reads as a 20% improvement against a
     flat-or-down token gate — an invisible false pass. The failure mode is
-    exactly zero (crewai 1.15 rerouting the agent loop through instructor),
-    not a small drift, so an equality check is the right shape.
+    exactly zero, not a small drift, so an equality check is the right shape.
+
+    The reproducer is the IN-FLIGHT crewai 1.15 upgrade, where output_pydantic
+    reroutes the agent loop through instructor and the accumulator never gets
+    written. The bench itself still runs the pinned crewai==1.8.1 — the guard
+    exists so that upgrade cannot land a silent 20% token "win".
 
     Deliberately a warning and not a CSV column: adding a column would trip
     gate_schema against every existing baseline.
