@@ -754,6 +754,42 @@ class TestIdentifyElements:
         assert result["steps"][1]["locator"] == "name=q"
         assert result["steps"][2]["locator"] == "css=.product"
 
+    def test_query_url_reaches_the_browser_call_when_the_plan_has_none(self):
+        """The wiring, not the function. extract_plan_url's query pass is unit
+        tested and was replayed over 1,260 captured plans, but both exercise it
+        directly — neither proves identify_elements forwards user_query to it,
+        nor that the browser call then happens at all.
+
+        The 2026-08-02 bench could not close this: every one of its 30 plans
+        carried its own navigation step, so the pass never executed. Without
+        the forward, this plan reaches the documented dead end instead — no
+        URL, no browser call, every element a found:false placeholder."""
+        steps = [
+            _step("New Browser"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, calls = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get the titles of all books",
+            run_tool=run_tool)
+
+        assert len(calls) == 1, "the browser call must happen, not be skipped"
+        assert calls[0]["url"] == "https://books.toscrape.com"
+        assert result["steps"][1]["locator"] == "ol > li"
+        assert result["steps"][1]["found"] is True
+
+    def test_a_plan_without_any_url_and_a_query_without_one_still_skips(self):
+        """The complement — the pass must not invent a destination. No URL
+        anywhere means the browser call is skipped, exactly as before."""
+        steps = [_step("New Browser"), _step("Click", description="login button")]
+        run_tool, calls = self._tool_recorder(self._success_response({}))
+        result = identify_elements(steps, "click the login button", run_tool=run_tool)
+
+        assert calls == [], "no URL anywhere → no browser call"
+        assert result["steps"][1]["found"] is False
+
     def test_tool_error_means_no_retry_and_placeholder_path(self):
         """CONTRACT: tool error → one call only, every locator step
         found:false. The old LLM's rogue second call is the failure mode
