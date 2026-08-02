@@ -382,9 +382,12 @@ class TestExtractPlanUrlFromUserQuery:
     their target URL ONLY because the browser-launch step carried one in
     `value`, and blanking that value makes every earlier pass return None.
     Nothing put it there on purpose — PLANNING_OUTPUT_RULES rule 6 told the
-    planner to emit `browser`/`headless` keys that PlannedStep does not have
-    and the response schema forbids (additionalProperties: false), so the model
-    improvised into `value`, and the destination sometimes rode along. That is
+    planner to emit `browser`/`headless` keys that PlannedStep does not have.
+    The response schema carries no additionalProperties flag (Google's Schema
+    type has no such field); what makes the keys unemittable is Gemini's
+    controlled generation, which constrains the response to the declared
+    properties. So the model improvised into `value`, and the destination
+    sometimes rode along. That is
     an accident, not a contract: any prompt, model or provider change removes
     it silently, and the run then hits the documented dead end — no URL, no
     browser call, every element a found:false placeholder.

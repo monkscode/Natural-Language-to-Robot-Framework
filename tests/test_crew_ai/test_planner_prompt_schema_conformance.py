@@ -2,9 +2,12 @@
 
 The defect this pins: PLANNING_OUTPUT_RULES rule 6 injected a worked example
 reading {"keyword": "New Browser", "browser": "chromium", "headless": "True"}.
-`browser` and `headless` are not PlannedStep fields, and the response schema
-forwarded to capable providers sets additionalProperties: false — so the model
-was instructed to emit keys it had no legal way to emit. It improvised them
+`browser` and `headless` are not PlannedStep fields, so the model was instructed
+to emit keys it had no legal way to emit: on capable providers the response
+schema is forwarded and Gemini's controlled generation constrains the reply to
+the declared properties. (Not via additionalProperties — Google's Schema type
+has no such field, and PlannedStep sets no extra="forbid"; the constraint is
+the decoding, not a flag.) It improvised them
 into `value` instead: 56 of 60 plans across two benches carried an improvised
 launch-step value in 8 distinct encodings, including whole JSON blobs and
 "browser=chromium, headless=True, url=https://...".

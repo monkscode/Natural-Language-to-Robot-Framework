@@ -337,9 +337,10 @@ def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
     # ONLY because the browser-launch step's `value` carried one; blanking it
     # makes all three passes above return None. Nothing put it there on
     # purpose — PLANNING_OUTPUT_RULES rule 6 demanded `browser`/`headless`
-    # keys that PlannedStep does not define and the response schema forbids,
-    # so the planner improvised into `value` and the destination sometimes
-    # rode along. All 34 of those user queries state the URL in plain text.
+    # keys that PlannedStep does not define, and structured output constrains
+    # the reply to the declared properties, so the planner improvised into
+    # `value` and the destination sometimes rode along. All 34 of those user
+    # queries state the URL in plain text.
     #
     # Runs last on purpose: the plan is the more specific signal, and output
     # rule 5's search-engine default must be able to send a URL-bearing query
