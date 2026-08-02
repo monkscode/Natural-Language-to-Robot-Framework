@@ -204,6 +204,37 @@ class TestGetLlm:
             f"zero thinking budget — generationConfig was {generation_config!r}"
         )
 
+    @pytest.mark.parametrize("model_name", [
+        "claude-sonnet-4@20250514",
+        "llama-3.1-405b-instruct-maas",
+        "mistral-large@2411",
+    ])
+    def test_non_gemini_vertex_models_get_no_thinking_config(self, model_name):
+        """thinkingConfig is a Gemini generationConfig field. Vertex also serves
+        Anthropic, Llama and Mistral, and resolve_model_string does not check
+        the family — ONLINE_MODEL is a free string, so one config edit reaches
+        this branch with a non-Gemini model.
+
+        Switching from `thinking` to `thinkingConfig` removed the loud failure
+        that used to cover that. Measured on the pinned litellm 1.75.3:
+
+            thinking       llama/mistral -> UnsupportedParamsError (loud)
+                           claude        -> a valid Anthropic thinking param
+            thinkingConfig every one     -> silently accepted, Gemini-only
+                                            field shipped to a non-Gemini model
+
+        So the guard has to carry its own family check."""
+        from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+        with patch.dict(os.environ, {"VERTEXAI_CREDENTIALS": "creds.json",
+                                      "VERTEXAI_PROJECT": "test-project",
+                                      "VERTEXAI_LOCATION": "us-central1"}):
+            llm = get_llm(model_provider="vertex", model_name=model_name)
+
+        assert "thinkingConfig" not in llm.additional_params, (
+            f"{model_name} is not a Gemini model — a Gemini-only "
+            f"generationConfig field must not be attached to it")
+
     def test_get_llm_gemini_does_not_disable_thinking_budget(self):
         """The thinking-ON flip is Vertex-specific (probe-verified 2026-07-18) —
         Google AI Studio isn't touched, so gemini provider must stay untouched."""

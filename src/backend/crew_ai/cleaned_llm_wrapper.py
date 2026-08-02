@@ -578,7 +578,18 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         # budget and emits only includeThoughts=False, which hides thoughts
         # without stopping them. thinkingConfig reaches generationConfig
         # untouched and reproduces what 1.75.3 put on the wire.
-        llm.additional_params["thinkingConfig"] = {"thinkingBudget": 0}
+        #
+        # Gated on the model family, because that same switch removed the loud
+        # failure that used to cover this. Vertex also serves Anthropic, Llama
+        # and Mistral, and resolve_model_string does not check the family —
+        # ONLINE_MODEL is a free string, so one config edit reaches here with a
+        # non-Gemini model. Measured on the pinned litellm 1.75.3: `thinking`
+        # raised UnsupportedParamsError on llama/mistral and mapped to a real
+        # Anthropic param on claude, while thinkingConfig is accepted silently
+        # by all three and would ship a Gemini-only generationConfig field to a
+        # non-Gemini endpoint.
+        if "gemini" in routed_model.lower():
+            llm.additional_params["thinkingConfig"] = {"thinkingBudget": 0}
         return llm
 
     # model_provider == "gemini" — Google AI Studio.
