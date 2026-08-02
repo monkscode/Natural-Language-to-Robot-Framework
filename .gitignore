@@ -61,6 +61,10 @@ docs/tasks/
 # deliberately NOT ignored — it is tracked.
 docs/superpowers/plans/
 docs/superpowers/specs/
+# Top-level notes (HANDOFF-*, FINDINGS-*, UPSTREAM-*) were untracked but NOT
+# ignored, so `git add -A` could still sweep them in. `*` does not match `/`,
+# so this covers direct children only and leaves acceptance/ tracked.
+docs/superpowers/*.md
 .agents/workflows/development-workflow.md
 tasks/*
 logs/crewai.log.txt
