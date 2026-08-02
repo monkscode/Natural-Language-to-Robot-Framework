@@ -133,9 +133,9 @@ class TestGetLlm:
         the only path LLM._prepare_completion_params forwards untouched to LiteLLM.
 
         The guard carries Vertex's own thinkingConfig, not LiteLLM's `thinking`
-        shorthand; see test_vertex_thinking_guard_maps_to_a_zero_budget_on_the_wire
-        for why, and prefer that test — it asserts the outcome rather than this
-        key, so it survives the next mapping change.
+        shorthand; see test_vertex_thinking_guard_reaches_the_request_body for
+        why, and prefer that test — this one only checks that we set the key,
+        which says nothing about whether it survives into the request.
         """
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
 
@@ -147,7 +147,7 @@ class TestGetLlm:
         assert llm.additional_params["thinkingConfig"] == {"thinkingBudget": 0}
 
     @pytest.mark.parametrize("model_name", ["gemini-3.5-flash", "gemini-2.5-flash"])
-    def test_vertex_thinking_guard_maps_to_a_zero_budget_on_the_wire(self, model_name):
+    def test_vertex_thinking_guard_reaches_the_request_body(self, model_name):
         """The guard is only worth what LiteLLM actually puts on the wire.
 
         Asserting on additional_params (the tests above) checks our half of the
@@ -160,11 +160,27 @@ class TestGetLlm:
         first step (0 elements identified, vacuous passing tests) or past
         parsing entirely (max_tokens ConverterError, dead run).
 
-        So assert the OUTCOME, not the mechanism — whatever key we use, the
-        mapped provider params must carry a zero thinking budget for the models
-        we actually run.
+        Assert on the BUILT REQUEST BODY, not on get_optional_params. Since the
+        guard switched from `thinking` to `thinkingConfig` it no longer passes
+        through any mapping: `thinkingConfig` is absent from
+        get_supported_openai_params(), so LiteLLM echoes it back verbatim the way
+        it echoes any unrecognised vertex kwarg (probe: thinkingConfigTYPO and
+        totalNonsenseKey come back untouched). A test on that stage is satisfied
+        by its own input and cannot fail.
+
+        The stage that CAN drop it is _transform_request_body, which filters
+        optional_params against GenerationConfig.__annotations__ before building
+        generationConfig. Drop `thinkingConfig` from that TypedDict — exactly the
+        shape of the 1.94.1 change — and the body comes back {} while the
+        get_optional_params assertion stays green.
+
+        Importing a private LiteLLM helper is deliberate: if a future bump moves
+        or renames it the import fails loudly on the version bump, which is when
+        the wire needs re-verifying anyway.
         """
-        from litellm.utils import get_optional_params
+        from litellm.llms.vertex_ai.gemini.transformation import (
+            _transform_request_body,
+        )
 
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
 
@@ -173,15 +189,19 @@ class TestGetLlm:
                                       "VERTEXAI_LOCATION": "us-central1"}):
             llm = get_llm(model_provider="vertex", model_name=model_name)
 
-        mapped = get_optional_params(
+        body = _transform_request_body(
+            messages=[{"role": "user", "content": "ping"}],
             model=model_name,
+            optional_params=dict(llm.additional_params),
             custom_llm_provider="vertex_ai",
-            **llm.additional_params,
+            litellm_params={},
+            cached_content=None,
         )
+        generation_config = body.get("generationConfig", {})
 
-        assert mapped.get("thinkingConfig", {}).get("thinkingBudget") == 0, (
-            f"{model_name}: guard did not reach the wire as a zero thinking "
-            f"budget — mapped to {mapped.get('thinkingConfig')!r}"
+        assert generation_config.get("thinkingConfig", {}).get("thinkingBudget") == 0, (
+            f"{model_name}: the guard did not survive into the request body as a "
+            f"zero thinking budget — generationConfig was {generation_config!r}"
         )
 
     def test_get_llm_gemini_does_not_disable_thinking_budget(self):
