@@ -769,9 +769,7 @@ If the user's query implies a loop (e.g., "for every link", "for each item"), yo
 3.  For validation steps, use "Should Be True" keyword with a "condition_expression" key.
 4.  The keys `condition_type`, `condition_value`, `loop_type`, and `loop_source` are OPTIONAL and should only be included for steps with conditional logic or loops.
 5.  If the query involves a web search (e.g., "search for X") but does not specify a URL, you MUST generate a first step to open a search engine. Use 'https://www.google.com' as the value for the URL.
-6.  When generating a browser initialization step, you MUST include library-specific parameters:
-{browser_init_placeholder}
-7.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
+6.  **MOST CRITICAL**: DO NOT add popup dismissal, cookie consent, or any steps not explicitly mentioned in user query. The browser automation handles these automatically.
 """
 
     # NOTE: the IDENTIFICATION COMPONENTS (FORM_ELEMENT_HANDLING,

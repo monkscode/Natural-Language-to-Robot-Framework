@@ -251,6 +251,66 @@ class TestExtractPlanUrl:
                  _step("Click", description="contact mailto:sales@example.com")]
         assert extract_plan_url(steps) is None
 
+    def test_a_url_being_typed_into_a_field_is_not_a_navigation_target(self):
+        """The embedded pass must not undo the first-token rule it sits behind.
+
+        _url_candidate reads only the first token precisely so that prose and
+        typed text cannot become the destination. The embedded pass scans every
+        token, so without a filter the string the user wants TYPED into a search
+        box becomes the page to open — here a competitor's site instead of the
+        one under test.
+
+        Reachable: pass 1 rejects the documented "New Page -> about:blank"
+        shape (4 of 897 captured runs), pass 2 finds no step led by a URL, and
+        pass 3 then reaches the Input Text value.
+
+        Provably lossless: across 1,313 captured runs the embedded pass fires 5
+        times and all 5 are New Browser steps (action get_text) — never an
+        input or select."""
+        steps = [_step("New Page", value="about:blank"),
+                 _step("Input Text", description="search box",
+                       value="find reviews of https://competitor.example.com")]
+        assert extract_plan_url(steps) is None
+
+    def test_the_embedded_pass_still_reads_a_launch_step(self):
+        """The complement — the 5 real captured hits are all this shape, so the
+        input/select filter must not cost them."""
+        steps = [_step("New Page", value="about:blank"),
+                 _step("New Browser", value="chromium, url=https://github.com/monkscode")]
+        assert extract_plan_url(steps) == "https://github.com/monkscode"
+
+    def test_a_comma_inside_the_query_string_is_not_a_terminator(self):
+        """A comma is legal in an HTTP path or query. Excluding it from the
+        match class truncated `?tags=python,robot` to `?tags=python` — not a
+        loud mangle but a VALID URL for a different page, which is the worst
+        shape: the run navigates, locates, and tests the wrong thing.
+
+        The comma still terminates in practice where it matters, because
+        rstrip(_VALUE_SEPARATORS) removes it when it is genuinely trailing.
+        The semicolon stays excluded — it is a real packed-value separator
+        ("url=https://x;browser=chromium") with no such rescue."""
+        steps = [_step("New Browser",
+                       value="chromium, url=https://example.org/s?tags=python,robot")]
+        assert extract_plan_url(steps) == "https://example.org/s?tags=python,robot"
+
+    def test_a_semicolon_still_separates_packed_fields(self):
+        steps = [_step("New Browser", value="url=https://example.com;browser=chromium")]
+        assert extract_plan_url(steps) == "https://example.com"
+
+    def test_a_packed_field_label_cannot_smuggle_a_non_navigable_scheme(self):
+        """The scheme guard read only the START of the token, but `url=` breaks
+        the scheme match (`=` is not a scheme character), so `_explicit_scheme`
+        returned None and the guard passed — then the regex recovered the
+        embedded https URL. blob: and view-source: wrap a real URL inside a
+        scheme the passes above reject on purpose; the packed form is the shape
+        this pass exists to read, so it is exactly where the hole was."""
+        assert extract_plan_url(
+            [_step("New Browser", value="chromium, url=blob:https://example.com/9f8e")]
+        ) is None
+        assert extract_plan_url(
+            [_step("New Browser", value="chromium, url=view-source:https://example.com")]
+        ) is None
+
     def test_navigation_step_still_beats_a_packed_compound_value(self):
         """Pass order is unchanged: a real navigation keyword outranks anything
         recovered from inside another step's value."""
@@ -345,6 +405,93 @@ class TestExtractPlanUrl:
         assert extract_plan_url([_step("New Page", value="HTTPS://Example.com/A")]) == \
             "HTTPS://Example.com/A"
         assert extract_plan_url([_step("New Page", value="MAILTO:a@b.com")]) is None
+
+
+class TestExtractPlanUrlFromUserQuery:
+    """Last-resort pass: the URL the user literally wrote.
+
+    Measured over the whole capture (1,260 runs with parseable plans): 34 got
+    their target URL ONLY because the browser-launch step carried one in
+    `value`, and blanking that value makes every earlier pass return None.
+    Nothing put it there on purpose — PLANNING_OUTPUT_RULES rule 6 told the
+    planner to emit `browser`/`headless` keys that PlannedStep does not have.
+    The response schema carries no additionalProperties flag (Google's Schema
+    type has no such field); what makes the keys unemittable is Gemini's
+    controlled generation, which constrains the response to the declared
+    properties. So the model improvised into `value`, and the destination
+    sometimes rode along. That is
+    an accident, not a contract: any prompt, model or provider change removes
+    it silently, and the run then hits the documented dead end — no URL, no
+    browser call, every element a found:false placeholder.
+
+    All 34 of those user queries contain the URL in plain text. So the plan is
+    not the only place the destination is written down, and this pass reads the
+    one source the planner cannot corrupt.
+    """
+
+    QUERY = "Go to https://books.toscrape.com, get the titles of all books"
+
+    def test_user_query_url_is_used_when_the_plan_carries_none(self):
+        steps = [_step("New Browser"), _step("Get Elements", description="books")]
+        assert extract_plan_url(steps, self.QUERY) == "https://books.toscrape.com"
+
+    def test_a_navigation_step_still_wins_over_the_query(self):
+        """The plan is the more specific signal — the query is the backstop.
+        A user query naming one site while the plan navigates to another must
+        not be overridden (multi-site plans, and the search-engine default of
+        output rule 5, both depend on this ordering)."""
+        steps = [_step("New Page", value="https://explicit-nav.com")]
+        assert extract_plan_url(steps, self.QUERY) == "https://explicit-nav.com"
+
+    def test_a_url_anywhere_in_the_plan_still_wins_over_the_query(self):
+        """Pass 4 runs after the two token passes AND the embedded pass, so
+        removing rule 6 cannot change the answer for any run that works today."""
+        steps = [_step("New Browser", value="https://packed.example.com")]
+        assert extract_plan_url(steps, self.QUERY) == "https://packed.example.com"
+
+    def test_no_query_keeps_the_old_answer(self):
+        """Every existing caller and test passes steps only."""
+        assert extract_plan_url([_step("New Browser", value="chromium")]) is None
+
+    def test_a_query_without_a_url_guesses_nothing(self):
+        steps = [_step("New Browser", value="chromium")]
+        assert extract_plan_url(steps, "Search Flipkart for running shoes") is None
+
+    def test_a_non_navigable_scheme_in_the_query_is_not_a_destination(self):
+        """Same allowlist the value passes enforce: only http(s) names a page."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Email mailto:sales@example.com to ask") is None
+        assert extract_plan_url(steps, "Open about:blank and wait") is None
+
+    def test_sentence_punctuation_is_stripped_from_the_recovered_url(self):
+        """The literal form users write: the URL is mid-sentence, so the comma
+        or full stop is glued to it and would be handed to the browser."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, self.QUERY) == "https://books.toscrape.com"
+        assert extract_plan_url(steps, "Go to https://example.org/a. Then click.") == \
+            "https://example.org/a"
+
+    def test_a_wrapper_scheme_in_the_query_is_not_a_destination(self):
+        """The query pass searched the whole string with no scheme check, so a
+        wrapper scheme recovered its payload and navigated there — the plan
+        passes reject exactly that. Same allowlist, both sides."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Open view-source:https://example.com now") is None
+        assert extract_plan_url(steps, "Open blob:https://example.com/9f8e now") is None
+
+    def test_a_wrapper_scheme_does_not_hide_a_later_real_url(self):
+        """Rejecting the wrapper token must not abandon the query — a genuine
+        URL further along is still the destination."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(
+            steps, "Ignore blob:https://cdn.example.net/x and go to https://real.example.com"
+        ) == "https://real.example.com"
+
+    def test_the_first_url_in_the_query_is_the_destination(self):
+        """Queries read left to right; the opening navigation is the target."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Go to https://first.com then https://second.com") \
+            == "https://first.com"
 
 
 # ─── FORM_ELEMENT_HANDLING port (port checklist #3) ──────────────────────────
@@ -685,6 +832,92 @@ class TestIdentifyElements:
         assert [e["id"] for e in calls[0]["elements"]] == ["elem_1", "elem_2"]
         assert result["steps"][1]["locator"] == "name=q"
         assert result["steps"][2]["locator"] == "css=.product"
+
+    def test_query_url_reaches_the_browser_call_when_the_plan_has_none(self):
+        """The wiring, not the function. extract_plan_url's query pass is unit
+        tested and was replayed over 1,260 captured plans, but both exercise it
+        directly — neither proves identify_elements forwards user_query to it,
+        nor that the browser call then happens at all.
+
+        The 2026-08-02 bench could not close this: every one of its 30 plans
+        carried its own navigation step, so the pass never executed. Without
+        the forward, this plan reaches the documented dead end instead — no
+        URL, no browser call, every element a found:false placeholder."""
+        steps = [
+            _step("New Browser"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, calls = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get the titles of all books",
+            run_tool=run_tool)
+
+        assert len(calls) == 1, "the browser call must happen, not be skipped"
+        assert calls[0]["url"] == "https://books.toscrape.com"
+        assert result["steps"][1]["locator"] == "ol > li"
+        assert result["steps"][1]["found"] is True
+
+    def test_a_query_recovered_url_is_written_back_onto_the_plan(self):
+        """The browser call is only half the run. The Assembler is built from
+        these steps alone (assemble_code_task takes identified_steps_json and
+        nothing else — no query, no URL argument), so a URL recovered from the
+        query would locate elements and then generate a test that never
+        navigates.
+
+        Measured on the 34 captured runs this fallback exists to serve: after
+        the rule-6 improvisation is gone, 0 of 34 still carry a navigation step
+        with a URL and 0 carry any http string anywhere — yet 34 of 34 emitted a
+        New Page with a URL today, because the Assembler read it out of the
+        launch step's value. Blanking that value without writing the recovered
+        URL back reproduces the captured vacuous artifact: New Browser →
+        New Context → Close Browser, a browser opened and closed."""
+        steps = [
+            _step("New Browser"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, _ = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get the titles of all books",
+            run_tool=run_tool)
+
+        values = [s.get("value") for s in result["steps"]]
+        assert "https://books.toscrape.com" in values, (
+            "the Assembler sees only these steps — a URL that reaches the "
+            f"browser call but not the plan generates a test that never "
+            f"navigates; got {values!r}")
+
+    def test_a_url_already_in_the_plan_is_never_rewritten(self):
+        """Write-back is for the recovered case only. When the plan names the
+        destination itself, the steps must come back untouched — the query is
+        the backstop, never an override."""
+        steps = [
+            _step("New Page", value="https://explicit-nav.com"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, calls = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get all titles",
+            run_tool=run_tool)
+
+        assert calls[0]["url"] == "https://explicit-nav.com"
+        assert [s.get("value") for s in result["steps"]][0] == "https://explicit-nav.com"
+        assert "https://books.toscrape.com" not in str(result["steps"])
+
+    def test_a_plan_without_any_url_and_a_query_without_one_still_skips(self):
+        """The complement — the pass must not invent a destination. No URL
+        anywhere means the browser call is skipped, exactly as before."""
+        steps = [_step("New Browser"), _step("Click", description="login button")]
+        run_tool, calls = self._tool_recorder(self._success_response({}))
+        result = identify_elements(steps, "click the login button", run_tool=run_tool)
+
+        assert calls == [], "no URL anywhere → no browser call"
+        assert result["steps"][1]["found"] is False
 
     def test_tool_error_means_no_retry_and_placeholder_path(self):
         """CONTRACT: tool error → one call only, every locator step

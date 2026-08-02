@@ -393,7 +393,6 @@ class RobotTasks:
         # RobotAgents._get_agent_context); the task description used to re-ship
         # both verbatim (~1,130 tokens/run, finding F1).
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
-        self._cached_browser_init = self._get_browser_init_instructions()
 
     def _get_keyword_guidelines(self) -> str:
         """Get MINIMAL keyword guidelines for planning phase."""
@@ -410,28 +409,6 @@ class RobotTasks:
             • Keyboard Actions: Pressing keys
             
             Focus on HIGH-LEVEL steps. Code Assembler handles details.
-            """
-
-    def _get_browser_init_instructions(self) -> str:
-        """Get library-specific browser initialization instructions."""
-        if self.library_context:
-            params = self.library_context.browser_init_params
-            # Browser Library is the only supported target (Task 11/E8)
-            param_list = ', '.join([f'{k}={v}' for k, v in params.items()])
-            return f"""
-    - For Browser Library: Use "New Browser" keyword
-    - Include these parameters: {param_list}
-    - Example: {{"keyword": "New Browser", "browser": "{params.get('browser', 'chromium')}", "headless": "{params.get('headless', 'True')}"}}
-    - DO NOT include 'options' parameter for Browser Library
-            """
-        else:
-            # Fallback when constructed without a context (identification-only
-            # usage in tests) — Browser Library defaults.
-            logger.warning(
-                "No library context available, using Browser Library defaults")
-            return """
-    - Use "New Browser" keyword with browser=chromium and headless parameters
-    - Example: {"keyword": "New Browser", "browser": "chromium", "headless": "True"}
             """
 
     def _get_task_hints(self, role: str) -> str:
@@ -491,7 +468,7 @@ class RobotTasks:
 
             {PromptComponents.PLANNING_LOOP_HANDLING}
 
-            {PromptComponents.PLANNING_OUTPUT_RULES.replace("{browser_init_placeholder}", self._cached_browser_init)}
+            {PromptComponents.PLANNING_OUTPUT_RULES}
 
             """
         return Task(
