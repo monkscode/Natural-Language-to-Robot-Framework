@@ -811,6 +811,56 @@ class TestIdentifyElements:
         assert result["steps"][1]["locator"] == "ol > li"
         assert result["steps"][1]["found"] is True
 
+    def test_a_query_recovered_url_is_written_back_onto_the_plan(self):
+        """The browser call is only half the run. The Assembler is built from
+        these steps alone (assemble_code_task takes identified_steps_json and
+        nothing else — no query, no URL argument), so a URL recovered from the
+        query would locate elements and then generate a test that never
+        navigates.
+
+        Measured on the 34 captured runs this fallback exists to serve: after
+        the rule-6 improvisation is gone, 0 of 34 still carry a navigation step
+        with a URL and 0 carry any http string anywhere — yet 34 of 34 emitted a
+        New Page with a URL today, because the Assembler read it out of the
+        launch step's value. Blanking that value without writing the recovered
+        URL back reproduces the captured vacuous artifact: New Browser →
+        New Context → Close Browser, a browser opened and closed."""
+        steps = [
+            _step("New Browser"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, _ = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get the titles of all books",
+            run_tool=run_tool)
+
+        values = [s.get("value") for s in result["steps"]]
+        assert "https://books.toscrape.com" in values, (
+            "the Assembler sees only these steps — a URL that reaches the "
+            f"browser call but not the plan generates a test that never "
+            f"navigates; got {values!r}")
+
+    def test_a_url_already_in_the_plan_is_never_rewritten(self):
+        """Write-back is for the recovered case only. When the plan names the
+        destination itself, the steps must come back untouched — the query is
+        the backstop, never an override."""
+        steps = [
+            _step("New Page", value="https://explicit-nav.com"),
+            _step("Get Elements", description="all book titles"),
+        ]
+        run_tool, calls = self._tool_recorder(self._success_response({
+            "elem_1": _mapping_entry(locator="ol > li"),
+        }))
+        result = identify_elements(
+            steps, "Go to https://books.toscrape.com, get all titles",
+            run_tool=run_tool)
+
+        assert calls[0]["url"] == "https://explicit-nav.com"
+        assert [s.get("value") for s in result["steps"]][0] == "https://explicit-nav.com"
+        assert "https://books.toscrape.com" not in str(result["steps"])
+
     def test_a_plan_without_any_url_and_a_query_without_one_still_skips(self):
         """The complement — the pass must not invent a destination. No URL
         anywhere means the browser call is skipped, exactly as before."""

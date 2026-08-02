@@ -266,7 +266,11 @@ def _url_candidate(value: Any) -> str | None:
 
 
 def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
-    """The URL is the first navigation step that carries one — nothing is guessed.
+    """The URL is the first navigation step that carries one.
+
+    Four passes, most trusted first; the plan always outranks the query. Only
+    the last pass guesses: it takes the FIRST http(s) URL in the user's own
+    words, which is a guess when the query names more than one.
 
     A navigation step whose value cannot name a page — a non-navigable
     scheme, or prose — is skipped rather than trusted (see _url_candidate for
@@ -351,6 +355,42 @@ def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
         if recovered:
             return recovered
     return None
+
+
+def adopt_recovered_url(steps: list[dict[str, Any]], url: str) -> bool:
+    """Write a URL recovered from the user query back onto the plan.
+
+    extract_plan_url feeds the browser call, but that is only half the run: the
+    Assembler is built from the merged steps and nothing else
+    (tasks.assemble_code_task takes identified_steps_json — no query, no URL
+    argument). A URL that reaches the browser call but not the plan locates
+    every element and then generates a test that never navigates.
+
+    Measured on the 34 captured runs the query pass exists to serve: with the
+    rule-6 improvisation gone, 0 of 34 carry a navigation step with a URL and 0
+    carry any http string anywhere — yet 34 of 34 emitted `New Page <url>`
+    today, because the Assembler read it out of the launch step's value. So the
+    plan is the channel, and this puts the destination back on it.
+
+    A navigation step is the right slot and wins; the launch step is the
+    fallback (the shape the Assembler already handled 34 of 34 times). The
+    value is overwritten unconditionally, which is safe only because the caller
+    reaches here exclusively after every plan pass returned None — so whatever
+    is there is prose, about:blank or nothing, never a usable destination.
+    Returns False when the plan has no slot at all.
+    """
+    fallback: dict[str, Any] | None = None
+    for step in steps:
+        keyword = _normalize_keyword(step.get("keyword"))
+        if keyword in _NAVIGATION_KEYWORDS:
+            step["value"] = url
+            return True
+        if fallback is None and keyword == "new browser":
+            fallback = step
+    if fallback is not None:
+        fallback["value"] = url
+        return True
+    return False
 
 
 def rewrite_form_description(description: str) -> str:
@@ -593,7 +633,17 @@ def identify_elements(
     notify(22, "🔍 Scanning webpage for interactive elements...")
 
     elements, step_element_ids = build_elements(dict_steps)
-    url = extract_plan_url(dict_steps, user_query)
+    url = extract_plan_url(dict_steps)
+    if url is None:
+        # Last resort. The plan named no destination, so fall back to the user's
+        # own words — and put the answer back on the plan, because the Assembler
+        # reads the destination from there and from nowhere else.
+        url = extract_plan_url(dict_steps, user_query)
+        if url is not None and not adopt_recovered_url(dict_steps, url):
+            logger.warning(
+                "Recovered URL %s from the user query but the plan has no "
+                "navigation or launch step to carry it — the browser call will "
+                "run, the generated test will not navigate", url)
     locator_mapping: dict[str, dict[str, Any]] = {}
 
     if elements and url:
