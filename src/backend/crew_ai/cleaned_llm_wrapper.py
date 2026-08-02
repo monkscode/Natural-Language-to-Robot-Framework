@@ -570,9 +570,15 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         # LLM.__init__ has its own same-named `thinking` param (Anthropic-oriented)
         # that is never stored or forwarded, so passing thinking=... as a
         # constructor kwarg above would silently no-op. additional_params is the
-        # only attribute _prepare_completion_params forwards untouched to LiteLLM,
-        # which does map "thinking" to Vertex's thinkingConfig.thinkingBudget.
-        llm.additional_params["thinking"] = {"type": "enabled", "budget_tokens": 0}
+        # only attribute _prepare_completion_params forwards untouched to LiteLLM.
+        #
+        # Send Vertex's own thinkingConfig rather than LiteLLM's `thinking`
+        # shorthand: from litellm 1.94.1 _map_thinking_param routes every
+        # "Gemini 3 or newer" model down a thinkingLevel branch that drops the
+        # budget and emits only includeThoughts=False, which hides thoughts
+        # without stopping them. thinkingConfig reaches generationConfig
+        # untouched and reproduces what 1.75.3 put on the wire.
+        llm.additional_params["thinkingConfig"] = {"thinkingBudget": 0}
         return llm
 
     # model_provider == "gemini" — Google AI Studio.

@@ -352,16 +352,20 @@ class TestCleanedLLMWrapperEmptyRetry:
     """
 
     def _make_wrapper(self):
-        """Live wrapper with real LLMFormattingMonitor so we can assert counters."""
+        """Live wrapper with real LLMFormattingMonitor so we can assert counters.
+
+        Built through the real constructor. The previous shortcut —
+        object.__new__ plus a stubbed BaseLLM.__init__ — stopped working on
+        crewai 1.15: BaseLLM is a Pydantic model there, so Pydantic converts
+        the single-underscore class constants (_EMPTY_RETRY_BASE_SECONDS,
+        _EMPTY_RETRY_CAP_SECONDS) into private attributes served out of
+        __pydantic_private__, and skipping BaseLLM.__init__ leaves that dict
+        uninitialised. Reading either constant then raises AttributeError.
+        Production was never affected: CleanedLLMWrapper.__new__ calls
+        BaseLLM.__init__ for real, so wrappers from get_llm() initialise it.
+        """
         from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
-        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
-        with patch("crewai.llm.BaseLLM.__init__", return_value=None):
-            instance = object.__new__(CleanedLLMWrapper)
-            instance.model = "vertex_ai/gemini-3.5-flash"
-            instance.context_window_size = 0
-            instance._monitor = LLMFormattingMonitor()
-            instance.base_url = None
-            return instance
+        return CleanedLLMWrapper(model="vertex_ai/gemini-3.5-flash")
 
     def _patch_settings(self, max_retries: int):
         """Patch settings.LLM_EMPTY_RESPONSE_MAX_RETRIES for the wrapper's lazy import."""

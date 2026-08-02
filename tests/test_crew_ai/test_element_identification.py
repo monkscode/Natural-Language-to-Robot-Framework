@@ -199,6 +199,65 @@ class TestExtractPlanUrl:
         steps = [_step("Open Browser", value="Flipkart")]
         assert extract_plan_url(steps) == "Flipkart"
 
+    def test_compound_value_packing_params_and_url_still_yields_the_url(self):
+        """Measured on the crewai 1.15.10 bench (q01 rep2/rep3): with every
+        PlannedStep field forced required and non-null, the planner packed the
+        browser params AND the destination into one value and emitted no
+        navigation step. The first token is 'chromium,' — no scheme, no dot,
+        not alone — so both existing passes returned None, the browser call was
+        skipped and every element got a found:false placeholder.
+
+        PlannedStep has no browser field (see the dotless-site-name test), so
+        params riding in `value` is a shape the planner has always produced —
+        21 of 30 plans in the 2026-07-31 baseline carry them. Only the packed
+        variant is unreachable, and it must not cost the whole run."""
+        steps = [_step("New Browser",
+                       value="chromium, headless=True, url=https://github.com/monkscode"),
+                 _step("Get Text", description="the first pinned repository title")]
+        assert extract_plan_url(steps) == "https://github.com/monkscode"
+
+    def test_compound_value_led_by_the_url_drops_the_trailing_separator(self):
+        """Same bench, q10 rep3: value 'https://books.toscrape.com, browser=
+        chromium, headless=True'. The first token carries a navigable scheme,
+        so it was returned verbatim — including the comma — and handed to the
+        browser service as the navigation target. A silent mangle rather than a
+        loud skip, and reachable on crewai 1.8.1 too."""
+        steps = [_step("New Browser",
+                       value="https://books.toscrape.com, browser=chromium, headless=True")]
+        assert extract_plan_url(steps) == "https://books.toscrape.com"
+
+    def test_packed_url_followed_by_sentence_punctuation_is_trimmed(self):
+        """Same bench, q09 rep1: the planner narrated inside the value and left
+        a full stop glued to the URL. Same silent-mangle class as the comma —
+        the browser service would be handed a host that is not the one the
+        query named."""
+        steps = [_step("New Browser",
+                       value="setup chromium then open https://example.org/tryit.asp?x=1. Next step")]
+        assert extract_plan_url(steps) == "https://example.org/tryit.asp?x=1"
+
+    def test_compound_params_without_any_url_still_yield_none(self):
+        """The fallback must not invent a destination. This is the 21-of-30
+        baseline shape once the separate navigation step is removed: browser
+        params and nothing else."""
+        steps = [_step("New Browser", value="browser=chromium, headless=True"),
+                 _step("Input Text", description="search box", value="Cierra")]
+        assert extract_plan_url(steps) is None
+
+    def test_embedded_non_navigable_scheme_is_not_resurrected(self):
+        """about:blank and mailto: are rejected by the existing passes on
+        purpose. Scanning inside a value must not be the hole that lets them
+        back in."""
+        steps = [_step("New Browser", value="open about:blank then wait"),
+                 _step("Click", description="contact mailto:sales@example.com")]
+        assert extract_plan_url(steps) is None
+
+    def test_navigation_step_still_beats_a_packed_compound_value(self):
+        """Pass order is unchanged: a real navigation keyword outranks anything
+        recovered from inside another step's value."""
+        steps = [_step("New Browser", value="chromium, url=https://fallback.com"),
+                 _step("Go To", value="https://explicit-nav.com")]
+        assert extract_plan_url(steps) == "https://explicit-nav.com"
+
     def test_scheme_less_host_port_is_returned(self):
         """Same class as the exemplar: no dot, still a real destination."""
         steps = [_step("New Page", value="localhost:3000")]

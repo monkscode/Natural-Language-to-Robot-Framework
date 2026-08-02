@@ -132,6 +132,20 @@ _NAVIGABLE_SCHEMES = frozenset({"http", "https"})
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
 _PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
 
+# An absolute URL buried inside a longer value. PlannedStep has no browser
+# field, so the planner packs browser params into `value` — 21 of the 30 plans
+# in the 2026-07-31 baseline do. Usually they ride on their own step and the
+# destination stays separate; when the destination is packed in beside them
+# ("chromium, headless=True, url=https://...") the token-based passes cannot
+# see it. Restricted to the navigable schemes so this cannot readmit
+# about:blank or mailto:, which the passes above reject deliberately.
+_EMBEDDED_URL_RE = re.compile(r"https?://[^\s,;'\"<>]+", re.IGNORECASE)
+
+# Punctuation the planner leaves glued to a URL when it packs one into a list
+# or a sentence. A trailing dot is sentence punctuation here, never a root-zone
+# label — the browser service would resolve the mangled host either way.
+_VALUE_SEPARATORS = ",;."
+
 # Schemes to reject even when a bare port is what follows the colon. This is
 # the one shape the port test cannot resolve on structure: `tel` and
 # `localhost` are both valid host labels, so "tel:12345" and "localhost:12345"
@@ -236,7 +250,13 @@ def _url_candidate(value: Any) -> str | None:
     tokens = (value or "").strip().split()
     if not tokens:
         return None
-    candidate = tokens[0]
+    # A packed value leaves its separator glued to the URL
+    # ("https://books.toscrape.com, browser=chromium"), which otherwise rode
+    # through into the navigation target as a silent mangle rather than a
+    # loud skip.
+    candidate = tokens[0].rstrip(_VALUE_SEPARATORS)
+    if not candidate:
+        return None
     scheme = _explicit_scheme(candidate)
     if scheme:
         return candidate if scheme in _NAVIGABLE_SCHEMES else None
@@ -277,6 +297,23 @@ def extract_plan_url(steps: list[Any]) -> str | None:
         candidate = _url_candidate(step.get("value"))
         if candidate and _explicit_scheme(candidate) in _NAVIGABLE_SCHEMES:
             return candidate
+    # Last resort: an absolute URL packed inside a longer value. Least
+    # trusted, so it runs only after both token-based passes have failed.
+    #
+    # Scanned per token, skipping any token whose own leading scheme is
+    # non-navigable: "blob:https://x/9f8e" and "view-source:https://x" embed a
+    # real URL inside a scheme the passes above reject on purpose, and a plain
+    # search would hand it back as a navigation target.
+    for step in dict_steps:
+        for token in str(step.get("value") or "").split():
+            scheme = _explicit_scheme(token)
+            if scheme and scheme not in _NAVIGABLE_SCHEMES:
+                continue
+            match = _EMBEDDED_URL_RE.search(token)
+            if match:
+                recovered = match.group(0).rstrip(_VALUE_SEPARATORS)
+                if recovered:
+                    return recovered
     return None
 
 
