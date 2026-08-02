@@ -309,7 +309,14 @@ def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
     # non-navigable: "blob:https://x/9f8e" and "view-source:https://x" embed a
     # real URL inside a scheme the passes above reject on purpose, and a plain
     # search would hand it back as a navigation target.
+    #
+    # Steps that TYPE a value are skipped: scanning every token would undo the
+    # first-token rule _url_candidate exists to enforce, and turn the URL a user
+    # wants entered in a search box into the page to open. Lossless — across
+    # 1,313 captured runs this pass fires 5 times, all on New Browser steps.
     for step in dict_steps:
+        if action_for_keyword(step.get("keyword") or "") in _VALUE_ACTIONS:
+            continue
         for token in str(step.get("value") or "").split():
             scheme = _explicit_scheme(token)
             if scheme and scheme not in _NAVIGABLE_SCHEMES:

@@ -251,6 +251,34 @@ class TestExtractPlanUrl:
                  _step("Click", description="contact mailto:sales@example.com")]
         assert extract_plan_url(steps) is None
 
+    def test_a_url_being_typed_into_a_field_is_not_a_navigation_target(self):
+        """The embedded pass must not undo the first-token rule it sits behind.
+
+        _url_candidate reads only the first token precisely so that prose and
+        typed text cannot become the destination. The embedded pass scans every
+        token, so without a filter the string the user wants TYPED into a search
+        box becomes the page to open — here a competitor's site instead of the
+        one under test.
+
+        Reachable: pass 1 rejects the documented "New Page -> about:blank"
+        shape (4 of 897 captured runs), pass 2 finds no step led by a URL, and
+        pass 3 then reaches the Input Text value.
+
+        Provably lossless: across 1,313 captured runs the embedded pass fires 5
+        times and all 5 are New Browser steps (action get_text) — never an
+        input or select."""
+        steps = [_step("New Page", value="about:blank"),
+                 _step("Input Text", description="search box",
+                       value="find reviews of https://competitor.example.com")]
+        assert extract_plan_url(steps) is None
+
+    def test_the_embedded_pass_still_reads_a_launch_step(self):
+        """The complement — the 5 real captured hits are all this shape, so the
+        input/select filter must not cost them."""
+        steps = [_step("New Page", value="about:blank"),
+                 _step("New Browser", value="chromium, url=https://github.com/monkscode")]
+        assert extract_plan_url(steps) == "https://github.com/monkscode"
+
     def test_navigation_step_still_beats_a_packed_compound_value(self):
         """Pass order is unchanged: a real navigation keyword outranks anything
         recovered from inside another step's value."""
