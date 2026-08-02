@@ -132,6 +132,11 @@ _NAVIGABLE_SCHEMES = frozenset({"http", "https"})
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
 _PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
 
+# The scheme sitting directly in front of an embedded URL. Anchored to the END
+# of the text before the match, so it sees the wrapper in both "blob:https://x"
+# and "url=blob:https://x" — the leading-scheme test only saw the first.
+_PRECEDING_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):$")
+
 # An absolute URL buried inside a longer value. PlannedStep has no browser
 # field, so the planner packs browser params into `value` — 21 of the 30 plans
 # in the 2026-07-31 baseline do. Usually they ride on their own step and the
@@ -139,7 +144,14 @@ _PORT_RE = re.compile(r"^\d{1,5}(?:[/?#]|$)")
 # ("chromium, headless=True, url=https://...") the token-based passes cannot
 # see it. Restricted to the navigable schemes so this cannot readmit
 # about:blank or mailto:, which the passes above reject deliberately.
-_EMBEDDED_URL_RE = re.compile(r"https?://[^\s,;'\"<>]+", re.IGNORECASE)
+#
+# The comma is NOT a terminator: it is legal in an HTTP path or query, and
+# excluding it truncated "?tags=python,robot" to "?tags=python" — a valid URL
+# for a DIFFERENT page, which navigates and tests the wrong thing instead of
+# failing loudly. A genuinely trailing comma is still removed, by the rstrip
+# below. The semicolon stays excluded: it separates packed fields
+# ("url=https://x;browser=chromium") and has no such rescue.
+_EMBEDDED_URL_RE = re.compile(r"https?://[^\s;'\"<>]+", re.IGNORECASE)
 
 # Punctuation the planner leaves glued to a URL when it packs one into a list
 # or a sentence. A trailing dot is sentence punctuation here, never a root-zone
@@ -183,6 +195,12 @@ def _explicit_scheme(candidate: str) -> str | None:
     if _PORT_RE.match(candidate[match.end():]) and scheme not in _NUMERIC_PAYLOAD_SCHEMES:
         return None
     return scheme
+
+
+def _preceding_scheme(prefix: str) -> str | None:
+    """The URI scheme the text ends on, lowercased, or None."""
+    match = _PRECEDING_SCHEME_RE.search(prefix)
+    return match.group(1).lower() if match else None
 
 
 def _normalize_keyword(keyword: str | None) -> str:
@@ -297,44 +315,16 @@ def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
     (see the user_query pass below).
     """
     dict_steps = [_as_dict(step) for step in steps]
-    for step in dict_steps:
-        if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
-            candidate = _url_candidate(step.get("value"))
-            if candidate:
-                return candidate
-    for step in dict_steps:
-        candidate = _url_candidate(step.get("value"))
-        if candidate and _explicit_scheme(candidate) in _NAVIGABLE_SCHEMES:
-            return candidate
-    # Last resort: an absolute URL packed inside a longer value. Least
-    # trusted, so it runs only after both token-based passes have failed.
-    #
-    # Scanned per token, skipping any token whose own leading scheme is
-    # non-navigable: "blob:https://x/9f8e" and "view-source:https://x" embed a
-    # real URL inside a scheme the passes above reject on purpose, and a plain
-    # search would hand it back as a navigation target.
-    #
-    # Steps that TYPE a value are skipped: scanning every token would undo the
-    # first-token rule _url_candidate exists to enforce, and turn the URL a user
-    # wants entered in a search box into the page to open. Lossless — across
-    # 1,313 captured runs this pass fires 5 times, all on New Browser steps.
-    for step in dict_steps:
-        if action_for_keyword(step.get("keyword") or "") in _VALUE_ACTIONS:
-            continue
-        for token in str(step.get("value") or "").split():
-            scheme = _explicit_scheme(token)
-            if scheme and scheme not in _NAVIGABLE_SCHEMES:
-                continue
-            match = _EMBEDDED_URL_RE.search(token)
-            if match:
-                recovered = match.group(0).rstrip(_VALUE_SEPARATORS)
-                if recovered:
-                    return recovered
-    # Every pass above reads the plan. When the planner names no destination on
-    # any step, they all return None together and the run is already lost:
-    # identify_elements skips the browser call and hands every element a
-    # found:false placeholder. The user wrote the URL down too, and that copy
-    # is the one the planner cannot corrupt.
+    for find_url in (_url_on_a_navigation_step,
+                     _url_led_by_a_step_value,
+                     _url_embedded_in_a_step_value):
+        url = find_url(dict_steps)
+        if url:
+            return url
+    # Last resort — the user's own words. Every pass above reads the plan, so
+    # they fail together when the planner names no destination anywhere, and
+    # the run is then already lost: identify_elements skips the browser call
+    # and hands every element a found:false placeholder.
     #
     # This is not a new capability, it is an existing one made deliberate.
     # Measured over 1,260 captured runs with parseable plans, 34 reached a URL
@@ -349,8 +339,71 @@ def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
     # Runs last on purpose: the plan is the more specific signal, and output
     # rule 5's search-engine default must be able to send a URL-bearing query
     # somewhere other than the URL it names.
-    match = _EMBEDDED_URL_RE.search(user_query or "")
-    if match:
+    return _recover_embedded_url(user_query)
+
+
+def _url_on_a_navigation_step(dict_steps: list[dict[str, Any]]) -> str | None:
+    """Pass 1 — the destination where the contract says it lives."""
+    for step in dict_steps:
+        if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
+            candidate = _url_candidate(step.get("value"))
+            if candidate:
+                return candidate
+    return None
+
+
+def _url_led_by_a_step_value(dict_steps: list[dict[str, Any]]) -> str | None:
+    """Pass 2 — a value that *starts* with a literal URL, on any keyword.
+
+    The planner's keyword vocabulary is a free string, so the URL sometimes
+    rides on a non-navigation step (bench 2026-07-11 q03: keyword "New
+    Browser", value=<url> — the whitelist miss skipped the browser call and
+    every element got a found:false placeholder).
+    """
+    for step in dict_steps:
+        candidate = _url_candidate(step.get("value"))
+        if candidate and _explicit_scheme(candidate) in _NAVIGABLE_SCHEMES:
+            return candidate
+    return None
+
+
+def _url_embedded_in_a_step_value(dict_steps: list[dict[str, Any]]) -> str | None:
+    """Pass 3 — a URL buried mid-value, e.g. "chromium, url=https://...".
+
+    Steps that TYPE a value are skipped: scanning every token would undo the
+    first-token rule _url_candidate exists to enforce, and turn the URL a user
+    wants entered in a search box into the page to open. Lossless — across
+    1,313 captured runs this pass fires 5 times, all on New Browser steps.
+    """
+    for step in dict_steps:
+        if action_for_keyword(step.get("keyword") or "") in _VALUE_ACTIONS:
+            continue
+        recovered = _recover_embedded_url(step.get("value"))
+        if recovered:
+            return recovered
+    return None
+
+
+def _recover_embedded_url(text: Any) -> str | None:
+    """The first absolute http(s) URL inside free text, or None.
+
+    Scanned per whitespace token so a wrapper scheme cannot smuggle its payload
+    past the allowlist: "blob:https://x/9f8e" and "view-source:https://x" embed
+    a real URL inside a scheme the passes above reject on purpose.
+
+    The scheme tested is the one IMMEDIATELY BEFORE the match, not the token's
+    leading one. Testing the token's start looked equivalent and was not:
+    "url=blob:https://x" has no token-leading scheme at all — `=` is not a
+    scheme character, so the match fails and the guard waved it through — and
+    packed field labels are precisely the shape this pass exists to read.
+    """
+    for token in str(text or "").split():
+        match = _EMBEDDED_URL_RE.search(token)
+        if not match:
+            continue
+        scheme = _preceding_scheme(token[:match.start()])
+        if scheme and scheme not in _NAVIGABLE_SCHEMES:
+            continue
         recovered = match.group(0).rstrip(_VALUE_SEPARATORS)
         if recovered:
             return recovered

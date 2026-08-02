@@ -279,6 +279,38 @@ class TestExtractPlanUrl:
                  _step("New Browser", value="chromium, url=https://github.com/monkscode")]
         assert extract_plan_url(steps) == "https://github.com/monkscode"
 
+    def test_a_comma_inside_the_query_string_is_not_a_terminator(self):
+        """A comma is legal in an HTTP path or query. Excluding it from the
+        match class truncated `?tags=python,robot` to `?tags=python` — not a
+        loud mangle but a VALID URL for a different page, which is the worst
+        shape: the run navigates, locates, and tests the wrong thing.
+
+        The comma still terminates in practice where it matters, because
+        rstrip(_VALUE_SEPARATORS) removes it when it is genuinely trailing.
+        The semicolon stays excluded — it is a real packed-value separator
+        ("url=https://x;browser=chromium") with no such rescue."""
+        steps = [_step("New Browser",
+                       value="chromium, url=https://example.org/s?tags=python,robot")]
+        assert extract_plan_url(steps) == "https://example.org/s?tags=python,robot"
+
+    def test_a_semicolon_still_separates_packed_fields(self):
+        steps = [_step("New Browser", value="url=https://example.com;browser=chromium")]
+        assert extract_plan_url(steps) == "https://example.com"
+
+    def test_a_packed_field_label_cannot_smuggle_a_non_navigable_scheme(self):
+        """The scheme guard read only the START of the token, but `url=` breaks
+        the scheme match (`=` is not a scheme character), so `_explicit_scheme`
+        returned None and the guard passed — then the regex recovered the
+        embedded https URL. blob: and view-source: wrap a real URL inside a
+        scheme the passes above reject on purpose; the packed form is the shape
+        this pass exists to read, so it is exactly where the hole was."""
+        assert extract_plan_url(
+            [_step("New Browser", value="chromium, url=blob:https://example.com/9f8e")]
+        ) is None
+        assert extract_plan_url(
+            [_step("New Browser", value="chromium, url=view-source:https://example.com")]
+        ) is None
+
     def test_navigation_step_still_beats_a_packed_compound_value(self):
         """Pass order is unchanged: a real navigation keyword outranks anything
         recovered from inside another step's value."""
@@ -438,6 +470,22 @@ class TestExtractPlanUrlFromUserQuery:
         assert extract_plan_url(steps, self.QUERY) == "https://books.toscrape.com"
         assert extract_plan_url(steps, "Go to https://example.org/a. Then click.") == \
             "https://example.org/a"
+
+    def test_a_wrapper_scheme_in_the_query_is_not_a_destination(self):
+        """The query pass searched the whole string with no scheme check, so a
+        wrapper scheme recovered its payload and navigated there — the plan
+        passes reject exactly that. Same allowlist, both sides."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Open view-source:https://example.com now") is None
+        assert extract_plan_url(steps, "Open blob:https://example.com/9f8e now") is None
+
+    def test_a_wrapper_scheme_does_not_hide_a_later_real_url(self):
+        """Rejecting the wrapper token must not abandon the query — a genuine
+        URL further along is still the destination."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(
+            steps, "Ignore blob:https://cdn.example.net/x and go to https://real.example.com"
+        ) == "https://real.example.com"
 
     def test_the_first_url_in_the_query_is_the_destination(self):
         """Queries read left to right; the opening navigation is the target."""
