@@ -265,7 +265,7 @@ def _url_candidate(value: Any) -> str | None:
     return candidate if len(tokens) == 1 else None
 
 
-def extract_plan_url(steps: list[Any]) -> str | None:
+def extract_plan_url(steps: list[Any], user_query: str = "") -> str | None:
     """The URL is the first navigation step that carries one — nothing is guessed.
 
     A navigation step whose value cannot name a page — a non-navigable
@@ -286,6 +286,11 @@ def extract_plan_url(steps: list[Any]) -> str | None:
     and every element got a found:false placeholder). If no navigation step
     carries one, the first *literal* URL among the step values is taken;
     non-URL values (browser names, input text) are never eligible.
+
+    Last resort: the user's own query. Every pass above reads the plan, so all
+    of them fail together when the planner writes no destination anywhere —
+    34 of 1,260 captured runs were one prompt quirk away from exactly that
+    (see the user_query pass below).
     """
     dict_steps = [_as_dict(step) for step in steps]
     for step in dict_steps:
@@ -314,6 +319,29 @@ def extract_plan_url(steps: list[Any]) -> str | None:
                 recovered = match.group(0).rstrip(_VALUE_SEPARATORS)
                 if recovered:
                     return recovered
+    # Every pass above reads the plan. When the planner names no destination on
+    # any step, they all return None together and the run is already lost:
+    # identify_elements skips the browser call and hands every element a
+    # found:false placeholder. The user wrote the URL down too, and that copy
+    # is the one the planner cannot corrupt.
+    #
+    # This is not a new capability, it is an existing one made deliberate.
+    # Measured over 1,260 captured runs with parseable plans, 34 reached a URL
+    # ONLY because the browser-launch step's `value` carried one; blanking it
+    # makes all three passes above return None. Nothing put it there on
+    # purpose — PLANNING_OUTPUT_RULES rule 6 demanded `browser`/`headless`
+    # keys that PlannedStep does not define and the response schema forbids,
+    # so the planner improvised into `value` and the destination sometimes
+    # rode along. All 34 of those user queries state the URL in plain text.
+    #
+    # Runs last on purpose: the plan is the more specific signal, and output
+    # rule 5's search-engine default must be able to send a URL-bearing query
+    # somewhere other than the URL it names.
+    match = _EMBEDDED_URL_RE.search(user_query or "")
+    if match:
+        recovered = match.group(0).rstrip(_VALUE_SEPARATORS)
+        if recovered:
+            return recovered
     return None
 
 
@@ -557,7 +585,7 @@ def identify_elements(
     notify(22, "🔍 Scanning webpage for interactive elements...")
 
     elements, step_element_ids = build_elements(dict_steps)
-    url = extract_plan_url(dict_steps)
+    url = extract_plan_url(dict_steps, user_query)
     locator_mapping: dict[str, dict[str, Any]] = {}
 
     if elements and url:

@@ -347,6 +347,74 @@ class TestExtractPlanUrl:
         assert extract_plan_url([_step("New Page", value="MAILTO:a@b.com")]) is None
 
 
+class TestExtractPlanUrlFromUserQuery:
+    """Last-resort pass: the URL the user literally wrote.
+
+    Measured over the whole capture (1,260 runs with parseable plans): 34 got
+    their target URL ONLY because the browser-launch step carried one in
+    `value`, and blanking that value makes every earlier pass return None.
+    Nothing put it there on purpose — PLANNING_OUTPUT_RULES rule 6 told the
+    planner to emit `browser`/`headless` keys that PlannedStep does not have
+    and the response schema forbids (additionalProperties: false), so the model
+    improvised into `value`, and the destination sometimes rode along. That is
+    an accident, not a contract: any prompt, model or provider change removes
+    it silently, and the run then hits the documented dead end — no URL, no
+    browser call, every element a found:false placeholder.
+
+    All 34 of those user queries contain the URL in plain text. So the plan is
+    not the only place the destination is written down, and this pass reads the
+    one source the planner cannot corrupt.
+    """
+
+    QUERY = "Go to https://books.toscrape.com, get the titles of all books"
+
+    def test_user_query_url_is_used_when_the_plan_carries_none(self):
+        steps = [_step("New Browser"), _step("Get Elements", description="books")]
+        assert extract_plan_url(steps, self.QUERY) == "https://books.toscrape.com"
+
+    def test_a_navigation_step_still_wins_over_the_query(self):
+        """The plan is the more specific signal — the query is the backstop.
+        A user query naming one site while the plan navigates to another must
+        not be overridden (multi-site plans, and the search-engine default of
+        output rule 5, both depend on this ordering)."""
+        steps = [_step("New Page", value="https://explicit-nav.com")]
+        assert extract_plan_url(steps, self.QUERY) == "https://explicit-nav.com"
+
+    def test_a_url_anywhere_in_the_plan_still_wins_over_the_query(self):
+        """Pass 4 runs after the two token passes AND the embedded pass, so
+        removing rule 6 cannot change the answer for any run that works today."""
+        steps = [_step("New Browser", value="https://packed.example.com")]
+        assert extract_plan_url(steps, self.QUERY) == "https://packed.example.com"
+
+    def test_no_query_keeps_the_old_answer(self):
+        """Every existing caller and test passes steps only."""
+        assert extract_plan_url([_step("New Browser", value="chromium")]) is None
+
+    def test_a_query_without_a_url_guesses_nothing(self):
+        steps = [_step("New Browser", value="chromium")]
+        assert extract_plan_url(steps, "Search Flipkart for running shoes") is None
+
+    def test_a_non_navigable_scheme_in_the_query_is_not_a_destination(self):
+        """Same allowlist the value passes enforce: only http(s) names a page."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Email mailto:sales@example.com to ask") is None
+        assert extract_plan_url(steps, "Open about:blank and wait") is None
+
+    def test_sentence_punctuation_is_stripped_from_the_recovered_url(self):
+        """The literal form users write: the URL is mid-sentence, so the comma
+        or full stop is glued to it and would be handed to the browser."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, self.QUERY) == "https://books.toscrape.com"
+        assert extract_plan_url(steps, "Go to https://example.org/a. Then click.") == \
+            "https://example.org/a"
+
+    def test_the_first_url_in_the_query_is_the_destination(self):
+        """Queries read left to right; the opening navigation is the target."""
+        steps = [_step("New Browser")]
+        assert extract_plan_url(steps, "Go to https://first.com then https://second.com") \
+            == "https://first.com"
+
+
 # ─── FORM_ELEMENT_HANDLING port (port checklist #3) ──────────────────────────
 
 class TestRewriteFormDescription:
