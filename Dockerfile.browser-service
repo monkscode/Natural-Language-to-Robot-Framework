@@ -14,13 +14,26 @@ WORKDIR /app
 # that declaration since it has no langchain imports, which broke this image's startup.
 # requirements-bus.txt already declares PyYAML for the local bus venv for the same reason.
 #
-# EVERY VERSION IS PINNED. Left unpinned, two builds of the same commit produce
-# different images: merging any PR into the browser-service repo auto-publishes a
-# patch bump to PyPI, and browser-service is what drags in browser-use — so an
-# unpinned line here silently overrides the browser-use version Phase 2 chose.
-# Pins are the set measured inside monkscode/nlrf:browser-service-latest on
-# 2026-08-03, i.e. what production is already running; this freezes that set, it
-# does not change it.
+# EVERY DIRECTLY-INSTALLED PACKAGE IS PINNED. Left unpinned, two builds of the
+# same commit produce different images: merging any PR into the browser-service
+# repo auto-publishes a patch bump to PyPI, and browser-service is what drags in
+# browser-use — so an unpinned line here silently overrides the browser-use
+# version Phase 2 chose. Pins are the set measured inside
+# monkscode/nlrf:browser-service-latest on 2026-08-03, i.e. what production is
+# already running; this freezes that set, it does not change it.
+#
+# Two mutable surfaces remain, deliberately, and this is NOT a fully reproducible
+# image:
+#   1. BASE_IMAGE is a tag, not a digest — it carries Python, UV, Chrome and the
+#      OS libraries. Pinning a digest here would not help CI, which rebuilds the
+#      base per branch and passes the fresh tag in as `base_image_tag`
+#      (build-images.yml), overriding this ARG entirely; it would only pin local
+#      builds and would fight the documented `--build-arg BASE_IMAGE=...-local`
+#      flow. The base is reproduced by rebuilding it, not by pinning it.
+#   2. Transitive dependencies of these pins are not locked. Closing that needs a
+#      generated lockfile plus `uv pip sync`. Note requirements-bus.txt is NOT
+#      reusable for it — it would add traceloop-sdk and the OTel stack (absent
+#      here) and downgrade pydantic-settings 2.14.2 -> 2.10.1.
 #
 # These are NOT the same versions as requirements-bus.txt (playwright 1.57.0,
 # structlog 25.5.0, Flask 3.1.2, pydantic-settings 2.10.1), which is what the bench
