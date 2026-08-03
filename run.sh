@@ -82,10 +82,35 @@ else
     VENV_ACTIVATE="$VENV_DIR/bin/activate"
 fi
 
+# A venv is only as fresh as the manifest it was built from. Both blocks below used to
+# install ONLY when the venv was missing, so editing a requirements file left an existing
+# venv silently stale — and the bench then measures package versions the manifest does
+# not claim. That is how the playwright bench-vs-container fork could reappear after
+# being closed. Each venv now stores a hash of its manifest and reinstalls in place when
+# it changes. In place, never renamed: uv console-script trampolines hardcode an absolute
+# interpreter path.
+_req_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+BACKEND_REQ="src/backend/requirements.txt"
+VENV_STAMP="$VENV_DIR/.requirements-hash"
+BACKEND_HASH="$(_req_hash "$BACKEND_REQ")"
+
 # Check if venv exists and is valid
 if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     echo "Using existing virtual environment..."
     source "$VENV_ACTIVATE"
+    if [ "$(cat "$VENV_STAMP" 2>/dev/null)" != "$BACKEND_HASH" ]; then
+        echo "$BACKEND_REQ changed — updating virtual environment..."
+        command -v uv >/dev/null 2>&1 || pip install uv
+        uv pip install -r "$BACKEND_REQ"
+        echo "$BACKEND_HASH" > "$VENV_STAMP"
+    fi
 else
     echo "Creating new virtual environment..."
     # Remove invalid venv if it exists
@@ -94,8 +119,9 @@ else
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install uv
-    uv pip install -r src/backend/requirements.txt
+    uv pip install -r "$BACKEND_REQ"
     uv pip install pytest pytest-asyncio pytest-cov
+    echo "$BACKEND_HASH" > "$VENV_STAMP"
 fi
 
 # --- Browser-use service venv (isolated — see requirements-bus.txt header) ---
@@ -105,12 +131,22 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; t
 else
     BUS_PY="$BUS_VENV_DIR/bin/python"
 fi
+BUS_STAMP="$BUS_VENV_DIR/.requirements-hash"
+BUS_HASH="$(_req_hash requirements-bus.txt)"
 if [ ! -f "$BUS_PY" ]; then
     echo "Creating browser-service virtual environment..."
     [ -d "$BUS_VENV_DIR" ] && rm -rf "$BUS_VENV_DIR"
     python -m venv "$BUS_VENV_DIR"
     "$BUS_PY" -m pip install -r requirements-bus.txt
     "$BUS_PY" -m playwright install chromium
+    echo "$BUS_HASH" > "$BUS_STAMP"
+elif [ "$(cat "$BUS_STAMP" 2>/dev/null)" != "$BUS_HASH" ]; then
+    # Reinstall the browser too: the pin that changed may be playwright itself, and the
+    # engine is what the locator stack resolves against.
+    echo "requirements-bus.txt changed — updating browser-service virtual environment..."
+    "$BUS_PY" -m pip install -r requirements-bus.txt
+    "$BUS_PY" -m playwright install chromium
+    echo "$BUS_HASH" > "$BUS_STAMP"
 fi
 
 # --- Postgres (auth + learning stack live here as of Phase 4) ---
