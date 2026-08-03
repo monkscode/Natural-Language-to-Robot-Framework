@@ -502,6 +502,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         PROVIDER_PREFIXES,
         resolve_model_string,
         resolve_completion_kwargs,
+        resolve_thinking_kwargs,
     )
 
     if model_provider not in PROVIDER_PREFIXES:
@@ -565,31 +566,19 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
             is_litellm=True,
             **schema_kwargs,
         )
-        # Vertex flipped gemini-3.5-flash to server-side thinking-ON (2026-07-18),
-        # inflating completion tokens 4-6x and burning TPM/RPD quota. crewai's
-        # LLM.__init__ has its own same-named `thinking` param (Anthropic-oriented)
-        # that is never stored or forwarded, so passing thinking=... as a
+        # The thinking guard itself lives in llm_provider_routing so that every
+        # LiteLLM call site reads one rule — see resolve_thinking_kwargs for why
+        # it carries thinkingConfig rather than `thinking`, why it is gated on
+        # the model family, and why it must be handed the routed model string.
+        #
+        # It has to land in additional_params post-construction: crewai's
+        # LLM.__init__ has its own same-named `thinking` param (Anthropic-
+        # oriented) that is never stored or forwarded, so passing it as a
         # constructor kwarg above would silently no-op. additional_params is the
         # only attribute _prepare_completion_params forwards untouched to LiteLLM.
-        #
-        # Send Vertex's own thinkingConfig rather than LiteLLM's `thinking`
-        # shorthand: from litellm 1.94.1 _map_thinking_param routes every
-        # "Gemini 3 or newer" model down a thinkingLevel branch that drops the
-        # budget and emits only includeThoughts=False, which hides thoughts
-        # without stopping them. thinkingConfig reaches generationConfig
-        # untouched and reproduces what 1.75.3 put on the wire.
-        #
-        # Gated on the model family, because that same switch removed the loud
-        # failure that used to cover this. Vertex also serves Anthropic, Llama
-        # and Mistral, and resolve_model_string does not check the family —
-        # ONLINE_MODEL is a free string, so one config edit reaches here with a
-        # non-Gemini model. Measured on the pinned litellm 1.75.3: `thinking`
-        # raised UnsupportedParamsError on llama/mistral and mapped to a real
-        # Anthropic param on claude, while thinkingConfig is accepted silently
-        # by all three and would ship a Gemini-only generationConfig field to a
-        # non-Gemini endpoint.
-        if "gemini" in routed_model.lower():
-            llm.additional_params["thinkingConfig"] = {"thinkingBudget": 0}
+        llm.additional_params.update(
+            resolve_thinking_kwargs(model_provider, routed_model)
+        )
         return llm
 
     # model_provider == "gemini" — Google AI Studio.

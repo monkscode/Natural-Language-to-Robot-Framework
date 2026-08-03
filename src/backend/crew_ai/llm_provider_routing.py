@@ -12,6 +12,9 @@ Scope (deliberately narrow):
   does not derive from env vars on its own (currently only Ollama's
   api_base; Gemini and Vertex auth comes from env vars LiteLLM reads
   natively).
+- Resolve the Vertex thinking guard, which is a fact about the provider and
+  model family rather than about any one caller, so every LiteLLM call site
+  gets it from the same place.
 
 What this module does NOT own — those are call-site policy, not routing:
 - Timeout / retry behavior (agents are long-running; triggers are snappy)
@@ -78,4 +81,47 @@ def resolve_completion_kwargs(provider: str) -> dict:
         return {
             "api_base": os.getenv("OLLAMA_API_BASE", "http://localhost:11434"),
         }
+    return {}
+
+
+def resolve_thinking_kwargs(provider: str, routed_model: str) -> dict:
+    """Vertex thinking guard — one rule, every LiteLLM call site.
+
+    Vertex flipped gemini-3.5-flash to server-side thinking-ON (2026-07-18),
+    inflating completion tokens 4-6x and burning TPM/RPD quota. Every call we
+    make to a Gemini model on Vertex must carry a zero budget.
+
+    Lives here rather than at a call site because it is a fact about the
+    provider, not about the caller: it was originally encoded inside
+    get_llm() alone, and the conflict-detection path in learning_config —
+    which calls litellm.completion() directly — silently went unguarded and
+    paid for thinking on every call.
+
+    Carries `thinkingConfig` (Vertex's own generationConfig field) rather than
+    LiteLLM's `thinking` shorthand: from litellm 1.94.1 _map_thinking_param
+    routes every "Gemini 3 or newer" model down a thinkingLevel branch that
+    drops the budget and emits only includeThoughts=False, hiding thoughts
+    without stopping them. thinkingConfig reaches generationConfig untouched
+    and reproduces what 1.75.3 put on the wire.
+
+    Gated on the model family because that same switch removed the loud
+    failure that used to cover this. Vertex also serves Anthropic, Llama and
+    Mistral, and resolve_model_string does not check the family — ONLINE_MODEL
+    is a free string, so one config edit reaches here with a non-Gemini model.
+    Measured on the pinned litellm 1.75.3: `thinking` raised
+    UnsupportedParamsError on llama/mistral and mapped to a real Anthropic
+    param on claude, while thinkingConfig is accepted silently by all three
+    and would ship a Gemini-only generationConfig field to a non-Gemini
+    endpoint.
+
+    Takes the ROUTED model string, never the bare name. resolve_model_string
+    strips a stale cross-provider prefix, so the bare argument
+    'gemini/claude-sonnet-4@20250514' routes to
+    'vertex_ai/claude-sonnet-4@20250514' — a bare-name family check sees
+    'gemini' from the stripped prefix and would attach the guard to a Claude
+    endpoint. Measured 2026-08-03; pinned by
+    test_family_check_reads_the_routed_string_not_the_bare_name.
+    """
+    if provider == "vertex" and "gemini" in routed_model.lower():
+        return {"thinkingConfig": {"thinkingBudget": 0}}
     return {}
