@@ -35,11 +35,15 @@ WORKDIR /app
 #      reusable for it — it would add traceloop-sdk and the OTel stack (absent
 #      here) and downgrade pydantic-settings 2.14.2 -> 2.10.1.
 #
-# These are NOT the same versions as requirements-bus.txt (playwright 1.57.0,
-# structlog 25.5.0, Flask 3.1.2, pydantic-settings 2.10.1), which is what the bench
-# validates. That container-vs-bench fork is real and predates this pin — closing it
-# means either upgrading the bus venv or downgrading production, so it is a
-# deliberate open decision, not an oversight. Do not "fix" it by editing one side.
+# playwright MUST stay equal to the pin in requirements-bus.txt, which is what the bench
+# runs. It is the browser engine the locator stack resolves against, so a fork means the
+# bench validates an engine production does not run. It was forked — 1.62.0/Chromium 151
+# here vs 1.57.0/Chromium 143 in the bus venv — until 2026-08-03, when the bus venv was
+# converged UP to this value. Change both files together or not at all.
+#
+# The other versions still differ from requirements-bus.txt (structlog 25.5.0, Flask
+# 3.1.2, pydantic-settings 2.10.1 there). None of them touch locator resolution, so that
+# part of the fork is tolerated. Do not "fix" it by editing one side.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
     flask==3.1.3 \

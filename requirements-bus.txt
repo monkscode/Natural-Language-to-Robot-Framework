@@ -15,7 +15,14 @@
 # needed; 331 packages resolve with uv pip compile --universal, and playwright,
 # traceloop-sdk, posthog, pydantic and pydantic-settings all hold.
 browser-use==0.13.7
-playwright==1.57.0          # locator validation uses the Playwright Python API directly
+# playwright MUST stay equal to the pin in Dockerfile.browser-service. It is the browser
+# engine the locator stack resolves against, so a fork here means the bench validates an
+# engine production does not run. It was forked — 1.57.0/Chromium 143 here vs
+# 1.62.0/Chromium 151 in the shipped image — until 2026-08-03, when this venv was
+# converged UP to the shipped value. Bumping it moves nothing else: `uv pip compile
+# --universal` resolves the same 331 packages on either pin, playwright is the only line
+# that differs. Change both files together or not at all.
+playwright==1.62.0          # locator validation uses the Playwright Python API directly
 Flask==3.1.2                # HTTP service shell (gunicorn is Docker-only)
 requests==2.33.0            # forced: browser-use 0.13.7 exact-pins requests==2.33.0
 PyYAML==6.0.3               # needed by src.backend.core.config, imported by the entrypoint
