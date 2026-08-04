@@ -28,7 +28,8 @@ dependencies = [
     # crewai 1.8.1 requires openai<1.84.dev0 (openai 1.83.x only).
     # litellm 1.75.3 is the last version that accepts openai>=1.68.2 (compatible).
     # litellm 1.75.4+ bumped to openai>=1.99.5 which crewai 1.8.1 blocks.
-    # Upgrade crewai to 1.14.2 (requires openai>=2.0.0) planned separately.
+    # The crewai 1.15.10 upgrade is blocked upstream (crewAIInc/crewAI#6774 —
+    # 1.15.x strips null from Optional schema fields); re-attempt after the fix ships.
     "crewai==1.8.1",
     "litellm==1.75.3",
     # LLM providers
