@@ -1,13 +1,24 @@
+# Patterns are matched against the WHOLE context-relative path, not the basename,
+# and `*` does not cross `/`. A bare `node_modules/` therefore excluded only a
+# root-level directory and shipped src/frontend-react/node_modules (138MB) into
+# every image. Anything that can appear at depth needs the `**/` prefix.
+#
+# Only these paths are ever COPYed by a Dockerfile: src/, tools/, clients/,
+# scripts/fastapi-entrypoint.sh, pyproject.toml. Everything else is context the
+# daemon transfers and discards, so exclude it.
+
 # Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-.eggs/
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.eggs
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
 
 # Virtual environments
 venv/
+venv-bus/
 .venv/
 env/
 
@@ -19,10 +30,12 @@ env/
 .kiro/
 .codex/
 .agents/
+.superpowers/
 
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Logs
 *.log
@@ -38,9 +51,15 @@ chroma_db/
 data/
 robot_tests/
 
-# Node
-node_modules/
-coverage/
+# Bench harness: 1.7GB of run evidence, baselines and private query sets. No
+# Dockerfile COPYs it, and bench/private/ + bench/runs/ hold customer data that
+# has no business crossing a build-context boundary.
+bench/
+
+# Node. Dockerfile.frontend runs its own `npm ci`, so the host tree must never be
+# copied over it - the Windows node_modules would clobber the Linux install.
+**/node_modules
+**/coverage
 **/dist/
 
 # Postgres data volume (runtime, not for build)
@@ -48,16 +67,22 @@ pgdata/
 
 # Docker
 docker-compose.yml
+docker-compose.vertex.yml
 .env*
 !src/backend/.env.example
+
+# Secrets. Mounted at runtime by docker-compose.vertex.yml, never built in.
+credentials.json
 
 # Docs (not needed in image)
 docs/
 tasks/
 tests/
+FuturePlans/
 pytest.ini
 *.md
 !README.md
 
 # Misc
 .github/
+.playwright-mcp/
