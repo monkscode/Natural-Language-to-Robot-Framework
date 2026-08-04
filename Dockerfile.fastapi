@@ -27,11 +27,19 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir uv
 
 # Install Robot Framework libraries (needed for libdoc generation)
-# These will NOT be in the final image - we only extract the JSON docs
+# These will NOT be in the final image - we only extract the JSON docs.
+#
+# PINNED, AND EQUAL TO Dockerfile.test-runner BY CONTRACT. The JSON produced here
+# becomes /app/libdocs, which is what the assembler is prompted with in container
+# mode (LIBDOCS_DIR=/app/libdocs in docker-compose.yml) - so it must describe the
+# same library version the runner executes, extras included. Unpinned, this stage
+# resolved whatever was current at build time while the runner resolved whatever
+# was current at its build time, and neither was recorded anywhere.
+# Enforced by tests/test_build_manifests.py.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
-    robotframework \
-    robotframework-browser
+    robotframework==7.4.2 \
+    "robotframework-browser[bb]==19.14.2"
 
 # Initialize Browser library (requires Node.js)
 RUN rfbrowser init --skip-browsers
