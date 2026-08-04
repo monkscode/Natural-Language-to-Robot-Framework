@@ -15,6 +15,7 @@ logs/audit
 # Virtual environment
 venv/
 venv-bus/
+.venv/
 
 # Robot Test Files
 robot_tests/

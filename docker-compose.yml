@@ -95,7 +95,14 @@ services:
     image: ${BROWSER_SERVICE_IMAGE_TAG:-monkscode/nlrf:browser-service-latest}
     container_name: nlrf-browser-service
     ports:
-      - "4999:4999"
+      # Loopback-only (IPv4 AND IPv6), same rationale as fastapi and postgres
+      # below: this service drives a browser to caller-supplied URLs, and nothing
+      # off-host needs it — fastapi reaches it as http://browser-service:4999 over
+      # nlrf-network, which published ports do not affect. Both binds are required
+      # because Windows resolves `localhost` to ::1 first and Docker Desktop
+      # black-holes unbound IPv6 ports.
+      - "127.0.0.1:4999:4999"
+      - "[::1]:4999:4999"
     volumes:
       # Shared logs directory
       - ./logs:/app/logs
