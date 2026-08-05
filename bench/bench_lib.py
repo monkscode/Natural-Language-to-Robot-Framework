@@ -4,6 +4,7 @@ Covers:
 - SSE stage-duration mapping from client-timestamped /generate-and-run events
 - report math (median / nearest-rank p90, summarize, compare)
 - browser-service log parsing (structlog JSON *and* LOG_FORMAT=console lines)
+- the read-coverage signal (a query asking for a value vs a test reading one)
 - the frozen CSV row schema
 
 Stage checkpoints are the fixed progress values pushed by
@@ -386,6 +387,70 @@ def span_durations(lines, start_marker, end_marker):
             out.append((ts - start_ts).total_seconds())
             start_ts = None
     return out
+
+
+# ---------------------------------------------------------------------------
+# Read coverage — does a query that asks for a value get a test that reads one
+# ---------------------------------------------------------------------------
+
+# Verbs that mean "give me a value back off the page". Whole words only:
+# "target" contains "get" and must not count.
+_READ_VERBS_RE = re.compile(r"\b(get|read|extract|retrieve|fetch)\b", re.IGNORECASE)
+
+# Browser Library keywords that extract a VALUE from the page. Counting
+# keywords are deliberately absent: "Get Elements", "Get Element",
+# "Get Element Count" and "Get Length" produce the degenerate count-only test
+# this signal exists to catch, so treating them as reads would defeat it.
+#
+# Plain substring matching is safe here because no entry is a prefix of a
+# non-read Browser Library keyword. The supersets that do exist are still
+# reads — "Get Texts" and "Get Attribute Names" both pull values off the page —
+# so the prefixes below match them, correctly. That is also why "get texts"
+# is absent: "get text" already covers it, and listing it would be dead.
+_READ_KEYWORDS = (
+    "get text",
+    "get attribute",
+    "get property",
+    "get selected options",
+)
+
+
+def query_requests_read(query: str) -> bool:
+    """True when the query asks for a value to be read back off the page.
+
+    Word-boundary, case-insensitive match on get/read/extract/retrieve/fetch.
+    On the frozen 30-query bench corpus this matches exactly q01, q05 and q10 —
+    the only three that ask for a value — and nothing else.
+    """
+    return bool(_READ_VERBS_RE.search(query or ""))
+
+
+def code_performs_read(code: str) -> bool:
+    """True when the generated Robot source extracts at least one page VALUE.
+
+    Named `code_performs_read`, not `test_performs_read`: the latter is
+    collected as a test case by pytest the moment any test module imports it
+    by name.
+
+    Case-insensitive substring match against _READ_KEYWORDS. A test that only
+    counts elements returns False — that is the whole point (see
+    warn_if_read_query_never_reads in bench/run_bench.py for the measured
+    q10 evidence).
+
+    SUBSTRING, not Robot-cell parsing — asked and answered 2026-08-05, do not
+    re-propose without new data. A read keyword sitting in `[Documentation]`,
+    a comment or an argument cell would suppress the warning on a test that
+    never executes a read; the hole is real. It has also never once opened: a
+    keyword-cell parser (section tracking, comment stripping, assignment-target
+    skipping) was built and replayed against all 1,808 captured artifacts in
+    bench/runs, and the two detectors disagreed on ZERO of them. The parser is
+    not a no-op — it correctly flags a synthetic `[Documentation] Get Text of
+    each book title` on a count-only test. Trading 40 lines of Robot-syntax
+    parsing, which this file would then have to keep correct, for a failure
+    with no measured incidence is not a trade this bench needs.
+    """
+    lowered = (code or "").lower()
+    return any(kw in lowered for kw in _READ_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------

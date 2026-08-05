@@ -331,6 +331,92 @@ class TestCollectionCardinalityRules:
         assert "Get Texts" not in PromptComponents.LOOP_HANDLING
 
 
+class TestCollectionChainingOperator:
+    """Reaching into a collection element uses `>>`; `>>>` is iframe entry.
+
+    Two of the 289 captured collection runs chained with `>>>` and both failed
+    with `Selector "ol > li >> nth=0" resolved to <li>, <iframe>` — Browser
+    looking for a frame, because `>>>` is the IFRAME ENTRY operator. All 17
+    occurrences of `>>>` in the committed Browser 19.14.2 libdoc are frame
+    entry, none is a chaining operator; the runs that passed used `>>`, the
+    same form Browser's own Get Elements example uses
+    (`Get Property    ${elem} >> option    value`).
+
+    The reason the guidance gives matters as much as the rule. "A loop variable
+    is never a frame" is too weak — it invites the model to conclude that `>>>`
+    would be fine on a collection that IS an iframe. The libdoc's own rule has
+    no such opening: under *Element reference syntax* it states that "frame
+    piercing is not possible with element reference", full stop. `${element}`
+    is a reference, not a selector, so `>>>` after it is wrong unconditionally.
+
+    This block deliberately does NOT tell the assembler to descend by default.
+    That was tried on 2026-08-05 and regressed q06: the guidance made the model
+    reach for a child selector it had never seen (`tbody tr` ->
+    `div[role="gridcell"]:first-child`, a React-grid selector on a plain HTML
+    table) and the run died on a 30s timeout, against 12/12 passes historically
+    with no descent at all. The child selector is never validated by the
+    pipeline — only the collection locator is — so every descent is an
+    unverified guess and must stay the exception, not the default.
+    """
+
+    def test_teaches_the_chaining_operator(self):
+        """`>>` chains a child selector onto an element reference."""
+        assert "${element} >> " in PromptComponents.LOOP_HANDLING
+
+    def test_warns_that_triple_gt_is_frame_entry(self):
+        """The `>>` vs `>>>` warning lived only in DROPDOWN_HANDLING, ~100
+        lines away from the collection guidance that needed it."""
+        body = PromptComponents.LOOP_HANDLING
+        assert ">>>" in body
+        assert "iframe" in body.lower()
+
+    def test_gives_the_element_reference_reason_not_the_weak_one(self):
+        """The rule must rest on WHAT `${element}` is, not on what it happens
+        to point at.
+
+        "A loop variable is never a frame" leaves the model an out: decide the
+        collection is an iframe and `>>>` becomes legal again. It never is —
+        the libdoc rules out frame piercing for element references outright.
+        """
+        body = PromptComponents.LOOP_HANDLING.lower()
+        assert "element reference" in body
+        assert "frame piercing is not possible" in body
+        # The weaker claim must not come back alongside it.
+        assert "never a frame" not in body
+
+    def test_does_not_contradict_the_iframe_rules(self):
+        """83 of the 1,478 captured assembler prompts ship LOOP_HANDLING and
+        DROPDOWN_HANDLING TOGETHER, and DROPDOWN_HANDLING requires `>>>` for an
+        iframe prefix. A blanket ban here would contradict it inside one
+        prompt, so the prohibition must be scoped to what follows `${element}`
+        and leave `>>>` in front of a real iframe SELECTOR alone.
+        """
+        body = PromptComponents.LOOP_HANDLING
+        assert "iframe SELECTOR" in body
+        assert "NEVER with `>>>`" not in body
+
+    def test_the_iframe_rules_still_require_triple_gt(self):
+        """Guard the other side of the same contradiction."""
+        assert ">>>" in PromptComponents.DROPDOWN_HANDLING
+
+    def test_does_not_make_descent_the_default(self):
+        """The q06 regression guard: descent must read as conditional.
+
+        Pins the two clauses that carry the framing, plus the table row that
+        reads straight off the loop variable. An earlier version of this test
+        asserted a phrase ("descend before you read") that has never appeared
+        anywhere in this repo's history, and offered three spellings of the
+        table row of which two could not match — so it passed on one clause and
+        guarded nothing.
+        """
+        body = PromptComponents.LOOP_HANDLING
+        # Whitespace-collapsed: these clauses are prose and get re-wrapped.
+        flowed = " ".join(body.split())
+        assert "Usually you do not need to" in flowed
+        assert "When the value genuinely sits on a child" in flowed
+        assert "`Get Attribute ${element}` inside" in flowed
+
+
 class TestGetSelectedOptionsReturnShape:
     """Same family as the collection-cardinality bug: the assembler guessing a
     Browser Library keyword's contract instead of being told it.

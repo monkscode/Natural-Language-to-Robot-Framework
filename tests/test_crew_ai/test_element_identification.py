@@ -1171,3 +1171,196 @@ class TestStageCompletionMessages:
     def test_no_elements_needed_message(self):
         events = self._events_for([OPEN, CLOSE], {"status": "success"})
         assert "No page elements needed" in self._final_message(events)
+
+
+# ─── orphan navigation rendering ─────────────────────────────────────────────
+
+class TestOrphanNavigation:
+    """A plan's mid-sequence "Go To" has no element behind it, so nothing in
+    the element list triggers it.
+
+    build_workflow_prompt renders one navigation instruction (the workflow's
+    url) plus an ordered element list, and the browser-use agent moves between
+    pages as a side effect of each element's OWN action. That model holds for
+    action-caused page changes and has no way to express "now go here" — the
+    URL reaches the agent only inside the user's goal prose, which it follows
+    some of the time. Measured over 246 post-navigation element validations,
+    58 (24%) happened on a page other than the plan's most recent "Go To".
+
+    navigate_before attaches that URL to the element it precedes, so the
+    prompt can put the instruction back at its sequence position.
+
+    Only ORPHAN navigations qualify. A navigation before the first element is
+    already the workflow's url (extract_plan_url), and pinning every element to
+    its most recent navigation would break the action-causes-page-change model
+    — see test_element_after_an_action_driven_page_change_is_not_pinned.
+    """
+
+    SIGNIN = _step("Click", description="Sign In submit button in the login form")
+    REPORT_URL = "https://billing.example.com/reports/customerReport/"
+
+    def test_mid_sequence_navigation_attaches_to_the_next_element(self):
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value=self.REPORT_URL),
+            _step("Click", description="Accounts item in the left sidebar navigation menu"),
+        ]
+        elements, _ = build_elements(steps)
+        assert len(elements) == 2
+        assert "navigate_before" not in elements[0]
+        assert elements[1]["navigate_before"] == self.REPORT_URL
+
+    def test_single_page_plan_carries_the_key_nowhere(self):
+        """The launch step's URL is the workflow's url parameter, not an
+        orphan — a plan with no mid-sequence navigation must render exactly as
+        it does today."""
+        steps = [
+            OPEN,
+            _step("Input Text", description="search box", value="shoes"),
+            _step("Click", description="search button"),
+            _step("Get Text", description="first product name"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements
+        assert all("navigate_before" not in e for e in elements)
+
+    def test_navigation_before_the_first_element_is_not_an_orphan(self):
+        """"New Page <url>" ahead of every element is the destination
+        extract_plan_url already returns. Rendering it again would tell the
+        agent to navigate somewhere it is already standing."""
+        steps = [
+            _step("New Browser", value="chromium"),
+            _step("New Page", value="https://shop.example.com/"),
+            _step("Click", description="cart icon"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements == [{"id": "elem_1", "description": "cart icon", "action": "click"}]
+
+    def test_two_pre_element_navigations_are_both_skipped(self):
+        """4.7% of captured plans open a browser AND navigate before the first
+        element. Neither is an orphan."""
+        steps = [
+            _step("Open Browser", value="https://shop.example.com/"),
+            _step("Go To", value="https://shop.example.com/"),
+            _step("Click", description="cart icon"),
+        ]
+        elements, _ = build_elements(steps)
+        assert "navigate_before" not in elements[0]
+
+    def test_only_the_element_that_follows_the_navigation_carries_it(self):
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value=self.REPORT_URL),
+            _step("Click", description="Accounts menu"),
+            _step("Get Text", description="first customer name in the report table"),
+        ]
+        elements, _ = build_elements(steps)
+        assert [e.get("navigate_before") for e in elements] == [None, self.REPORT_URL, None]
+
+    def test_the_later_of_two_consecutive_navigations_wins(self):
+        """Back-to-back navigations land the agent on the LAST one. Rendering
+        the first would send it to a page the plan has already left."""
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value="https://billing.example.com/accounts/"),
+            _step("Go To", value=self.REPORT_URL),
+            _step("Click", description="Accounts menu"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements[1]["navigate_before"] == self.REPORT_URL
+
+    def test_a_navigation_without_a_usable_url_attaches_nothing(self):
+        """Same bar as extract_plan_url: prose and non-navigable schemes are
+        not destinations. Attaching one would send the agent to garbage
+        mid-run."""
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value="the reports page"),
+            _step("Click", description="Accounts menu"),
+        ]
+        elements, _ = build_elements(steps)
+        assert "navigate_before" not in elements[1]
+
+    def test_about_blank_is_not_a_destination(self):
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value="about:blank"),
+            _step("Click", description="Accounts menu"),
+        ]
+        elements, _ = build_elements(steps)
+        assert "navigate_before" not in elements[1]
+
+    def test_dedup_keeps_the_first_occurrence_and_drops_the_navigation(self):
+        """build_elements dedups by description. The duplicate maps to an
+        element that already rendered EARLIER in the list, so attaching the
+        navigation there would put the instruction at the wrong sequence
+        position. Keep the first; splitting the element would change element
+        counts, step budget and cost on speculation.
+        """
+        steps = [
+            OPEN,
+            _step("Click", description="Accounts menu"),
+            _step("Go To", value=self.REPORT_URL),
+            _step("Click", description="Accounts menu"),
+        ]
+        elements, _ = build_elements(steps)
+        assert len(elements) == 1
+        assert "navigate_before" not in elements[0]
+
+    def test_element_after_an_action_driven_page_change_is_not_pinned(self):
+        """The regression the design rejects.
+
+        Clicking Save POSTs to a new page and the validation error renders
+        there, so finding the Email field on that new page is the
+        action-causes-page-change model working correctly. There is no
+        navigation step between them, so nothing may be attached; pinning the
+        field to the form's URL would force the agent back and destroy the
+        post-Save state.
+        """
+        form_url = "https://billing.example.com/accounts/customer_add/"
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value=form_url),
+            _step("Click", description="Save button at the bottom of the customer form"),
+            _step("Get Classes", description="Email input field in the customer form"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements[1]["navigate_before"] == form_url
+        assert "navigate_before" not in elements[2]
+
+    def test_navigation_does_not_disturb_action_or_value(self):
+        """The key is additive — the dedup precedence and value contracts are
+        untouched."""
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value=self.REPORT_URL),
+            _step("Input Text", description="customer search box", value="4727985745"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements[1] == {
+            "id": "elem_2",
+            "description": "customer search box",
+            "action": "input",
+            "value": "4727985745",
+            "navigate_before": self.REPORT_URL,
+        }
+
+    def test_step_element_ids_still_map_every_locator_step(self):
+        """The navigation step itself needs no locator and must not consume an
+        element id or a map entry."""
+        steps = [
+            OPEN,
+            self.SIGNIN,
+            _step("Go To", value=self.REPORT_URL),
+            _step("Click", description="Accounts menu"),
+        ]
+        elements, step_element_ids = build_elements(steps)
+        assert step_element_ids == {1: "elem_1", 3: "elem_2"}
+        assert [e["id"] for e in elements] == ["elem_1", "elem_2"]

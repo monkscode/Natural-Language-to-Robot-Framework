@@ -297,6 +297,20 @@ Use the `Get Elements` + FOR pattern shown above for the read cases. `Get
 Elements` is the ONLY bulk-read keyword Browser Library has — never invent a
 plural one to avoid the loop.
 
+**IF you reach into a collection element, chain with `>>`, never `>>>`.**
+Usually you do not need to: the loop variable itself is what you read. When the
+value genuinely sits on a child, `${element} >> h3 > a` chains a child selector
+onto an element reference — that is the correct operator.
+
+`>>>` is Browser Library's IFRAME ENTRY operator. It stays correct in front of
+an iframe SELECTOR (see the dropdown/iframe rules if they appear above), and is
+wrong after `${element}` for a reason no loop variable can satisfy: Browser's
+own documentation states that **frame piercing is not possible with an element
+reference**. `${element}` is a reference handed back by `Get Elements`, not a
+selector, so `>>>` after it can never enter a frame no matter what the element
+is — it just sends Browser hunting for one and fails with
+`resolved to <li>, <iframe>`.
+
 **Key Rules:**
 1. Use `@{variable}` (list notation) for Get Elements return value
 2. Exit on empty/whitespace: `Exit For Loop If    len($text.strip()) == 0`
