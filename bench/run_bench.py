@@ -41,6 +41,7 @@ from bench.bench_lib import (
     append_pin_conflict,
     build_csv_row,
     build_meta,
+    code_performs_read,
     count_dryrun_repairs,
     duplicate_lookup_rate,
     extract_metrics_fields,
@@ -49,6 +50,7 @@ from bench.bench_lib import (
     meta_path_for,
     parse_locator_timers,
     preflight_violations,
+    query_requests_read,
     span_durations,
     stage_durations,
 )
@@ -103,6 +105,47 @@ def warn_if_zero_crewai_tokens(data: dict, query_id: str, repeat: int,
         _warn(f"{query_id} repeat {repeat}: crewai_tokens == 0 for {workflow_id} — "
               f"the crewai token accumulator is not being written. Do NOT trust "
               f"llm_tokens/llm_cost_usd from this run.")
+
+
+def warn_if_read_query_never_reads(query: str, query_id: str, repeat: int,
+                                   workflow_id: str) -> None:
+    """Warn when a query asks for a value but the test never reads one.
+
+    Measured on q10 ("Go to https://books.toscrape.com, get the titles of all
+    books on the first page, and verify there are 20 books") over the 146
+    captured q10 runs in bench/runs: 109 (75%) generated a test that only
+    counts elements — Get Elements -> Get Length -> Should Be True — and never
+    reads a title. 102 of those PASSED, so the bench reported a pass for a test
+    that did half the query.
+
+    The dryrun gate cannot catch this. It validates keyword and argument SHAPE,
+    not semantics, and a count-only test is perfectly well-formed Robot
+    Framework. This guard is what makes the gap visible.
+
+    The generated test is read from bench/runs/<workflow_id>/artifacts (the
+    capture_evidence copy) and falls back to the staging dir (which detach_run
+    deletes, so it only survives when capture failed). Neither present → an
+    unmeasurable run, and an unmeasurable run must not warn.
+
+    Deliberately a warning and not a CSV column: adding a column would trip
+    gate_schema against every existing baseline.
+    """
+    candidates = (RUNS_DIR / workflow_id / "artifacts" / "test.robot",
+                  STAGING_ROOT / workflow_id / "test.robot")
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        return
+    try:
+        code = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # A guard must never be the thing that breaks a bench run.
+        return
+    if query_requests_read(query) and not code_performs_read(code):
+        _warn(f"{query_id} repeat {repeat}: {workflow_id} — the query asks for "
+              f"a value to be read off the page, but the generated test "
+              f"performs no read (no Get Text/Texts/Attribute/Property/"
+              f"Selected Options). A 'passed' result does NOT mean the test did "
+              f"the work the query asked for.")
 
 
 def fetch_health(url: str) -> dict:
@@ -316,6 +359,7 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
 
         if capture_evidence(conn, workflow_id):
             detach_run(conn, workflow_id)
+        warn_if_read_query_never_reads(query, query_id, repeat, workflow_id)
 
     return build_csv_row(fields)
 
