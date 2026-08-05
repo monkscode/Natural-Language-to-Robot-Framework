@@ -331,6 +331,61 @@ class TestCollectionCardinalityRules:
         assert "Get Texts" not in PromptComponents.LOOP_HANDLING
 
 
+class TestCollectionChainingOperator:
+    """Reaching into a collection element uses `>>`; `>>>` is iframe entry.
+
+    Two of the 289 captured collection runs chained with `>>>` and both failed
+    with `Selector "ol > li >> nth=0" resolved to <li>, <iframe>` — Browser
+    looking for a frame, because `>>>` is the IFRAME ENTRY operator and the
+    selector in front of it must select a frame element. Zero occurrences of
+    `>>>` as a chaining operator exist in the Browser 19.14.2 libdoc; the runs
+    that passed used `>>`, the same form Browser's own Get Elements example
+    uses.
+
+    This block deliberately does NOT tell the assembler to descend by default.
+    That was tried on 2026-08-05 and regressed q06: the guidance made the model
+    reach for a child selector it had never seen (`tbody tr` ->
+    `div[role="gridcell"]:first-child`, a React-grid selector on a plain HTML
+    table) and the run died on a 30s timeout, against 12/12 passes historically
+    with no descent at all. The child selector is never validated by the
+    pipeline — only the collection locator is — so every descent is an
+    unverified guess and must stay the exception, not the default.
+    """
+
+    def test_teaches_the_chaining_operator(self):
+        """`>>` chains a child selector onto an element reference."""
+        assert "${element} >> " in PromptComponents.LOOP_HANDLING
+
+    def test_warns_that_triple_gt_is_frame_entry(self):
+        """The `>>` vs `>>>` warning lived only in DROPDOWN_HANDLING, ~100
+        lines away from the collection guidance that needed it."""
+        body = PromptComponents.LOOP_HANDLING
+        assert ">>>" in body
+        assert "iframe" in body.lower() or "frame" in body.lower()
+
+    def test_does_not_contradict_the_iframe_rules(self):
+        """83 of the 1,478 captured assembler prompts ship LOOP_HANDLING and
+        DROPDOWN_HANDLING TOGETHER, and DROPDOWN_HANDLING requires `>>>` for an
+        iframe prefix. A blanket ban here would contradict it inside one
+        prompt, so the guidance must scope the prohibition and give the reason
+        it holds: a `Get Elements` loop variable is never a frame.
+        """
+        body = PromptComponents.LOOP_HANDLING
+        assert "never a frame" in body.lower()
+        assert "NEVER with `>>>`" not in body
+
+    def test_the_iframe_rules_still_require_triple_gt(self):
+        """Guard the other side of the same contradiction."""
+        assert ">>>" in PromptComponents.DROPDOWN_HANDLING
+
+    def test_does_not_make_descent_the_default(self):
+        """The q06 regression guard: descent must read as conditional."""
+        body = PromptComponents.LOOP_HANDLING
+        assert "descend before you read" not in body.lower()
+        assert "Get Attribute    ${element}" in body or "Get Attribute `${element}`" in body \
+            or "`Get Attribute ${element}` inside" in body
+
+
 class TestGetSelectedOptionsReturnShape:
     """Same family as the collection-cardinality bug: the assembler guessing a
     Browser Library keyword's contract instead of being told it.
