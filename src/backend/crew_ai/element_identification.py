@@ -485,13 +485,45 @@ def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, st
     index in `steps` to the element id it resolved to. Locator-needing steps
     with no element_description get NO element (and no map entry) — the merge
     marks them found:false (planner defect → placeholder, accommodation (a)).
+
+    ORPHAN NAVIGATION: a navigation step that no element's action triggers is
+    stapled to the next element created, as the optional `navigate_before`
+    key, so the browser service can render the instruction at its sequence
+    position (prompts/workflow.py). Only navigations AFTER the first element
+    qualify — one before it is already the workflow's `url` via
+    extract_plan_url, and re-rendering it would tell the agent to navigate
+    where it is already standing.
+
+    Deliberately NOT per-element URL pinning. An element found on a new page
+    because the PREVIOUS element's action changed pages is the documented
+    model working (EXAMPLE_WORKFLOW_TEMPLATE: "elem_1's action caused a page
+    change, so elem_2 is naturally found on the new page"); pinning it to the
+    plan's most recent navigation would force the agent back and destroy the
+    state that action created.
     """
     elements: list[dict[str, Any]] = []
     by_description: dict[str, dict[str, Any]] = {}
     step_element_ids: dict[int, str] = {}
+    pending_navigation: str | None = None
 
     for index, raw_step in enumerate(steps):
         step = _as_dict(raw_step)
+
+        if _normalize_keyword(step.get("keyword")) in _NAVIGATION_KEYWORDS:
+            # No elements yet ⇒ nothing has been located ⇒ this is the
+            # pre-element navigation extract_plan_url already returns.
+            # Consecutive navigations: the LAST is where the agent ends up, so
+            # it overwrites — rendering an earlier one would send it back to a
+            # page the plan has already left. The URL bar is the same one
+            # extract_plan_url applies, so prose and non-navigable schemes
+            # ("about:blank") attach nothing rather than becoming a real
+            # navigation target.
+            if elements:
+                candidate = _url_candidate(step.get("value"))
+                if candidate:
+                    pending_navigation = candidate
+            continue
+
         if not step_needs_locator(step):
             continue
         description = (step.get("element_description") or "").strip()
@@ -508,13 +540,33 @@ def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, st
                 "description": description,
                 "action": action,
             }
+            if pending_navigation:
+                element["navigate_before"] = pending_navigation
             _apply_action_value(element, action, value)
             elements.append(element)
             by_description[description] = element
-        elif _ACTION_PRECEDENCE[action] > _ACTION_PRECEDENCE[element["action"]]:
-            element["action"] = action
-            element.pop("value", None)
-            _apply_action_value(element, action, value)
+        else:
+            if pending_navigation:
+                # The duplicate resolves to an element that already rendered
+                # EARLIER in the list, so the navigation cannot be placed at
+                # its own sequence position. Keep the first occurrence —
+                # splitting the element would change element counts, the step
+                # budget and cost on speculation. No bench query reuses a
+                # description across pages; this logs it if one ever does.
+                logger.warning(
+                    "Plan step %d navigates to %s and then reuses element "
+                    "description %r from an earlier page — keeping the first "
+                    "occurrence and dropping the navigation",
+                    index, pending_navigation, description,
+                )
+            if _ACTION_PRECEDENCE[action] > _ACTION_PRECEDENCE[element["action"]]:
+                element["action"] = action
+                element.pop("value", None)
+                _apply_action_value(element, action, value)
+
+        # Consumed or deliberately dropped — either way it belonged to this
+        # element and must not leak onto the next one.
+        pending_navigation = None
 
         step_element_ids[index] = element["id"]
 
