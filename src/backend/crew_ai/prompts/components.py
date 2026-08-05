@@ -302,11 +302,13 @@ Usually you do not need to: the loop variable itself is what you read. When the
 value genuinely sits on a child, `${element} >> h3 > a` chains a child selector
 onto an element reference — that is the correct operator.
 
-`>>>` is Browser Library's IFRAME ENTRY operator. It stays correct for an
-iframe prefix (see the dropdown/iframe rules if they appear above) and is wrong
-here for a specific reason: the selector in front of it must select a frame
-element, and a loop variable from `Get Elements` is never a frame. Used to
-reach a child it sends Browser hunting for an iframe and fails with
+`>>>` is Browser Library's IFRAME ENTRY operator. It stays correct in front of
+an iframe SELECTOR (see the dropdown/iframe rules if they appear above), and is
+wrong after `${element}` for a reason no loop variable can satisfy: Browser's
+own documentation states that **frame piercing is not possible with an element
+reference**. `${element}` is a reference handed back by `Get Elements`, not a
+selector, so `>>>` after it can never enter a frame no matter what the element
+is — it just sends Browser hunting for one and fails with
 `resolved to <li>, <iframe>`.
 
 **Key Rules:**

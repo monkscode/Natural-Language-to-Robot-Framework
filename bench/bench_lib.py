@@ -436,6 +436,18 @@ def code_performs_read(code: str) -> bool:
     counts elements returns False — that is the whole point (see
     warn_if_read_query_never_reads in bench/run_bench.py for the measured
     q10 evidence).
+
+    SUBSTRING, not Robot-cell parsing — asked and answered 2026-08-05, do not
+    re-propose without new data. A read keyword sitting in `[Documentation]`,
+    a comment or an argument cell would suppress the warning on a test that
+    never executes a read; the hole is real. It has also never once opened: a
+    keyword-cell parser (section tracking, comment stripping, assignment-target
+    skipping) was built and replayed against all 1,808 captured artifacts in
+    bench/runs, and the two detectors disagreed on ZERO of them. The parser is
+    not a no-op — it correctly flags a synthetic `[Documentation] Get Text of
+    each book title` on a count-only test. Trading 40 lines of Robot-syntax
+    parsing, which this file would then have to keep correct, for a failure
+    with no measured incidence is not a trade this bench needs.
     """
     lowered = (code or "").lower()
     return any(kw in lowered for kw in _READ_KEYWORDS)
