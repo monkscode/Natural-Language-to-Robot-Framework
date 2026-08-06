@@ -114,8 +114,24 @@ ONLINE_MODEL=gemini-2.5-flash
 ADMIN_EMAILS=you@example.com
 ```
 
-Those are the only values you must change; everything below is background on what they
-mean.
+You must also replace the placeholder **`JWT_SECRET_KEY`**. It ships as
+`change-me-in-production`, and the app **refuses to start** with that value — the
+`fastapi` container exits at startup with
+`RuntimeError: JWT_SECRET_KEY is unset or still the placeholder`. Generate one using an
+image you have already pulled, so this needs no Python on your machine:
+
+```bash
+docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Paste the output into `src/backend/.env`:
+
+```env
+JWT_SECRET_KEY=<the generated value>
+```
+
+Those four are the only values you must change; everything below is background on what
+they mean.
 
 - **`ADMIN_EMAILS`** — set this **before the first start**. Mark 1 is approval-gated:
   a new signup lands `pending` and sees an Access Gate rather than the Generate page.
