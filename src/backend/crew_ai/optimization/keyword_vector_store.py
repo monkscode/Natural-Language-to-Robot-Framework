@@ -208,8 +208,8 @@ class KeywordVectorStore:
                 "args": row[1] if row[1] is not None else [],
                 "description": row[2] or "",
             }
-        except Exception as e:
-            logger.error("Keyword lookup failed for '%s': %s", name, e)
+        except Exception:
+            logger.exception("Keyword lookup failed for '%s'", name)
             return None
 
     # ------------------------------------------------------------------
