@@ -234,14 +234,25 @@ def ensure_browser_timeout(robot_code: str) -> str:
 # is not followed by `=`. `css=` is included in the alternation because
 # `css=css=#foo` is the same mistake applied to an already-css locator.
 #
+# `(?:css=)+` consumes the WHOLE run of prefixes in one match, which single
+# `css=` could not: `re.subn` does not rescan replaced text, so stripping only
+# the outermost left the next `css=` preceded by `=`, where the boundary rule
+# below rejects it — `css=css=id=searchBox` came out as `css=id=searchBox`,
+# still not valid CSS. The repetition is greedy and the lookahead still has to
+# hold after it, so backtracking leaves exactly one `css=` when the locator
+# underneath is genuinely css: `css=css=css=#foo` -> `css=#foo`, while
+# `css=css=css=xpath=//tbody/tr` -> `xpath=//tbody/tr`.
+#
 # The match must also START a cell — line start, or immediately after a Robot
 # cell separator (tab, or two spaces). A stacked prefix is only ever the first
 # thing in the locator cell; the same sequence further in is part of a value
 # that was written correctly, and rewriting it silently changes what the test
 # selects. `css=[data-value="css=id=x"]` and `xpath=//div[@a="css=id=y"]` are
-# both valid and are both left alone by the boundary requirement.
+# both valid and are both left alone by the boundary requirement — the run
+# length makes no difference to that, `css=[data-value="css=css=id=x"]` is
+# left alone for the same reason.
 _REDUNDANT_CSS_PREFIX_RE = re.compile(
-    r"(?:^|(?<=\t)|(?<= {2}))css=(?=(?:id|xpath|text|role|data-testid|css)=)",
+    r"(?:^|(?<=\t)|(?<= {2}))(?:css=)+(?=(?:id|xpath|text|role|data-testid|css)=)",
     re.MULTILINE,
 )
 
@@ -281,11 +292,16 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
     if not robot_code or "css=" not in robot_code:
         return robot_code
 
-    stripped, count = _REDUNDANT_CSS_PREFIX_RE.subn("", robot_code)
-    if count:
+    stripped, cells = _REDUNDANT_CSS_PREFIX_RE.subn("", robot_code)
+    if cells:
+        # One match can now carry several prefixes, so the match count is
+        # locators, not prefixes. Every character the pattern removes belongs
+        # to a `css=` — the boundary alternatives and the lookahead are all
+        # zero-width — so the length delta divides exactly into the real total.
+        dropped = (len(robot_code) - len(stripped)) // len("css=")
         logger.info(
-            f"Locator normalizer: dropped {count} redundant `css=` prefix(es) "
-            "from already-prefixed locator(s)"
+            f"Locator normalizer: dropped {dropped} redundant `css=` prefix(es) "
+            f"from {cells} already-prefixed locator(s)"
         )
     return stripped
 

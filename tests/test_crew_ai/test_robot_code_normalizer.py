@@ -339,6 +339,26 @@ def test_ensure_browser_timeout_yields_to_a_continuation_argument():
             "    Click    css=css=#submit",
             "    Click    css=#submit",
         ),
+        # --- Stacked more than once. `re.subn` does not rescan replaced text,
+        # so a pattern matching ONE prefix strips only the outermost: the next
+        # `css=` is then preceded by `=` and the cell-boundary rule rejects it,
+        # leaving `css=id=searchBox` — still not valid CSS. The prefix count
+        # has to be consumed in a single match. ---
+        (
+            "css= stacked twice on a strategy locator",
+            "    Click    css=css=id=searchBox",
+            "    Click    id=searchBox",
+        ),
+        (
+            "css= stacked three deep on a strategy locator",
+            "${row_locator}    css=css=css=xpath=//tbody/tr",
+            "${row_locator}    xpath=//tbody/tr",
+        ),
+        (
+            "css= stacked three deep on a css locator keeps exactly one",
+            "    Click    css=css=css=#submit",
+            "    Click    css=#submit",
+        ),
         # --- Must NOT be rewritten ---
         (
             "A correct css= locator is left alone",
@@ -383,6 +403,11 @@ def test_ensure_browser_timeout_yields_to_a_continuation_argument():
             "css=<strategy>= inside an xpath predicate belongs to the xpath",
             '    Click    xpath=//div[@a="css=id=y"]',
             '    Click    xpath=//div[@a="css=id=y"]',
+        ),
+        (
+            "the boundary rule holds for a stacked prefix mid-cell too",
+            '    Click    css=[data-value="css=css=id=x"]',
+            '    Click    css=[data-value="css=css=id=x"]',
         ),
         (
             "css=<strategy>= in prose is not a locator",
