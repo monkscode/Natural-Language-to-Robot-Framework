@@ -9,6 +9,7 @@ Uses in-memory SQLite with full Phase 1 schema.
 
 import sqlite3
 from datetime import datetime
+from unittest.mock import Mock
 
 import pytest
 
@@ -753,10 +754,18 @@ class TestRegression:
 
     def test_full_context_fallback_unknown_role(self):
         """Unknown roles fall back to code_assembly_context with a warning
-        (the 'identifier' branch was removed in Task 16 — it was dead code)."""
+        (the 'identifier' branch was removed in Task 16 — it was dead code).
+
+        _format_zero_context ignores agent_role entirely, so Tier 2 succeeds
+        for any role and _get_full_context_fallback is unreachable unless Tier
+        2 is made to fail. Without that, this test asserted only that SOME
+        context came back — which the zero-context tier satisfies, so it never
+        touched the fallback it is named for.
+        """
         p = create_provider()
+        p._format_zero_context = Mock(side_effect=RuntimeError("format failed"))
         result = p.get_agent_context("find element", "unknown-role")
-        assert len(result.context) > 0
+        assert result.context == "FULL CODE ASSEMBLY CONTEXT"
         assert isinstance(result, AgentContextResult)
 
 
