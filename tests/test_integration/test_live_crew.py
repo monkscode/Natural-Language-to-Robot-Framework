@@ -104,7 +104,7 @@ class TestLiveLLMCrewOnline:
             model_name=_MODEL,
             workflow_id="live-test-001",
         )
-        assert len(result) == 5
+        assert len(result) == 7
 
     def test_run_crew_output_is_non_empty_string(self):
         """The assembler task's raw output is a non-empty string.

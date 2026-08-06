@@ -134,13 +134,35 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
 # ---------------------------------------------------------------------------
 
 class TestRunCrewReturnShape:
-    """run_crew() must return a 5-tuple with the correct element types."""
+    """run_crew() must return a RunCrewResult with the correct element types.
 
-    def test_returns_five_tuple(self):
-        """Success path: result is a 5-element tuple."""
+    Indices 0-4 are unchanged from the original 5-tuple; stage_metrics and
+    shared_llm are appended, so every positional assertion below still holds.
+    """
+
+    def test_returns_seven_tuple(self):
+        """Success path: result is a 7-element tuple."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 5
+        assert len(result) == 7
+
+    def test_named_access_matches_positional(self):
+        """It is a NamedTuple: names and indices address the same members."""
+        result, _ = _run_crew_with_mocks()
+        assert result.output is result[0]
+        assert result.crew is result[1]
+        assert result.llm_monitor is result[4]
+        assert result.stage_metrics is result[5]
+        assert result.shared_llm is result[6]
+
+    def test_seventh_element_is_the_shared_llm_wrapper(self):
+        """result[6] is agents.llm — the wrapper, not its monitor.
+
+        workflow_service needs the wrapper itself for get_workflow_usage().
+        """
+        agents_mock = _make_agents_mock()
+        out, _ = _run_crew_with_mocks(agents_mock=agents_mock)
+        assert out[6] is agents_mock.llm
 
     def test_first_element_is_assembler_kickoff_result(self):
         """result[0] is what the assembler crew's kickoff() returned."""

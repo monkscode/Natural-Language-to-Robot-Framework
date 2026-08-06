@@ -39,6 +39,8 @@ import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
 
+from src.backend.crew_ai.crew import RunCrewResult
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -65,8 +67,9 @@ def _make_run_crew_result(
     json_dict_code=None,
     raw_code=None,
 ):
-    """Build the 5-tuple returned by run_crew() — the single-task ASSEMBLER
-    crew (Task 16). Delivered code comes from tasks[-1] (the assembler)."""
+    """Build the RunCrewResult returned by run_crew() — the single-task
+    ASSEMBLER crew (Task 16). Delivered code comes from tasks[-1] (the
+    assembler)."""
     # ---- tasks[-1]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
@@ -94,7 +97,20 @@ def _make_run_crew_result(
     llm_monitor = MagicMock()
     llm_monitor.get_numeric_stats.return_value = {}
 
-    return (MagicMock(), crew, None, {}, llm_monitor)
+    shared_llm = MagicMock()
+    shared_llm.get_workflow_usage.return_value = {
+        "llm_calls": 8, "prompt_tokens": 160, "completion_tokens": 40,
+        "tokens": 200, "cost": 0.0008,
+    }
+    stage_metrics = {
+        "planner": {"duration_s": 1.0, "llm_calls": 3, "prompt_tokens": 60,
+                    "completion_tokens": 15, "tokens": 75, "cost": 0.0003},
+        "assembler": {"duration_s": 2.0, "llm_calls": 5, "prompt_tokens": 100,
+                      "completion_tokens": 25, "tokens": 125, "cost": 0.0005},
+    }
+
+    return RunCrewResult(MagicMock(), crew, None, {}, llm_monitor,
+                         stage_metrics, shared_llm)
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
@@ -591,9 +607,9 @@ class TestWorkflowCompletionPaths:
 
         # Build a run_crew mock that returns non-empty hint_metadata
         crew_result = _make_run_crew_result()
-        # Override the hint_metadata element (4th in the 5-tuple)
-        crew_result_with_hints = (crew_result[0], crew_result[1], crew_result[2],
-                                  hint_data, crew_result[4])
+        # Override just hint_metadata; _replace keeps the other members intact
+        # so this test does not break when run_crew's arity changes.
+        crew_result_with_hints = crew_result._replace(hint_metadata=hint_data)
 
         with patch("src.backend.services.workflow_service.run_crew",
                    return_value=crew_result_with_hints), \

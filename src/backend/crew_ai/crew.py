@@ -8,6 +8,7 @@ from src.backend.crew_ai.callbacks import get_crew_callbacks
 from src.backend.core.workflow_metrics import WorkflowMetrics, count_tokens
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from datetime import datetime
+from typing import Any, NamedTuple
 import json
 import os
 import re
@@ -16,6 +17,28 @@ import logging
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+class RunCrewResult(NamedTuple):
+    """What run_crew() returns.
+
+    A NamedTuple rather than a plain tuple so callers can read fields by name
+    while every existing positional access keeps working. Members 0-4 are in
+    their original order for exactly that reason; the two additions are
+    appended rather than inserted.
+
+    shared_llm sits last despite being the more useful handle: llm_monitor is
+    index 4 in released code and in test assertions, and reordering to put the
+    wrapper there would silently change what index 4 means.
+    """
+
+    output: Any                    # assembler CrewOutput
+    crew: Any                      # the ASSEMBLER crew (delivered code + usage)
+    optimization_metrics: Any      # None whenever OPTIMIZATION_ENABLED=False
+    hint_metadata: Any
+    llm_monitor: Any               # agents.llm._monitor — authoritative call count
+    stage_metrics: dict            # {"planner": {...}, "assembler": {...}}
+    shared_llm: Any                # the CleanedLLMWrapper itself, for get_workflow_usage()
 
 # CrewAI log file path and rotation settings
 CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
@@ -451,7 +474,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     # Rotate crewai.log if it exceeds size limit (before creating the Crews)
     _rotate_crewai_log()
 
-    step_callback, task_callback = get_crew_callbacks()
+    step_callback, task_callback = get_crew_callbacks(llm=agents.llm)
 
     def _make_crew(agent, task):
         return Crew(
@@ -501,6 +524,9 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 register_task(workflow_id, str(assemble_code.id), 2)
 
             assembler_crew = _make_crew(code_assembler_agent, assemble_code)
+            # Restart the stage clock: the deterministic element stage above ran
+            # between the two kickoffs and is not the assembler's time.
+            task_callback.mark_stage_start()
             result = assembler_crew.kickoff()
 
             logger.info("✅ CrewAI workflow completed successfully")
@@ -534,7 +560,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             # The ASSEMBLER crew is returned: workflow_service reads delivered
             # code from its tasks[-1].output and usage metrics from it (the
             # shared _token_usage accumulator covers both kickoffs).
-            return result, assembler_crew, optimization_metrics, hint_metadata, agents.llm._monitor
+            return RunCrewResult(
+                result, assembler_crew, optimization_metrics, hint_metadata,
+                agents.llm._monitor, task_callback.stage_metrics, agents.llm,
+            )
 
         except Exception as e:
             error_msg = str(e)
