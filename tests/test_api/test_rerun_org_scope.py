@@ -111,7 +111,11 @@ def test_same_org_admin_peer_can_rerun(client):
     # The ownership gate must NOT return 404 or 403.
     # The test may 409 (no stored code path issues), 500 (Docker unavailable),
     # or 200 (streaming started) — all mean the gate passed.
-    assert resp.status_code not in (403, 404), (
+    # 401 is rejected too: authentication runs BEFORE the ownership gate, so a
+    # peer whose token never authenticated would pass without the org path ever
+    # executing — the gate would go green while proving nothing.
+    assert resp.status_code not in (401, 403, 404), (
         f"Same-org org_admin peer was denied (status {resp.status_code}): {resp.text}. "
-        "OLD code denies by user_id mismatch; NEW code must allow via org_admin."
+        "OLD code denies by user_id mismatch; NEW code must allow via org_admin. "
+        "A 401 means the peer token never authenticated — the org gate was never reached."
     )

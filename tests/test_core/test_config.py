@@ -162,15 +162,22 @@ class TestSettingsValidators:
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
 
 
-def test_local_service_urls_use_ipv4_loopback():
+def test_local_service_urls_use_ipv4_loopback(monkeypatch):
     """Local service hops must default to 127.0.0.1, never localhost.
 
     On Windows `localhost` resolves to IPv6 ::1 first; these services bind IPv4
     only, so a `localhost` default adds a ~2s connect stall per hop (execute
     makes two hops -> ~4s). Guard against a well-meaning revert to `localhost`.
+
+    The assertion is about the DEFAULTS, so both override sources are cut off:
+    the process env and the .env file. docker-compose.yml sets both of these
+    vars to service names, so without this the test fails wherever compose's
+    environment is present — a false alarm about a default that never changed.
     """
+    monkeypatch.delenv("RUNNER_EXEC_URL", raising=False)
+    monkeypatch.delenv("BROWSER_USE_SERVICE_URL", raising=False)
     from src.backend.core.config import Settings
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.RUNNER_EXEC_URL == "http://127.0.0.1:4998"
     assert s.BROWSER_USE_SERVICE_URL == "http://127.0.0.1:4999"
     assert "localhost" not in s.RUNNER_EXEC_URL
