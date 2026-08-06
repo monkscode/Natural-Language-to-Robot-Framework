@@ -24,6 +24,10 @@ workflow_metrics, llm_traces and test_runs and removes the artifact run dir.
 Capture failure → nothing is deleted, a loud warning is printed. audit_log
 rows are deliberately kept (append-only audit trail). Assumes the local
 artifact store (dev stack) — S3 mode is out of scope for the bench.
+
+One exception to "after each run": a run whose STREAM died is queued and
+detached once the sweep is over, because at that moment the server is usually
+still executing it — see queue_partial_detach.
 """
 
 import argparse
