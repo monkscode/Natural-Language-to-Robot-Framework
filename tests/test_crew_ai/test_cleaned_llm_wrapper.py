@@ -519,6 +519,31 @@ class TestUsageAccounting:
         assert usage["llm_calls"] == 3
         assert usage["cost"] > 0
 
+    def test_stages_sum_to_the_workflow_total(self):
+        """The invariant the metrics row depends on.
+
+        crew_stage_metrics and the crewai_* totals are read from two different
+        methods. If they priced differently, a Grafana panel breaking cost down
+        by stage would not add up to the cost shown for the run — and there
+        would be no way to tell which of the two was wrong.
+        """
+        w = self._wrapper()
+
+        self._bump(w, 1200, 300, 2)     # planner
+        planner = w.pop_stage_usage()
+        self._bump(w, 4000, 900, 3)     # assembler
+        assembler = w.pop_stage_usage()
+
+        total = w.get_workflow_usage()
+
+        assert planner["prompt_tokens"] + assembler["prompt_tokens"] == total["prompt_tokens"]
+        assert planner["completion_tokens"] + assembler["completion_tokens"] == total["completion_tokens"]
+        assert planner["tokens"] + assembler["tokens"] == total["tokens"]
+        assert planner["llm_calls"] + assembler["llm_calls"] == total["llm_calls"]
+        # Pricing is linear in tokens, so the stage costs must reconstruct the
+        # total to within the 6dp both are rounded to.
+        assert abs(planner["cost"] + assembler["cost"] - total["cost"]) < 1e-6
+
     def test_stage_drain_returns_only_what_arrived_since_the_last_drain(self):
         w = self._wrapper()
         self._bump(w, 1000, 200, 1)
