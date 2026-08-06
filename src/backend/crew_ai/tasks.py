@@ -385,6 +385,13 @@ class RobotTasks:
         self.library_context = library_context
         self._hint_context = hint_context or {}
 
+        # Guardrail invocations per attachment site. Owned by the instance, not
+        # the module: RobotTasks is built once per run_crew and once per repair
+        # mini-crew, so this is workflow-scoped by construction — no lock, no
+        # workflow_id key, nothing to leak between concurrent runs. >1 at a site
+        # means the assembler had to be re-prompted there.
+        self.guardrail_attempts: dict[str, int] = {}
+
         # Cache static context - computed once on initialization
         # These values depend on library_context which is set at init time
         # NOTE (Task 24R Stage 1): code-structure and viewport instructions are
@@ -393,6 +400,23 @@ class RobotTasks:
         # RobotAgents._get_agent_context); the task description used to re-ship
         # both verbatim (~1,130 tokens/run, finding F1).
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
+
+    def _track_guardrail(self, name: str):
+        """Wrap assembly_output_guardrail so its invocations are counted.
+
+        `name` distinguishes the two attachment sites, which share the same
+        guardrail function: 'assembly_output' (first-pass format fix) and
+        'repair_output' (inside the dryrun repair loop).
+
+        The count is incremented before delegating, so a guardrail that fails
+        is still counted — a failure is precisely what causes the retry we are
+        trying to measure.
+        """
+        def _guardrail(result: TaskOutput) -> Tuple[bool, Any]:
+            self.guardrail_attempts[name] = self.guardrail_attempts.get(name, 0) + 1
+            return assembly_output_guardrail(result)
+
+        return _guardrail
 
     def _get_keyword_guidelines(self) -> str:
         """Get MINIMAL keyword guidelines for planning phase."""
@@ -553,7 +577,7 @@ class RobotTasks:
             ),
             agent=agent,
             output_pydantic=AssemblyOutput,
-            guardrail=assembly_output_guardrail,  # Fixes format without retry
+            guardrail=self._track_guardrail("assembly_output"),  # Fixes format without retry
         )
 
     def repair_code_task(self, agent, robot_code: str, dryrun_errors: str) -> Task:
@@ -604,7 +628,7 @@ class RobotTasks:
             ),
             agent=agent,
             output_pydantic=AssemblyOutput,
-            guardrail=assembly_output_guardrail,  # same format-fixer as the main assembler
+            guardrail=self._track_guardrail("repair_output"),  # same format-fixer as the main assembler
         )
 
     # NOTE: analyze_popup_strategy_task has been REMOVED
