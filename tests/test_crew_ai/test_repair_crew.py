@@ -56,6 +56,9 @@ def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browse
     mock_llm = MagicMock(name="llm", spec=_CrewAILLM)
     mock_llm._monitor = MagicMock(name="monitor")
     mock_llm._token_usage = {}
+    # set_workflow_id is CleanedLLMWrapper's, not crewai LLM's, so spec= hides
+    # it. The repair crew labels its calls with run_id for trace attribution.
+    mock_llm.set_workflow_id = MagicMock(name="set_workflow_id")
     with patch("crewai.Crew", mock_cls), \
          patch("src.backend.crew_ai.agents.get_llm", return_value=mock_llm), \
          patch("src.backend.crew_ai.library_context.get_library_context",

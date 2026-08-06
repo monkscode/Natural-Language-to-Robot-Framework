@@ -65,6 +65,40 @@ logger = logging.getLogger(__name__)
 # LiteLLM per-call trace callback
 # ---------------------------------------------------------------------------
 
+def _workflow_id_from_metadata(kwargs: dict) -> str | None:
+    """Read workflow.id off the call's own metadata.
+
+    Preferred over baggage because it travels inside the call kwargs: litellm
+    dispatches this callback with executor.submit (litellm/utils.py:1262), and
+    contextvars — which OTel baggage is built on — do not cross a thread-pool
+    hop. Verified on litellm 1.75.3: metadata passed to completion() arrives
+    here as kwargs["litellm_params"]["metadata"].
+    """
+    try:
+        metadata = (kwargs.get("litellm_params") or {}).get("metadata")
+        if isinstance(metadata, dict):
+            return metadata.get("workflow_id") or None
+    except Exception as _exc:
+        logger.debug("[LLM_TRACE] metadata unreadable: %s", _exc)
+    return None
+
+
+def _workflow_id_from_baggage() -> str | None:
+    """Fallback attribution from OTel baggage.
+
+    Kept rather than deleted: some rows do carry a workflow_id today, and the
+    async path that produces them (utils.py:838 awaits async_success_handler
+    inline, preserving context) is not fully characterised. It costs one dict
+    lookup and can only help.
+    """
+    try:
+        from opentelemetry import baggage
+        return baggage.get_baggage("workflow.id")
+    except Exception as _exc:
+        logger.debug("[LLM_TRACE] baggage unavailable: %s", _exc)
+        return None
+
+
 def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datetime, end_time: datetime) -> None:
     """
     LiteLLM success_callback — writes one row to the trace store per LLM call.
@@ -128,16 +162,18 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
         # single "0000..." bucket in the trace DB.
         trace_id_hex = uuid.uuid4().hex
         parent_span_id_hex: str | None = None
-        workflow_id: str | None = None
         try:
-            from opentelemetry import baggage, trace as otel_trace
+            from opentelemetry import trace as otel_trace
             span_ctx = otel_trace.get_current_span().get_span_context()
             if span_ctx and span_ctx.trace_id:
                 trace_id_hex = format(span_ctx.trace_id, "032x")
                 parent_span_id_hex = format(span_ctx.span_id, "016x")
-            workflow_id = baggage.get_baggage("workflow.id")
         except Exception as _exc:
             logger.warning("[LLM_TRACE] OTel context unavailable: %s", _exc)
+
+        # Metadata first: it rides on the call itself and survives the
+        # thread-pool hop this callback is dispatched across. Baggage second.
+        workflow_id = _workflow_id_from_metadata(kwargs) or _workflow_id_from_baggage()
 
         # Each LiteLLM call gets its own span_id so it appears as a distinct row.
         span_id_hex = uuid.uuid4().hex[:16]
@@ -334,6 +370,34 @@ class CleanedLLMWrapper(LLM):
         except Exception:
             logger.debug("pop_stage_usage failed", exc_info=True)
             return dict(self._ZERO_USAGE)
+
+    def set_workflow_id(self, workflow_id: str | None) -> None:
+        """Label every subsequent LiteLLM call with this workflow_id.
+
+        additional_params is the only attribute crewai's
+        _prepare_completion_params forwards untouched to LiteLLM
+        (crewai/llm.py:702), so it is the injection point; the value comes back
+        to _litellm_trace_callback as kwargs["litellm_params"]["metadata"].
+
+        Without this, llm_traces rows carry a NULL workflow_id and
+        bench/run_bench.py's detach_run (DELETE ... WHERE workflow_id = %s)
+        cannot match them — bench traces then stay in the live store forever.
+
+        Merges rather than replaces: the Vertex thinking guard also lives in
+        additional_params. Never raises — a labelling failure must not cost a
+        run.
+        """
+        try:
+            if not workflow_id:
+                return
+            params = getattr(self, "additional_params", None)
+            if params is None:
+                return
+            metadata = dict(params.get("metadata") or {})
+            metadata["workflow_id"] = workflow_id
+            params["metadata"] = metadata
+        except Exception:
+            logger.debug("set_workflow_id failed", exc_info=True)
 
     def get_workflow_usage(self) -> dict:
         """This wrapper's lifetime usage with cost — the workflow totals.

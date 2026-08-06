@@ -444,6 +444,13 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     )
     tasks = RobotTasks(library_context, hint_context=hint_context)
 
+    # Label every LiteLLM call with this run so its llm_traces row is
+    # attributable — and, crucially, so bench detach_run can delete it
+    # (DELETE ... WHERE workflow_id = %s cannot match NULL). Both wrappers:
+    # they share _monitor and _token_usage but not additional_params.
+    agents.llm.set_workflow_id(workflow_id)
+    agents.planner_llm.set_workflow_id(workflow_id)
+
     # Task 16 pipeline: two single-task kickoffs around a deterministic Python
     # stage — Planner (LLM) → element_identification (plain Python + ONE
     # batch_browser_automation call) → Assembler (LLM). The element-identifier

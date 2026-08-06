@@ -440,6 +440,10 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     # knowledge (§8.2).
     agents = RobotAgents(model_provider, model_name, library_context)
     tasks = RobotTasks(library_context)
+    # run_id == workflow_id. These calls run after the workflow OTel span has
+    # closed, so metadata is the ONLY thing that can attribute them.
+    agents.llm.set_workflow_id(run_id)
+    agents.planner_llm.set_workflow_id(run_id)
     assembler = agents.code_assembler_agent()
     # Bound the repair agent's internal iterations. Also keeps MAX_AGENT_ITERATIONS
     # a live consumer now that the validator agent (its previous consumer) is gone.
