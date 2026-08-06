@@ -6,11 +6,11 @@ This guide helps you resolve common issues with Mark 1.
 
 | Symptom | Fix |
 |---|---|
-| **App won't load on `:3000`** | If port 3000 is occupied by another service, free up that port and then try again. |
+| **App won't load on `:3000`** | Find what holds the port — `netstat -ano \| findstr :3000` on Windows (`lsof -i :3000` on macOS/Linux) — then stop that process, or leave it alone and remap Mark 1 instead: change the frontend's `ports:` entry in `docker-compose.yml` from `"3000:8080"` to e.g. `"3001:8080"` and open `:3001`. |
 | **A container never becomes `healthy`** | Check logs: `docker compose logs fastapi` / `docker compose logs browser-service`. |
 | **`401` / `403` / authentication errors** | Check `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION` in `src/backend/.env`, make sure `credentials.json` is in the repo root, and start with the `docker-compose.vertex.yml` override. |
 | **`address already in use`** | Another app holds the port — stop it, or edit the port mapping in `docker-compose.yml`. |
-| **Browser service slow to start** | First start downloads browser binaries; wait a full ~3 minutes. |
+| **Browser service slow to start** | Expected on first start — it downloads browser binaries. Its healthcheck allows a 120s grace period (`start_period` in `docker-compose.yml`), so give it ~2 minutes before treating it as stuck. |
 | **Boot/login errors after an update** | Make sure all four image tags use the **same** `-develop` suffix, then re-run `docker compose pull` followed by `docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d`. |
 
 More Docker-specific fixes: [Docker Guide → Troubleshooting](DOCKER-GUIDE.md#troubleshooting).
