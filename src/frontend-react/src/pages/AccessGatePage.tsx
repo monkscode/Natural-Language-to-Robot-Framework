@@ -2,8 +2,12 @@ import { useAuth } from '@/auth/AuthContext'
 
 const COPY: Record<string, { title: string; body: string }> = {
   pending: {
+    // Approval bumps token_version, which revokes this pending token, and this
+    // page never refreshes auth state — so access is NOT granted in place.
+    // Telling the user it is would leave them waiting on a screen that can
+    // never change. Sign out and back in is the actual path to an active session.
     title: 'Your access is pending approval',
-    body: 'An administrator needs to approve your account before you can use the framework. You will gain access as soon as it is approved.',
+    body: 'An administrator needs to approve your account before you can use the framework. Once approved, sign out and sign in again to start an active session.',
   },
   suspended: {
     title: 'Your access has been suspended',

@@ -29,7 +29,12 @@ export default function OrgsTab() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [members, setMembers] = useState<OrgMember[]>([])
+  // Members carry the org they were loaded for. A bare OrgMember[] is not safe:
+  // refreshOrg(A) can resolve AFTER the admin expands org B, and A's rows would
+  // then render under B — where "Make owner"/"Move"/"Remove" send B's orgId with
+  // a user from A, actually moving that user into B. Binding the rows to their
+  // org lets the render discard a mismatched result instead of acting on it.
+  const [members, setMembers] = useState<{ orgId: string; rows: OrgMember[] } | null>(null)
   const [addUserId, setAddUserId] = useState('')
 
   async function load() {
@@ -69,7 +74,7 @@ export default function OrgsTab() {
   }
 
   async function loadMembers(orgId: string) {
-    setMembers(await api<OrgMember[]>(`/auth/admin/orgs/${orgId}/members`))
+    setMembers({ orgId, rows: await api<OrgMember[]>(`/auth/admin/orgs/${orgId}/members`) })
   }
 
   // Shared post-mutation refresh: re-pull the affected org's members and the org
@@ -82,7 +87,7 @@ export default function OrgsTab() {
   async function toggleMembers(orgId: string) {
     if (expanded === orgId) {
       setExpanded(null)
-      setMembers([])
+      setMembers(null)
       return
     }
     setError(null)
@@ -149,8 +154,11 @@ export default function OrgsTab() {
 
   // Derived off the currently-expanded org: other team orgs are move targets;
   // add-candidates are active users not already seated in this org.
+  // shownMembers is empty unless the loaded rows belong to the expanded org, so
+  // an out-of-order refresh can never seat another org's users in this one.
+  const shownMembers = members?.orgId === expanded ? members.rows : []
   const otherTeamOrgs = orgs.filter((t) => t.kind === 'team' && t.id !== expanded)
-  const addCandidates = users.filter((u) => !members.some((m) => m.user_id === u.id))
+  const addCandidates = users.filter((u) => !shownMembers.some((m) => m.user_id === u.id))
 
   return (
     <div className="flex flex-col gap-5">
@@ -196,10 +204,10 @@ export default function OrgsTab() {
             </div>
             {o.kind === 'team' && expanded === o.id && (
               <ul className="flex flex-col gap-1 border-t pt-2">
-                {members.length === 0 && (
+                {shownMembers.length === 0 && (
                   <li className="text-xs text-muted-foreground">No members.</li>
                 )}
-                {members.map((m) => (
+                {shownMembers.map((m) => (
                   <li key={m.user_id} className="flex items-center justify-between text-sm">
                     <div className="flex items-center gap-2">
                       <span>{m.email}</span>
