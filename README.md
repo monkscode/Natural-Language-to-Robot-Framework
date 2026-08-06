@@ -89,14 +89,38 @@ cp .env.example .env                              # root: Docker image tags
 cp src/backend/.env.example src/backend/.env      # backend: Vertex AI + settings
 ```
 
-In **`src/backend/.env`**, set the Vertex AI project and location — these are the **only** values you must change:
+In the **root `.env`**, point all four image tags at `-develop`. The file ships with
+`-local` defaults, which are **not** published to Docker Hub — only `frontend` can be
+built locally, so leaving them as-is makes `docker compose pull` fail:
+
+```env
+FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-develop
+BROWSER_SERVICE_IMAGE_TAG=monkscode/nlrf:browser-service-develop
+TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
+FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-develop
+```
+
+All four must carry the **same** suffix — a mixed set is the usual cause of odd boot
+and login errors after an update.
+
+In **`src/backend/.env`**, set the Vertex AI project and location, and add your own
+email as an admin:
 
 ```env
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-project-id
 VERTEXAI_LOCATION=us-central1
 ONLINE_MODEL=gemini-2.5-flash
+ADMIN_EMAILS=you@example.com
 ```
+
+Those are the only values you must change; everything below is background on what they
+mean.
+
+- **`ADMIN_EMAILS`** — set this **before the first start**. Mark 1 is approval-gated:
+  a new signup lands `pending` and sees an Access Gate rather than the Generate page.
+  Emails listed here are created `active` and can approve everyone else. Miss it and
+  you lock yourself out of your own instance with no one able to let you in.
 
 - **`VERTEXAI_PROJECT`** — the setup script prints this at the end (it is also the `project_id` field inside `credentials.json`).
 - **`VERTEXAI_LOCATION`** — the Google Cloud region to serve Vertex AI requests from, e.g. `us-central1` or `asia-south1` (Mumbai).
@@ -119,13 +143,16 @@ Check that the services are healthy:
 docker compose ps
 ```
 
-> ⏳ The **browser service can take up to ~2 minutes** to report `healthy` on first start (it's initialising Playwright). This is normal.
+> ⏳ The **browser service can take up to ~2 minutes** to report `healthy` on first start (it's initialising Playwright). This is normal — its healthcheck grants a 120s `start_period` for exactly this reason.
 
-Your generated tests, logs, and database live in local folders (`./robot_tests`, `./logs`, `./chroma_db`, `./data`) and are **preserved** across restarts. For everyday commands (`up`, `down`, `ps`, `logs`, `pull`), see the [Docker Compose CLI reference](https://docs.docker.com/reference/cli/docker/compose/).
+Your generated tests, logs, and database live in local folders (`./robot_tests`, `./logs`, `./data`) and are **preserved** across restarts. For everyday commands (`up`, `down`, `ps`, `logs`, `pull`), see the [Docker Compose CLI reference](https://docs.docker.com/reference/cli/docker/compose/).
 
 ### 5. Open the app & generate your first test
 
-Open **[http://localhost:3000](http://localhost:3000)** and **create an account** — you'll land straight on the **Generate** page. Then:
+Open **[http://localhost:3000](http://localhost:3000)** and **create an account**, using the
+email you put in `ADMIN_EMAILS`. That account is active immediately and lands on the
+**Generate** page; any other email lands on the Access Gate until an admin approves it.
+Then:
 
 1. Enter a description:
    ```text
