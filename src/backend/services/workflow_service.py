@@ -931,7 +931,8 @@ class _GenerationError(Exception):
 
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
-                robot_code: str | None = None, rerun_of: str | None = None) -> None:
+                robot_code: str | None = None, rerun_of: str | None = None,
+                error_message: str | None = None) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
@@ -942,9 +943,49 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
         get_run_registry().record_start(
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
+            error_message=error_message,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
+
+
+_ERROR_MESSAGE_MAX_CHARS = 2000
+
+
+def _store_failure(result_store: dict, event: dict) -> None:
+    """Remember a generation failure so the caller can record a test_runs row.
+
+    The error SSE already carries workflow_id (so the bench can detach failed
+    runs); this keeps it, plus the reason, for the history row.
+    """
+    result_store["error_message"] = (event.get("message") or "Generation failed")[
+        :_ERROR_MESSAGE_MAX_CHARS]
+    if event.get("workflow_id"):
+        result_store["workflow_id"] = event["workflow_id"]
+
+
+def _record_generation_failure(result_store: dict, user: dict | None,
+                               user_query: str | None) -> None:
+    """Write a test_runs row for a run that never produced code.
+
+    Without this a generation failure leaves no trace anywhere: the metrics
+    block runs after the dryrun gate, so _GenerationError returns before any
+    row is written and the run is invisible to History and to Grafana.
+
+    Status 'error' already exists in test_runs and in the SPA's RunStatus and
+    filter list, so this adds no vocabulary and needs no UI change.
+    """
+    wf_id = result_store.get("workflow_id")
+    if not wf_id:
+        # No id means nothing to key the row on; the SSE already told the user.
+        return
+    try:
+        run_id = str(uuid.UUID(wf_id))
+    except ValueError:
+        logging.warning("[RUN_REGISTRY] non-UUID workflow_id on failure; run not recorded")
+        return
+    _record_run(run_id, user, user_query, status="error",
+                error_message=result_store.get("error_message"))
 
 
 def _set_run_status(run_id: str, status: str) -> None:
@@ -1014,6 +1055,7 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
                 workflow_thread.join()
                 return
             elif event.get("status") == "error":
+                _store_failure(result_store, event)
                 workflow_thread.join()
                 raise _GenerationError()
         except Empty:
@@ -1028,11 +1070,13 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
             result_store["robot_code"] = event["robot_code"]
             result_store["workflow_id"] = event.get("workflow_id")
         elif event.get("status") == "error":
+            _store_failure(result_store, event)
             raise _GenerationError()
 
     if not result_store.get("robot_code"):
         msg = "Agentic workflow finished without generating code."
         logging.error(msg)
+        _store_failure(result_store, {"message": msg})
         yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': msg})}\n\n"
         raise _GenerationError()
 
@@ -1149,6 +1193,7 @@ async def stream_generate_only(
             async for sse in _drain_generation_queue(workflow_thread, q, result_store):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
             return
 
         # History row: a generate-only run is terminal at 'generated' until the
@@ -1280,6 +1325,7 @@ async def stream_generate_and_run(
             async for sse in _drain_generation_queue(workflow_thread, q, result_store):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
             return
 
         robot_code = result_store["robot_code"]

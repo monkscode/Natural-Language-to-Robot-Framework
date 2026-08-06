@@ -54,6 +54,9 @@ _SCHEMA_DDL = (
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS robot_code TEXT",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS rerun_of TEXT",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS org_id TEXT",
+    # Why a run ended in status 'error'. Generation failures write no metrics
+    # row (the metrics block runs after the gate), so this is their only record.
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS error_message TEXT",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_org_created"
     " ON test_runs (org_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_user_created"
@@ -98,6 +101,7 @@ class RunRegistry:
         status: str,
         robot_code: Optional[str] = None,
         rerun_of: Optional[str] = None,
+        error_message: Optional[str] = None,
     ) -> None:
         """Upsert a run row. Ownership/query/lineage are write-once (COALESCE
         keeps the first non-NULL value); status and updated_at always advance.
@@ -106,14 +110,16 @@ class RunRegistry:
         code so the row holds what actually ran ("Run again" re-executes it
         verbatim). rerun_of links a re-run to its ORIGINAL run (root-flattened
         by the caller) — the run whose learning record user feedback should
-        update, since re-run executions skip learning."""
+        update, since re-run executions skip learning. error_message follows the
+        same newest-non-NULL-wins rule as robot_code: a run that fails, is
+        retried and succeeds keeps the reason it failed the first time."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO test_runs
-                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET
                         status     = EXCLUDED.status,
                         updated_at = now(),
@@ -122,7 +128,8 @@ class RunRegistry:
                         user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
                         robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
                         rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
-                        org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id)
+                        org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
+                        error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message)
                     """,
                     (
                         run_id,
@@ -133,6 +140,7 @@ class RunRegistry:
                         rerun_of,
                         status,
                         (user or {}).get("org_id"),
+                        error_message,
                     ),
                 )
         except Exception as e:

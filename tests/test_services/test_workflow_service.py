@@ -66,6 +66,103 @@ class TestStreamGenerateOnly:
         assert any("error" in str(e).lower() for e in events)
 
 
+class TestGenerationFailureIsRecorded:
+    """A generation failure must leave a row behind.
+
+    Before this, _GenerationError returned before _record_run and the metrics
+    block runs only after the dryrun gate — so a run that never produced code
+    was invisible to History and to Grafana alike. Status 'error' already
+    exists in test_runs and in the SPA's filter list, so nothing new is needed
+    downstream.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def _run(self, events, user=None):
+        """Drive stream_generate_only over a scripted generation event list."""
+        recorded = {}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            recorded.update({"run_id": run_id, "status": status,
+                             "user_query": user_query, **kw})
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return recorded, sse
+
+    def test_error_event_writes_an_error_row(self):
+        recorded, _ = self._run([
+            {"status": "running", "message": "planning"},
+            {"status": "error", "message": "LLM offline",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["run_id"] == self._WF_ID
+        assert recorded["status"] == "error"
+        assert recorded["user_query"] == "login to github"
+
+    def test_row_carries_the_failure_reason(self):
+        """Angle E: countable is not enough — a failure has to be diagnosable."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "Vertex 429 Resource exhausted",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Vertex 429 Resource exhausted"
+
+    def test_reason_is_truncated(self):
+        """A stack-trace-sized message must not bloat every history query."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "x" * 9000, "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+
+    def test_no_row_without_a_workflow_id(self):
+        """Nothing to key the row on; the SSE already told the user."""
+        recorded, sse = self._run([{"status": "error", "message": "died early"}])
+        assert recorded == {}
+        assert any("error" in str(e).lower() for e in sse)
+
+    def test_non_uuid_workflow_id_records_nothing(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "boom", "workflow_id": "not-a-uuid"},
+        ])
+        assert recorded == {}
+
+    def test_finished_without_code_cannot_be_attributed(self):
+        """Documented limitation, not an oversight.
+
+        The 'finished without generating code' fallback has no workflow_id to
+        key a row on: running events do not carry one (workflow_service.py:577),
+        and only complete/error events do. Every real failure path emits an
+        error event, which does carry it — so this fallback is the one case
+        Grafana cannot count. Recording it under a fresh uuid would invent a run
+        that the metrics and trace stores know nothing about.
+        """
+        recorded, sse = self._run([{"status": "running", "message": "planning"}])
+        assert recorded == {}
+        assert any("without generating code" in str(e) for e in sse)
+
+    def test_successful_generation_is_not_recorded_as_error(self):
+        recorded, _ = self._run([
+            {"status": "complete", "robot_code": "*** Test Cases ***\nT\n    Log    hi",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["status"] == "generated"
+
+
 class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator."""
 
