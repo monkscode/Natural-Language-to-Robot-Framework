@@ -28,6 +28,11 @@
 
 set -euo pipefail
 
+# Always write credentials.json into the repo root, whatever directory the
+# script was invoked from. docker-compose.vertex.yml bind-mounts it from there,
+# so a key dropped in the caller's cwd would leave the container without one.
+cd "$(dirname "$0")"
+
 # Locate the gcloud CLI: on PATH, or in the default install folders (a fresh
 # install is not visible on this shell's PATH yet, so check those too).
 find_gcloud() {
