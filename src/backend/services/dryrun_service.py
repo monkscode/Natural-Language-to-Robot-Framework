@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 
 import docker
@@ -461,7 +462,10 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     repair_crew.kickoff()
     task_output = repair_crew.tasks[0].output
     usage = _repair_usage_dict(repair_crew, model_name)
-    return task_output, usage
+    # `tasks` is local to this call, so its guardrail counter dies here unless
+    # it is returned. The main crew's drain never sees these — this mini-crew
+    # builds its own RobotTasks by design (§5, no double-count).
+    return task_output, usage, dict(tasks.guardrail_attempts)
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +513,15 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         {"code": <possibly-repaired code>,
          "dryrun_status": "passed" | "failed" | "unverified" | "skipped",
          "dryrun_errors": <str, only when failed>,
-         "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>}
+         "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>,
+         "dryrun_attempts": <int, dryruns invoked>,
+         "dryrun_repairs": <int, repair rounds invoked>,
+         "guardrail_attempts": <dict, summed across repair rounds; {} when none>,
+         "repair_duration_s": <float, wall time in repair; 0.0 when none>}
+
+    The four counters are present on EVERY exit. They are the metrics row's only
+    record of what the gate did: before this, dryrun_repairs was recovered by
+    counting "🔧 Fixing test code..." occurrences in the SSE stream.
 
     Flow:
       1. DRYRUN_ENABLED off OR empty/whitespace code → skipped (no container; §8.4).
@@ -526,6 +538,20 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     learning DB; only the real Docker run feeds learning.
     """
     repair_usage: dict = {}
+    # Counted BEFORE each invocation, never after: an attempt that times out or
+    # whose container dies was still attempted, and a run that reported 0 for it
+    # would look like a run that never verified at all.
+    counters = {"dryrun_attempts": 0, "dryrun_repairs": 0}
+    guardrail_attempts: dict = {}
+    repair_duration_s = 0.0
+
+    def _result(**fields) -> dict:
+        """Every exit carries the counters — the four outcomes are equally
+        interesting and a missing key would read as zero downstream."""
+        return {"repair_usage": repair_usage,
+                "guardrail_attempts": guardrail_attempts,
+                "repair_duration_s": round(repair_duration_s, 3),
+                **counters, **fields}
 
     # The assembler's 80% checkpoint. Its TaskCompletedEvent is lost to the
     # event-bus handler race (see progress_events._on_task_started); the gate
@@ -538,7 +564,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     if not settings.DRYRUN_ENABLED or not robot_code or not robot_code.strip():
         reason = "DRYRUN_ENABLED=False" if not settings.DRYRUN_ENABLED else "empty code"
         logger.info("🔬 DRYRUN: skipping gate (%s) for run_id=%s", reason, run_id)
-        return {"code": robot_code, "dryrun_status": "skipped", "repair_usage": repair_usage}
+        return _result(code=robot_code, dryrun_status="skipped")
 
     # learn-6 — ensure the runner image via the executor hop. Any failure (incl.
     # executor unreachable) degrades to 'unverified' and STILL delivers the code.
@@ -550,8 +576,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: executor/image unavailable — delivering unverified: %s",
             e, exc_info=True,
         )
-        return {"code": robot_code, "dryrun_status": "unverified",
-                "message": f"Verification unavailable: {e}", "repair_usage": repair_usage}
+        return _result(code=robot_code, dryrun_status="unverified",
+                       message=f"Verification unavailable: {e}")
 
     code = robot_code
     last_result = None
@@ -561,23 +587,28 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             # repair hold the bar (progress=None) so it never moves backwards.
             _push_progress(progress_queue, "🔬 Verifying generated test...",
                            88 if attempt == 0 else None)
+            counters["dryrun_attempts"] += 1
             last_result = runner_exec_client.dryrun(run_id, code)
 
             if last_result["passed"]:
                 logger.info("🔬 DRYRUN: passed for run_id=%s (attempt %d)", run_id, attempt)
-                return {"code": code, "dryrun_status": "passed", "repair_usage": repair_usage}
+                return _result(code=code, dryrun_status="passed")
 
             # Failed — repair only if attempts remain.
             if attempt < settings.MAX_DRYRUN_FIXES:
                 _push_progress(progress_queue, "🔧 Fixing test code...", 92)
+                counters["dryrun_repairs"] += 1
+                _repair_t0 = time.monotonic()
                 try:
-                    task_output, attempt_usage = repair_robot_code(
+                    task_output, attempt_usage, attempt_guardrails = repair_robot_code(
                         run_id, code, last_result["errors"],
                         model_provider, model_name,
                     )
                     # Count the repair cost as soon as it is known, before
                     # extraction, so it is not lost if extraction later fails.
                     _accumulate_usage(repair_usage, attempt_usage)
+                    for _name, _count in (attempt_guardrails or {}).items():
+                        guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
                     new_code = extract_and_normalize_robot_code(task_output)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
@@ -587,6 +618,10 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                         e, exc_info=True,
                     )
                     break
+                finally:
+                    # finally, not the success path: a repair that raised still
+                    # spent the wall time, and Angle D bills it to the stage.
+                    repair_duration_s += time.monotonic() - _repair_t0
                 if not new_code or not new_code.strip():
                     logger.warning("🔬 DRYRUN: repair produced empty code — stopping")
                     break
@@ -603,10 +638,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: dryrun execution error — delivering unverified (non-blocking): %s",
             e, exc_info=True,
         )
-        return {"code": code, "dryrun_status": "unverified",
-                "message": str(e), "repair_usage": repair_usage}
+        return _result(code=code, dryrun_status="unverified", message=str(e))
 
     # Loop exhausted (or broke early) without a pass → failed, but STILL delivered.
-    return {"code": code, "dryrun_status": "failed",
-            "dryrun_errors": last_result["errors"] if last_result else "",
-            "repair_usage": repair_usage}
+    return _result(code=code, dryrun_status="failed",
+                   dryrun_errors=last_result["errors"] if last_result else "")
