@@ -50,15 +50,33 @@ if [ "$MODE" = "bench" ]; then
     # port would read as free — the guard has to refuse to run instead of
     # passing while a live stack is still up.
     if command -v netstat >/dev/null 2>&1; then
-        port_probe() { netstat -an 2>/dev/null | grep "LISTEN"; }
+        PROBE_NAME=netstat
+        port_probe() { netstat -an 2>/dev/null; }
     elif command -v ss >/dev/null 2>&1; then
+        PROBE_NAME=ss
         port_probe() { ss -ltn 2>/dev/null; }
     else
         echo "Error: neither 'netstat' nor 'ss' is available — cannot verify that ports 5000/4999/4998 are free. Install net-tools or iproute2."
         exit 1
     fi
+    # Present is not the same as working. A netstat that exists but cannot read
+    # the connection table (permissions, a stub on PATH) prints nothing, 2>/dev/null
+    # hides why, and an empty probe reads as "every port is free" — the same
+    # fail-open the branch above exists to close, one layer in. Both tools print
+    # a header even with zero listeners, so an EMPTY probe means the tool failed,
+    # not that the machine is idle: test the raw table before filtering it.
+    # Probed once and reused — three invocations are three kernel sweeps that can
+    # disagree with each other between ports.
+    PORT_TABLE="$(port_probe)"
+    if [ -z "$PORT_TABLE" ]; then
+        echo "Error: '$PROBE_NAME' produced no output — cannot verify that ports 5000/4999/4998 are free. Check that it can read the connection table."
+        exit 1
+    fi
+    # ss -ltn is already listen-only; the filter also drops its header row, and
+    # on Windows netstat says LISTENING, which this matches too.
+    LISTENING="$(printf '%s\n' "$PORT_TABLE" | grep "LISTEN")"
     for port in 5000 4999 4998; do
-        if port_probe | grep -Eq "[:.]${port}([[:space:]]|$)"; then
+        if printf '%s\n' "$LISTENING" | grep -Eq "[:.]${port}([[:space:]]|$)"; then
             echo "Error: port ${port} already in use — is the dev stack still running? Stop it first."
             exit 1
         fi
@@ -126,6 +144,16 @@ _install_failed() {
 }
 
 BACKEND_REQ="src/backend/requirements.txt"
+# ONE install set behind ONE stamp. The create and update branches used to
+# install different sets — create added the test runner, update did not — while
+# both wrote the same hash. So a create that failed on its second command left a
+# venv whose retry came back through the update branch, installed the manifest
+# only, stamped it fresh, and left `venv/` permanently without pytest. Anything
+# both branches must guarantee belongs here.
+_install_backend() {
+    uv pip install -r "$BACKEND_REQ" \
+        && uv pip install pytest pytest-asyncio pytest-cov
+}
 VENV_STAMP="$VENV_DIR/.requirements-hash"
 BACKEND_HASH="$(_req_hash "$BACKEND_REQ")"
 
@@ -136,7 +164,7 @@ if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     if [ "$(cat "$VENV_STAMP" 2>/dev/null)" != "$BACKEND_HASH" ]; then
         echo "$BACKEND_REQ changed — updating virtual environment..."
         command -v uv >/dev/null 2>&1 || pip install uv
-        if uv pip install -r "$BACKEND_REQ"; then
+        if _install_backend; then
             echo "$BACKEND_HASH" > "$VENV_STAMP"
         else
             _install_failed "the backend dependency update" "$VENV_STAMP"
@@ -150,7 +178,7 @@ else
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install uv
-    if uv pip install -r "$BACKEND_REQ" && uv pip install pytest pytest-asyncio pytest-cov; then
+    if _install_backend; then
         echo "$BACKEND_HASH" > "$VENV_STAMP"
     else
         _install_failed "the backend dependency install" "$VENV_STAMP"
