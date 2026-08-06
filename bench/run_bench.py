@@ -30,6 +30,7 @@ import shutil
 import sys
 import time
 from datetime import datetime
+from itertools import zip_longest
 from pathlib import Path
 
 import psycopg
@@ -374,7 +375,7 @@ def existing_header(out_path: Path) -> list[str] | None:
 
 
 def gate_schema(out_path: Path) -> None:
-    """Refuse to append rows written against a different column set.
+    """Refuse to append rows written against a different column layout.
 
     DictWriter writes by CURRENT fieldnames and only emits a header for a new
     file, so appending to an older CSV silently misaligns every value after
@@ -392,8 +393,35 @@ def gate_schema(out_path: Path) -> None:
         return
     missing = [c for c in CSV_COLUMNS if c not in header]
     extra = [c for c in header if c not in CSV_COLUMNS]
-    # ASCII only: this message is the last thing the process does, and a
-    # cp1252 stderr would turn a clear refusal into a UnicodeEncodeError.
+    # ASCII only, here and below: this message is the last thing the process
+    # does, and a cp1252 stderr would turn a clear refusal into a
+    # UnicodeEncodeError.
+    if not missing and not extra:
+        # Same column names, so the report below has nothing to list and would
+        # print "(none)" on both lines, naming no cause at all - it reads like
+        # the gate is broken rather than like the file is. Both checks above
+        # ignore order and repeats, so what is left is a reorder (or, in
+        # principle, a duplicated column). zip_longest rather than zip because
+        # a duplicate makes the header LONGER, and pairwise zip would stop at
+        # the short list and find nothing; header != CSV_COLUMNS is already
+        # established, so padding guarantees the search below finds a position.
+        index, (theirs, ours) = next(
+            (i, pair)
+            for i, pair in enumerate(zip_longest(header, CSV_COLUMNS))
+            if pair[0] != pair[1]
+        )
+        # `is None` rather than a falsy test, so the substitution says exactly
+        # what it means: None is zip_longest's padding and nothing else.
+        past_end = "(past the last column)"
+        theirs = past_end if theirs is None else theirs
+        ours = past_end if ours is None else ours
+        sys.exit(
+            f"error: {out_path} lists the same columns in a different order. "
+            f"Appending would misalign every value from that point on.\n"
+            f"  first difference at column {index}: it has {theirs}, "
+            f"we write {ours}\n"
+            f"Use a fresh --out path."
+        )
     sys.exit(
         f"error: {out_path} was written with a different CSV schema. Appending "
         f"would misalign every column after the first difference.\n"

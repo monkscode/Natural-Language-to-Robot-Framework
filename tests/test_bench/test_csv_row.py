@@ -284,6 +284,47 @@ class TestAppendSchemaGate:
             gate_schema(path)
         assert "queue_s" in str(exc.value)
 
+    def test_a_reordered_header_is_refused_and_names_the_reason(self, tmp_path):
+        """Same column names, different order.
+
+        Both membership checks come back empty here, so the generic report has
+        nothing to list: it printed `(none)` on both lines and named no cause,
+        which reads like the gate itself is broken. The refusal was always
+        correct; only the reason was missing.
+        """
+        from bench.run_bench import gate_schema
+
+        header = list(CSV_COLUMNS)
+        moved = header.index("llm_429_count")
+        header[moved], header[moved - 1] = header[moved - 1], header[moved]
+        path = self._write(tmp_path, header)
+
+        with pytest.raises(SystemExit) as exc:
+            gate_schema(path)
+
+        message = str(exc.value)
+        assert "(none)" not in message, "the empty-list report must not be reused here"
+        assert "order" in message
+        # Points at the first column that actually moved, not just "somewhere".
+        assert f"column {moved - 1}" in message
+        assert CSV_COLUMNS[moved] in message
+
+    def test_a_duplicated_column_is_refused_without_crashing(self, tmp_path):
+        """A header can reach the same-names branch without being a reorder.
+
+        `not in` ignores repeats, so a header carrying a duplicate column has
+        no missing and no extra entries either, while being LONGER than
+        CSV_COLUMNS. Zipping the two lists pairwise would run off the short
+        one and find no difference at all. Guard that the gate still refuses
+        and still reports, rather than dying inside its own error path.
+        """
+        from bench.run_bench import gate_schema
+
+        path = self._write(tmp_path, [*CSV_COLUMNS, CSV_COLUMNS[0]])
+        with pytest.raises(SystemExit) as exc:
+            gate_schema(path)
+        assert "fresh --out path" in str(exc.value)
+
     def test_an_empty_file_gets_a_header_instead_of_a_headerless_row(self, tmp_path):
         """A zero-byte --out slipped past both guards. existing_header returns
         None for it exactly as it does for a missing file, so gate_schema
