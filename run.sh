@@ -97,6 +97,21 @@ _req_hash() {
     fi
 }
 
+# The stamp is the venv's claim to match its manifest, so it may only be written
+# once the install backing that claim has actually succeeded. This script does
+# not `set -e`: a bare `echo ... > stamp` on the line after an install runs even
+# when that install failed, which marks a half-built venv fresh. Every later run
+# then compares equal, skips the repair, and the bench goes on measuring a
+# package set the manifest no longer describes — the same fork the hashing above
+# was added to close, except now it is unrecoverable without deleting the stamp
+# by hand. Fail loudly instead, and leave the stamp as it was so the next run
+# retries: the create paths below have already made the venv directory, so a
+# retry re-enters through the update branch and reinstalls there.
+_install_failed() {
+    echo "Error: $1 failed. Leaving $2 unchanged so the next run retries." >&2
+    exit 1
+}
+
 BACKEND_REQ="src/backend/requirements.txt"
 VENV_STAMP="$VENV_DIR/.requirements-hash"
 BACKEND_HASH="$(_req_hash "$BACKEND_REQ")"
@@ -108,8 +123,11 @@ if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     if [ "$(cat "$VENV_STAMP" 2>/dev/null)" != "$BACKEND_HASH" ]; then
         echo "$BACKEND_REQ changed — updating virtual environment..."
         command -v uv >/dev/null 2>&1 || pip install uv
-        uv pip install -r "$BACKEND_REQ"
-        echo "$BACKEND_HASH" > "$VENV_STAMP"
+        if uv pip install -r "$BACKEND_REQ"; then
+            echo "$BACKEND_HASH" > "$VENV_STAMP"
+        else
+            _install_failed "the backend dependency update" "$VENV_STAMP"
+        fi
     fi
 else
     echo "Creating new virtual environment..."
@@ -119,9 +137,11 @@ else
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install uv
-    uv pip install -r "$BACKEND_REQ"
-    uv pip install pytest pytest-asyncio pytest-cov
-    echo "$BACKEND_HASH" > "$VENV_STAMP"
+    if uv pip install -r "$BACKEND_REQ" && uv pip install pytest pytest-asyncio pytest-cov; then
+        echo "$BACKEND_HASH" > "$VENV_STAMP"
+    else
+        _install_failed "the backend dependency install" "$VENV_STAMP"
+    fi
 fi
 
 # --- Browser-use service venv (isolated — see requirements-bus.txt header) ---
@@ -137,16 +157,22 @@ if [ ! -f "$BUS_PY" ]; then
     echo "Creating browser-service virtual environment..."
     [ -d "$BUS_VENV_DIR" ] && rm -rf "$BUS_VENV_DIR"
     python -m venv "$BUS_VENV_DIR"
-    "$BUS_PY" -m pip install -r requirements-bus.txt
-    "$BUS_PY" -m playwright install chromium
-    echo "$BUS_HASH" > "$BUS_STAMP"
+    if "$BUS_PY" -m pip install -r requirements-bus.txt \
+        && "$BUS_PY" -m playwright install chromium; then
+        echo "$BUS_HASH" > "$BUS_STAMP"
+    else
+        _install_failed "the browser-service dependency install" "$BUS_STAMP"
+    fi
 elif [ "$(cat "$BUS_STAMP" 2>/dev/null)" != "$BUS_HASH" ]; then
     # Reinstall the browser too: the pin that changed may be playwright itself, and the
     # engine is what the locator stack resolves against.
     echo "requirements-bus.txt changed — updating browser-service virtual environment..."
-    "$BUS_PY" -m pip install -r requirements-bus.txt
-    "$BUS_PY" -m playwright install chromium
-    echo "$BUS_HASH" > "$BUS_STAMP"
+    if "$BUS_PY" -m pip install -r requirements-bus.txt \
+        && "$BUS_PY" -m playwright install chromium; then
+        echo "$BUS_HASH" > "$BUS_STAMP"
+    else
+        _install_failed "the browser-service dependency update" "$BUS_STAMP"
+    fi
 fi
 
 # --- Postgres (auth + learning stack live here as of Phase 4) ---
