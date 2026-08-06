@@ -450,12 +450,26 @@ def create_hint(
         # rows. Matching an org-private hint here would silently turn "create a
         # hint for every org" into an evidence bump on one tenant's private row
         # — the shared hint the admin intended would never exist.
-        existing = conn.execute(
-            "SELECT * FROM nl_feedback_corrections "
-            "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
-            "AND is_shared = 1",
-            (text, request.domain, request.scope),
-        ).fetchone()
+        #
+        # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url and
+        # NLFeedbackEngine.learn_from_feedback: identical text on two pages of
+        # the same domain is two hints, one per page. Without the url predicate
+        # the second page's create bumps evidence on the FIRST page's hint and
+        # the hint the admin asked for is never written.
+        if request.scope == "url":
+            existing = conn.execute(
+                "SELECT * FROM nl_feedback_corrections "
+                "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
+                "AND url IS NOT DISTINCT FROM ? AND scope = ? AND is_shared = 1",
+                (text, request.domain, request.url, request.scope),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT * FROM nl_feedback_corrections "
+                "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
+                "AND is_shared = 1",
+                (text, request.domain, request.scope),
+            ).fetchone()
 
         if existing:
             # Duplicate text — bump evidence, reactivate, and clear any conflict flag.
