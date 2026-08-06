@@ -249,7 +249,119 @@ class CleanedLLMWrapper(LLM):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
         self._monitor = LLMFormattingMonitor()
+        # Watermark for pop_stage_usage(): the value of BaseLLM._token_usage at
+        # the last drain. Per-stage usage is the diff against it, NOT a counter
+        # maintained by an override of call(). See pop_stage_usage().
+        self._stage_baseline = dict(getattr(self, "_token_usage", {}) or {})
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
+
+    # ------------------------------------------------------------------
+    # Token/cost accounting
+    #
+    # Both readers below diff or read crewai's BaseLLM._token_usage, which
+    # LLM.call updates synchronously in the calling thread (llm.py ~1150).
+    # They are pure READERS — deliberately not an override of call().
+    #
+    # An accounting wrapper around call() double-counts: crewai retries an
+    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:1715),
+    # which re-enters the override, so the inner and outer frames each bill the
+    # same tokens. It also misses any call that does not go through the
+    # override, and it puts a metrics read on the LLM call path, where a
+    # failure can take down the call it was only meant to measure.
+    # ------------------------------------------------------------------
+
+    _ZERO_USAGE = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                   "tokens": 0, "cost": 0.0}
+
+    def _cost_for(self, prompt_tokens: int, completion_tokens: int) -> float:
+        """Price a token count via LiteLLM's tables. 0.0 on any failure.
+
+        Pricing is linear in tokens, so aggregating before pricing is exact for
+        a single model.
+        """
+        if not (prompt_tokens or completion_tokens):
+            return 0.0
+        try:
+            import litellm
+            prompt_cost, completion_cost = litellm.cost_per_token(
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            return round(prompt_cost + completion_cost, 6)
+        except Exception as e:
+            # Loud enough to notice: a model LiteLLM cannot price reports $0
+            # while its tokens report correctly, which reads as "free" on a
+            # cost panel rather than as "unknown".
+            logger.warning(
+                "LLM cost lookup failed for model=%s (%d prompt / %d completion "
+                "tokens reported at $0): %s",
+                self.model, prompt_tokens, completion_tokens, e,
+            )
+            return 0.0
+
+    def pop_stage_usage(self) -> dict:
+        """Usage accrued since the last drain, priced, and move the watermark.
+
+        Called at each task boundary. Execution is sequential, so everything
+        accumulated since the previous drain belongs to the task that just
+        finished. Diffing the shared accumulator (rather than counting in an
+        override) means a call attributes correctly however it entered — and
+        means the planner's wrapper needs no second alias, since it already
+        aliases the one _token_usage dict.
+
+        Never raises; returns zeroed usage on any failure.
+        """
+        try:
+            current = self._token_usage
+            # max(0, ...) is defensive only: crewai assigns _token_usage once in
+            # BaseLLM.__init__ and never resets it. A negative would silently
+            # corrupt a panel, so clamp rather than trust.
+            prompt = max(0, int(current.get("prompt_tokens", 0) or 0)
+                         - int(self._stage_baseline.get("prompt_tokens", 0) or 0))
+            completion = max(0, int(current.get("completion_tokens", 0) or 0)
+                             - int(self._stage_baseline.get("completion_tokens", 0) or 0))
+            calls = max(0, int(current.get("successful_requests", 0) or 0)
+                        - int(self._stage_baseline.get("successful_requests", 0) or 0))
+            self._stage_baseline = dict(current)
+            return {
+                "llm_calls": calls,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                "cost": self._cost_for(prompt, completion),
+            }
+        except Exception:
+            logger.debug("pop_stage_usage failed", exc_info=True)
+            return dict(self._ZERO_USAGE)
+
+    def get_workflow_usage(self) -> dict:
+        """This wrapper's lifetime usage with cost — the workflow totals.
+
+        Preferred over Crew.calculate_usage_metrics(), which adds the shared LLM
+        instance's _token_usage once per agent in the crew and so is only
+        correct while the crew stays single-agent (it reported 3x on the old
+        3-agent crew). One wrapper per workflow makes this exact regardless of
+        crew shape.
+
+        Prices through the same path as pop_stage_usage(), so the workflow total
+        and the sum of the per-stage figures agree. Drains nothing. Never
+        raises; returns zeroed usage on any failure.
+        """
+        try:
+            u = self._token_usage
+            prompt = int(u.get("prompt_tokens", 0) or 0)
+            completion = int(u.get("completion_tokens", 0) or 0)
+            return {
+                "llm_calls": int(u.get("successful_requests", 0) or 0),
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                "cost": self._cost_for(prompt, completion),
+            }
+        except Exception:
+            logger.debug("get_workflow_usage failed", exc_info=True)
+            return dict(self._ZERO_USAGE)
 
     def get_context_window_size(self) -> int:
         """Return the context window size for the configured model.
