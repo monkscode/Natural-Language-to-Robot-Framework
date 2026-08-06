@@ -327,7 +327,7 @@ def detach_run(conn, workflow_id: str) -> None:
             _warn(f"could not remove artifact dir {run_dir}: {e}")
 
 
-def queue_partial_detach(workflow_id: str | None, pending: list | None) -> None:
+def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     """Record a run whose stream died mid-flight for detachment AFTER the sweep.
 
     The id reaches the client only on the terminal generation event
@@ -358,8 +358,7 @@ def queue_partial_detach(workflow_id: str | None, pending: list | None) -> None:
     # Named now, not only at drain time: if the process is killed before the
     # sweep ends, this line is the only record of what needs cleaning by hand.
     _log(f"{workflow_id}: stream failed — queued for detachment at end of sweep")
-    if pending is not None:
-        pending.append(workflow_id)
+    pending.append(workflow_id)
 
 
 def drain_deferred_detach(conn, pending: list) -> None:
@@ -388,11 +387,13 @@ def drain_deferred_detach(conn, pending: list) -> None:
 
 def run_once(base_url: str, token: str | None, query_id: str, query: str,
              repeat: int, browser_log: Path | None, conn,
-             pending_detach: list | None = None) -> dict:
+             pending_detach: list) -> dict:
     """Execute one benchmark run and return its complete CSV row.
 
     `pending_detach` collects the ids of runs whose stream died mid-flight; see
-    queue_partial_detach for why those cannot be detached inline.
+    queue_partial_detach for why those cannot be detached inline. Required, not
+    defaulted: a caller that forgets it would drop those ids on the floor and
+    leave the runs attached to History with nothing said about it.
     """
     fields: dict = {
         "query_id": query_id, "query": query, "repeat": repeat,
