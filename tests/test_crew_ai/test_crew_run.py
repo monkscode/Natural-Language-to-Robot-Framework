@@ -136,15 +136,16 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
 class TestRunCrewReturnShape:
     """run_crew() must return a RunCrewResult with the correct element types.
 
-    Indices 0-4 are unchanged from the original 5-tuple; stage_metrics and
-    shared_llm are appended, so every positional assertion below still holds.
+    Indices 0-4 are unchanged from the original 5-tuple; stage_metrics,
+    shared_llm and guardrail_attempts are appended, so every positional
+    assertion below still holds.
     """
 
-    def test_returns_seven_tuple(self):
-        """Success path: result is a 7-element tuple."""
+    def test_returns_eight_tuple(self):
+        """Success path: result is an 8-element tuple."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 7
+        assert len(result) == 8
 
     def test_named_access_matches_positional(self):
         """It is a NamedTuple: names and indices address the same members."""

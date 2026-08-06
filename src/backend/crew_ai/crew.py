@@ -39,6 +39,7 @@ class RunCrewResult(NamedTuple):
     llm_monitor: Any               # agents.llm._monitor — authoritative call count
     stage_metrics: dict            # {"planner": {...}, "assembler": {...}}
     shared_llm: Any                # the CleanedLLMWrapper itself, for get_workflow_usage()
+    guardrail_attempts: dict       # the main crew's RobotTasks counter (assembly_output)
 
 # CrewAI log file path and rotation settings
 CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
@@ -563,6 +564,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             return RunCrewResult(
                 result, assembler_crew, optimization_metrics, hint_metadata,
                 agents.llm._monitor, task_callback.stage_metrics, agents.llm,
+                dict(tasks.guardrail_attempts),
             )
 
         except Exception as e:

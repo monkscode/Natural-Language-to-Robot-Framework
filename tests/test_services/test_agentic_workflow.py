@@ -110,7 +110,7 @@ def _make_run_crew_result(
     }
 
     return RunCrewResult(MagicMock(), crew, None, {}, llm_monitor,
-                         stage_metrics, shared_llm)
+                         stage_metrics, shared_llm, {"assembly_output": 1})
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
@@ -508,14 +508,10 @@ class TestWorkflowCompletionPaths:
     def test_repair_cost_folded_into_crewai_and_total_metrics(self):
         """The gate's repair_usage is added into crewai_*/total_* WorkflowMetrics
         and the main-crew calls are NOT double-counted (decision 5 / §5)."""
-        from src.backend.core.workflow_metrics import calculate_crewai_cost
-
-        # Baseline crewai metrics from the mocked crew usage (200 tokens, 8 calls).
-        base = calculate_crewai_cost(
-            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
-             'successful_requests': 8},
-            model_name="gemini-2.5-flash",
-        )
+        # Baseline crewai metrics now come from the shared wrapper's
+        # get_workflow_usage(), not the assembler crew's calculate_usage_metrics()
+        # — same numbers in production, but the mock defines them here.
+        base = _make_run_crew_result().shared_llm.get_workflow_usage()
         repair_usage = {'llm_calls': 2, 'cost': 0.004, 'tokens': 50,
                         'prompt_tokens': 40, 'completion_tokens': 10}
 
@@ -550,6 +546,67 @@ class TestWorkflowCompletionPaths:
         # Totals derive from the CrewAI bucket, so they include the repair cost too.
         assert m.total_llm_calls == base['llm_calls'] + 2
         assert abs(m.total_cost - round(base['cost'] + 0.004, 6)) < 1e-9
+
+    def test_observability_fields_land_on_the_metrics_row(self):
+        """The T3/T5 payloads reach WorkflowMetrics, not just the log."""
+        gate_out = {
+            "code": VALID_ROBOT_CODE, "dryrun_status": "failed",
+            "dryrun_errors": "No keyword with name 'Cilck' found",
+            "dryrun_attempts": 3, "dryrun_repairs": 2,
+            "repair_duration_s": 4.25,
+            "repair_usage": {"llm_calls": 2, "cost": 0.004, "tokens": 50,
+                             "prompt_tokens": 40, "completion_tokens": 10},
+            "guardrail_attempts": {"repair_output": 3},
+        }
+        captured = {}
+
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=lambda wid, code, *a, **k: gate_out), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        m = captured["m"]
+        assert m.dryrun_status == "failed"
+        assert m.dryrun_attempts == 3
+        assert m.dryrun_repairs == 2
+        # Wall time of the whole run — distinct from execution_time, which is
+        # the browser-use figure and is 0 here (no browser metrics).
+        assert m.workflow_duration_s is not None and m.workflow_duration_s >= 0.0
+
+        # Angle D: repair is a third stage alongside planner and assembler.
+        assert set(m.crew_stage_metrics) == {"planner", "assembler", "repair"}
+        assert m.crew_stage_metrics["repair"]["duration_s"] == 4.25
+        assert m.crew_stage_metrics["repair"]["llm_calls"] == 2
+
+        # Both RobotTasks counters merged: main crew + repair mini-crew.
+        assert m.guardrail_attempts == {"assembly_output": 1, "repair_output": 3}
+
+    def test_stage_metrics_omit_repair_when_none_ran(self):
+        captured = {}
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        assert set(captured["m"].crew_stage_metrics) == {"planner", "assembler"}
 
     def test_run_crew_exception_yields_error_event(self):
         """If run_crew() raises, the generator yields an error event."""

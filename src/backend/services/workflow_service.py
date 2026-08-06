@@ -3,6 +3,7 @@ import uuid
 import logging
 import json
 import asyncio
+import time
 from queue import Queue, Empty
 from threading import Thread
 import threading
@@ -556,6 +557,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     workflow_id = str(uuid.uuid4())
     logging.info(f"🆔 Workflow ID: {workflow_id}")
 
+    # Wall clock for the whole run. Deliberately NOT execution_time, which is
+    # browser_metrics['execution_time'] — the browser-use figure this function
+    # passes straight through and which excludes both crew kickoffs and the gate.
+    _t0 = time.monotonic()
+
     # Bind workflow context so all subsequent log entries include workflow_id
     # without modifying any individual log call sites.
     bind_workflow_context(
@@ -624,7 +630,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
             (_crew_output, crew_with_results, optimization_metrics, hint_metadata,
-             llm_monitor, crew_stage_metrics, shared_llm) = run_crew(
+             llm_monitor, crew_stage_metrics, shared_llm,
+             crew_guardrail_attempts) = run_crew(
                 natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
@@ -658,44 +665,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # ============================================
         try:
             # 1. Extract CrewAI metrics
-            # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
-            try:
-                usage_metrics_obj = crew_with_results.calculate_usage_metrics()
-
-                # Convert UsageMetrics object to dict
-                usage_metrics_dict = {
-                    'total_tokens': usage_metrics_obj.total_tokens,
-                    'prompt_tokens': usage_metrics_obj.prompt_tokens,
-                    'completion_tokens': usage_metrics_obj.completion_tokens,
-                    'successful_requests': usage_metrics_obj.successful_requests
-                }
-
-                logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
-                # calculate_usage_metrics() covers the WHOLE pipeline: the planner
-                # and assembler wrappers are separate instances (Task 22 gave the
-                # planner its own response_format) that ALIAS one _token_usage dict
-                # (RobotAgents.__init__), so it accumulates across both kickoffs and
-                # CrewAI sums it once per agent (here: once — the old
-                # 3-agent crew triple-counted). The authoritative call count is in
-                # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
-                # (agents.llm._monitor) — incremented exactly once per
-                # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-
-            except Exception as e:
-                logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
-                # Fallback to empty metrics
-                usage_metrics_dict = {
-                    'total_tokens': 0,
-                    'prompt_tokens': 0,
-                    'completion_tokens': 0,
-                    'successful_requests': 0
-                }
-
-            crewai_metrics = calculate_crewai_cost(
-                usage_metrics_dict,
-                model_name=model_name
-            )
+            # Read the shared wrapper's accumulator directly instead of the
+            # assembler crew's calculate_usage_metrics(). Both give the same
+            # numbers today, but only because the crew is single-agent:
+            # calculate_usage_metrics() adds the shared _token_usage once PER
+            # AGENT, which triple-counted on the old 3-agent crew. One wrapper
+            # per workflow is exact regardless of crew shape, and it prices
+            # through the same path as the per-stage figures, so the stages sum
+            # to the total. Never raises — returns zeroed usage on failure.
+            crewai_metrics = shared_llm.get_workflow_usage()
             logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
             # Fold the dryrun repair crew's LLM cost into the CrewAI bucket. The repair
             # mini-crew replaced the removed validator agent (whose cost used to live
@@ -711,6 +689,25 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 crewai_metrics['prompt_tokens'] += _repair_usage.get('prompt_tokens', 0)
                 crewai_metrics['completion_tokens'] += _repair_usage.get('completion_tokens', 0)
                 logging.info(f"📊 Folded dryrun repair usage into CrewAI metrics: {_repair_usage}")
+
+            # 1b. Per-stage breakdown. The planner/assembler entries are drained
+            # in-thread at each task boundary (crew_ai/callbacks.py); repair is
+            # composed here from the gate's usage plus its own wall time, since
+            # the mini-crew has no task callback to drain. Same key set for all
+            # three, so a Grafana panel can GROUP BY stage without special cases.
+            _stage_metrics = dict(crew_stage_metrics or {})
+            if _repair_usage:
+                _stage_metrics["repair"] = {
+                    "duration_s": gate.get("repair_duration_s", 0.0),
+                    **_repair_usage,
+                }
+
+            # Guardrail invocations from BOTH RobotTasks instances: the main
+            # crew's (assembly_output) and the repair mini-crew's (repair_output).
+            # The names never collide, so a plain merge is unambiguous.
+            _guardrail_attempts = dict(crew_guardrail_attempts or {})
+            for _name, _count in (gate.get("guardrail_attempts") or {}).items():
+                _guardrail_attempts[_name] = _guardrail_attempts.get(_name, 0) + _count
 
             # 2. Read browser-use metrics from temp file
             temp_storage = get_temp_metrics_storage()
@@ -786,6 +783,17 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 # identify_s phase breakdown (2026-07-26 efficiency check)
                 phase_timings=browser_metrics.get('phase_timings'),
                 agent_diagnostics=browser_metrics.get('agent_diagnostics'),
+
+                # Workflow wall time — crew kickoffs + element stage + gate.
+                workflow_duration_s=round(time.monotonic() - _t0, 3),
+
+                # The deterministic gate's own account of what it did.
+                dryrun_status=gate.get("dryrun_status"),
+                dryrun_attempts=gate.get("dryrun_attempts"),
+                dryrun_repairs=gate.get("dryrun_repairs"),
+
+                crew_stage_metrics=_stage_metrics,
+                guardrail_attempts=_guardrail_attempts,
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
