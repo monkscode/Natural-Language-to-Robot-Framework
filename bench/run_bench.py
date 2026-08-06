@@ -164,12 +164,20 @@ def fetch_health(url: str) -> dict:
 # SSE
 # ---------------------------------------------------------------------------
 
-def stream_generate_and_run(base_url: str, query: str, token: str | None):
-    """POST the query, return [(client_monotonic_time, event_dict), ...]."""
+def stream_generate_and_run(base_url: str, query: str, token: str | None,
+                            sink: list | None = None):
+    """POST the query, return [(client_monotonic_time, event_dict), ...].
+
+    `sink`, when given, is the list the events are appended to, so a caller can
+    still read the PARTIAL stream after this raises. Detachment is
+    unconditional (see the module docstring) and the workflow already exists
+    server-side by the time a read timeout can fire — without the partial
+    events the caller never learns its id and the run's rows stay attached.
+    """
     headers = {"Accept": "text/event-stream"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    events = []
+    events = [] if sink is None else sink
     with requests.post(
         f"{base_url}/generate-and-run",
         json={"query": query},
@@ -311,6 +319,31 @@ def detach_run(conn, workflow_id: str) -> None:
             _warn(f"could not remove artifact dir {run_dir}: {e}")
 
 
+def detach_partial_run(conn, workflow_id: str | None) -> None:
+    """Detach a run whose stream died mid-flight, if it got as far as an id.
+
+    The id reaches the client only on the terminal generation event
+    (workflow_service.py yields "workflow_id" on complete/error, never on the
+    in-progress pushes), so this covers a failure during the EXECUTION phase —
+    the long Docker one, and the realistic read-timeout window.
+
+    A failure before generation completes has no id to detach by, and
+    capture_evidence(None) would write a bench/runs/None directory. Those
+    llm_traces rows stay attached and have to be cleaned up by hand, so say so
+    rather than returning quietly.
+    """
+    if not workflow_id:
+        _warn("the stream failed before the generation event that carries the "
+              "workflow_id, so this run could not be detached — any llm_traces "
+              "rows it wrote are still attached to History/metrics")
+        return
+    if capture_evidence(conn, workflow_id):
+        detach_run(conn, workflow_id)
+    else:
+        _warn(f"{workflow_id}: the stream failed AND its evidence could not be "
+              f"captured — its rows are still attached to History/metrics")
+
+
 # ---------------------------------------------------------------------------
 # Per-run orchestration
 # ---------------------------------------------------------------------------
@@ -324,11 +357,17 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
     }
     offset = log_offset(browser_log)
 
+    events: list = []
     try:
-        events = stream_generate_and_run(base_url, query, token)
+        stream_generate_and_run(base_url, query, token, events)
     except requests.RequestException as e:
         _warn(f"{query_id} repeat {repeat}: request failed: {e}")
+        # generation_status stays "error": the partial stream's last status
+        # describes a run that then died, and the CSV must not read as a
+        # completed one. Only the id is taken, and only to detach by.
         fields["generation_status"] = "error"
+        fields["workflow_id"] = extract_run_identity(events)["workflow_id"]
+        detach_partial_run(conn, fields["workflow_id"])
         return build_csv_row(fields)
 
     ident = extract_run_identity(events)
@@ -466,7 +505,11 @@ def gate_pins(args, out_path: Path) -> None:
 
     meta = build_meta(nlrf_health, browser_health, args.base_url, args.browser_url)
     pins_str = ", ".join(f"{k}={v}" for k, v in meta["nlrf_pins"].items()) or "unavailable"
-    _log(f"preflight OK — nlrf pins: {pins_str}")
+    # The bench log is a run's evidence record. --allow-unpinned reaches here
+    # with violations intact, and an "OK" line there makes a non-comparable run
+    # read as comparable to whoever analyses the CSV later.
+    status = "UNPINNED (violations ignored)" if violations else "OK"
+    _log(f"preflight {status} — nlrf pins: {pins_str}")
     _log(f"browser-service: model_provider={meta['browser_service']['model_provider']} "
          f"headless={meta['browser_service']['headless']}")
 
