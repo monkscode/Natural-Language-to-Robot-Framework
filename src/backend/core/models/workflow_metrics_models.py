@@ -136,6 +136,35 @@ class WorkflowMetricsBase(
     # steps_total_s, llm_coverage_gap. Historical rows also carry agent_steps.
     agent_diagnostics: Optional[Dict[str, Any]] = None
 
+    # Wall time of the whole generation run, measured in
+    # run_agentic_workflow. NOT execution_time above, which is
+    # browser_metrics['execution_time'] — the browser-use figure that
+    # workflow_service passes straight through. None on pre-2026-08 rows.
+    workflow_duration_s: Optional[float] = None
+
+    # Deterministic dryrun gate outcome (dryrun_service.validate_and_repair):
+    # 'passed' | 'failed' | 'skipped' | 'unverified'. attempts counts every
+    # dryrun invoked, repairs every repair invoked — both counted BEFORE the
+    # call, so an attempt that times out or raises is still reported.
+    dryrun_status: Optional[str] = None
+    dryrun_attempts: Optional[int] = None
+    dryrun_repairs: Optional[int] = None
+
+    # Per-crew-stage duration and LLM usage, keyed 'planner' / 'assembler'
+    # (callbacks._AGENT_STAGE_MAP). Each value carries duration_s, llm_calls,
+    # prompt_tokens, completion_tokens, tokens, cost.
+    #
+    # Dict[str, Any] values for the same reason as phase_timings: WorkflowMetrics
+    # is built inside a try/except that swallows ValidationError, so a strict
+    # value type would discard the ENTIRE row — cost, tokens, elements — over
+    # one unmeasured stage timing.
+    crew_stage_metrics: Optional[Dict[str, Any]] = None
+
+    # Guardrail invocations per attachment site, keyed 'assembly_output' /
+    # 'repair_output'. CrewAI retries a task internally when a guardrail returns
+    # (False, ...), so >1 means the assembler needed re-prompting.
+    guardrail_attempts: Optional[Dict[str, int]] = None
+
 
 class WorkflowMetrics(WorkflowMetricsBase):
     """
@@ -327,6 +356,12 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             element_approach_metrics=m.element_approach_metrics,
             phase_timings=m.phase_timings,
             agent_diagnostics=m.agent_diagnostics,
+            workflow_duration_s=m.workflow_duration_s,
+            dryrun_status=m.dryrun_status,
+            dryrun_attempts=m.dryrun_attempts,
+            dryrun_repairs=m.dryrun_repairs,
+            crew_stage_metrics=m.crew_stage_metrics,
+            guardrail_attempts=m.guardrail_attempts,
             keyword_search_stats=m.keyword_search_stats,
             pattern_learning_stats=m.pattern_learning_stats,
             context_reduction=m.context_reduction,

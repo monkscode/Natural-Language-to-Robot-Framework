@@ -271,3 +271,109 @@ class TestPhaseTimings:
         resp = WorkflowMetricsResponse.from_workflow_metrics(m)
         assert resp.phase_timings == timings
         assert resp.agent_diagnostics == diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Run-shape fields: workflow duration, dryrun gate outcome, per-stage crew
+# metrics and guardrail attempts.
+#
+# These carry the signal a Grafana dashboard needs straight into the
+# workflow_metrics row rather than into a parallel log stream. workflow_metrics
+# is already org-scoped and already detached by bench/run_bench.py, so both
+# tenancy and bench isolation come for free — a second sink would have to
+# re-solve them.
+# ---------------------------------------------------------------------------
+
+class TestRunShapeFields:
+    """duration / dryrun / crew_stage_metrics / guardrail_attempts."""
+
+    def _make_metrics(self, **kwargs):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        defaults = {
+            "workflow_id": "wf-run-shape",
+            "url": "https://example.com",
+            "total_llm_calls": 5,
+            "total_cost": 0.0586,
+            "execution_time": 20.76,
+            "timestamp": datetime.now(),
+        }
+        defaults.update(kwargs)
+        return WorkflowMetrics(**defaults)
+
+    def test_all_run_shape_fields_survive_the_round_trip(self):
+        """extra='ignore' silently drops undeclared keys — this is the guard."""
+        stages = {
+            "planner": {"duration_s": 4.1, "llm_calls": 1, "prompt_tokens": 3200,
+                        "completion_tokens": 410, "tokens": 3610, "cost": 0.0021},
+            "assembler": {"duration_s": 9.8, "llm_calls": 2, "prompt_tokens": 8100,
+                          "completion_tokens": 1220, "tokens": 9320, "cost": 0.0074},
+        }
+        guardrails = {"assembly_output": 1, "repair_output": 2}
+        m = self._make_metrics(
+            workflow_duration_s=41.2, dryrun_status="passed",
+            dryrun_attempts=2, dryrun_repairs=1,
+            crew_stage_metrics=stages, guardrail_attempts=guardrails,
+        )
+        data = m.to_dict()
+        assert data["workflow_duration_s"] == 41.2
+        assert data["dryrun_status"] == "passed"
+        assert data["dryrun_attempts"] == 2
+        assert data["dryrun_repairs"] == 1
+        assert data["crew_stage_metrics"] == stages
+        assert data["guardrail_attempts"] == guardrails
+
+    def test_historical_rows_without_the_fields_still_deserialize(self):
+        """Every row written before this change lacks all six keys. from_dict
+        must keep loading them or the History page and the metrics API lose
+        their entire back-catalogue."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        legacy = {
+            "workflow_id": "wf-legacy", "url": None, "total_llm_calls": 5,
+            "total_cost": 0.05, "execution_time": 20.0,
+            "timestamp": datetime.now().isoformat(),
+        }
+        m = WorkflowMetrics.from_dict(legacy)
+        assert m.workflow_duration_s is None
+        assert m.dryrun_status is None
+        assert m.dryrun_attempts is None
+        assert m.dryrun_repairs is None
+        assert m.crew_stage_metrics is None
+        assert m.guardrail_attempts is None
+
+    def test_workflow_duration_is_not_the_browser_use_execution_time(self):
+        """execution_time is browser_metrics['execution_time'] — the browser-use
+        figure only (workflow_service passes it straight through). The wall time
+        of the whole run had no home before this field, so the two must stay
+        independently settable."""
+        m = self._make_metrics(execution_time=20.76, workflow_duration_s=41.2)
+        assert m.execution_time == 20.76
+        assert m.workflow_duration_s == 41.2
+
+    def test_the_response_model_carries_the_run_shape_fields(self):
+        """from_workflow_metrics enumerates fields by hand, so inheriting them
+        on the response model is not enough — the same trap the phase_timings
+        test above guards."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetricsResponse
+
+        stages = {"planner": {"duration_s": 4.1, "cost": 0.0021}}
+        m = self._make_metrics(
+            workflow_duration_s=41.2, dryrun_status="failed",
+            dryrun_attempts=3, dryrun_repairs=2,
+            crew_stage_metrics=stages, guardrail_attempts={"assembly_output": 1},
+        )
+        resp = WorkflowMetricsResponse.from_workflow_metrics(m)
+        assert resp.workflow_duration_s == 41.2
+        assert resp.dryrun_status == "failed"
+        assert resp.dryrun_attempts == 3
+        assert resp.dryrun_repairs == 2
+        assert resp.crew_stage_metrics == stages
+        assert resp.guardrail_attempts == {"assembly_output": 1}
+
+    def test_a_none_inside_a_stage_does_not_discard_the_whole_row(self):
+        """Same reasoning as phase_timings: WorkflowMetrics is built inside a
+        try/except that swallows ValidationError, so a strict value type would
+        silently cost the run its cost, tokens and element counts too."""
+        m = self._make_metrics(
+            crew_stage_metrics={"planner": {"duration_s": None, "cost": 0.0}},
+        )
+        assert m.crew_stage_metrics["planner"]["duration_s"] is None
