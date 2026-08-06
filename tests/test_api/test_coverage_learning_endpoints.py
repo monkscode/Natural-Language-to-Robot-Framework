@@ -532,6 +532,61 @@ class TestCreateHint:
         assert org_row[1] == 0, "org hint must stay private"
         assert org_row[2] == "org-A"
 
+    def test_url_scope_second_page_is_not_deduped_into_the_first(self, learning_client):
+        """Two url-scoped hints with identical text+domain but different urls are
+        distinct hints, one per page. The dedup SELECT must key on url for
+        scope='url' — the storage contract already does (uq_nlfc_dedup_url) and so
+        does NLFeedbackEngine.learn_from_feedback. Omitting url here bumps evidence
+        on the FIRST page's hint and the second page's hint is never created."""
+        client, _, _, db_path = learning_client
+        first_id = _insert_hint(
+            db_path, feedback_text="Wait for the spinner to clear",
+            scope="url", domain="shop.test", url="https://shop.test/checkout",
+            evidence=1, is_shared=1,
+        )
+
+        resp = client.post("/hints", json=self._valid_payload(
+            feedback_text="Wait for the spinner to clear",
+            scope="url", domain="shop.test", url="https://shop.test/cart",
+        ))
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["created"] is True, (
+            "the second page's hint was deduped into the first page's hint — "
+            "the dedup key ignored url for scope='url'"
+        )
+        assert data["hint"]["url"] == "https://shop.test/cart"
+        assert data["hint"]["id"] != first_id
+
+        conn = _pg_conn(db_path)
+        first_evidence = conn.execute(
+            "SELECT evidence_count FROM nl_feedback_corrections WHERE id = ?",
+            (first_id,),
+        ).fetchone()[0]
+        conn.close()
+        assert first_evidence == 1, (
+            "the first page's hint was reinforced by a create meant for another page"
+        )
+
+    def test_url_scope_same_page_still_dedupes(self, learning_client):
+        """The url key must not break same-page dedup: identical text+domain+url
+        stays one hint with bumped evidence."""
+        client, _, _, db_path = learning_client
+        _insert_hint(
+            db_path, feedback_text="Wait for the spinner to clear",
+            scope="url", domain="shop.test", url="https://shop.test/checkout",
+            evidence=1, is_shared=1,
+        )
+
+        resp = client.post("/hints", json=self._valid_payload(
+            feedback_text="Wait for the spinner to clear",
+            scope="url", domain="shop.test", url="https://shop.test/checkout",
+        ))
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["created"] is False, "same-page resubmission must dedup, not duplicate"
+        assert data["hint"]["evidence_count"] == 2
+
 
 # ---------------------------------------------------------------------------
 # PATCH /hints/{id}
