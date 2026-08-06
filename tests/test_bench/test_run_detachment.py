@@ -5,6 +5,10 @@ never reach History, the metrics dashboards or pricing. The happy path honours
 that. These tests hold the two paths where it used to slip — a request that
 dies after the server already created the workflow, and a preflight that logs
 OK for a run its own violations made non-comparable.
+
+The failed run is queued, not detached where it failed: the stream dying is not
+the run dying, and deleting a run the server is still executing takes its
+bind-mounted robot_tests/<id> out from under a live container.
 """
 
 from types import SimpleNamespace
@@ -12,7 +16,7 @@ from unittest.mock import patch
 
 import requests
 
-from bench.run_bench import gate_pins, run_once
+from bench.run_bench import drain_deferred_detach, gate_pins, run_once
 
 PINNED_NLRF = {"status": "healthy", "pins": {
     "optimization_enabled": False, "model_provider": "gemini",
@@ -35,50 +39,58 @@ PARTIAL_EVENTS = [
 ]
 
 
-class TestMidStreamFailureStillDetaches:
-    """READ_TIMEOUT_S is finite and Docker execution is the long phase, so a
-    read timeout after the generation completed is the realistic trigger. The
-    run's workflow_metrics / llm_traces / test_runs rows exist by then."""
+def _timeout_after(events):
+    """A stream that delivers `events` and then dies, like a read timeout."""
+    def blow_up(base_url, query, token, sink=None):
+        sink.extend(events)
+        raise requests.ReadTimeout("read timed out")
+    return blow_up
+
+
+class TestMidStreamFailureQueuesDetachment:
+    """A dead stream does not mean a dead RUN.
+
+    The id only reaches the client on the terminal generation event, so the
+    failure we can detach by is one during the EXECUTION phase — where the
+    server is still inside runner_exec_client.execute and the container holds
+    robot_tests/<id> as a read-write bind mount. Detaching there would rmtree a
+    live run directory and save a half-finished snapshot as that run's evidence.
+    The id is queued instead, and drained once the sweep is over.
+    """
 
     def _run(self, stream_side_effect):
-        captured, detached = [], []
+        captured, detached, pending = [], [], []
         with patch("bench.run_bench.stream_generate_and_run",
                    side_effect=stream_side_effect), \
              patch("bench.run_bench.capture_evidence",
                    side_effect=lambda conn, wid: captured.append(wid) or True), \
              patch("bench.run_bench.detach_run",
                    side_effect=lambda conn, wid: detached.append(wid)):
-            row = run_once("http://nlrf", None, "q01", "a query", 1, None, None)
-        return row, captured, detached
+            row = run_once("http://nlrf", None, "q01", "a query", 1, None, None,
+                           pending)
+        return row, captured, detached, pending
 
-    def test_partial_stream_is_captured_and_detached(self):
-        def blow_up(base_url, query, token, sink=None):
-            sink.extend(PARTIAL_EVENTS)
-            raise requests.ReadTimeout("read timed out")
+    def test_a_partial_stream_is_queued_not_detached_on_the_spot(self):
+        row, captured, detached, pending = self._run(_timeout_after(PARTIAL_EVENTS))
+        assert pending == [WF], "the failed run was not queued for detachment"
+        assert captured == [] and detached == [], (
+            "the run was detached while the server may still be executing it")
 
-        row, captured, detached = self._run(blow_up)
-        assert captured == [WF], "capture_evidence never ran on the failure path"
-        assert detached == [WF], "the run's rows were left attached to History"
-
-    def test_failure_row_records_the_workflow_id_it_detached(self):
+    def test_failure_row_records_the_workflow_id_it_queued(self):
         """An error row with no id cannot be traced back to its evidence dir."""
-        def blow_up(base_url, query, token, sink=None):
-            sink.extend(PARTIAL_EVENTS)
-            raise requests.ReadTimeout("read timed out")
-
-        row, _, _ = self._run(blow_up)
+        row, _, _, _ = self._run(_timeout_after(PARTIAL_EVENTS))
         assert row["workflow_id"] == WF
         assert row["generation_status"] == "error", (
             "the run failed — the partial stream's status must not overwrite it")
 
-    def test_failure_before_any_event_detaches_nothing(self):
+    def test_failure_before_any_event_queues_nothing(self):
         """No workflow_id means nothing the client can detach BY — and
         capture_evidence(None) would write a bench/runs/None directory."""
         def blow_up(base_url, query, token, sink=None):
             raise requests.ConnectionError("connection refused")
 
-        row, captured, detached = self._run(blow_up)
-        assert captured == [] and detached == []
+        row, captured, detached, pending = self._run(blow_up)
+        assert pending == [] and captured == [] and detached == []
         assert row["generation_status"] == "error"
 
     def test_failure_before_generation_completes_warns_it_is_undetachable(
@@ -86,29 +98,68 @@ class TestMidStreamFailureStillDetaches:
         """In-progress SSE events carry no workflow_id, so a timeout during
         generation leaves llm_traces rows the client cannot find. It cannot be
         fixed here — it must not be silent."""
-        def blow_up(base_url, query, token, sink=None):
-            sink.append((0.0, {"stage": "generation", "status": "running",
-                               "progress": 22}))
-            raise requests.ReadTimeout("read timed out")
-
-        row, captured, detached = self._run(blow_up)
-        assert captured == [] and detached == []
+        row, captured, detached, pending = self._run(_timeout_after(
+            [(0.0, {"stage": "generation", "status": "running", "progress": 22})]))
+        assert pending == [] and captured == [] and detached == []
         assert row["workflow_id"] == ""      # build_csv_row writes None as ''
         assert "could not be detached" in capsys.readouterr().err
 
-    def test_capture_failure_leaves_rows_alone_and_warns(self, capsys):
-        """The capture-before-delete contract holds on this path too."""
-        def blow_up(base_url, query, token, sink=None):
+    def test_a_healthy_run_is_never_queued(self):
+        """Deferral is for the failure path only — a run whose stream completed
+        is detached inline, as it always was."""
+        def clean(base_url, query, token, sink=None):
             sink.extend(PARTIAL_EVENTS)
-            raise requests.ReadTimeout("read timed out")
+            sink.append((3.0, {"stage": "execution", "status": "passed"}))
 
-        detached = []
-        with patch("bench.run_bench.stream_generate_and_run", side_effect=blow_up), \
-             patch("bench.run_bench.capture_evidence", return_value=False), \
+        # The generation reached "complete", so run_once polls for the metrics
+        # row; this test is about the queue, not the metrics columns.
+        with patch("bench.run_bench.fetch_metrics_data", return_value=None):
+            row, captured, detached, pending = self._run(clean)
+        assert pending == [], "a completed run must not wait for the sweep to end"
+        assert captured == [WF] and detached == [WF]
+
+
+class TestDrainingTheQueue:
+    """What the sweep does with the queue once every run is over."""
+
+    def _drain(self, pending, *, capture_ok=True):
+        captured, detached = [], []
+        with patch("bench.run_bench.capture_evidence",
+                   side_effect=lambda conn, wid: captured.append(wid) or capture_ok), \
              patch("bench.run_bench.detach_run",
                    side_effect=lambda conn, wid: detached.append(wid)):
-            run_once("http://nlrf", None, "q01", "a query", 1, None, None)
+            drain_deferred_detach(None, pending)
+        return captured, detached
+
+    def test_every_queued_run_is_captured_then_detached(self):
+        other = "99999999-8888-7777-6666-555555555555"
+        captured, detached = self._drain([WF, other])
+        assert captured == [WF, other]
+        assert detached == [WF, other], "a queued run was left attached to History"
+
+    def test_capture_failure_leaves_rows_alone_and_warns(self, capsys):
+        """The capture-before-delete contract holds on this path too."""
+        captured, detached = self._drain([WF], capture_ok=False)
         assert detached == [], "rows were deleted without a successful capture"
+        assert WF in capsys.readouterr().err
+
+    def test_one_failure_does_not_strand_the_rest_of_the_queue(self, capsys):
+        """detach_run talks to Postgres. If it raises for one id, the remaining
+        ids must still be drained — otherwise a single DB hiccup at the end of a
+        sweep leaves every later run attached."""
+        other = "99999999-8888-7777-6666-555555555555"
+        detached = []
+
+        def flaky(conn, wid):
+            if wid == WF:
+                raise RuntimeError("connection reset")
+            detached.append(wid)
+
+        with patch("bench.run_bench.capture_evidence", return_value=True), \
+             patch("bench.run_bench.detach_run", side_effect=flaky):
+            drain_deferred_detach(None, [WF, other])
+
+        assert detached == [other]
         assert WF in capsys.readouterr().err
 
 
@@ -135,6 +186,54 @@ class TestStreamSink:
                 pass
         assert [ev for _, ev in sink] == [{"stage": "generation",
                                            "workflow_id": WF}]
+
+
+class TestTheSweepAlwaysDrainsWhatItQueued:
+    """The queue only helps if it is actually emptied — including when the
+    sweep is abandoned. Ctrl-C during a 90-run bench is the ordinary way this
+    ends, and the runs queued before it must not stay attached."""
+
+    def _sweep(self, run_once_side_effect, tmp_path):
+        import bench.run_bench as rb
+
+        queries = tmp_path / "q.json"
+        queries.write_text('{"queries": [{"id": "q01", "query": "a"},'
+                           ' {"id": "q02", "query": "b"}]}', encoding="utf-8")
+        argv = ["run_bench", "--queries", str(queries), "--repeats", "1",
+                "--out", str(tmp_path / "out.csv")]
+        drained = []
+        with patch.object(rb.sys, "argv", argv), \
+             patch.object(rb.psycopg, "connect"), \
+             patch.object(rb, "gate_schema"), patch.object(rb, "gate_pins"), \
+             patch.object(rb, "append_row"), \
+             patch.object(rb, "run_once", side_effect=run_once_side_effect), \
+             patch.object(rb, "drain_deferred_detach",
+                          side_effect=lambda conn, p: drained.extend(p)):
+            try:
+                rb.main()
+            except KeyboardInterrupt:
+                pass
+        return drained
+
+    @staticmethod
+    def _queue_then(exc):
+        def _run_once(base_url, token, qid, query, repeat, log, conn,
+                      pending_detach=None):
+            pending_detach.append(f"wf-{qid}")
+            if exc is not None and qid == "q02":
+                raise exc
+            return {"generation_status": "error", "test_status": "",
+                    "total_s": None}
+        return _run_once
+
+    def test_a_completed_sweep_drains_the_queue(self, tmp_path):
+        assert self._sweep(self._queue_then(None), tmp_path) == ["wf-q01", "wf-q02"]
+
+    def test_an_interrupted_sweep_still_drains_what_it_queued(self, tmp_path):
+        """RED before the `finally`: a Ctrl-C left every queued run attached."""
+        drained = self._sweep(self._queue_then(KeyboardInterrupt()), tmp_path)
+        assert drained == ["wf-q01", "wf-q02"], (
+            "the sweep was abandoned with runs still attached to History/metrics")
 
 
 class TestPreflightLogIsHonest:

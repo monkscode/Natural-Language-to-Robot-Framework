@@ -86,8 +86,11 @@ executor, docker). Then, from the nlrf repo root:
 # pointing at the browser-service repo's logs/ yields empty log-derived metrics
 $env:BROWSER_SERVICE_LOG = (Join-Path (Get-Location) "logs/browser_use.log")
 # $env:BENCH_TOKEN = "<jwt>"   # only when AUTH_ENFORCED=true — see note below
-# --out APPENDS (see the schema note above) — always a path this run owns
-python -m bench.run_bench --out "bench/baselines/$(Get-Date -Format 'yyyy-MM-dd')-baseline.csv"
+# --out APPENDS (see the schema note above), and the day is not unique enough:
+# several benches a day is normal, and a second run would land its rows in the
+# first one's file. Name the run after the change it measures — that is what
+# every committed baseline does (2026-08-03-playwright-1.62-chromium-151-run2).
+python -m bench.run_bench --out "bench/baselines/$(Get-Date -Format 'yyyy-MM-dd')-what-changed.csv"
 ```
 
 Auth note: when the server runs with `AUTH_ENFORCED=true`, `BENCH_TOKEN` must

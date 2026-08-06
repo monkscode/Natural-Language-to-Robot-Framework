@@ -2,7 +2,11 @@
 
 Usage (from the repo root, against a fully running dev stack):
 
-    python -m bench.run_bench --out bench/baselines/2026-07-03-baseline.csv
+    python -m bench.run_bench --out bench/baselines/2026-07-03-what-changed.csv
+
+--out APPENDS, so name it after the change this run measures and never at an
+existing baseline — 2026-07-03-baseline.csv is the committed frozen reference,
+and pointing --out at it rewrites the distribution everything is compared to.
 
 Environment:
     NLRF_BASE_URL        nlrf base URL (default http://127.0.0.1:5000)
@@ -319,13 +323,23 @@ def detach_run(conn, workflow_id: str) -> None:
             _warn(f"could not remove artifact dir {run_dir}: {e}")
 
 
-def detach_partial_run(conn, workflow_id: str | None) -> None:
-    """Detach a run whose stream died mid-flight, if it got as far as an id.
+def queue_partial_detach(workflow_id: str | None, pending: list | None) -> None:
+    """Record a run whose stream died mid-flight for detachment AFTER the sweep.
 
     The id reaches the client only on the terminal generation event
     (workflow_service.py yields "workflow_id" on complete/error, never on the
-    in-progress pushes), so this covers a failure during the EXECUTION phase —
-    the long Docker one, and the realistic read-timeout window.
+    in-progress pushes), so the failure this can act on is one during the
+    EXECUTION phase — the long Docker one, and the realistic read-timeout window.
+
+    Which is exactly why it is not detached here. The stream dying is not the
+    RUN dying: at that moment the server is still blocked in
+    runner_exec_client.execute, and robot_tests/<id> is a read-write bind mount
+    inside the live container (docker_service.py). Deleting it there would pull
+    the output directory out from under a running test, save a half-finished
+    snapshot as that run's permanent evidence, and race the workflow_metrics
+    insert that _process_learning makes AFTER the execution result — which would
+    re-attach the run to History moments after we deleted it. By the end of the
+    sweep that work has finished, and one capture sees the whole run.
 
     A failure before generation completes has no id to detach by, and
     capture_evidence(None) would write a bench/runs/None directory. Those
@@ -337,11 +351,31 @@ def detach_partial_run(conn, workflow_id: str | None) -> None:
               "workflow_id, so this run could not be detached — any llm_traces "
               "rows it wrote are still attached to History/metrics")
         return
-    if capture_evidence(conn, workflow_id):
-        detach_run(conn, workflow_id)
-    else:
-        _warn(f"{workflow_id}: the stream failed AND its evidence could not be "
-              f"captured — its rows are still attached to History/metrics")
+    # Named now, not only at drain time: if the process is killed before the
+    # sweep ends, this line is the only record of what needs cleaning by hand.
+    _log(f"{workflow_id}: stream failed — queued for detachment at end of sweep")
+    if pending is not None:
+        pending.append(workflow_id)
+
+
+def drain_deferred_detach(conn, pending: list) -> None:
+    """Capture-then-detach every run queued by queue_partial_detach.
+
+    Runs from a `finally`, so an aborted sweep still cleans up what it queued.
+    Each id is isolated: detach_run talks to Postgres, and one connection error
+    must not strand the ids behind it.
+    """
+    for workflow_id in pending:
+        try:
+            if capture_evidence(conn, workflow_id):
+                detach_run(conn, workflow_id)
+            else:
+                _warn(f"{workflow_id}: the stream failed AND its evidence could "
+                      f"not be captured — its rows are still attached to "
+                      f"History/metrics")
+        except Exception as e:
+            _warn(f"{workflow_id}: deferred detachment failed ({e}) — its rows "
+                  f"are still attached to History/metrics")
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +383,13 @@ def detach_partial_run(conn, workflow_id: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 def run_once(base_url: str, token: str | None, query_id: str, query: str,
-             repeat: int, browser_log: Path | None, conn) -> dict:
-    """Execute one benchmark run and return its complete CSV row."""
+             repeat: int, browser_log: Path | None, conn,
+             pending_detach: list | None = None) -> dict:
+    """Execute one benchmark run and return its complete CSV row.
+
+    `pending_detach` collects the ids of runs whose stream died mid-flight; see
+    queue_partial_detach for why those cannot be detached inline.
+    """
     fields: dict = {
         "query_id": query_id, "query": query, "repeat": repeat,
         "started_at": _now_iso(),
@@ -367,7 +406,7 @@ def run_once(base_url: str, token: str | None, query_id: str, query: str,
         # completed one. Only the id is taken, and only to detach by.
         fields["generation_status"] = "error"
         fields["workflow_id"] = extract_run_identity(events)["workflow_id"]
-        detach_partial_run(conn, fields["workflow_id"])
+        queue_partial_detach(fields["workflow_id"], pending_detach)
         return build_csv_row(fields)
 
     ident = extract_run_identity(events)
@@ -587,17 +626,27 @@ def main() -> int:
                          row_factory=dict_row) as conn:
         total = len(queries) * args.repeats
         done = 0
-        for spec in queries:
-            for repeat in range(1, args.repeats + 1):
-                done += 1
-                _log(f"({done}/{total}) {spec['id']} repeat {repeat}: "
-                     f"{spec['query'][:60]}...")
-                row = run_once(args.base_url, token, spec["id"], spec["query"],
-                               repeat, browser_log, conn)
-                append_row(out_path, row)
-                _log(f"({done}/{total}) {spec['id']} repeat {repeat}: "
-                     f"gen={row['generation_status']} test={row['test_status']} "
-                     f"total_s={row['total_s']}")
+        # Runs whose stream died mid-flight. Detached after the loop, once the
+        # server has certainly finished with them — see queue_partial_detach.
+        pending_detach: list[str] = []
+        try:
+            for spec in queries:
+                for repeat in range(1, args.repeats + 1):
+                    done += 1
+                    _log(f"({done}/{total}) {spec['id']} repeat {repeat}: "
+                         f"{spec['query'][:60]}...")
+                    row = run_once(args.base_url, token, spec["id"], spec["query"],
+                                   repeat, browser_log, conn, pending_detach)
+                    append_row(out_path, row)
+                    _log(f"({done}/{total}) {spec['id']} repeat {repeat}: "
+                         f"gen={row['generation_status']} test={row['test_status']} "
+                         f"total_s={row['total_s']}")
+        finally:
+            # Also on Ctrl-C or an unexpected raise: an abandoned sweep must not
+            # leave the runs it already queued attached to History/metrics.
+            if pending_detach:
+                _log(f"detaching {len(pending_detach)} run(s) whose stream failed")
+                drain_deferred_detach(conn, pending_detach)
     _log(f"done — {out_path}")
     return 0
 
