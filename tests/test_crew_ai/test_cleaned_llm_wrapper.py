@@ -446,8 +446,12 @@ class TestGetLlmResponseFormat:
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
         from src.backend.crew_ai.tasks import PlanOutput
 
-        os.environ.pop("OLLAMA_API_BASE", None)
-        with patch("litellm.utils.supports_response_schema", return_value=False):
+        # patch.dict restores the real environment afterwards — a bare pop()
+        # here deleted OLLAMA_API_BASE for every later test in the session
+        # (same guard as test_local_returns_ollama_wrapper).
+        with patch.dict("os.environ", {}, clear=False), \
+             patch("litellm.utils.supports_response_schema", return_value=False):
+            os.environ.pop("OLLAMA_API_BASE", None)
             get_llm(model_provider="local", model_name="qwen2.5-coder:14b",
                     response_format=PlanOutput)
 

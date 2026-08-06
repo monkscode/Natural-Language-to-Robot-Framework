@@ -206,7 +206,7 @@ class TestSimilarityFilterRoundTrips:
         assert any("COUNT(*)" in s for s in executed)
 
     def test_cold_start_fails_open(self, recording_em):
-        em, executed = recording_em      # no anchors at all
+        em, _executed = recording_em     # no anchors at all
         sink = {}
         survivors = em.filter_by_query_similarity(
             "a query", [1, 2], "nl", score_sink=sink)
