@@ -22,6 +22,10 @@ export default function MembersTab() {
   const [users, setUsers] = useState<Member[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // See PendingTab: the list starts empty, so "No members yet." would otherwise
+  // render during the request and after a failed one — an empty roster is a
+  // claim, and it may only be made once a request has returned one.
+  const [loaded, setLoaded] = useState(false)
 
   async function load() {
     setError(null)
@@ -29,6 +33,7 @@ export default function MembersTab() {
       const all = await api<Member[]>('/auth/admin/users')
       // Pending users live in the Pending tab.
       setUsers(all.filter((u) => u.status !== 'pending'))
+      setLoaded(true)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load users')
     }
@@ -51,7 +56,9 @@ export default function MembersTab() {
   return (
     <div className="flex flex-col gap-3">
       {error && <p className="text-xs text-destructive">{error}</p>}
-      {users.length === 0 && <p className="text-sm text-muted-foreground">No members yet.</p>}
+      {loaded && users.length === 0 && (
+        <p className="text-sm text-muted-foreground">No members yet.</p>
+      )}
       <ul className="flex flex-col gap-2">
         {users.map((u) => (
           <li key={u.id} className="flex items-center justify-between rounded-md border p-3">

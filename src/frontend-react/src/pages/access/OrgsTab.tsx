@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 
@@ -35,6 +35,12 @@ export default function OrgsTab() {
   // a user from A, actually moving that user into B. Binding the rows to their
   // org lets the render discard a mismatched result instead of acting on it.
   const [members, setMembers] = useState<{ orgId: string; rows: OrgMember[] } | null>(null)
+  // Ticket for the newest member load. The binding above stops a late response
+  // being ACTED on, but it does not stop it landing: refreshOrg(A) resolving
+  // after the admin expands B overwrites B's rows, and the render guard then
+  // shows B as "No members." with every one of its users offered as an
+  // add-candidate. Stale responses have to be dropped, not stored.
+  const membersReq = useRef(0)
   const [addUserId, setAddUserId] = useState('')
 
   async function load() {
@@ -73,8 +79,14 @@ export default function OrgsTab() {
     }
   }
 
-  async function loadMembers(orgId: string) {
-    setMembers({ orgId, rows: await api<OrgMember[]>(`/auth/admin/orgs/${orgId}/members`) })
+  // Returns false when a newer load started while this one was in flight, so
+  // the caller can skip whatever it was going to do with the result too.
+  async function loadMembers(orgId: string): Promise<boolean> {
+    const req = ++membersReq.current
+    const rows = await api<OrgMember[]>(`/auth/admin/orgs/${orgId}/members`)
+    if (req !== membersReq.current) return false
+    setMembers({ orgId, rows })
+    return true
   }
 
   // Shared post-mutation refresh: re-pull the affected org's members and the org
@@ -88,13 +100,18 @@ export default function OrgsTab() {
     if (expanded === orgId) {
       setExpanded(null)
       setMembers(null)
+      // Collapsing cancels any load still in flight for this org — otherwise it
+      // lands after the clear and puts the rows back.
+      membersReq.current++
       return
     }
     setError(null)
     setAddUserId('')
     try {
-      await loadMembers(orgId)
-      setExpanded(orgId)
+      // Only expand when this load is still the current one — expanding on a
+      // superseded load would point `expanded` at an org whose rows were
+      // dropped, which renders as an empty org that is not empty.
+      if (await loadMembers(orgId)) setExpanded(orgId)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load members')
     }
