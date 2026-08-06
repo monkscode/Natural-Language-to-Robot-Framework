@@ -16,6 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from src.backend.auth.db import get_pool
+# The SAME normaliser registration uses. An invitation is matched at signup
+# against the address the user registered with, so a rule the register path
+# rejects can never be consumed here — a second, looser copy just manufactures
+# dead rows in the owner's open-invitation list.
+from src.backend.auth.endpoints import _normalize_email
 from src.backend.auth.invitation_repository import InvitationExists, InvitationRepository
 from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.org_repository import OrgRepository
@@ -51,10 +56,7 @@ class _InviteBody(BaseModel):
     @field_validator("email")
     @classmethod
     def _norm(cls, v: str) -> str:
-        v = v.strip().lower()
-        if "@" not in v or len(v) > 254:
-            raise ValueError("Enter a valid email")
-        return v
+        return _normalize_email(v)
 
 
 @org_router.post("/invitations", status_code=201)
