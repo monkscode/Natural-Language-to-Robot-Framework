@@ -44,8 +44,21 @@ if [ "$MODE" = "bench" ]; then
     # is buried in a child process log and the bench hits mixed pins.
     # netstat portability: Windows prints "LISTENING", Linux/macOS "LISTEN";
     # macOS separates the port with "." not ":"; -o is Windows/Linux-only.
+    # netstat first because that is the path this guard was written and verified
+    # against; ss is the fallback for Linux images that ship without net-tools.
+    # Calling a missing binary prints nothing, so grep -q would fail and every
+    # port would read as free — the guard has to refuse to run instead of
+    # passing while a live stack is still up.
+    if command -v netstat >/dev/null 2>&1; then
+        port_probe() { netstat -an 2>/dev/null | grep "LISTEN"; }
+    elif command -v ss >/dev/null 2>&1; then
+        port_probe() { ss -ltn 2>/dev/null; }
+    else
+        echo "Error: neither 'netstat' nor 'ss' is available — cannot verify that ports 5000/4999/4998 are free. Install net-tools or iproute2."
+        exit 1
+    fi
     for port in 5000 4999 4998; do
-        if netstat -an | grep "LISTEN" | grep -Eq "[:.]${port}[[:space:]]"; then
+        if port_probe | grep -Eq "[:.]${port}([[:space:]]|$)"; then
             echo "Error: port ${port} already in use — is the dev stack still running? Stop it first."
             exit 1
         fi
