@@ -750,6 +750,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 timestamp=datetime.now(),
                 url=extract_url_from_query(natural_language_query),
 
+                # What produced the cost and token figures below. Taken from
+                # this call's arguments, not from settings: a caller may pass a
+                # provider/model other than the configured default.
+                model_provider=model_provider,
+                model_name=model_name,
+
                 # Totals
                 total_llm_calls=crewai_metrics['llm_calls'] + browser_calls_for_total,
                 total_cost=crewai_metrics['cost'] + browser_actual_cost,

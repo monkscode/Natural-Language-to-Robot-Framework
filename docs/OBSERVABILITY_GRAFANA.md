@@ -79,6 +79,26 @@ ORDER BY ts DESC;
 it by a couple of percent run to run, so treat a single row's cost as indicative and
 compare medians over a window, never two individual runs.
 
+**Always group cost by model.** `data->>'model_provider'` and `data->>'model_name'` say
+what produced the figures, so a median that spans a model or provider change does not
+silently blend two different price points:
+
+```sql
+SELECT
+    data->>'model_provider'                       AS provider,
+    data->>'model_name'                           AS model,
+    count(*)                                      AS runs,
+    round(avg((data->>'total_cost')::numeric), 4) AS avg_cost_usd
+FROM workflow_metrics
+WHERE data ? 'model_name'
+GROUP BY 1, 2
+ORDER BY runs DESC;
+```
+
+`llm_traces.model` is not a substitute for `model_provider`: LiteLLM strips the provider
+prefix before the trace callback runs, so those rows read `gemini-3.5-flash` and cannot
+tell Vertex from AI Studio.
+
 ## Cost and duration per stage
 
 `crew_stage_metrics` is a JSONB object keyed by stage — `planner`, `assembler`, and

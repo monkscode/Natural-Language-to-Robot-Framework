@@ -136,6 +136,16 @@ class WorkflowMetricsBase(
     # steps_total_s, llm_coverage_gap. Historical rows also carry agent_steps.
     agent_diagnostics: Optional[Dict[str, Any]] = None
 
+    # Which model produced the numbers on this row, and through which provider.
+    # A cost or token figure is not comparable across a model change without
+    # them, and neither is recoverable elsewhere: llm_traces.model gives the
+    # NAME but LiteLLM strips the provider prefix before the success callback
+    # sees it, so rows read 'gemini-3.5-flash', never 'vertex_ai/...'. The
+    # provider also decides the endpoint, the quota pool and the pricing path.
+    # None on pre-2026-08 rows.
+    model_provider: Optional[str] = None
+    model_name: Optional[str] = None
+
     # Wall time of the whole generation run, measured in
     # run_agentic_workflow. NOT execution_time above, which is
     # browser_metrics['execution_time'] — the browser-use figure that
@@ -357,6 +367,8 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             element_approach_metrics=m.element_approach_metrics,
             phase_timings=m.phase_timings,
             agent_diagnostics=m.agent_diagnostics,
+            model_provider=m.model_provider,
+            model_name=m.model_name,
             workflow_duration_s=m.workflow_duration_s,
             dryrun_status=m.dryrun_status,
             dryrun_attempts=m.dryrun_attempts,

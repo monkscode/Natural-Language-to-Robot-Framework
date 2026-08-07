@@ -284,6 +284,47 @@ class TestPhaseTimings:
 # re-solve them.
 # ---------------------------------------------------------------------------
 
+class TestModelAttribution:
+    """A cost figure is not interpretable without the model that produced it.
+
+    llm_traces.model recovers the model NAME, but LiteLLM strips the provider
+    prefix before the success callback sees it — archived rows read
+    'gemini-3.5-flash', never 'vertex_ai/gemini-3.5-flash'. The provider is
+    therefore recoverable from nowhere in Postgres unless this row carries it.
+    """
+
+    def _valid_data(self, **overrides):
+        data = {
+            "workflow_id": "wf-model",
+            "url": None,
+            "total_llm_calls": 0,
+            "total_cost": 0.0,
+            "execution_time": 1.0,
+            "timestamp": datetime.now(),
+        }
+        data.update(overrides)
+        return data
+
+    def test_model_fields_round_trip(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+
+        m = WorkflowMetrics(**self._valid_data(
+            model_provider="vertex", model_name="gemini-3.5-flash"))
+        data = m.to_dict()
+
+        assert data["model_provider"] == "vertex"
+        assert data["model_name"] == "gemini-3.5-flash"
+
+    def test_model_fields_absent_on_older_rows(self):
+        """Rows written before these fields existed must still deserialize."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+
+        m = WorkflowMetrics(**self._valid_data())
+
+        assert m.model_provider is None
+        assert m.model_name is None
+
+
 class TestRunShapeFields:
     """duration / dryrun / crew_stage_metrics / guardrail_attempts."""
 
