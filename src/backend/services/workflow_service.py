@@ -573,8 +573,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         user_id=user_id,
     )
 
-    # Start with welcome message
-    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
+    # Start with welcome message. Carries workflow_id so the caller can open a
+    # history row immediately: this is the only event guaranteed to be emitted
+    # before anything can fail, so a run that dies mid-flight is still
+    # attributable to an id.
+    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...",
+           "progress": 0, "workflow_id": workflow_id}
 
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
@@ -964,6 +968,36 @@ def _store_failure(result_store: dict, event: dict) -> None:
         result_store["workflow_id"] = event["workflow_id"]
 
 
+def _make_start_recorder(user: dict | None, user_query: str | None):
+    """Return an async callback that opens a test_runs row at status 'running'.
+
+    Without an opening row, a run that dies before either terminal path — the
+    process is killed, the container restarts, the machine runs out of memory —
+    leaves no trace anywhere, and "never started" is indistinguishable from
+    "started and vanished". A row left sitting at 'running' makes that
+    difference visible.
+
+    'running' is not a new status: the execute path already writes it. The
+    terminal upsert overwrites it, and record_start COALESCEs ownership and
+    query, so the later write fills in anything missing here.
+    """
+    async def _record(workflow_id: str) -> None:
+        try:
+            run_id = str(uuid.UUID(workflow_id))
+        except ValueError:
+            logging.warning("[RUN_REGISTRY] non-UUID workflow_id at start; run not opened")
+            return
+        try:
+            await asyncio.to_thread(_record_run, run_id, user, user_query, "running")
+        except Exception as e:
+            # _record_run swallows registry errors itself; this guards the hop
+            # into the thread as well. Opening a row is bookkeeping — it must
+            # never take down a run that is otherwise fine.
+            logging.error("[RUN_REGISTRY] could not open run %s: %s", run_id, e)
+
+    return _record
+
+
 def _record_generation_failure(result_store: dict, user: dict | None,
                                user_query: str | None) -> None:
     """Write a test_runs row for a run that never produced code.
@@ -1037,18 +1071,39 @@ def _start_workflow_thread(
     return thread
 
 
-async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict):
+async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict,
+                                  on_workflow_id=None):
     """Drain the workflow queue, yielding SSE generation events.
 
     Populates result_store with 'robot_code' and 'workflow_id' on completion.
     Raises _GenerationError when an error event is seen or no code is produced,
     so the caller can return early.  The error SSE is always yielded before
     raising, so the client receives it.
+
+    on_workflow_id, when given, is awaited ONCE with the workflow_id the first
+    time any event carries it — which is the opening 'running' event, long
+    before either terminal path. That is what lets the caller open a history row
+    for a run that may never reach a terminal event at all.
     """
+    async def _note_workflow_id(event: dict) -> None:
+        """Fire on_workflow_id once, on the first event that carries an id.
+
+        Called from BOTH drain loops: a short run can finish before the
+        is_alive() loop runs at all, leaving every event to the buffered drain
+        below — which is exactly the vanished-run case this exists to catch.
+        """
+        if on_workflow_id is None or not event.get("workflow_id"):
+            return
+        already_seen = result_store.get("workflow_id") is not None
+        result_store["workflow_id"] = event["workflow_id"]
+        if not already_seen:
+            await on_workflow_id(event["workflow_id"])
+
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
             yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
+            await _note_workflow_id(event)
             if event.get("status") == "complete" and "robot_code" in event:
                 result_store["robot_code"] = event["robot_code"]
                 result_store["workflow_id"] = event.get("workflow_id")
@@ -1066,6 +1121,7 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     while not q.empty():
         event = q.get_nowait()
         yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
+        await _note_workflow_id(event)
         if event.get("status") == "complete" and "robot_code" in event:
             result_store["robot_code"] = event["robot_code"]
             result_store["workflow_id"] = event.get("workflow_id")
@@ -1190,7 +1246,9 @@ async def stream_generate_only(
         workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(user, user_query)):
                 yield sse
         except _GenerationError:
             await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
@@ -1322,7 +1380,9 @@ async def stream_generate_and_run(
 
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(user, user_query)):
                 yield sse
         except _GenerationError:
             await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)

@@ -185,9 +185,28 @@ ORDER BY occurrences DESC
 LIMIT 20;
 ```
 
-One failure path cannot be counted: a run that finishes without producing code and
-without emitting an error event has no id to key a row on. Every real failure path emits
-an error event, which does carry one.
+## Runs that vanished
+
+Every run opens a `test_runs` row at status `'running'` before any work begins, and both
+terminal paths overwrite it — `'generated'` on success, `'error'` on failure. So a row
+still sitting at `'running'` well after it was created is a run that died without
+reaching either: the process was killed, the container restarted, the machine ran out of
+memory. Those are invisible in `workflow_metrics`, which is only written on the delivery
+path.
+
+```sql
+SELECT run_id, user_query, created_at, now() - created_at AS age
+FROM test_runs
+WHERE status = 'running'
+  AND created_at < now() - interval '15 minutes'
+ORDER BY created_at DESC;
+```
+
+Pick the threshold above the slowest legitimate run — the 30-query bench medians about
+21s of generation, and execution adds Docker time on top, so 15 minutes is generous.
+The execute path also uses `'running'`, so a row here may have died during execution
+rather than generation; join `workflow_metrics` on `workflow_id = run_id` to tell the two
+apart (a row with metrics got as far as delivering code).
 
 ## Query text alongside metrics
 
