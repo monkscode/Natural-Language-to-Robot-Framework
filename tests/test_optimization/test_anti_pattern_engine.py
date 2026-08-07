@@ -1244,14 +1244,11 @@ class TestEdgeCases:
             error_message="Error with special chars",
             robot_code="    Get Text    id=status",
         )
-        try:
-            engine.learn(record)
-            count = conn.execute(
-                "SELECT COUNT(*) FROM anti_patterns"
-            ).fetchone()[0]
-            assert count == 1, "Special characters in query handled"
-        except Exception as e:
-            assert False, f"Special characters in query handled: {e}"
+        engine.learn(record)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM anti_patterns"
+        ).fetchone()[0]
+        assert count == 1, "Special characters in query handled"
         conn.close()
 
     def test_empty_db_get_hints_returns_none(self):
