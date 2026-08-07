@@ -233,7 +233,7 @@ def tmp_dir():
 def _shared_embedder():
     """Load the fastembed model once for the whole session (~80 MB ONNX)."""
     from fastembed import TextEmbedding
-    from src.backend.crew_ai.optimization.postgres_execution_memory import EMBED_MODEL
+    from src.backend.crew_ai.optimization.embedding import EMBED_MODEL
     return TextEmbedding(model_name=EMBED_MODEL)
 
 

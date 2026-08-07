@@ -10,6 +10,7 @@ exception — just a silently wrong keyword choice.
 All external calls are mocked; no browser-service or network required.
 """
 
+import inspect
 from unittest.mock import patch, MagicMock
 import pytest
 from tools.browser_use_tool import BatchBrowserUseTool, BrowserUseAPI
@@ -136,6 +137,68 @@ class TestLocatorMappingFoundEntries:
         )])
         assert mapping["elem_1"]["dropdown_framework"] == ""
 
+    def test_datepicker_framework_forwarded(self, tool):
+        """Task D repair: browser-service returns top-level
+        datepicker_framework='flatpickr' but the locator_mapping builder
+        never copied it — the identify agent was instructed to extract a
+        key that could not exist, so DATE_PICKER_HANDLING never routed to
+        the setDate idiom and Fill Text timed out on readonly inputs.
+        Same silent-drop shape as the Tom Select fields this file guards."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "id=customer_cdr_from_date",
+            element_type="date-picker",
+            datepicker_framework="flatpickr",
+        )])
+        assert mapping["elem_1"]["datepicker_framework"] == "flatpickr"
+
+    def test_datepicker_framework_defaults_to_empty_string_when_absent(self, tool):
+        """Non-datepicker elements omit the key — must default to ''
+        (the contract IdentifiedElement expects)."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        assert mapping["elem_1"]["datepicker_framework"] == ""
+
+    def test_stability_forwarded(self, tool):
+        """Task 16: browser-service returns top-level stability (Task 10's
+        field) but the locator_mapping builder never copied it — the same
+        silent-drop shape as datepicker_framework (fixed 4ef8379). Without
+        this the Assembler can never emit the volatile-locator WARNING."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "xpath=//div[4]/input",
+            stability="volatile",
+        )])
+        assert mapping["elem_1"]["stability"] == "volatile"
+
+    def test_stability_defaults_to_stable_when_absent(self, tool):
+        """Older browser-service responses omit stability — default to
+        'stable' (the same default browser-service itself uses in its
+        re-ranker) so absent never fires a false volatile warning."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        assert mapping["elem_1"]["stability"] == "stable"
+
+    def test_astpp_flags_forwarded(self, tool):
+        """Task 16: visibility_filtered / row_anchored / row_anchor_ambiguous
+        (ASTPP B/A flags) are emitted top-level by browser-service only when
+        True — forward them so the Assembler side can see them."""
+        mapping = _run_mapping(tool, [_found(
+            "elem_1", "xpath=//tr[td[text()='Cierra']]//a",
+            visibility_filtered=True,
+            row_anchored=True,
+            row_anchor_ambiguous=True,
+        )])
+        entry = mapping["elem_1"]
+        assert entry["visibility_filtered"] is True
+        assert entry["row_anchored"] is True
+        assert entry["row_anchor_ambiguous"] is True
+
+    def test_astpp_flags_default_to_false_when_absent(self, tool):
+        """browser-service omits the flags when False — the mapping must
+        carry explicit False, not a missing key."""
+        mapping = _run_mapping(tool, [_found("elem_1", "id=username")])
+        entry = mapping["elem_1"]
+        assert entry["visibility_filtered"] is False
+        assert entry["row_anchored"] is False
+        assert entry["row_anchor_ambiguous"] is False
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""
@@ -233,3 +296,55 @@ class TestLocatorMappingMixedBatch:
         mapping = _run_mapping(tool, results)
         assert mapping["elem_3"]["found"] is False
         assert "dropdown_framework" not in mapping["elem_3"]
+
+
+# ─── identify_s phase instrumentation (2026-07-26 efficiency check) ──────────
+
+class TestPollInstrumentation:
+    """The backend owns two of the seven identify_s spans: the submit POST and
+    the accumulated poll-grid sleep. It also owns the poll interval, which the
+    2026-07-23 baseline showed was wasting ~2.5s of every run.
+    """
+
+    def test_resolve_check_interval_defaults_to_one_second(self, monkeypatch):
+        """5s grid wasted ~2.5s/run — 28 of 30 bench rows landed on a 5s boundary."""
+        from tools.browser_use_tool import _resolve_check_interval
+        monkeypatch.delenv("BROWSER_USE_CHECK_INTERVAL", raising=False)
+        assert _resolve_check_interval() == 1.0
+
+    def test_resolve_check_interval_accepts_fractional_override(self, monkeypatch):
+        """int() would raise ValueError here — the cast must be float()."""
+        from tools.browser_use_tool import _resolve_check_interval
+        monkeypatch.setenv("BROWSER_USE_CHECK_INTERVAL", "0.5")
+        assert _resolve_check_interval() == 0.5
+
+    def test_network_retry_backoff_is_not_accumulated_anywhere(self):
+        """Network-retry backoff is error recovery, not grid waste.
+
+        It used to be summed into a _PollClock.network_retry_s field that no
+        production code ever read — dead by the repo's own rule. The
+        separation now comes from only the grid sleeps incrementing
+        poll_wait_s, so nothing needs to hold the retry total."""
+        import tools.browser_use_tool as tool
+
+        assert not hasattr(tool, "_PollClock")
+        # Attribute use only, not the bare name: a comment or docstring
+        # recording why the accumulator was removed must not fail this test.
+        source = inspect.getsource(tool)
+        assert "self.network_retry_s" not in source
+        assert "network_retry_s =" not in source
+
+    def test_merge_phase_timings_combines_service_and_backend_spans(self):
+        from tools.browser_use_tool import _merge_phase_timings
+        service = {"queue_s": 0.01, "session_setup_s": 3.2, "agent_run_s": 20.76}
+        merged = _merge_phase_timings(service, submit_s=0.05, poll_wait_s=4.37)
+        assert merged["session_setup_s"] == 3.2
+        assert merged["submit_s"] == 0.05
+        assert merged["poll_wait_s"] == 4.37
+
+    def test_merge_phase_timings_tolerates_missing_service_payload(self):
+        """An un-synced browser-service returns no phase_timings — must not crash."""
+        from tools.browser_use_tool import _merge_phase_timings
+        assert _merge_phase_timings(None, submit_s=0.05, poll_wait_s=4.37) == {
+            "submit_s": 0.05, "poll_wait_s": 4.37,
+        }

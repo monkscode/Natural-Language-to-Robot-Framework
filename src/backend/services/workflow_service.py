@@ -573,26 +573,31 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             logging.error("Orchestrator: GEMINI_API_KEY not found for gemini provider.")
-            yield {"status": "error", "message": "GEMINI_API_KEY not found."}
+            yield {"status": "error", "message": "GEMINI_API_KEY not found.",
+                   "workflow_id": workflow_id}
             return
 
     elif model_provider == "vertex":
         creds_path = os.getenv("VERTEXAI_CREDENTIALS")
         if not creds_path:
             logging.error("Orchestrator: VERTEXAI_CREDENTIALS not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file."}
+            yield {"status": "error", "message": "VERTEXAI_CREDENTIALS not set. Point it to your service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not os.path.exists(creds_path):
             logging.error(f"Orchestrator: Credentials file not found at: {creds_path}")
-            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file."}
+            yield {"status": "error", "message": "Vertex AI credentials file not found. Check that VERTEXAI_CREDENTIALS in your .env points to a valid service account JSON file.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_PROJECT:
             logging.error("Orchestrator: VERTEXAI_PROJECT not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_PROJECT not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
         if not settings.VERTEXAI_LOCATION:
             logging.error("Orchestrator: VERTEXAI_LOCATION not set for vertex provider.")
-            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI."}
+            yield {"status": "error", "message": "VERTEXAI_LOCATION not set in .env for Vertex AI.",
+                   "workflow_id": workflow_id}
             return
 
     # Run CrewAI workflow with real-time progress events.
@@ -610,23 +615,26 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # authoritative LiteLLM trace callback, just outside this workflow span.
         with create_workflow_span(workflow_id, natural_language_query, model_provider, model_name, settings.ROBOT_LIBRARY,
                                   org_id=org_id, user_id=user_id):
-            # run_crew's first element is crew.kickoff()'s CrewOutput (the terminal
-            # task is now the Assembler — there is no validator verdict). Unused here;
-            # delivered code is read from crew_with_results.tasks[2] below.
+            # run_crew's first element is the assembler crew kickoff's CrewOutput
+            # (the terminal task is the Assembler — there is no validator verdict).
+            # Unused here; delivered code is read from crew_with_results.tasks[-1]
+            # below. Since Task 16, crew_with_results is the ASSEMBLER crew (the
+            # pipeline is two single-task kickoffs around the deterministic
+            # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
             _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
-                natural_language_query, model_provider, model_name, library_type=None, workflow_id=workflow_id,
+                natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
             _store_hint_metadata(workflow_id, hint_metadata)
 
-        # Extract robot code from task[2] (Code Assembler — the terminal crew task)
-        # and apply the shared normalization pipeline (also used by the dryrun repair
-        # path) so both normalize identically.
-        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[2].output)
+        # Extract robot code from tasks[-1] (Code Assembler — the terminal task of
+        # the assembler crew) and apply the shared normalization pipeline (also used
+        # by the dryrun repair path) so both normalize identically.
+        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[-1].output)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -662,11 +670,16 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 }
 
                 logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: successful_requests above is inflated — CrewAI's
-                # calculate_usage_metrics() adds the shared LLM's _token_usage once per
-                # agent. The authoritative call count is in "📊 Final LLM Stats" (crew.py),
-                # which reads llm_monitor (agents.llm._monitor) — incremented exactly once
-                # per CleanedLLMWrapper.call() invocation, scoped to this workflow only.
+                # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
+                # calculate_usage_metrics() covers the WHOLE pipeline: the planner
+                # and assembler wrappers are separate instances (Task 22 gave the
+                # planner its own response_format) that ALIAS one _token_usage dict
+                # (RobotAgents.__init__), so it accumulates across both kickoffs and
+                # CrewAI sums it once per agent (here: once — the old
+                # 3-agent crew triple-counted). The authoritative call count is in
+                # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
+                # (agents.llm._monitor) — incremented exactly once per
+                # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
 
             except Exception as e:
                 logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
@@ -715,13 +728,28 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
             avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
 
+            # browser_llm_calls is len(agent_result.history) — a STEP count, not a
+            # call count. They happen to be equal today (all 10 captured runs
+            # carrying both numbers agree), but summing a step count into a field
+            # named total_llm_calls is a category error, and llm_calls_actual is
+            # the measured API-call number the instrumentation cycles added for
+            # exactly this. Only the total is corrected: browser_use_llm_calls and
+            # the per-element average keep the step-count meaning their CSV series
+            # were built on.
+            _diag = browser_metrics.get('agent_diagnostics') or {}
+            _actual = _diag.get('llm_calls_actual') if isinstance(_diag, dict) else None
+            _actual_is_usable = (
+                isinstance(_actual, int) and not isinstance(_actual, bool) and _actual > 0
+            )
+            browser_calls_for_total = _actual if _actual_is_usable else browser_llm_calls
+
             unified_metrics = WorkflowMetrics(
                 workflow_id=workflow_id,
                 timestamp=datetime.now(),
                 url=extract_url_from_query(natural_language_query),
 
                 # Totals
-                total_llm_calls=crewai_metrics['llm_calls'] + browser_llm_calls,
+                total_llm_calls=crewai_metrics['llm_calls'] + browser_calls_for_total,
                 total_cost=crewai_metrics['cost'] + browser_actual_cost,
                 execution_time=browser_metrics.get('execution_time', 0),
 
@@ -753,6 +781,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
 
                 # Per-element approach metrics for pattern analysis
                 element_approach_metrics=browser_metrics.get('element_approach_metrics', []),
+
+                # identify_s phase breakdown (2026-07-26 efficiency check)
+                phase_timings=browser_metrics.get('phase_timings'),
+                agent_diagnostics=browser_metrics.get('agent_diagnostics'),
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
@@ -831,7 +863,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         logging.error("Failed to generate valid Robot Framework code: %s", e)
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}"}
+        # workflow_id lets the bench detach a failed run — its pre-failure LLM
+        # calls are already recorded in llm_traces.
+        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+               "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
             f"An unexpected error occurred during the CrewAI workflow: {e}", exc_info=True)
@@ -839,7 +874,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}"}
+        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+               "workflow_id": workflow_id}
     
 
 

@@ -14,6 +14,8 @@ logs/audit
 
 # Virtual environment
 venv/
+venv-bus/
+.venv/
 
 # Robot Test Files
 robot_tests/
@@ -35,7 +37,10 @@ tmpclaude-*
 
 # Ignore the database content
 chroma_db/
-data/
+data/*
+# ...except pre-generated libdocs: the app reads these instead of importing
+# robotframework, the same way the FastAPI image does.
+!data/libdocs/
 logs/temp_metrics
 # Postgres data volume (auth/users DB) + React build output
 pgdata/
@@ -52,6 +57,15 @@ node_modules/
 coverage/
 
 docs/tasks/
+# Owner rule: plans and specs live on disk only, never committed. Enforced here
+# so `git add -A` cannot sweep them in. docs/superpowers/acceptance/ is
+# deliberately NOT ignored — it is tracked.
+docs/superpowers/plans/
+docs/superpowers/specs/
+# Top-level notes (HANDOFF-*, FINDINGS-*, UPSTREAM-*) were untracked but NOT
+# ignored, so `git add -A` could still sweep them in. `*` does not match `/`,
+# so this covers direct children only and leaves acceptance/ tracked.
+docs/superpowers/*.md
 .agents/workflows/development-workflow.md
 tasks/*
 logs/crewai.log.txt
@@ -61,3 +75,11 @@ FuturePlans/*
 
 tests/test_clients/
 clients/integrity/*
+
+# Bench harness: bench data stays local — run evidence, new baseline CSVs
+# (operational metrics), and private/ (customer query sets) are never committed.
+# The frozen 2026-07-03 public baseline predates this rule and stays tracked
+# as the comparison reference.
+bench/runs/
+bench/baselines/
+bench/private/

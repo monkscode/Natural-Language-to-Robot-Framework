@@ -102,6 +102,48 @@ class TestWorkflowMetricsModel:
         assert "wf-resp" in json_str
 
 
+class TestUrlOptional:
+    """Task 14: extract_url_from_query returns None when the query names no
+    URL, and both WorkflowMetrics call sites pass that value straight in —
+    so url=None must construct and round-trip."""
+
+    def _valid_data(self, **overrides):
+        data = {
+            "workflow_id": "wf-nourl",
+            "url": None,
+            "total_llm_calls": 0,
+            "total_cost": 0.0,
+            "execution_time": 1.0,
+            "timestamp": datetime.now(),
+        }
+        data.update(overrides)
+        return data
+
+    def test_construction_with_url_none(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        m = WorkflowMetrics(**self._valid_data())
+        assert m.url is None
+
+    def test_url_none_round_trips_through_dict(self):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        m = WorkflowMetrics(**self._valid_data())
+        d = m.to_dict()
+        assert d["url"] is None
+        m2 = WorkflowMetrics.from_dict(
+            {**d, "timestamp": datetime.now().isoformat()}
+        )
+        assert m2.url is None
+
+    def test_response_conversion_with_url_none(self):
+        from src.backend.core.models.workflow_metrics_models import (
+            WorkflowMetrics,
+            WorkflowMetricsResponse,
+        )
+        m = WorkflowMetrics(**self._valid_data())
+        resp = WorkflowMetricsResponse.from_workflow_metrics(m)
+        assert resp.url is None
+
+
 # ===================================================================
 # C4 — optimization_fallback_used field
 # ===================================================================
@@ -154,3 +196,78 @@ class TestOptimizationFallbackUsed:
         }
         m = WorkflowMetrics.from_dict(old_record)
         assert m.optimization_fallback_used is False
+
+
+# ===================================================================
+# identify_s phase instrumentation (2026-07-26 efficiency check)
+# ===================================================================
+
+class TestPhaseTimings:
+    """The model sets extra='ignore', so an undeclared key is dropped silently —
+    no error, just an empty CSV column six steps downstream. These are the guard.
+    """
+
+    def _make_metrics(self, **kwargs):
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetrics
+        defaults = {
+            "workflow_id": "wf-1",
+            "url": "https://example.com",
+            "total_llm_calls": 5,
+            "total_cost": 0.0586,
+            "execution_time": 20.76,
+            "timestamp": datetime.now(),
+        }
+        defaults.update(kwargs)
+        return WorkflowMetrics(**defaults)
+
+    def test_phase_timings_survives_round_trip(self):
+        """extra='ignore' silently drops undeclared keys — this is the guard."""
+        timings = {
+            "submit_s": 0.05, "queue_s": 0.01, "session_setup_s": 3.2,
+            "agent_setup_s": 0.4, "agent_run_s": 20.76, "postprocess_s": 0.9,
+            "poll_wait_s": 4.37,
+        }
+        diagnostics = {
+            "agent_steps": 7, "dom_elements_max": 2143, "dom_elements_median": 1876,
+            "llm_429_count": 2, "retry_lost_s": 3.4,
+        }
+        m = self._make_metrics(
+            phase_timings=timings, agent_diagnostics=diagnostics
+        )
+        data = m.to_dict()
+        assert data["phase_timings"] == timings
+        assert data["agent_diagnostics"] == diagnostics
+
+    def test_phase_timings_defaults_to_none_when_absent(self):
+        """Older rows and failed runs carry no timings — must not raise."""
+        m = self._make_metrics(
+            workflow_id="wf-2", url=None, total_llm_calls=0,
+            total_cost=0.0, execution_time=0.0,
+        )
+        assert m.phase_timings is None
+        assert m.agent_diagnostics is None
+        assert m.to_dict()["phase_timings"] is None
+
+    def test_a_none_span_does_not_discard_the_whole_metrics_row(self):
+        """The browser service is versioned separately and already uses None
+        for "not measured" (llm_coverage_gap). Dict[str, float] raised
+        ValidationError on such a span — and because WorkflowMetrics is built
+        inside a try/except that swallows it, the run lost cost, tokens and
+        element counts too, not just the timings."""
+        m = self._make_metrics(phase_timings={"queue_s": None, "agent_run_s": 20.7})
+        assert m.phase_timings["queue_s"] is None
+        assert m.phase_timings["agent_run_s"] == 20.7
+
+    def test_the_response_model_carries_both_new_dicts(self):
+        """WorkflowMetricsResponse inherits both fields, but
+        from_workflow_metrics enumerates fields explicitly — omitting them
+        made GET /api/workflow-metrics/ always return null for a field the
+        schema advertises."""
+        from src.backend.core.models.workflow_metrics_models import WorkflowMetricsResponse
+
+        timings = {"submit_s": 0.05, "agent_run_s": 20.76}
+        diagnostics = {"llm_calls_actual": 6, "llm_coverage_gap": None}
+        m = self._make_metrics(phase_timings=timings, agent_diagnostics=diagnostics)
+        resp = WorkflowMetricsResponse.from_workflow_metrics(m)
+        assert resp.phase_timings == timings
+        assert resp.agent_diagnostics == diagnostics

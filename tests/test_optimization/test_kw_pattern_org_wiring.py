@@ -127,7 +127,7 @@ def test_feedback_loop_passes_org_id_to_pattern_learner(in_memory_db):
 
 def _stub_library_context():
     ctx = MagicMock()
-    ctx.library_name = "SeleniumLibrary"
+    ctx.library_name = "Browser"
     ctx.core_rules = "# Core rules stub"
     ctx.planning_context = "# Planning context stub"
     ctx.code_assembly_context = "# Assembly context stub"
@@ -151,22 +151,24 @@ def test_provider_does_not_surface_other_org_keyword_patterns(kw_store):
     from src.backend.crew_ai.optimization.pattern_learning import QueryPatternMatcher
     from src.backend.crew_ai.optimization.smart_keyword_provider import SmartKeywordProvider
 
-    # Seed an org-A pattern whose query matches the provider query exactly.
+    # Seed an org-A pattern whose query matches the provider query exactly,
+    # plus an org-B one that MUST come through — without the positive control
+    # this test passes for any reason the context ends up empty.
     kw_store.add_pattern("login as admin", ["OrgASeleniumKw"], org_id="org-A")
+    kw_store.add_pattern("login as admin", ["OrgBOwnKw"], org_id="org-B")
 
-    # The vector_store mock echoes each queried name back so that predicted
+    # The vector_store mock echoes each looked-up name back so that predicted
     # keywords surface in the formatted context (avoiding false-green from
-    # empty keyword docs).
+    # empty keyword docs). It must stub get_keyword_doc, which is what
+    # _format_predicted_context calls — stubbing .search instead left a bare
+    # MagicMock to be subscripted, which raised, fell back to zero-context,
+    # and made the leak assertion pass no matter how the search was scoped.
     vs = MagicMock()
-    vs.search.side_effect = lambda library_name, query, top_k: [
-        {
-            "name": query,
-            "args": [],
-            "description": "stub-doc",
-            "distance": 0.1,
-            "similarity": 0.9,
-        }
-    ]
+    vs.get_keyword_doc.side_effect = lambda library_name, name: {
+        "name": name,
+        "args": [],
+        "description": "stub-doc",
+    }
 
     provider = SmartKeywordProvider(
         library_context=_stub_library_context(),
@@ -179,6 +181,10 @@ def test_provider_does_not_surface_other_org_keyword_patterns(kw_store):
     bundle = provider.get_agent_context("login as admin", "assembler")
     combined = bundle.hint_text + bundle.context
 
+    assert "OrgBOwnKw" in combined, (
+        f"org-B's OWN pattern never reached the context, so the leak assertion "
+        f"below proves nothing. context={bundle.context!r}"
+    )
     assert "OrgASeleniumKw" not in combined, (
         f"org-B provider leaked org-A keyword pattern. "
         f"context={bundle.context!r}"

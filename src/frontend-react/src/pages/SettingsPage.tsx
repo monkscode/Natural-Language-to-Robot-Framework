@@ -62,8 +62,7 @@ const SECTIONS: Section[] = [
       {
         id: 'library', label: 'Library', type: 'select', defaultValue: 'browser',
         options: [
-          { value: 'browser', label: 'Browser (Playwright) — Recommended' },
-          { value: 'selenium', label: 'SeleniumLibrary — Legacy' },
+          { value: 'browser', label: 'Browser (Playwright)' },
         ],
       },
       {

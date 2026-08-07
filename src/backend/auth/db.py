@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS users (
     google_sub      TEXT UNIQUE,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     token_version   INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('pending', 'active', 'suspended', 'rejected')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login      TIMESTAMPTZ
 )
@@ -72,9 +74,22 @@ _TOKEN_VERSION_MIGRATION = (
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0"
 )
 
+# Idempotent lifecycle-status migration. status is authoritative for usability;
+# is_active is kept as a coarse mirror. Existing inactive rows were suspensions.
+_STATUS_MIGRATION = (
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL "
+    "DEFAULT 'active' "
+    "CHECK (status IN ('pending', 'active', 'suspended', 'rejected'))"
+)
+_STATUS_BACKFILL = (
+    "UPDATE users SET status = 'suspended' "
+    "WHERE is_active = FALSE AND status = 'active'"
+)
+
 _INDEXES_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
     "CREATE INDEX IF NOT EXISTS idx_users_google_sub ON users (google_sub)",
+    "CREATE INDEX IF NOT EXISTS idx_users_status ON users (status)",
 )
 
 
@@ -89,6 +104,8 @@ def init_auth_db() -> None:
     with pool.connection() as conn:
         conn.execute(_USERS_TABLE_DDL)
         conn.execute(_TOKEN_VERSION_MIGRATION)
+        conn.execute(_STATUS_MIGRATION)
+        conn.execute(_STATUS_BACKFILL)
         for ddl in _INDEXES_DDL:
             conn.execute(ddl)
         conn.commit()

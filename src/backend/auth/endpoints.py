@@ -28,6 +28,7 @@ from src.backend.auth.jwt_utils import (
 )
 from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
+from src.backend.auth.provisioning import match_invite_on_signup, provision_on_approval
 from src.backend.auth.repository import (
     AccountInactive,
     EmailAlreadyExists,
@@ -109,12 +110,28 @@ def _user_public(row: dict) -> dict:
         "email": row["email"],
         "display_name": row.get("display_name", ""),
         "role": row.get("role", "user"),
+        "status": row.get("status", "active"),
     }
 
 
 def _token_payload(row: dict) -> dict:
     user = _user_public(row)
+    # is_org_admin drives the SPA's org-owner Team page/nav. It is a TEAM-org
+    # signal — being admin of one's own personal org does not count.
+    user["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
     orgs = _org_repo.get_orgs_for_user(str(row["id"]))
+    if not orgs and user["status"] == "active":
+        # Self-heal: an ACTIVE user must never mint an org-less token — org_id
+        # None means UNSCOPED learning reads (every org's hints injected into
+        # their runs) and unattributed writes. The state is reachable outside
+        # the approve flow: _sync_role_to_allowlist force-flips a pending
+        # allowlisted user to active at login without provisioning, and the
+        # Google callback's existing-user branch never provisions. Minting is
+        # the one choke point every login path funnels through, so heal here.
+        # No-op for pending signups (they get their org at approval) and for
+        # anyone already provisioned.
+        provision_on_approval(str(row["id"]))
+        orgs = _org_repo.get_orgs_for_user(str(row["id"]))
     primary = orgs[0] if orgs else {}
     token = create_access_token(
         {
@@ -125,6 +142,7 @@ def _token_payload(row: dict) -> dict:
             "org_id": primary.get("org_id"),
             "org_role": primary.get("org_role"),
             "token_version": row.get("token_version", 0),
+            "status": user["status"],
         }
     )
     return {"access_token": token, "token_type": "bearer", "user": user}
@@ -166,7 +184,14 @@ async def register(request: Request, req: RegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail=str(exc))
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
-    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
+    match_invite_on_signup(str(row["id"]), row["email"])
+    # An allowlisted (ADMIN_EMAILS) signup lands instantly active and never
+    # passes through the Approve step — the only other place org membership is
+    # materialised — so provision here, BEFORE the token is minted, so the first
+    # token already carries the org. No-op for pending signups (they get their
+    # org at approval) and for anyone who already has a membership.
+    if row.get("status") == "active":
+        provision_on_approval(str(row["id"]))
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
@@ -187,12 +212,20 @@ async def login(request: Request, req: LoginRequest, response: Response):
 async def me(user: dict = Depends(get_current_user)):
     """Re-read the user from the DB so role/name reflect current state."""
     row = _repo.get_by_id(user["user_id"])
-    if not row or not row.get("is_active"):
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
     if row.get("token_version", 0) != user.get("token_version", 0):
         # token was revoked by a logout-all / password change after it was minted
         raise HTTPException(status_code=401, detail="Token revoked")
-    return _user_public(row)
+    if row.get("status") not in ("pending", "active"):
+        # suspended/rejected accounts cannot use even the pending-gate seam;
+        # token_version alone is not enough since set_status() doesn't bump it.
+        raise HTTPException(status_code=401, detail="Account is not active")
+    # Enrich with the team-org-admin flag the SPA gates the org-owner UI on.
+    # _user_public itself stays DB-free; only these callers pay the extra query.
+    public = _user_public(row)
+    public["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
+    return public
 
 
 @auth_router.post("/logout")
@@ -253,17 +286,26 @@ class _RoleUpdate(BaseModel):
 def set_user_platform_role(
     user_id: str,
     body: _RoleUpdate,
+    request: Request,
     admin: dict = Depends(require_admin),
 ):
     """Platform-admin grants/revokes another user's platform-admin role.
 
     role is validated to {'admin','user'} by the _RoleUpdate model (invalid
     values are rejected with 422 before this body runs)."""
+    # Self-revoke guard runs before any mutation; it depends only on the caller
+    # and the requested role, not the current one.
     if user_id == admin["user_id"] and body.role == "user":
         raise HTTPException(status_code=400, detail="cannot revoke your own platform-admin")
+    # set_platform_role captures the prior role atomically (same locked statement
+    # as the update) and returns it as 'old_role', so the audit detail's 'from'
+    # can't go stale under concurrent admin updates to the same user.
     row = _repo.set_platform_role(user_id, body.role)
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
+    # Enrichment hook read by the audit floor (main.py request_id_middleware):
+    # the floor writes the audit row; this only exposes WHAT changed.
+    request.state.audit_detail = {"from": row["old_role"], "to": body.role}
     return _user_public(row)
 
 
@@ -300,14 +342,24 @@ async def google_callback(request: Request):
         return _error_redirect("email_unverified")
 
     try:
-        row = _repo.get_or_create_google_user(
+        row, created = _repo.get_or_create_google_user(
             google_sub=profile["sub"], email=email, display_name=profile.get("name", ""),
         )
     except EmailAlreadyExists:
         return _error_redirect("email_exists")
     except AccountInactive:
         return _error_redirect("account_disabled")
-    _org_repo.ensure_personal_org(str(row["id"]), row["email"])
+    # Only a brand-new pending signup may consume an invite. An existing/active
+    # user (or the bootstrapped admin, whom _sync flips to active) must NOT — the
+    # invite→membership link is materialised only at approval of a pending user
+    # (provision_on_approval). Consuming here for an existing user would silently
+    # burn the org-owner's open invite with no membership ever created.
+    if created:
+        match_invite_on_signup(str(row["id"]), row["email"])
+        # Same as /register: an allowlisted Google signup is instantly active and
+        # skips Approve, so provision its org now (no-op for pending signups).
+        if row.get("status") == "active":
+            provision_on_approval(str(row["id"]))
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*

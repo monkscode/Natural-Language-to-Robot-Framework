@@ -408,7 +408,8 @@ class LearningEngine(ABC):
         Args:
             user_query: The natural language test query
             url: Target website URL
-            agent_role: "planner" | "identifier" | "assembler"
+            agent_role: "planner" | "assembler" (engines role-filter and may
+                return None for anything else)
 
         Returns:
             List of hint strings, or None if no relevant hints
@@ -528,12 +529,27 @@ def _get_conflict_detection_model() -> str:
 def _get_conflict_detection_completion_kwargs() -> dict:
     """Per-provider extra kwargs for litellm.completion().
 
-    Currently only Ollama needs api_base injected — litellm.completion()
-    does NOT read OLLAMA_API_BASE from the env on its own.
+    Only Ollama needs api_base injected — litellm.completion() does NOT read
+    OLLAMA_API_BASE from the env on its own.
+
+    Also carries the Vertex thinking guard. This path calls
+    litellm.completion() directly rather than through get_llm(), so it does
+    not inherit the guard the agent wrappers get; without this it pays for
+    server-side thinking on every conflict-detection call. Both call sites
+    now read the rule from llm_provider_routing so they cannot drift apart.
     """
     from src.backend.core.config import settings
-    from src.backend.crew_ai.llm_provider_routing import resolve_completion_kwargs
-    return resolve_completion_kwargs(settings.MODEL_PROVIDER)
+    from src.backend.crew_ai.llm_provider_routing import (
+        resolve_completion_kwargs,
+        resolve_model_string,
+        resolve_thinking_kwargs,
+    )
+    provider = settings.MODEL_PROVIDER
+    routed_model = resolve_model_string(provider, settings.ONLINE_MODEL)
+    return {
+        **resolve_completion_kwargs(provider),
+        **resolve_thinking_kwargs(provider, routed_model),
+    }
 
 
 def _parse_conflict_json(content: str) -> dict:

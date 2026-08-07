@@ -793,8 +793,12 @@ export default function GeneratePage() {
           </CardContent>
         </Card>
 
-        {/* Generated / editable code card */}
-        <Card className="col-span-3 flex flex-col max-lg:col-span-1">
+        {/* Generated / editable code card. overflow-hidden is load-bearing: as a
+            grid item its automatic minimum size would otherwise be the editor's
+            full content height, so a long test grew the row past the grid's own
+            fixed box and the cards spilled underneath the result card. Clipping
+            pins the card to the row; the editor scrolls internally instead. */}
+        <Card className="col-span-3 flex flex-col overflow-hidden max-lg:col-span-1">
           <CardHeader className="flex-row items-start justify-between space-y-0 pb-3">
             <div>
               <CardTitle className="text-sm">Generated Code</CardTitle>

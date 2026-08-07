@@ -198,6 +198,44 @@ class TestValidateAndRepair:
         assert out["repair_usage"] == {}
         mock_rc.ensure_image.assert_not_called()  # §8.4 — no executor hop for a skip
 
+    def test_assembled_checkpoint_pushed_at_gate_entry(self):
+        """The 80% '✅ Test code assembled' checkpoint is pushed when the gate
+        starts. The event-bus TaskCompletedEvent for the assembler is lost to a
+        handler race (CrewAI bus runs sync handlers in a ThreadPoolExecutor),
+        so the gate — which by definition runs after the crew returned — is the
+        deterministic place to emit it."""
+        from queue import Queue
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            ds.validate_and_repair("rid", "code", "gemini", "m", q)
+
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        second = q.get(timeout=1)
+        assert "Preparing verification environment" in second["message"]
+
+    def test_assembled_checkpoint_pushed_even_when_gate_skipped(self):
+        """DRYRUN_ENABLED=false still means the assembler finished — the 80%
+        checkpoint must not depend on the gate actually running."""
+        from queue import Queue, Empty
+
+        q = Queue()
+        with patch.object(ds, "settings", self._settings(enabled=False)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client"):
+            out = ds.validate_and_repair("rid", "*** Settings ***\n", "gemini", "m", q)
+
+        assert out["dryrun_status"] == "skipped"
+        first = q.get(timeout=1)
+        assert first["progress"] == 80
+        assert "Test code assembled" in first["message"]
+        with pytest.raises(Empty):
+            q.get(timeout=0.1)
+
     @pytest.mark.parametrize("code", ["", "   \n\t  "])
     def test_empty_code_skips_without_container(self, code):
         with patch.object(ds, "settings", self._settings()), \
@@ -368,6 +406,37 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "\n" in out and "\\n" not in out
 
+    def test_redundant_css_prefix_is_stripped_by_the_pipeline(self):
+        """The strip is only worth anything if it is actually wired in here.
+
+        `css=id=searchBox` is not valid CSS — Playwright rejects it with
+        `Unexpected token "=" while parsing css selector` — and the dryrun gate
+        cannot catch it, because dryrun checks keyword names and arity without
+        resolving selectors. Without this test, deleting the
+        strip_redundant_css_prefix call from the pipeline leaves the whole
+        suite green.
+        """
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    css=id=searchBox\n"
+               "    Fill Text    css=xpath=//input[@name='q']    shoes")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "css=id=searchBox" not in out
+        assert "id=searchBox" in out
+        assert "css=xpath=" not in out
+        assert "xpath=//input[@name='q']" in out
+
+    def test_genuine_css_selectors_survive_the_pipeline(self):
+        """The strip must not touch real CSS: an attribute selector contains
+        `=` but does not start with a strategy name followed by `=`."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    css=#searchBox\n"
+               "    Click    css=input[id=foo]\n"
+               "    Click    css=[data-x=y]")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "css=#searchBox" in out
+        assert "css=input[id=foo]" in out
+        assert "css=[data-x=y]" in out
+
     def test_multiple_settings_blocks_uses_last(self):
         raw = ("*** Settings ***\nLibrary    OldLib\n\n"
                "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n    Log    hi\n")
@@ -384,6 +453,25 @@ class TestExtractAndNormalize:
         raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi" + '"}'
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert not out.endswith('"}')
+
+    def test_browser_timeout_injected(self):
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+
+    def test_browser_timeout_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path, so a repair pass must not strip or double the injected timeout."""
+        raw = "*** Settings ***\nLibrary    Browser\n*** Test Cases ***\nT\n    Log    hi"
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert second == first
+        assert second.count("timeout=") == 1
+
+    def test_selenium_suite_untouched(self):
+        raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "timeout=" not in out
 
 
 # ---------------------------------------------------------------------------

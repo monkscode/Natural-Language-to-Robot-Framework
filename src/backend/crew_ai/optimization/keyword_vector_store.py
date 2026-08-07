@@ -13,7 +13,7 @@ Tables (in the consolidated DB):
   accumulated (user_query -> keywords) patterns from successful runs.
 - kw_library_version(library, version) — for rebuild-on-version-change.
 
-Referenced by: keyword_search_tool.py, pattern_learning.py, feedback_loop.py, crew.py.
+Referenced by: pattern_learning.py, feedback_loop.py, crew.py.
 """
 
 import json
@@ -187,6 +187,30 @@ class KeywordVectorStore:
         except Exception as e:
             logger.error("Search failed for query '%s': %s", query, e)
             return []
+
+    def get_keyword_doc(self, library_name: str, name: str) -> Optional[Dict]:
+        """Exact-name keyword lookup on the (library, name) primary key.
+
+        Task 31: the predicted-keyword doc fetch needs the row for a KNOWN
+        name — an indexed WHERE clause, not an embed + ANN search. Returns the
+        same shape as one search() result (minus distance), or None.
+        """
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT name, args, doc FROM kw_keywords "
+                    "WHERE library = %s AND name = %s",
+                    (library_name, name)).fetchone()
+            if not row:
+                return None
+            return {
+                "name": row[0],
+                "args": row[1] if row[1] is not None else [],
+                "description": row[2] or "",
+            }
+        except Exception:
+            logger.exception("Keyword lookup failed for '%s'", name)
+            return None
 
     # ------------------------------------------------------------------
     # Version tracking + rebuild

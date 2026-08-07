@@ -1,0 +1,35 @@
+# Manifest for venv-bus/ — the isolated venv that runs tools/browser_use_service.py.
+#
+# WHY A SEPARATE VENV: browser-use exact-pins its dependency tree
+# (openai==2.16.0, mcp==1.26.0, pydantic==2.12.5, google-genai==1.65.0, ...).
+# Those pins are unsatisfiable next to crewai's requirements, so browser-use
+# must NEVER be installed into the backend venv. This mirrors production:
+# Dockerfile.browser-service already builds without crewai.
+#
+# Versions pinned to the working set verified on 2026-07-18 (traceloop-sdk excepted — see its line),
+# browser-use bumped 0.12.6 -> 0.13.7 on 2026-07-31 (dependency-upgrade Phase 2).
+#
+# requests and python-dotenv are NOT independent choices: browser-use exact-pins
+# its whole tree, so bumping browser-use alone fails to resolve ("you require
+# requests==2.32.5 ... unsatisfiable"). These two are the only additional bumps
+# needed; 331 packages resolve with uv pip compile --universal, and playwright,
+# traceloop-sdk, posthog, pydantic and pydantic-settings all hold.
+browser-use==0.13.7
+# playwright MUST stay equal to the pin in Dockerfile.browser-service. It is the browser
+# engine the locator stack resolves against, so a fork here means the bench validates an
+# engine production does not run. It was forked — 1.57.0/Chromium 143 here vs
+# 1.62.0/Chromium 151 in the shipped image — until 2026-08-03, when this venv was
+# converged UP to the shipped value. Bumping it moves nothing else: `uv pip compile
+# --universal` resolves the same 331 packages on either pin, playwright is the only line
+# that differs. Change both files together or not at all.
+playwright==1.62.0          # locator validation uses the Playwright Python API directly
+Flask==3.1.2                # HTTP service shell (gunicorn is Docker-only)
+requests==2.33.0            # forced: browser-use 0.13.7 exact-pins requests==2.33.0
+PyYAML==6.0.3               # needed by src.backend.core.config, imported by the entrypoint
+pydantic-settings==2.10.1
+python-dotenv==1.2.2        # forced: browser-use 0.13.7 exact-pins python-dotenv==1.2.2
+structlog==25.5.0           # JSON structured logging (Enhancement #4)
+traceloop-sdk==0.62.1       # OTel instrumentation (Enhancement #3), Grafana-stack only.
+# NOT 0.45.6: it pins posthog<4, unsatisfiable next to browser-use's posthog==7.7.0.
+# 0.62.1 dropped the posthog pin and resolves clean (verified 2026-07-20). Bus-only;
+# the backend venv keeps traceloop-sdk==0.45.6 from its own lockfile.

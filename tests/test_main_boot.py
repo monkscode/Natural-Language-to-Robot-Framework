@@ -71,7 +71,7 @@ def test_reports_are_auth_gated(app_client):
             jwt_utils._admin_repo, "get_by_id",
             return_value={"id": "00000000-0000-0000-0000-000000000000",
                           "email": "t@t.t", "role": "user",
-                          "is_active": True, "token_version": 0},
+                          "is_active": True, "token_version": 0, "status": "active"},
         ):
             denied_owner = app_client.get(
                 "/reports/no-such-run/log.html",
@@ -87,7 +87,7 @@ def test_reports_are_auth_gated(app_client):
         with patch.object(
             jwt_utils._admin_repo, "get_by_id",
             return_value={"id": "x", "email": "a@t.t", "role": "admin",
-                          "is_active": True},
+                          "is_active": True, "status": "active"},
         ):
             ok = app_client.get(
                 "/reports/no-such-run/log.html",

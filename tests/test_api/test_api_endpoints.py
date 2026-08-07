@@ -177,6 +177,38 @@ class TestFeedbackEndpoints:
         assert resp.status_code == 200
 
 
+class TestHealthPins:
+    """Bench preflight reads its comparability pins from /health."""
+
+    def test_health_exposes_bench_pins(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch("src.backend.api.health.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
+            mock_settings.OPTIMIZATION_ENABLED = False
+            mock_settings.MODEL_PROVIDER = "gemini"
+            mock_settings.ONLINE_MODEL = "gemini-3.5-flash"
+            mock_settings.DRYRUN_ENABLED = True
+            resp = health_app_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["pins"] == {
+            "optimization_enabled": False,
+            "model_provider": "gemini",
+            "online_model": "gemini-3.5-flash",
+            "dryrun_enabled": True,
+        }
+
+    def test_api_health_exposes_same_pins(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch("src.backend.api.health.settings") as mock_settings:
+            mock_settings.MAX_CONCURRENT_WORKFLOWS = 10
+            mock_settings.OPTIMIZATION_ENABLED = True
+            mock_settings.MODEL_PROVIDER = "vertex"
+            mock_settings.ONLINE_MODEL = "gemini-3.5-pro"
+            mock_settings.DRYRUN_ENABLED = False
+            resp = health_app_client.get("/api/health")
+        assert resp.json()["pins"]["optimization_enabled"] is True
+
+
 @pytest.fixture(scope="module")
 def health_app_client():
     """FastAPI test client with only the health endpoints, no main.py import.

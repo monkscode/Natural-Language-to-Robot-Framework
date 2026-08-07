@@ -9,13 +9,15 @@ import { AppHeader } from '@/components/app-header'
 import GeneratePage from '@/pages/GeneratePage'
 import HistoryPage from '@/pages/HistoryPage'
 import MetricsPage from '@/pages/MetricsPage'
-import TemplatesPage from '@/pages/TemplatesPage'
 import SettingsPage from '@/pages/SettingsPage'
 import LearningPage from '@/pages/LearningPage'
 import LoginPage from '@/pages/auth/LoginPage'
 import SignupPage from '@/pages/auth/SignupPage'
 import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage'
 import OAuthCallback from '@/auth/OAuthCallback'
+import AccessGatePage from '@/pages/AccessGatePage'
+import AccessConsolePage from '@/pages/AccessConsolePage'
+import TeamPage from '@/pages/TeamPage'
 
 /**
  * Keep-alive page cache.
@@ -29,29 +31,36 @@ import OAuthCallback from '@/auth/OAuthCallback'
  * starts clean, and logout unmounts the whole layout (state never leaks
  * across sessions).
  *
- * Admin gating: admin-only paths are never mounted for non-admins; a
- * non-admin navigating to one is bounced to /generate — the exact behaviour
- * RequireAdmin had when each route owned its element. The redirect renders
- * only for the ACTIVE path, so a cached page can never hijack navigation.
+ * Role gating: each page can require admin (`admin: true`) and/or org-admin
+ * (`orgAdmin: true`) access; a page is only ever mounted when
+ * `(!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)` holds, via the
+ * `allowed(p)` helper below. A user lacking the required role who navigates
+ * to a gated path (e.g. an admin-only page, or the org-admin-only `/team`)
+ * is bounced to /generate — the exact behaviour RequireAdmin had when each
+ * route owned its element. The redirect renders only for the ACTIVE path,
+ * so a cached page can never hijack navigation.
  */
-const PAGES: Array<{ path: string; admin?: boolean; node: JSX.Element }> = [
+const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JSX.Element }> = [
   { path: '/generate', node: <GeneratePage /> },
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
   { path: '/learning', admin: true, node: <LearningPage /> },
-  { path: '/templates', admin: true, node: <TemplatesPage /> },
+  { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
+  { path: '/team', orgAdmin: true, node: <TeamPage /> },
 ]
 
 function KeepAlivePages() {
   const { pathname } = useLocation()
-  const { isAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin } = useAuth()
+  const allowed = (p: { admin?: boolean; orgAdmin?: boolean }) =>
+    (!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)
   const visited = useRef(new Set<string>())
 
   const active = PAGES.find(p => p.path === pathname)
-  if (active && (!active.admin || isAdmin)) visited.current.add(active.path)
+  if (active && allowed(active)) visited.current.add(active.path)
 
-  if (active?.admin && !isAdmin) return <Navigate to="/generate" replace />
+  if (active && !allowed(active)) return <Navigate to="/generate" replace />
 
   // The admin predicate is re-checked on every render, so if a session is
   // demoted mid-flight (isAdmin flips false), any already-mounted admin page
@@ -59,7 +68,7 @@ function KeepAlivePages() {
   // background requests.
   return (
     <>
-      {PAGES.filter(p => visited.current.has(p.path) && (!p.admin || isAdmin)).map(p => (
+      {PAGES.filter(p => visited.current.has(p.path) && allowed(p)).map(p => (
         <div
           key={p.path}
           className={p.path === pathname ? 'flex flex-1 flex-col' : 'hidden'}
@@ -90,6 +99,12 @@ function AppLayout() {
   )
 }
 
+function GatedLayout() {
+  const { status } = useAuth()
+  if (status !== 'active') return <AccessGatePage />
+  return <AppLayout />
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -105,7 +120,7 @@ export default function App() {
             {/* Protected app routes — require a valid session. The page
                 routes render null: KeepAlivePages (in AppLayout) owns the
                 page elements so they persist across navigation. */}
-            <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
+            <Route element={<RequireAuth><GatedLayout /></RequireAuth>}>
               <Route index            element={<Navigate to="/generate" replace />} />
               {/* Every authenticated user gets Generate + their own History */}
               <Route path="/generate" element={null} />
@@ -113,8 +128,9 @@ export default function App() {
               {/* Admin-only pages (gated inside KeepAlivePages) */}
               <Route path="/metrics"   element={null} />
               <Route path="/learning"  element={null} />
-              <Route path="/templates" element={null} />
               <Route path="/settings"  element={null} />
+              <Route path="/access" element={null} />
+              <Route path="/team"   element={null} />
               {/* catch-all */}
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>

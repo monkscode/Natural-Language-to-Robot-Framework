@@ -28,8 +28,9 @@ def _token(role: str = "user") -> str:
     )
 
 
-def _db_row(role: str = "user", is_active: bool = True) -> dict:
-    return {"id": "u-1", "email": "u@x.com", "role": role, "is_active": is_active}
+def _db_row(role: str = "user", is_active: bool = True, status: str = "active") -> dict:
+    return {"id": "u-1", "email": "u@x.com", "role": role,
+            "is_active": is_active, "status": status}
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +112,7 @@ def test_admin_revoked_in_db_is_denied_immediately(_admin_db):
     """A still-valid admin token is rejected once the row is deactivated or
     demoted — revocation must not wait for token expiry."""
     creds = _creds(_token("admin"))
-    _admin_db.return_value = _db_row(role="admin", is_active=False)
+    _admin_db.return_value = _db_row(role="admin", is_active=False, status="suspended")
     with pytest.raises(HTTPException) as e1:
         jwt_utils.require_admin(creds)
     assert e1.value.status_code == 401
@@ -174,7 +175,27 @@ def test_require_user_inactive_rejected(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
     creds = _creds(_token("user"))
     with patch.object(jwt_utils._admin_repo, "get_by_id",
-                      return_value=_db_row(is_active=False)):
+                      return_value=_db_row(is_active=False, status="suspended")):
+        with pytest.raises(HTTPException) as exc:
+            jwt_utils.require_user(creds)
+    assert exc.value.status_code == 401
+
+
+def test_require_user_pending_status_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))
+    with patch.object(jwt_utils._admin_repo, "get_by_id",
+                      return_value=_db_row(status="pending")):
+        with pytest.raises(HTTPException) as exc:
+            jwt_utils.require_user(creds)
+    assert exc.value.status_code == 401
+
+
+def test_require_user_suspended_status_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
+    creds = _creds(_token("user"))
+    with patch.object(jwt_utils._admin_repo, "get_by_id",
+                      return_value=_db_row(status="suspended")):
         with pytest.raises(HTTPException) as exc:
             jwt_utils.require_user(creds)
     assert exc.value.status_code == 401

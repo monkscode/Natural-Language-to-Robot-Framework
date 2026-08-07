@@ -24,14 +24,17 @@ Scope:
   - Workflow completion: success → complete event
   - run_agentic_workflow gemini key missing → early error event
 
-The crew is now 3 tasks (planner, identifier, assembler); the LLM validator
-(old task[3]) was replaced by the deterministic robot --dryrun gate.
+Task 16: run_crew returns the single-task ASSEMBLER crew (the pipeline is two
+single-task kickoffs around the deterministic element stage); delivered code
+comes from tasks[-1]. The LLM validator was replaced earlier by the
+deterministic robot --dryrun gate.
 """
 
 import os
 import json
 import asyncio
 import threading
+import uuid
 import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
@@ -62,9 +65,9 @@ def _make_run_crew_result(
     json_dict_code=None,
     raw_code=None,
 ):
-    """Build the 5-tuple returned by run_crew() — a 3-task crew (planner,
-    identifier, assembler). Delivered code comes from task[2] (the assembler)."""
-    # ---- task[2]: robot code output ----
+    """Build the 5-tuple returned by run_crew() — the single-task ASSEMBLER
+    crew (Task 16). Delivered code comes from tasks[-1] (the assembler)."""
+    # ---- tasks[-1]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
         task2.output.pydantic = MagicMock(code=pydantic_code)
@@ -79,9 +82,9 @@ def _make_run_crew_result(
         task2.output.json_dict = None
         task2.output.raw = raw_code if raw_code is not None else VALID_ROBOT_CODE
 
-    # ---- crew (3 tasks; validator removed) ----
+    # ---- assembler crew (one task) ----
     crew = MagicMock()
-    crew.tasks = [MagicMock(), MagicMock(), task2]
+    crew.tasks = [task2]
     usage = MagicMock(
         total_tokens=200, prompt_tokens=160,
         completion_tokens=40, successful_requests=8
@@ -544,6 +547,21 @@ class TestWorkflowCompletionPaths:
 
         assert any(e.get("status") == "error" for e in events)
 
+    @pytest.mark.parametrize("exc", [RuntimeError("LLM offline"), ValueError("bad json")])
+    def test_error_event_carries_workflow_id(self, exc):
+        """Error events carry workflow_id so the bench can detach failed runs —
+        their pre-failure LLM calls are already recorded in llm_traces."""
+        with patch("src.backend.services.workflow_service.run_crew",
+                   side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("query", "gemini", "model"))
+
+        error = next(e for e in events if e.get("status") == "error")
+        uuid.UUID(error["workflow_id"])  # present and a real UUID
+
     def test_gemini_missing_api_key_yields_early_error(self):
         """When GEMINI_API_KEY is absent, an error event is yielded before run_crew()."""
         with patch("src.backend.services.workflow_service.run_crew") as mock_run_crew, \
@@ -618,3 +636,85 @@ class TestWorkflowCompletionPaths:
         events = _run_workflow(crew_result=result)
         # Should still complete — metrics failures are non-fatal
         assert any(e.get("status") == "complete" for e in events)
+
+
+class TestTotalLlmCallsUsesActualCalls:
+    """total_llm_calls must count real API calls, not history items.
+
+    browser_use_llm_calls is len(agent_result.history) — a step count.
+    agent_diagnostics['llm_calls_actual'] is the measured API-call count
+    (len(calls) in the bs agent). The two agree on every captured run today,
+    so this changes no value; it makes the field mean what its name says, and
+    it holds if anything ever adds a history item that costs no call.
+    browser_use_llm_calls keeps the step-count meaning its CSV series uses.
+    """
+
+    BASE_BROWSER = {
+        'llm_calls': 2,
+        'actual_cost': 0.01,
+        'elements_processed': 2,
+        'successful_elements': 2,
+    }
+
+    def _capture_metrics(self, browser_metrics):
+        captured = {}
+
+        def _capture(metrics, **kwargs):
+            captured["m"] = metrics
+
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = browser_metrics
+            mock_coll.return_value.record_workflow.side_effect = _capture
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        return captured["m"]
+
+    def _crewai_calls(self):
+        from src.backend.core.workflow_metrics import calculate_crewai_cost
+        return calculate_crewai_cost(
+            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
+             'successful_requests': 8},
+            model_name="gemini-2.5-flash",
+        )['llm_calls']
+
+    def test_uses_llm_calls_actual_when_positive(self):
+        """The red-to-green case: 2 history items, 1 real API call."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.total_llm_calls == self._crewai_calls() + 1
+
+    def test_browser_use_llm_calls_stays_the_step_count(self):
+        """The CSV series must not move — only the total is corrected."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.browser_use_llm_calls == 2
+
+    def test_avg_llm_calls_per_element_stays_on_the_step_count(self):
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 1}})
+        assert m.avg_llm_calls_per_element == 2 / 2
+
+    def test_falls_back_to_step_count_when_diagnostics_absent(self):
+        m = self._capture_metrics(dict(self.BASE_BROWSER))
+        assert m.total_llm_calls == self._crewai_calls() + 2
+
+    def test_falls_back_to_step_count_when_actual_is_zero(self):
+        """Zero means the diagnostic never populated, not 'no calls happened'."""
+        m = self._capture_metrics(
+            {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': 0}})
+        assert m.total_llm_calls == self._crewai_calls() + 2
+
+    def test_falls_back_to_step_count_when_actual_is_not_an_int(self):
+        """jsonb round-trips are untyped — a string or None must not poison the total."""
+        for bad in ("3", None, 1.5, True):
+            m = self._capture_metrics(
+                {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': bad}})
+            assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"

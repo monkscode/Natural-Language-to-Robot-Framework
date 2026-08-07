@@ -8,6 +8,14 @@ import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from typing import Any
 
+# Load src/backend/.env BEFORE the getenv reads below. config's import runs
+# load_dotenv as a side effect; without this, a process that imports this
+# module before config (runner_exec.app did) silently gets the hard-coded
+# defaults — it only ever worked under run.sh because the shell exported the
+# whole .env first. Observed failure: runner-exec built 'robot-test-runner:
+# latest' from scratch instead of using the .env-pinned local image.
+from src.backend.core import config as _config  # noqa: F401
+
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
 IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
 # Default remote image - fallback if local image not found
@@ -58,9 +66,21 @@ def resolve_host_robot_tests_dir(client: docker.DockerClient) -> str:
                     logging.info(
                         f"🐳 DOCKER SERVICE: Resolved host robot_tests mount from container inspect ({container_ref}): {source}")
                     return source
+        except docker.errors.NotFound:
+            # Expected miss: this candidate name isn't a running container (e.g.
+            # the machine HOSTNAME under `run.sh` dev, which is not a container at
+            # all). Not an error — we try the next candidate and fall back to
+            # HOST_ROBOT_TESTS_DIR if none match. DEBUG so it stops printing a
+            # false-alarm WARNING on every run.
+            logging.debug(
+                f"🐳 DOCKER SERVICE: container inspect miss for '{container_ref}' "
+                "(not a container); trying next candidate")
         except docker.errors.DockerException as e:
+            # A real Docker problem (daemon unreachable, permission denied, etc.) —
+            # keep this at WARNING; it may explain a downstream mount failure.
             logging.warning(
-            f"⚠️  DOCKER SERVICE: Could not resolve mount source via container inspect ({container_ref}): {type(e).__name__}: {e}")
+                "⚠️  DOCKER SERVICE: Docker error resolving mount source via container "
+                f"inspect ({container_ref}): {type(e).__name__}: {e}")
 
     logging.info(
         f"🐳 DOCKER SERVICE: Falling back to HOST_ROBOT_TESTS_DIR: {HOST_ROBOT_TESTS_DIR}")

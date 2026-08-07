@@ -163,22 +163,26 @@ class TestReadQueries:
 
 class TestEmbedderFailurePaths:
     def test_failed_init_within_cooldown_is_not_retried(self, in_memory_em):
+        # Task 31: the store borrows embedding.get_embedder() — the cooldown
+        # gate must still short-circuit before ever consulting the singleton.
+        from src.backend.crew_ai.optimization import embedding as emb_mod
         in_memory_em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
         in_memory_em._chroma_failed_at = time.monotonic()  # genuine recent failure
-        with patch("fastembed.TextEmbedding", MagicMock()) as te:
+        with patch.object(emb_mod, "get_embedder", MagicMock()) as ge:
             in_memory_em._init_chromadb()
-        te.assert_not_called()
+        ge.assert_not_called()
         assert in_memory_em._chroma_client is PostgresExecutionMemory._CHROMADB_INIT_FAILED
 
     def test_failed_init_retried_after_cooldown_and_failure_recached(self, in_memory_em):
+        from src.backend.crew_ai.optimization import embedding as emb_mod
         in_memory_em._chroma_client = PostgresExecutionMemory._CHROMADB_INIT_FAILED
         in_memory_em._chroma_failed_at = (
             time.monotonic() - in_memory_em._CHROMA_RETRY_COOLDOWN_S - 1)
-        with patch("fastembed.TextEmbedding",
-                   side_effect=RuntimeError("model download failed")):
+        with patch.object(emb_mod, "get_embedder", return_value=None) as ge:
             in_memory_em._init_chromadb()
+        ge.assert_called_once()  # cooldown expired -> retried via the singleton
         assert in_memory_em._chroma_client is PostgresExecutionMemory._CHROMADB_INIT_FAILED
-        assert in_memory_em._chroma_last_error == "model download failed"
+        assert in_memory_em._chroma_last_error == "shared fastembed embedder unavailable"
         assert in_memory_em._chroma_failed_at is not None  # fresh cooldown window
 
     def test_embed_returns_none_when_model_dies_mid_embed(self, in_memory_em):

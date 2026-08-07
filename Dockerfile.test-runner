@@ -5,17 +5,35 @@
 ARG BASE_IMAGE=monkscode/nlrf:base-browser-latest
 FROM ${BASE_IMAGE}
 
-# Install Robot Framework packages using UV with cache
+# Install Robot Framework packages using UV with cache.
+#
+# BOTH PINNED, AND NOT INDEPENDENTLY CHOOSABLE. This is the engine that executes
+# generated tests and runs the dryrun gate, while the assembler is prompted from
+# data/libdocs/*.json. Unpinned, the two drifted freely: measured 2026-08-04, the
+# runner behind the 30/30 baseline had Browser 19.14.2 while the committed libdocs
+# described 19.12.3, and the -latest image on Docker Hub had Browser 20.0.0 - a
+# major version the bench has never executed. These values are the set measured
+# inside monkscode/nlrf:test-runner-local, i.e. the engine the current baseline
+# was recorded on; this freezes that engine, it does not change it.
+#
+# Change these ONLY together with the libdoc-builder stage of Dockerfile.fastapi
+# and a regeneration of data/libdocs (run tools/generate_libdocs.py inside this
+# image, so the docs come from the exact versions pinned here). Enforced by
+# tests/test_build_manifests.py.
+#
+# The [bb] extra is carried here and in the libdoc stage so both sides expose the
+# same keyword set - the docs must describe the library the runner actually has.
+#
+# NOT fully reproducible: transitive dependencies of these two pins are unlocked,
+# and they do move - the 2026-08-04 rebuild carried robotframework-pythonlibcore
+# 4.5.0 -> 4.6.0 with the direct pins held constant. Closing that needs a
+# generated lockfile plus `uv pip sync`. Same caveat as Dockerfile.browser-service.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache \
-    robotframework \
-    robotframework-seleniumlibrary \
-    "robotframework-browser[bb]" && \
+    robotframework==7.4.2 \
+    "robotframework-browser[bb]==19.14.2" && \
     rfbrowser install chromium && \
     test -d /opt/playwright-browsers && \
     chmod -R 755 /opt/playwright-browsers
-
-# Set Chrome options for containerised headless execution
-ENV CHROME_OPTIONS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
 
 CMD ["robot", "--version"]

@@ -3,6 +3,7 @@ import re
 import sys
 import logging
 import uuid
+from types import SimpleNamespace
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,8 +38,12 @@ from fastapi import Depends
 from src.backend.core.config import settings
 from src.backend.auth.jwt_utils import require_admin
 from src.backend.auth.endpoints import auth_router
+from src.backend.auth.admin_access_endpoints import admin_access_router
+from src.backend.auth.org_endpoints import org_router
 from src.backend.auth.db import init_auth_db, close_pool
+from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
+from src.backend.auth.invitations_db import init_invitations_db
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -69,6 +74,11 @@ app.add_middleware(
 # is dropped in favour of a fresh UUID.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
+# Stand-in handed to the audit floor when the handler raised before producing a
+# response: ServerErrorMiddleware (outside this middleware) will send a 500, so
+# 500 is the status the floor should record for the failed mutation.
+_CRASH_RESPONSE = SimpleNamespace(status_code=500)
+
 
 @app.middleware("http")
 async def request_id_middleware(request, call_next):
@@ -79,11 +89,22 @@ async def request_id_middleware(request, call_next):
         else uuid.uuid4().hex
     )
     structlog.contextvars.bind_contextvars(request_id=request_id)
+    # Audit floor — record every authenticated state-changing request, including
+    # ones whose handler crashes (ServerErrorMiddleware then sends a 500 and
+    # re-raises, so without the except branch a failed mutation leaves no floor
+    # row). record_request fails open internally, so it can never affect the
+    # response, mask the original error, or break the request-id path.
     try:
         response = await call_next(request)
+    except Exception:
+        if request.method in audit_log.MUTATING_METHODS:
+            await audit_log.record_request(request, _CRASH_RESPONSE, request_id)
+        raise
     finally:
         structlog.contextvars.unbind_contextvars("request_id")
     response.headers["X-Request-ID"] = request_id
+    if request.method in audit_log.MUTATING_METHODS:
+        await audit_log.record_request(request, response, request_id)
     return response
 
 
@@ -94,6 +115,8 @@ register_error_handlers(app)
 # --- API Routers ---
 # Auth routes (public entry points): /auth/register, /auth/login, /auth/me, /auth/google/*
 app.include_router(auth_router)
+app.include_router(admin_access_router)
+app.include_router(org_router)
 
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
@@ -154,11 +177,19 @@ async def startup_event():
         # Org tenancy lives in the same identity domain and must init AFTER users
         # (org_members references users). Same best-effort guard.
         init_org_db()
+        init_invitations_db()
     except Exception as e:
         logging.warning(
-            f"[AUTH] init_auth_db/init_org_db failed — auth unavailable until "
+            f"[AUTH] auth store init (users/orgs/invitations) failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
+
+    # Create the audit_log table (shared auth/users pool). Best-effort: a DB
+    # outage must not block startup — the floor fails open until the table exists.
+    try:
+        audit_log.init_audit_log()
+    except Exception as e:
+        logging.warning(f"[AUDIT] init_audit_log skipped — audit floor degraded: {e}")
 
     try:
         from src.backend.auth.admin_seed import seed_platform_admins

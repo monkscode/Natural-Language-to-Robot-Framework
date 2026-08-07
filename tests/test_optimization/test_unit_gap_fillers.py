@@ -510,6 +510,55 @@ def test_fl_process_user_feedback_persists(in_memory_db):
     assert record.user_feedback_type == "completely_wrong"
 
 
+def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
+    """The actor passed to process_user_feedback reaches the hint_audit row.
+
+    Proves Option A end-to-end: a logged-in user re-submitting identical
+    feedback clears a conflict flag, and their email is recorded as the audit
+    actor after crossing the to_thread -> write-queue worker hop.
+    """
+    fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+
+    feedback_text = "the previous outcome was fine"
+    # Seed a conflict-flagged, domain-scoped hint matching the feedback the user
+    # is about to re-submit. conflict_flagged=1 also keeps the hint out of the
+    # Step 3b active-hints query (is_active=1 AND conflict_flagged=0), so no
+    # conflict-detection LLM call fires -- the test stays offline.
+    conn.execute(
+        "INSERT INTO nl_feedback_corrections "
+        "(feedback_text, category, scope, domain, url, "
+        " original_failure_category, evidence_count, "
+        " source_workflow_id, created_at, last_seen, conflict_flagged) "
+        "VALUES (?, 'uncategorized', 'domain', 'example.com', NULL, NULL, 1, "
+        "        NULL, datetime('now'), datetime('now'), 1)",
+        (feedback_text,),
+    )
+    conn.commit()
+    hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    fl.process_execution(
+        workflow_id="wf-actor-thread", user_query="check the page",
+        url="https://example.com", robot_code="*** Test Cases ***",
+        test_status="failed",
+    )
+    # SynchronousWriteQueue runs each submit inline, so the engine's audit write
+    # has completed by the time process_user_feedback returns -- no drain needed.
+    fl.process_user_feedback(
+        workflow_id="wf-actor-thread",
+        feedback_text=feedback_text,
+        feedback_type="completely_wrong",
+        actor="alice@example.com",
+    )
+
+    audit_rows = conn.execute(
+        "SELECT action, actor FROM hint_audit WHERE hint_id = ?",
+        (hint_id,),
+    ).fetchall()
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["action"] == "unflag"
+    assert audit_rows[0]["actor"] == "alice@example.com"
+
+
 def test_fl_no_holdout_in_config():
     """Verify no holdout/A-B testing flags exist in LEARNING_CONFIG."""
     holdout_keys = [

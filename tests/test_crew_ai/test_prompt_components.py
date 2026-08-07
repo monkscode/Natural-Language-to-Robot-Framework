@@ -94,3 +94,328 @@ class TestDropdownHandlingPromptComponent:
         # (the shape produced by browser-service Strategy 2/3 output).
         assert "xpath=//label" in body
         assert "Asia/Kolkata" in body
+
+
+class TestFileUploadHandlingPromptComponent:
+    """Task E (G5): file-upload steps must emit Upload File By Selector on
+    the (usually hidden) input - never Click, which opens the browser's
+    NATIVE file dialog and hangs the test until timeout."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.FILE_UPLOAD_HANDLING, str)
+        assert len(PromptComponents.FILE_UPLOAD_HANDLING) > 0
+
+    def test_routes_on_element_type(self):
+        body = PromptComponents.FILE_UPLOAD_HANDLING
+        assert "element_type='file-upload'" in body
+
+    def test_mandates_upload_keyword_and_forbids_click(self):
+        body = PromptComponents.FILE_UPLOAD_HANDLING
+        assert "Upload File By Selector" in body
+        assert "NEVER use Click" in body
+        # The why matters for LLM compliance: native dialog hangs.
+        assert "native" in body.lower()
+
+    def test_hidden_input_is_expected_not_an_error(self):
+        """The locator targets a display:none input by design - the agent
+        must not try to make it visible or click the styled button."""
+        body = PromptComponents.FILE_UPLOAD_HANDLING
+        assert "HIDDEN" in body or "hidden" in body
+        assert "legal" in body.lower() or "expected" in body.lower()
+
+    def test_placeholder_variable_when_no_file_value(self):
+        """Review-then-execute contract: with no file path in the step,
+        declare a Variables-section placeholder the user fills in."""
+        body = PromptComponents.FILE_UPLOAD_HANDLING
+        assert "${UPLOAD_FILE}" in body
+        assert "*** Variables ***" in body
+
+    def test_worked_example_present(self):
+        body = PromptComponents.FILE_UPLOAD_HANDLING
+        assert "customer_import_mapper" in body
+
+    def test_wired_into_assemble_task(self):
+        """The block only helps if assemble_code_task actually includes it."""
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "FILE_UPLOAD_HANDLING" in src_text
+
+
+class TestDatePickerHandlingPromptComponent:
+    """Task D (G4): flatpickr date pickers render READONLY inputs — Fill
+    Text waits for editability and dies with a timeout, every run. The
+    only robust path is the widget's own API via one Evaluate JavaScript
+    line (verified live on ASTPP 2026-07-08). Native input[type=date]
+    keeps plain Fill Text."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.DATE_PICKER_HANDLING, str)
+        assert len(PromptComponents.DATE_PICKER_HANDLING) > 0
+
+    def test_routes_on_element_type_and_framework(self):
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "element_type='date-picker'" in body
+        assert "datepicker_framework='flatpickr'" in body
+
+    def test_flatpickr_path_uses_setdate_js(self):
+        """The template must call setDate(value, true) on el._flatpickr —
+        state update + change event in one call, no calendar clicking."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "Evaluate JavaScript" in body
+        assert "el._flatpickr" in body
+        assert "setDate" in body
+        # Null-guard: the instance can be absent if the page re-rendered.
+        assert "if (fp)" in body
+
+    def test_flatpickr_path_forbids_fill_text(self):
+        """The readonly input is EXPECTED — the agent must not 'fix' it
+        by trying Fill Text first."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "readonly" in body.lower()
+        assert "do NOT try Fill Text" in body
+
+    def test_native_path_keeps_fill_text(self):
+        """Plain input[type=date] accepts Fill Text with an ISO date —
+        no JS needed."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "datepicker_framework='native'" in body
+        assert "Fill Text" in body
+
+    def test_worked_example_present(self):
+        """A worked example with the real ASTPP locator gives the LLM a
+        concrete substitution pattern."""
+        body = PromptComponents.DATE_PICKER_HANDLING
+        assert "customer_cdr_from_date" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "DATE_PICKER_HANDLING" in src_text
+
+    def test_merge_forwards_datepicker_framework(self):
+        """The Assembler only sees what the deterministic merge staples onto
+        the step (Task 16) — datepicker_framework must survive the pipe
+        (same pipe as dropdown_framework/select_id)."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Fill Text", "element_description": "from date",
+                  "value": "2026-07-01", "step_description": "fill date"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=customer_cdr_from_date",
+            "element_type": "date-picker", "datepicker_framework": "flatpickr",
+        }})
+        assert merged[0]["datepicker_framework"] == "flatpickr"
+
+
+class TestStabilityWarningPromptComponent:
+    """Task 16 (#10): steps whose stapled stability != 'stable' must get an
+    in-code WARNING comment above them — the in-code comment is the
+    disclosure channel (Task 12 precedent), NOT a UI/SSE warning. The field
+    arrives on the step via the deterministic merge (element_identification)."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.STABILITY_WARNING_RULES, str)
+        assert len(PromptComponents.STABILITY_WARNING_RULES) > 0
+
+    def test_routes_on_stability_field(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "stability" in body
+        assert "stable" in body
+
+    def test_mandates_warning_comment_above_the_step(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "# WARNING" in body
+        assert "above" in body.lower()
+
+    def test_covers_volatile_and_positional(self):
+        """browser-service emits 'stable' | 'volatile' | 'positional' —
+        anything but 'stable' warns."""
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "volatile" in body
+        assert "positional" in body
+
+    def test_warning_does_not_change_the_locator(self):
+        """The locator itself is still used exactly as provided — the
+        warning is disclosure, not a licence to substitute."""
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "still use" in body.lower() or "use it anyway" in body.lower() \
+            or "exactly as provided" in body.lower()
+
+    def test_worked_example_present(self):
+        body = PromptComponents.STABILITY_WARNING_RULES
+        assert "xpath=" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "STABILITY_WARNING_RULES" in src_text
+
+
+class TestStateVerificationPlanning:
+    """Task G (G7): planner side of class-state verification.
+
+    'Verify the Email field shows an error' on ASTPP: the site shows NO
+    error text anywhere — the server round-trip adds class `invalid` to
+    the input. The planner's only verification patterns were read-text
+    and check-number, so it planned a Get Text hunt for a message that
+    does not exist → dead step. The planner must instead target the
+    FIELD ITSELF with Get Classes."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.PLANNING_STATE_VERIFICATION, str)
+        assert len(PromptComponents.PLANNING_STATE_VERIFICATION) > 0
+
+    def test_plans_get_classes_against_the_field(self):
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "Get Classes" in body
+        assert "field itself" in body
+
+    def test_forbids_hunting_for_message_text(self):
+        """The failure mode being fixed: planning a Get Text step for an
+        error message element that does not exist on class-only sites."""
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "do NOT plan a step to read an error message" in body
+
+    def test_covers_the_state_phrasing_family(self):
+        """'shows an error' is one of a family: disabled, highlighted,
+        marked invalid — all are element-state checks, not text checks."""
+        body = PromptComponents.PLANNING_STATE_VERIFICATION
+        assert "shows an error" in body
+        assert "disabled" in body
+        assert "highlighted" in body
+
+    def test_wired_into_plan_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "PLANNING_STATE_VERIFICATION" in src_text
+
+
+class TestStateVerificationHandling:
+    """Task G (G7): assembler side of class-state verification.
+
+    The identify agent forwards the classes the locator engine OBSERVED
+    on the field at locate time — captured after the preceding steps ran,
+    so on ASTPP the empty-form Save has already happened and the observed
+    list is 'text field medium form-control invalid'. The assembler picks
+    the state marker from that observed evidence; it never guesses. When
+    no token reads as a state marker, it emits a loud placeholder that
+    fails until a human fills it — never a silently-green base-class
+    assertion (Bootstrap 3 puts has-error on the PARENT, so the field's
+    own list can legitimately contain no marker)."""
+
+    def test_prompt_is_non_empty_string(self):
+        assert isinstance(PromptComponents.STATE_VERIFICATION_HANDLING, str)
+        assert len(PromptComponents.STATE_VERIFICATION_HANDLING) > 0
+
+    def test_routes_on_get_classes_keyword(self):
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "Get Classes" in body
+        assert "element_classes" in body
+
+    def test_auto_picks_marker_from_observed_classes(self):
+        """The common case must be fully automatic: pick the error-family
+        token from the observed class list — no user input needed."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "invalid" in body
+        assert "error" in body
+        assert "danger" in body
+
+    def test_base_classes_never_qualify(self):
+        """Picking a base/layout class (present error or not) produces a
+        test that passes forever — the silent-green disease. The prompt
+        must name form-control as a NEVER-qualifying example."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "form-control" in body
+        assert "NEVER" in body
+
+    def test_user_word_is_cross_check_only(self):
+        """Owner decision 2026-07-09: observation decides. A user-named
+        state word is used only when it appears in the observed list."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "observed" in body
+        assert "cross-check" in body
+
+    def test_placeholder_fallback_is_loud(self):
+        """No marker in the observed list → EXPECTED_STATE_CLASS placeholder
+        with a TODO comment listing what WAS observed, so the test fails
+        loudly until a human fills it (Task 12 contract)."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "EXPECTED_STATE_CLASS" in body
+        assert "TODO" in body
+
+    def test_worked_example_uses_astpp_reality(self):
+        """A worked example with the live-verified ASTPP data gives the
+        LLM a concrete substitution pattern."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "form-control invalid" in body
+
+    def test_wired_into_assemble_task(self):
+        from pathlib import Path
+        import src.backend.crew_ai.tasks as tasks_mod
+        src_text = Path(tasks_mod.__file__).read_text(encoding="utf-8")
+        assert "STATE_VERIFICATION_HANDLING" in src_text
+
+    def test_merge_forwards_element_classes(self):
+        """The Assembler only sees what the deterministic merge staples onto
+        the step (Task 16) — element_info.className must land on the step as
+        element_classes (the pipe verified in browser-service
+        smart_locator.py element_info payload)."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input",
+                             "className": "text field medium form-control invalid"},
+        }})
+        assert merged[0]["element_classes"] == "text field medium form-control invalid"
+
+    def test_aria_invalid_rule_before_placeholder(self):
+        """Sites that mark invalid fields via ARIA instead of a CSS class
+        (aria-invalid='true' observed, no error-family class) must get a
+        real Get Attribute assertion, not the placeholder — the aria rule
+        must sit between the class-marker rules and the fallback."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "aria_invalid" in body
+        assert "Get Attribute    ${locator}    aria-invalid    ==    true" in body
+        assert body.index("aria_invalid") < body.index("EXPECTED_STATE_CLASS")
+
+    def test_merge_forwards_aria_invalid(self):
+        """Same pipe: element_info.ariaInvalid (added in browser-service
+        e0ebfea) must land on the step as aria_invalid."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input", "ariaInvalid": "true"},
+        }})
+        assert merged[0]["aria_invalid"] == "true"
+
+    def test_parent_class_rule_before_placeholder(self):
+        """Bootstrap 3 marks invalid fields on the PARENT div (form-group
+        has-error) while the field's own list stays clean — the one real
+        case that previously forced the placeholder despite the error
+        state being visibly observed. The parent-marker rule must sit
+        before the fallback and assert one level up via xpath=.. chaining."""
+        body = PromptComponents.STATE_VERIFICATION_HANDLING
+        assert "parent_classes" in body
+        assert ">> xpath=.." in body
+        assert "has-error" in body
+        assert body.index("parent_classes") < body.index("EXPECTED_STATE_CLASS")
+
+    def test_merge_forwards_parent_classes(self):
+        """Same pipe: element_info.parentClassName (added in
+        browser-service 97b3e10) must land on the step as parent_classes."""
+        from src.backend.crew_ai.element_identification import merge_locators
+        steps = [{"keyword": "Get Classes", "element_description": "email field",
+                  "step_description": "verify state"}]
+        merged = merge_locators(steps, {0: "elem_1"}, {"elem_1": {
+            "found": True, "best_locator": "id=email",
+            "element_info": {"tagName": "input",
+                             "parentClassName": "form-group has-error"},
+        }})
+        assert merged[0]["parent_classes"] == "form-group has-error"

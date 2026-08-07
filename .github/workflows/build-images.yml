@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'pyproject.toml'
       - 'browser_service/**'
       - 'browser-service/**'
       - 'Dockerfile.fastapi'
@@ -20,6 +21,7 @@ on:
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'pyproject.toml'
       - 'browser_service/**'
       - 'browser-service/**'
       - 'Dockerfile.fastapi'

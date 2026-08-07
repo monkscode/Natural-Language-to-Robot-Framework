@@ -33,13 +33,19 @@ class Settings(BaseSettings):
     
     # Service Configuration
     APP_PORT: int = Field(default=5000, description="Port for FastAPI service")
-    BROWSER_USE_SERVICE_URL: str = Field(default="http://localhost:4999", description="URL for BrowserUse service")
+    # 127.0.0.1, NOT localhost: on Windows `localhost` resolves to IPv6 ::1 first
+    # and the service binds IPv4 only, so every call stalls ~2s before the IPv4
+    # fallback. Compose overrides this to the service name (browser-service:4999).
+    BROWSER_USE_SERVICE_URL: str = Field(default="http://127.0.0.1:4999", description="URL for BrowserUse service")
     
     # Browser Configuration
     BROWSER_HEADLESS: bool = Field(default=True, description="Run browser in headless mode (no UI) for BrowserUse service")
     
-    # Robot Framework Library Configuration
-    ROBOT_LIBRARY: str = Field(default="selenium", description="Robot Framework library to use: 'selenium' or 'browser'")
+    # Robot Framework Library Configuration. Browser Library (Playwright) is the
+    # only supported target: the locator pipeline emits Playwright-only syntax
+    # (role=, text=, >>> iframe piercing), so any other library would receive
+    # valid-looking tests that fail on every step at runtime.
+    ROBOT_LIBRARY: str = Field(default="browser", description="Robot Framework library to use (only 'browser' is supported)")
 
     # Artifact storage backend — pluggable, chosen per deployment, exactly like
     # MODEL_PROVIDER chooses an LLM backend. "local" = on-disk robot_tests/;
@@ -74,11 +80,14 @@ class Settings(BaseSettings):
         default=False,
         description="Phase 4: opt-in read-only rootfs for runner containers; default off until a live run proves headless Chrome tolerates it (validated in a later phase task).",
     )
-    # Phase 4: base URL of the socket-holding executor service. localhost for
+    # Phase 4: base URL of the socket-holding executor service. 127.0.0.1 for
     # `./run.sh` dev; compose overrides to the service name.
+    # 127.0.0.1, NOT localhost: on Windows `localhost` resolves to IPv6 ::1 first
+    # and the service binds IPv4 only, so every hop stalls ~2s before the IPv4
+    # fallback (execute makes two hops → ~4s). Compose overrides to runner-exec:4998.
     RUNNER_EXEC_URL: str = Field(
-        default="http://localhost:4998",  # NOSONAR — internal Docker network, no TLS needed
-        description="Phase 4: base URL of the runner-exec service; localhost for run.sh dev, http://runner-exec:4998 in compose.",
+        default="http://127.0.0.1:4998",  # NOSONAR — internal Docker network, no TLS needed
+        description="Phase 4: base URL of the runner-exec service; 127.0.0.1 for run.sh dev, http://runner-exec:4998 in compose.",
     )
 
     # LLM Empty-Response Retry Configuration
@@ -99,7 +108,6 @@ class Settings(BaseSettings):
     
     # Custom Actions Configuration
     ENABLE_CUSTOM_ACTIONS: bool = Field(default=True, description="Enable/disable custom actions for browser automation")
-    CUSTOM_ACTION_TIMEOUT: int = Field(default=5, description="Timeout for custom action execution (in seconds)")
     MAX_LOCATOR_STRATEGIES: int = Field(default=21, description="Maximum number of locator strategies to try")
     TRACK_LLM_COSTS: bool = Field(default=True, description="Enable/disable LLM cost tracking and logging")
     
@@ -228,9 +236,15 @@ class Settings(BaseSettings):
 
     @validator('ROBOT_LIBRARY')
     def validate_robot_library(cls, v):
-        """Validate that ROBOT_LIBRARY is either 'selenium' or 'browser'."""
-        if v.lower() not in ['selenium', 'browser']:
-            raise ValueError(f"ROBOT_LIBRARY must be 'selenium' or 'browser', got '{v}'")
+        """Fail fast at startup — only Browser Library is supported (E8/D1)."""
+        if v.lower() == 'selenium':
+            raise ValueError(
+                "ROBOT_LIBRARY=selenium is no longer supported; this system "
+                "generates Browser Library (Playwright) tests only. Remove the "
+                "setting or set ROBOT_LIBRARY=browser."
+            )
+        if v.lower() != 'browser':
+            raise ValueError(f"ROBOT_LIBRARY must be 'browser', got '{v}'")
         return v.lower()
 
     @validator('ARTIFACT_STORE')
@@ -266,13 +280,6 @@ class Settings(BaseSettings):
         """LLM_EMPTY_RESPONSE_MAX_RETRIES must be between 0 (disabled) and 5."""
         if v < 0 or v > 5:
             raise ValueError(f"LLM_EMPTY_RESPONSE_MAX_RETRIES must be between 0 and 5, got {v}")
-        return v
-    
-    @validator('CUSTOM_ACTION_TIMEOUT')
-    def validate_custom_action_timeout(cls, v):
-        """Validate that CUSTOM_ACTION_TIMEOUT is positive."""
-        if v <= 0:
-            raise ValueError(f"CUSTOM_ACTION_TIMEOUT must be positive, got {v}")
         return v
     
     @validator('MAX_LOCATOR_STRATEGIES')

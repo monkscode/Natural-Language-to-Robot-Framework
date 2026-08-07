@@ -1084,6 +1084,7 @@ class FeedbackLoop:
         workflow_id: str,
         feedback_text: str,
         feedback_type: str,
+        actor: str | None = None,
     ) -> dict:
         """
         Process user NL feedback from the feedback UI.
@@ -1100,6 +1101,9 @@ class FeedbackLoop:
             workflow_id: The workflow this feedback applies to.
             feedback_text: User's natural language feedback.
             feedback_type: "close_enough" | "completely_wrong"
+            actor: Email of the authenticated submitter, recorded as the
+                hint_audit actor when this feedback implicitly unflags a hint.
+                None (auth disabled) falls back to "unknown" at the audit write.
 
         Returns:
             Triage result dict with category, confidence, taxonomy_code.
@@ -1199,6 +1203,8 @@ class FeedbackLoop:
             if record:
                 # Inject raw feedback text so engines can access it
                 triage["feedback_text"] = feedback_text
+                # who submitted — recorded by the NL engine's implicit-unflag audit row
+                triage["actor"] = actor
 
                 engines = [
                     self.structural_engine,

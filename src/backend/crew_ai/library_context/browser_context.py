@@ -46,7 +46,7 @@ class BrowserLibraryContext(LibraryContext):
 
     def get_viewport_config_code(self) -> str:
         """Return viewport configuration code for Browser Library."""
-        return "    New Context    viewport=None"
+        return "    New Context    viewport={'width': 1920, 'height': 1080}"
 
     @property
     def core_rules(self) -> str:
@@ -59,18 +59,21 @@ class BrowserLibraryContext(LibraryContext):
 **BROWSER LIBRARY CORE RULES:**
 
 1. **CRITICAL SEQUENCE (MUST FOLLOW):**
-   New Browser → New Context viewport=None → New Page
-   
+   New Browser → New Context viewport={'width': 1920, 'height': 1080} → New Page
+
    Example:
    ```robot
    New Browser    chromium    headless=True
-   New Context    viewport=None    ← REQUIRED!
+   New Context    viewport={'width': 1920, 'height': 1080}    ← REQUIRED!
    New Page    https://example.com
    ```
 
 2. **VIEWPORT REQUIREMENT:**
-   - ALWAYS include "New Context    viewport=None" after New Browser
-   - Default viewport (800x600) causes element detection failures
+   - ALWAYS include "New Context    viewport={'width': 1920, 'height': 1080}" after New Browser
+   - Headless Chromium's default window is 800x600 — "viewport=None" does NOT fix this,
+     it only disables Playwright's viewport emulation, not the underlying window size
+   - At 800x600 many real sites switch to a mobile layout, and text locators can
+     silently match the wrong (but visible) element instead of the collapsed nav
    - This is the #1 cause of Browser Library test failures
 
 3. **PARAMETER RULES:**
@@ -87,9 +90,12 @@ class BrowserLibraryContext(LibraryContext):
    text > role > data-testid > id > css > xpath
    - text=<value> → Most stable
    - role=<role>[name="<name>"] → Accessibility-first
-   - css=<selector> → Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`).
+   - css=<selector> → Prefix RAW CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`).
      A bare `#` at the start of a variable value or argument is parsed as a Robot Framework
      comment and the locator becomes empty at runtime.
+     NEVER add `css=` to a locator that already carries a strategy prefix
+     (`id=`, `xpath=`, `text=`, `role=`, `data-testid=`) — use it exactly as given.
+     `css=id=searchBox` is not valid CSS and fails at runtime.
 
 6. **COMMON PITFALLS:**
    ❌ Missing viewport config → Elements not found
@@ -127,7 +133,6 @@ class BrowserLibraryContext(LibraryContext):
         """
         Detailed context for Code Assembler Agent.
         Focuses on code structure and syntax rules.
-        Keyword details are available via keyword_search_tool.
         Uses lazy loading with caching for performance.
         """
         if self._code_assembly_context_cache is None:
@@ -150,19 +155,21 @@ ${headless}    True
 Generated Test
     [Documentation]    Auto-generated test case
     New Browser    ${browser}    headless=${headless}
-    New Context    viewport=None
+    New Context    viewport={'width': 1920, 'height': 1080}
     New Page    ${url}
     # Test steps here
     Close Browser
 ```
 
 **CRITICAL: VIEWPORT CONFIGURATION**
-Browser Library uses a small default viewport (800x600) which causes element detection failures.
-You MUST include "New Context    viewport=None" after "New Browser" and before "New Page".
+Headless Chromium's default window is 800x600, which causes element detection failures —
+"viewport=None" does NOT fix this (it only disables Playwright's viewport emulation, not
+the underlying window size). You MUST include an explicit desktop-sized
+"New Context    viewport={'width': 1920, 'height': 1080}" after "New Browser" and before "New Page".
 
 **Correct Order:**
 1. New Browser    ${browser}    headless=${headless}
-2. New Context    viewport=None    ← REQUIRED
+2. New Context    viewport={'width': 1920, 'height': 1080}    ← REQUIRED
 3. New Page    ${url}
 
 **VARIABLE DECLARATION RULES:**
@@ -178,7 +185,7 @@ New Browser (NO options parameter):
     Note: Browser Library uses 'browser' and 'headless' parameters, NOT 'options'
 
 New Context (viewport configuration):
-    New Context    viewport=None
+    New Context    viewport={'width': 1920, 'height': 1080}
 
 New Page:
     New Page    <url>
@@ -204,33 +211,22 @@ Close Browser:
 
 **CRITICAL RULES:**
 1. Always use New Browser before New Context before New Page
-2. MUST include "New Context    viewport=None" for proper element detection
+2. MUST include "New Context    viewport={'width': 1920, 'height': 1080}" for proper element detection
 3. Browser Library uses 'browser' and 'headless' parameters (NOT 'options')
 4. Browser Library auto-waits, so explicit waits are rarely needed
-5. Always prefix CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`) — a bare `#` at the
-   start of a variable value is parsed as a Robot Framework comment and the locator becomes empty
+5. Prefix RAW CSS selectors with `css=` (e.g. `css=#searchBox`, `css=.btn`) — a bare `#` at the
+   start of a variable value is parsed as a Robot Framework comment and the locator becomes empty.
+   NEVER add `css=` to a locator that already has a strategy prefix (`id=`, `xpath=`, `text=`,
+   `role=`, `data-testid=`) — use it as-is; `css=id=searchBox` is not valid CSS and fails
 6. Text and role selectors are preferred for stability
 
 **KEYWORD REFERENCE:**
-Use the keyword_search_tool to look up specific keyword details when needed.
 Common keywords: New Browser, New Context, New Page, Fill Text, Click, Get Text,
 Keyboard Key, Wait For Elements State, Close Browser
-
-**TOM SELECT INTERACTION (dropdown_framework='tom-select'):**
-TomSelect wraps a native `<select>` with a custom UI. Use JavaScript to find
-the option by display text and call TomSelect's `setValue()` API directly.
-This is viewport-agnostic and works on any website regardless of internal
-option values.
-
-```robot
-# Preferred — when select_id is set (targets the hidden <select> directly):
-Evaluate JavaScript    id=${select_id}    (el) => { const opt = Array.from(el.options).find(o => o.text.trim() === '${value}'); if (opt && el.tomselect) el.tomselect.setValue(opt.value); }
-
-# Fallback — when select_id is null (locator targets the .ts-control div):
-Evaluate JavaScript    ${locator}    (el) => { const sel = el.closest('.ts-wrapper').parentElement.querySelector('select.tomselected'); if (sel && sel.tomselect) { const opt = Array.from(sel.options).find(o => o.text.trim() === '${value}'); if (opt) sel.tomselect.setValue(opt.value); } }
-```
 """
-            # NOTE: keyword_search_tool is available when OPTIMIZATION_ENABLED=true (standard mode)
+            # NOTE: the Tom Select recipe lives in the DROPDOWN_HANDLING prompt
+            # component (conditional assembly block) — not here (Task 24R F1/F2
+            # dedup: this context is the assembler's always-on system prompt).
             self._code_assembly_context_cache = code_structure
         
         return self._code_assembly_context_cache

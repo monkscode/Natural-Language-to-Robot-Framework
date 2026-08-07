@@ -24,13 +24,73 @@ set -a
 source src/backend/.env
 set +a
 
-# --- Local-dev overrides (run.sh process only, never containers) ---
-# These override values from src/backend/.env for processes launched by this script.
-# Docker Compose reads src/backend/.env directly and does NOT source run.sh, so the
-# on-disk value (BROWSER_HEADLESS=true) remains authoritative for containers.
-export BROWSER_HEADLESS=false
-export LOG_FORMAT=console          # human-readable colored logs
-# export CREWAI_VERBOSE=true         # show agent reasoning in console
+# --- Mode: dev (default) or bench ("./run.sh bench") ---
+# Both modes are process-env overlays on src/backend/.env — the file is never
+# edited. Docker Compose reads src/backend/.env directly and does NOT source
+# run.sh, so the on-disk values remain authoritative for containers.
+MODE="${1:-dev}"
+if [ "$MODE" != "dev" ] && [ "$MODE" != "bench" ]; then
+    echo "Usage: ./run.sh [bench]"
+    exit 1
+fi
+
+if [ "$MODE" = "bench" ]; then
+    # Bench pins (bench/README.md): a baseline is only comparable to runs
+    # pinned the same way.
+    export OPTIMIZATION_ENABLED=false
+    export BROWSER_HEADLESS=true
+    export LOG_FORMAT=json
+    # Refuse to start over a live stack — otherwise the address-in-use error
+    # is buried in a child process log and the bench hits mixed pins.
+    # netstat portability: Windows prints "LISTENING", Linux/macOS "LISTEN";
+    # macOS separates the port with "." not ":"; -o is Windows/Linux-only.
+    # netstat first because that is the path this guard was written and verified
+    # against; ss is the fallback for Linux images that ship without net-tools.
+    # Calling a missing binary prints nothing, so grep -q would fail and every
+    # port would read as free — the guard has to refuse to run instead of
+    # passing while a live stack is still up.
+    if command -v netstat >/dev/null 2>&1; then
+        PROBE_NAME=netstat
+        port_probe() { netstat -an 2>/dev/null; }
+    elif command -v ss >/dev/null 2>&1; then
+        PROBE_NAME=ss
+        port_probe() { ss -ltn 2>/dev/null; }
+    else
+        echo "Error: neither 'netstat' nor 'ss' is available — cannot verify that ports 5000/4999/4998 are free. Install net-tools or iproute2."
+        exit 1
+    fi
+    # Present is not the same as working. A netstat that exists but cannot read
+    # the connection table (permissions, a stub on PATH) prints nothing, 2>/dev/null
+    # hides why, and an empty probe reads as "every port is free" — the same
+    # fail-open the branch above exists to close, one layer in. Both tools print
+    # a header even with zero listeners, so an EMPTY probe means the tool failed,
+    # not that the machine is idle: test the raw table before filtering it.
+    # Probed once and reused — three invocations are three kernel sweeps that can
+    # disagree with each other between ports.
+    PORT_TABLE="$(port_probe)"
+    if [ -z "$PORT_TABLE" ]; then
+        echo "Error: '$PROBE_NAME' produced no output — cannot verify that ports 5000/4999/4998 are free. Check that it can read the connection table."
+        exit 1
+    fi
+    # ss -ltn is already listen-only; the filter also drops its header row, and
+    # on Windows netstat says LISTENING, which this matches too.
+    LISTENING="$(printf '%s\n' "$PORT_TABLE" | grep "LISTEN")"
+    for port in 5000 4999 4998; do
+        if printf '%s\n' "$LISTENING" | grep -Eq "[:.]${port}([[:space:]]|$)"; then
+            echo "Error: port ${port} already in use — is the dev stack still running? Stop it first."
+            exit 1
+        fi
+    done
+    echo "=============================================================="
+    echo "  BENCH MODE: learning OFF, headless browser, JSON logs,"
+    echo "  frontend skipped. src/backend/.env untouched."
+    echo "=============================================================="
+else
+    # Local-dev overrides (run.sh process only, never containers)
+    export BROWSER_HEADLESS=false
+    export LOG_FORMAT=console          # human-readable colored logs
+    # export CREWAI_VERBOSE=true         # show agent reasoning in console
+fi
 
 # Support both APP_PORT (new) and PORT (legacy) variables with a sane default
 APP_PORT="${APP_PORT:-${PORT:-5000}}"
@@ -53,10 +113,63 @@ else
     VENV_ACTIVATE="$VENV_DIR/bin/activate"
 fi
 
+# A venv is only as fresh as the manifest it was built from. Both blocks below used to
+# install ONLY when the venv was missing, so editing a requirements file left an existing
+# venv silently stale — and the bench then measures package versions the manifest does
+# not claim. That is how the playwright bench-vs-container fork could reappear after
+# being closed. Each venv now stores a hash of its manifest and reinstalls in place when
+# it changes. In place, never renamed: uv console-script trampolines hardcode an absolute
+# interpreter path.
+_req_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# The stamp is the venv's claim to match its manifest, so it may only be written
+# once the install backing that claim has actually succeeded. This script does
+# not `set -e`: a bare `echo ... > stamp` on the line after an install runs even
+# when that install failed, which marks a half-built venv fresh. Every later run
+# then compares equal, skips the repair, and the bench goes on measuring a
+# package set the manifest no longer describes — the same fork the hashing above
+# was added to close, except now it is unrecoverable without deleting the stamp
+# by hand. Fail loudly instead, and leave the stamp as it was so the next run
+# retries: the create paths below have already made the venv directory, so a
+# retry re-enters through the update branch and reinstalls there.
+_install_failed() {
+    echo "Error: $1 failed. Leaving $2 unchanged so the next run retries." >&2
+    exit 1
+}
+
+BACKEND_REQ="src/backend/requirements.txt"
+# ONE install set behind ONE stamp. The create and update branches used to
+# install different sets — create added the test runner, update did not — while
+# both wrote the same hash. So a create that failed on its second command left a
+# venv whose retry came back through the update branch, installed the manifest
+# only, stamped it fresh, and left `venv/` permanently without pytest. Anything
+# both branches must guarantee belongs here.
+_install_backend() {
+    uv pip install -r "$BACKEND_REQ" \
+        && uv pip install pytest pytest-asyncio pytest-cov
+}
+VENV_STAMP="$VENV_DIR/.requirements-hash"
+BACKEND_HASH="$(_req_hash "$BACKEND_REQ")"
+
 # Check if venv exists and is valid
 if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     echo "Using existing virtual environment..."
     source "$VENV_ACTIVATE"
+    if [ "$(cat "$VENV_STAMP" 2>/dev/null)" != "$BACKEND_HASH" ]; then
+        echo "$BACKEND_REQ changed — updating virtual environment..."
+        command -v uv >/dev/null 2>&1 || pip install uv
+        if _install_backend; then
+            echo "$BACKEND_HASH" > "$VENV_STAMP"
+        else
+            _install_failed "the backend dependency update" "$VENV_STAMP"
+        fi
+    fi
 else
     echo "Creating new virtual environment..."
     # Remove invalid venv if it exists
@@ -65,9 +178,42 @@ else
     source "$VENV_ACTIVATE"
     echo "Installing dependencies..."
     pip install uv
-    uv pip install -r src/backend/requirements.txt
-    playwright install chromium
-    rfbrowser install chromium
+    if _install_backend; then
+        echo "$BACKEND_HASH" > "$VENV_STAMP"
+    else
+        _install_failed "the backend dependency install" "$VENV_STAMP"
+    fi
+fi
+
+# --- Browser-use service venv (isolated — see requirements-bus.txt header) ---
+BUS_VENV_DIR="venv-bus"
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    BUS_PY="$BUS_VENV_DIR/Scripts/python.exe"
+else
+    BUS_PY="$BUS_VENV_DIR/bin/python"
+fi
+BUS_STAMP="$BUS_VENV_DIR/.requirements-hash"
+BUS_HASH="$(_req_hash requirements-bus.txt)"
+if [ ! -f "$BUS_PY" ]; then
+    echo "Creating browser-service virtual environment..."
+    [ -d "$BUS_VENV_DIR" ] && rm -rf "$BUS_VENV_DIR"
+    python -m venv "$BUS_VENV_DIR"
+    if "$BUS_PY" -m pip install -r requirements-bus.txt \
+        && "$BUS_PY" -m playwright install chromium; then
+        echo "$BUS_HASH" > "$BUS_STAMP"
+    else
+        _install_failed "the browser-service dependency install" "$BUS_STAMP"
+    fi
+elif [ "$(cat "$BUS_STAMP" 2>/dev/null)" != "$BUS_HASH" ]; then
+    # Reinstall the browser too: the pin that changed may be playwright itself, and the
+    # engine is what the locator stack resolves against.
+    echo "requirements-bus.txt changed — updating browser-service virtual environment..."
+    if "$BUS_PY" -m pip install -r requirements-bus.txt \
+        && "$BUS_PY" -m playwright install chromium; then
+        echo "$BUS_HASH" > "$BUS_STAMP"
+    else
+        _install_failed "the browser-service dependency update" "$BUS_STAMP"
+    fi
 fi
 
 # --- Postgres (auth + learning stack live here as of Phase 4) ---
@@ -90,8 +236,8 @@ if [ -z "$PG_READY" ]; then
     exit 1
 fi
 
-# --- React SPA dev server (Vite, :5173) ---
-if [ ! -d "src/frontend-react/node_modules" ]; then
+# --- React SPA dev server (Vite, :5173) — dev mode only ---
+if [ "$MODE" != "bench" ] && [ ! -d "src/frontend-react/node_modules" ]; then
     echo "Installing frontend dependencies (first run)..."
     (cd src/frontend-react && npm install)
 fi
@@ -106,16 +252,22 @@ echo "Starting the application..."
 python -m uvicorn src.backend.main:app --host 0.0.0.0 --port "${APP_PORT}" &
 UVICORN_PID=$!
 
-python tools/browser_use_service.py > bus.log 2>&1 &
+"$BUS_PY" tools/browser_use_service.py > bus.log 2>&1 &
 BROWSER_SERVICE_PID=$!
 
-# vite.js is run with node directly (not 'npm run dev') and exec'd so the PID
-# we kill on exit is the actual dev-server process, not a wrapper around it.
-(cd src/frontend-react && exec node node_modules/vite/bin/vite.js) > frontend.log 2>&1 &
-FRONTEND_PID=$!
+PIDS=("$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID")
+
+if [ "$MODE" != "bench" ]; then
+    # vite.js is run with node directly (not 'npm run dev') and exec'd so the PID
+    # we kill on exit is the actual dev-server process, not a wrapper around it.
+    (cd src/frontend-react && exec node node_modules/vite/bin/vite.js) > frontend.log 2>&1 &
+    PIDS+=("$!")
+fi
 
 echo ""
-echo "  React SPA (validate here):  http://localhost:5173"
+if [ "$MODE" != "bench" ]; then
+    echo "  React SPA (validate here):  http://localhost:5173"
+fi
 echo "  FastAPI backend (API only):  http://localhost:${APP_PORT}"
 echo "  BrowserUse service:          http://localhost:4999/health"
 echo "  Postgres:                    localhost:5432 (container nlrf-postgres)"
@@ -125,13 +277,20 @@ echo "  Press Ctrl+C to stop everything (Postgres container stays up)."
 echo ""
 
 cleanup() {
-    kill "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+    kill "${PIDS[@]}" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
-wait -n "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID"
-EXIT_CODE=$?
+if ((BASH_VERSINFO[0] >= 4)); then
+    # Bash 4+: block until the first background service exits.
+    wait -n "${PIDS[@]}"
+    EXIT_CODE=$?
+else
+    # macOS ships Bash 3.2, which lacks `wait -n`: block until all exit.
+    wait "${PIDS[@]}"
+    EXIT_CODE=$?
+fi
 cleanup
-wait "$RUNNER_EXEC_PID" "$UVICORN_PID" "$BROWSER_SERVICE_PID" "$FRONTEND_PID" 2>/dev/null || true
+wait "${PIDS[@]}" 2>/dev/null || true
 exit "$EXIT_CODE"

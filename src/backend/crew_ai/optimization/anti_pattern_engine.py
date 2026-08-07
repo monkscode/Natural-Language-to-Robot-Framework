@@ -153,32 +153,26 @@ class AntiPatternEngine(LearningEngine):
             self._em.add_anchor("anti", new_anti_id, record.user_query,
                                 org_id=getattr(record, 'org_id', None))
 
-    def get_hints(self, user_query: str, url: str,
-                  agent_role: str,
-                  org_id: str | None = None) -> Optional[List[str]]:
-        """
-        Return anti-pattern warnings relevant to the query.
+    def get_warnings(self, user_query: str, url: str,
+                     org_id: str | None = None) -> List[dict]:
+        """Role-independent retrieval half of get_hints (Task 31).
 
-        Targets:
-        - Planner: "Don't generate linear code for iteration queries"
-        - Assembler: "Don't use single Get Text for 'all rows'"
-        - Identifier: None (not relevant for this role)
-
-        Only returns anti-patterns with score >= 0.4 AND evidence_count >= 3.
+        The expensive part — DB gate query + query-similarity filter (one
+        embed + pgvector lookup) — depends only on (query, url, org), so the
+        SmartKeywordProvider caches this result per workflow and formats it
+        per role via format_hints().
         """
-        if agent_role not in ("planner", "assembler"):
-            return None
         if not self._em:
-            return None
-
+            return []
         domain = extract_domain(url) if url else None
+        return self._find_matching_anti_patterns(user_query, domain, org_id=org_id)
 
-        # Query anti-patterns relevant to this query
-        warnings = self._find_matching_anti_patterns(user_query, domain, org_id=org_id)
-
-        if not warnings:
+    @staticmethod
+    def format_hints(warnings: List[dict],
+                     agent_role: str) -> Optional[List[str]]:
+        """Pure formatting half of get_hints — no DB or embedding access."""
+        if agent_role not in ("planner", "assembler") or not warnings:
             return None
-
         hints = []
         for ap in warnings:
             if agent_role == "planner":
@@ -197,8 +191,27 @@ class AntiPatternEngine(LearningEngine):
                         f"⚠️ AVOID: This pattern caused {ap['failure_category']}: "
                         f"{ap['error_message'][:100]}"
                     )
-
         return hints if hints else None
+
+    def get_hints(self, user_query: str, url: str,
+                  agent_role: str,
+                  org_id: str | None = None) -> Optional[List[str]]:
+        """
+        Return anti-pattern warnings relevant to the query.
+
+        Targets:
+        - Planner: "Don't generate linear code for iteration queries"
+        - Assembler: "Don't use single Get Text for 'all rows'"
+        - Identifier: None (not relevant for this role)
+
+        Only returns anti-patterns with score >= 0.4 AND evidence_count >= 3.
+        Composed from get_warnings + format_hints (Task 31 split).
+        """
+        if agent_role not in ("planner", "assembler"):
+            return None
+        return self.format_hints(
+            self.get_warnings(user_query, url, org_id=org_id), agent_role
+        )
 
     def get_stats(self) -> Dict:
         """Return engine statistics."""

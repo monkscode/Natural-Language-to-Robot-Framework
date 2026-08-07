@@ -4,7 +4,7 @@ Smart Keyword Provider with Hybrid Architecture
 This module orchestrates the 4-tier keyword retrieval system:
 0. Surgical Learning Hints (from learning engines — NEW in DAY_06)
 1. Core Rules (always included, ~300 tokens)
-2. Predicted Keywords (from pattern learning) OR Zero-Context + Tool
+2. Predicted Keywords (from pattern learning) OR Zero-Context (core rules only)
 3. Full Context Fallback (if both fail)
 
 Returns AgentContextResult (NamedTuple) containing both the context string
@@ -16,7 +16,6 @@ import random
 from typing import Optional, List, Dict, NamedTuple
 from .pattern_learning import QueryPatternMatcher
 from .keyword_vector_store import KeywordVectorStore
-from .keyword_search_tool import KeywordSearchTool
 from .context_pruner import ContextPruner
 from .learning_config import LEARNING_CONFIG
 
@@ -129,7 +128,7 @@ class SmartKeywordProvider:
     Intelligent keyword provider with hybrid approach:
     - Tier 0: Surgical Learning Hints (from past executions)
     - Tier 1: Core Rules (always included)
-    - Tier 2: Predicted Keywords OR Zero-Context + Tool
+    - Tier 2: Predicted Keywords OR Zero-Context (core rules only)
     - Tier 3: Full Context Fallback
     """
 
@@ -191,6 +190,14 @@ class SmartKeywordProvider:
         # cache lifetime is one workflow: no staleness risk.
         self._nl_hints_cache: dict = {}
 
+        # Task 31: the same argument applies to the anti-pattern and
+        # structural engines — their retrieval halves (get_warnings /
+        # get_intent_rules) are role-independent and each cost DB round-trips
+        # (anti additionally an embed + pgvector similarity query), so they
+        # too run once per workflow. Formatting stays per role.
+        self._anti_warnings_cache: dict = {}
+        self._structural_rules_cache: dict = {}
+
         # Lazy-loaded learning engine references
         self._structural_engine = None
         self._keyword_engine = None
@@ -244,11 +251,16 @@ class SmartKeywordProvider:
         sources = []
         safe_url = url or ""
 
-        # Structural hints (planner + assembler)
+        # Structural hints (planner + assembler). Retrieval is
+        # role-independent — cached per workflow (Task 31), formatted per role.
         try:
-            structural_hints = self._get_structural_engine().get_hints(
-                user_query, safe_url, agent_role
-            )
+            engine = self._get_structural_engine()
+            if user_query in self._structural_rules_cache:
+                structural_rules = self._structural_rules_cache[user_query]
+            else:
+                structural_rules = engine.get_intent_rules(user_query)
+                self._structural_rules_cache[user_query] = structural_rules
+            structural_hints = engine.format_hints(structural_rules, agent_role)
             if structural_hints:
                 for hint in structural_hints:
                     candidates.append({"text": hint, "priority": "high"})
@@ -257,11 +269,20 @@ class SmartKeywordProvider:
         except Exception as e:
             logger.warning(f"[LEARNING] Structural engine hint retrieval failed: {e}")
 
-        # Anti-pattern warnings (planner + assembler)
+        # Anti-pattern warnings (planner + assembler). Retrieval (embed +
+        # similarity filter + DB) is role-independent — cached per workflow
+        # (Task 31), formatted per role.
         try:
-            anti_pattern_hints = self._get_anti_pattern_engine().get_hints(
-                user_query, safe_url, agent_role, org_id=self._org_id
-            )
+            engine = self._get_anti_pattern_engine()
+            cache_key = (user_query, safe_url)
+            if cache_key in self._anti_warnings_cache:
+                anti_warnings = self._anti_warnings_cache[cache_key]
+            else:
+                anti_warnings = engine.get_warnings(
+                    user_query, safe_url, org_id=self._org_id
+                )
+                self._anti_warnings_cache[cache_key] = anti_warnings
+            anti_pattern_hints = engine.format_hints(anti_warnings, agent_role)
             if anti_pattern_hints:
                 for hint in anti_pattern_hints:
                     candidates.append({"text": hint, "priority": "medium"})
@@ -510,18 +531,20 @@ class SmartKeywordProvider:
         """
         return self.library_context.core_rules
 
-    def _format_zero_context_with_tool(self, agent_role: str) -> str:
+    def _format_zero_context(self, agent_role: str) -> str:
         """
-        Format minimal context with keyword search tool instructions.
+        Format minimal core-rules-only context.
 
         Used when no predictions are available from pattern learning.
-        Target: core rules (300) + tool instructions (200) = 500 tokens
+        (This tier used to teach the retired keyword-search tool's ReAct
+        call syntax — Task 24R Stage 1 reduced it to the core rules; the
+        static KEYWORD REFERENCE list lives in code_assembly_context.)
 
         Args:
             agent_role: "planner" or "assembler"
 
         Returns:
-            Formatted context string with core rules + tool usage instructions
+            Formatted context string with core rules
         """
         core_rules = self._get_core_rules()
 
@@ -529,30 +552,6 @@ class SmartKeywordProvider:
 You are an expert Robot Framework developer using {self.library_context.library_name}.
 
 {core_rules}
-
-**KEYWORD SEARCH TOOL AVAILABLE:**
-
-You have access to a keyword_search tool to find relevant keywords on-demand.
-When you need a keyword, search for it by describing what you want to do.
-
-**How to use the tool:**
-- Need to click? Search: "click button element"
-- Need to input text? Search: "type text input field"
-- Need to wait? Search: "wait element visible"
-- Need to get text? Search: "get text from element"
-
-The tool will return the top 3 matching keywords with documentation and examples.
-Use the exact keyword names and syntax from the tool results.
-
-**Examples:**
-```
-Action: keyword_search
-Action Input: "click button"
-
-Result: Click, Click Element, Click Button (with docs and examples)
-```
-
-Use this tool whenever you need to find the right keyword for an action.
 """
 
     def _format_predicted_context(self, predicted_keywords: List[str], agent_role: str, user_query: str = "") -> str:
@@ -614,19 +613,17 @@ Use this tool whenever you need to find the right keyword for an action.
             except Exception as e:
                 logger.warning(f"Context pruning failed: {e}, using all predicted keywords")
 
-        # Get full documentation for keywords from ChromaDB
+        # Get full documentation for the predicted keywords. Exact-name SQL
+        # lookup (Task 31): the old path embedded each keyword NAME for an ANN
+        # search and then kept the result only on exact name equality anyway —
+        # an indexed WHERE clause does the same with zero embeds.
         logger.info(f"Fetching documentation for {len(keywords_to_fetch)} keywords")
         keyword_docs = []
         for keyword_name in keywords_to_fetch:
-            # Search for exact keyword in ChromaDB
-            results = self.vector_store.search(
-                library_name=self.library_context.library_name,
-                query=keyword_name,
-                top_k=1
+            kw = self.vector_store.get_keyword_doc(
+                self.library_context.library_name, keyword_name
             )
-
-            if results and results[0]['name'] == keyword_name:
-                kw = results[0]
+            if kw:
                 # Format keyword documentation - MINIMAL format to reduce tokens
                 # Only include essential info: name and first 2 args
                 args_list = kw['args'][:2] if kw['args'] else []
@@ -652,8 +649,6 @@ You are an expert Robot Framework developer using {self.library_context.library_
 
 **RELEVANT KEYWORDS (from similar queries):**
 {predicted_docs}
-
-Use keyword_search tool if you need additional keywords.
 """
 
     # ------------------------------------------------------------------
@@ -661,20 +656,27 @@ Use keyword_search tool if you need additional keywords.
     # ------------------------------------------------------------------
 
     def get_agent_context(self, user_query: str, agent_role: str,
-                          url: str = None) -> AgentContextResult:
+                          url: str = None,
+                          hints_only: bool = False) -> AgentContextResult:
         """
         Get optimized context for an agent based on query and role.
 
         Implements 4-tier retrieval:
         0. Surgical Learning Hints (from past executions — NEW)
         1. Core Rules (always)
-        2. Predicted Keywords OR Zero-Context + Tool
+        2. Predicted Keywords OR Zero-Context (core rules only)
         3. Full Context Fallback
 
         Args:
             user_query: User's natural language query
-            agent_role: "planner", "identifier", or "assembler"
+            agent_role: "planner" or "assembler"
             url: Optional target URL for domain-scoped hints
+            hints_only: When True, run ONLY Tier 0 and return an empty
+                context string. The planner's retrieval mode: its agent
+                ships static minimal context by design (RobotAgents has no
+                planner context slot), so building Tier-1/2 context for it
+                is dead weight — a vector search plus keyword-doc fetches
+                whose result nothing reads.
 
         Returns:
             AgentContextResult with context string and hint metadata
@@ -715,6 +717,18 @@ Use keyword_search tool if you need additional keywords.
                 f"(non-blocking): {e}"
             )
 
+        # hints_only (planner path): Tier 0 ran; Tiers 1/2/3 are skipped.
+        if hints_only:
+            return AgentContextResult(
+                context="",
+                hints_count=hints_count,
+                hints_available=hints_available,
+                hint_sources=tuple(hint_sources),
+                hint_text=hint_text,
+                nl_injected_ids=nl_injected_ids,
+                selection_trace=selection_trace,
+            )
+
         # ═══ Existing Tiers (1, 2a, 2b, 3) — UNCHANGED ═══
         core_rules = self._get_core_rules()
 
@@ -741,7 +755,7 @@ Use keyword_search tool if you need additional keywords.
                 except Exception as e:
                     logger.warning(f"Failed to format predicted context: {e}, falling back to zero-context")
             else:
-                logger.info("No predictions from pattern learning, using zero-context + tool")
+                logger.info("No predictions from pattern learning, using zero-context (core rules only)")
 
                 # Track that no prediction was used
                 if self.metrics:
@@ -759,10 +773,10 @@ Use keyword_search tool if you need additional keywords.
                     keyword_count=0,
                 )
 
-        # Tier 2 Fallback: Zero-context + tool instructions
+        # Tier 2 Fallback: Zero-context (core rules only)
         if existing_context is None:
             try:
-                existing_context = self._format_zero_context_with_tool(agent_role)
+                existing_context = self._format_zero_context(agent_role)
             except Exception as e:
                 logger.error(f"Zero-context formatting failed: {e}, falling back to full context")
                 # Tier 3: Full context fallback (baseline behavior)
@@ -795,28 +809,15 @@ Use keyword_search tool if you need additional keywords.
         """
         logger.info(f"Fallback to full context for {agent_role} agent")
 
+        # NOTE: the "identifier" branch was removed in Task 16 — it was
+        # pre-existing dead code (zero callers even before the element
+        # identifier agent itself was replaced by deterministic Python).
         if agent_role == "planner":
             return self.library_context.planning_context
-        elif agent_role == "identifier":
-            # Element identifier doesn't need keyword context, just minimal guidance
-            return "Expert web element locator. Use batch_browser_automation tool to find all elements in one call."
         elif agent_role == "assembler":
             return self.library_context.code_assembly_context
         else:
             # Default to code assembly context
             logger.warning(f"Unknown agent role '{agent_role}', using code_assembly_context")
             return self.library_context.code_assembly_context
-
-    def get_keyword_search_tool(self) -> KeywordSearchTool:
-        """
-        Get keyword search tool for agents.
-
-        Returns:
-            KeywordSearchTool instance configured for this library
-        """
-        return KeywordSearchTool(
-            library_name=self.library_context.library_name,
-            vector_store=self.vector_store,
-            metrics=self.metrics
-        )
 

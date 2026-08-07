@@ -7,9 +7,9 @@ Purpose: Settings drives ALL configuration.  A wrong default means the app
 
 Tests:
   - Default MODEL_PROVIDER, ROBOT_LIBRARY, BROWSER_HEADLESS, OPTIMIZATION_ENABLED
-  - ROBOT_LIBRARY validator accepts 'browser'/'selenium', rejects others
+  - ROBOT_LIBRARY validator accepts only 'browser'; 'selenium' rejected with a
+    migration message (browser-only, fail fast — Task 11/E8)
   - MAX_AGENT_ITERATIONS validator enforces 1-5 range
-  - CUSTOM_ACTION_TIMEOUT validator enforces positive
   - Environment variable override
 """
 
@@ -27,11 +27,10 @@ class TestSettingsDefaults:
             "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
             "ONLINE_MODEL": "gemini-2.5-flash",
-            "ROBOT_LIBRARY": "selenium",
+            "ROBOT_LIBRARY": "browser",
             "BROWSER_HEADLESS": "true",
             "MAX_AGENT_ITERATIONS": "3",
             "ENABLE_CUSTOM_ACTIONS": "true",
-            "CUSTOM_ACTION_TIMEOUT": "5",
             "MAX_LOCATOR_STRATEGIES": "21",
             "OPTIMIZATION_ENABLED": "false",
         }
@@ -47,9 +46,12 @@ class TestSettingsDefaults:
         assert s.MODEL_PROVIDER == "gemini"
 
     def test_default_robot_library(self):
-        """Default ROBOT_LIBRARY is validated and lowercased."""
+        """Field default is 'browser' — a deployment with no env var gets the
+        only library the locator engine actually emits syntax for."""
+        from src.backend.core.config import Settings
+        assert Settings.__fields__["ROBOT_LIBRARY"].default == "browser"
         s = self._make_settings()
-        assert s.ROBOT_LIBRARY in ["selenium", "browser"]
+        assert s.ROBOT_LIBRARY == "browser"
 
     def test_default_browser_headless(self):
         """BROWSER_HEADLESS defaults to True."""
@@ -75,9 +77,8 @@ class TestSettingsValidators:
             "MODEL_PROVIDER": "gemini",
             "GEMINI_API_KEY": "test",
             "ONLINE_MODEL": "gemini-2.5-flash",
-            "ROBOT_LIBRARY": "selenium",
+            "ROBOT_LIBRARY": "browser",
             "MAX_AGENT_ITERATIONS": "3",
-            "CUSTOM_ACTION_TIMEOUT": "5",
             "MAX_LOCATOR_STRATEGIES": "21",
         }
         env.update(overrides)
@@ -90,10 +91,15 @@ class TestSettingsValidators:
         s = self._make_settings({"ROBOT_LIBRARY": "browser"})
         assert s.ROBOT_LIBRARY == "browser"
 
-    def test_robot_library_accepts_selenium(self):
-        """ROBOT_LIBRARY='selenium' is valid."""
-        s = self._make_settings({"ROBOT_LIBRARY": "selenium"})
-        assert s.ROBOT_LIBRARY == "selenium"
+    def test_robot_library_rejects_selenium_with_migration_message(self):
+        """ROBOT_LIBRARY='selenium' fails startup with a clear migration error.
+
+        The pipeline emits Browser Library (Playwright) locator syntax only
+        (role=, text=, >>> iframe piercing); selenium mode silently generated
+        broken tests, so it now fails fast instead.
+        """
+        with pytest.raises(ValidationError, match="no longer supported"):
+            self._make_settings({"ROBOT_LIBRARY": "selenium"})
 
     def test_robot_library_rejects_invalid(self):
         """ROBOT_LIBRARY='puppeteer' raises ValidationError."""
@@ -109,11 +115,6 @@ class TestSettingsValidators:
         """MAX_AGENT_ITERATIONS=6 raises ValidationError."""
         with pytest.raises(ValidationError):
             self._make_settings({"MAX_AGENT_ITERATIONS": "6"})
-
-    def test_custom_timeout_rejects_zero(self):
-        """CUSTOM_ACTION_TIMEOUT=0 raises ValidationError."""
-        with pytest.raises(ValidationError):
-            self._make_settings({"CUSTOM_ACTION_TIMEOUT": "0"})
 
     def test_locator_strategies_rejects_high(self):
         """MAX_LOCATOR_STRATEGIES=100 raises ValidationError."""
@@ -161,7 +162,23 @@ class TestSettingsValidators:
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
 
 
-def test_runner_exec_url_default():
+def test_local_service_urls_use_ipv4_loopback(monkeypatch):
+    """Local service hops must default to 127.0.0.1, never localhost.
+
+    On Windows `localhost` resolves to IPv6 ::1 first; these services bind IPv4
+    only, so a `localhost` default adds a ~2s connect stall per hop (execute
+    makes two hops -> ~4s). Guard against a well-meaning revert to `localhost`.
+
+    The assertion is about the DEFAULTS, so both override sources are cut off:
+    the process env and the .env file. docker-compose.yml sets both of these
+    vars to service names, so without this the test fails wherever compose's
+    environment is present — a false alarm about a default that never changed.
+    """
+    monkeypatch.delenv("RUNNER_EXEC_URL", raising=False)
+    monkeypatch.delenv("BROWSER_USE_SERVICE_URL", raising=False)
     from src.backend.core.config import Settings
-    s = Settings()
-    assert s.RUNNER_EXEC_URL == "http://localhost:4998"
+    s = Settings(_env_file=None)
+    assert s.RUNNER_EXEC_URL == "http://127.0.0.1:4998"
+    assert s.BROWSER_USE_SERVICE_URL == "http://127.0.0.1:4999"
+    assert "localhost" not in s.RUNNER_EXEC_URL
+    assert "localhost" not in s.BROWSER_USE_SERVICE_URL

@@ -99,7 +99,9 @@ class WorkflowMetricsBase(
     """
     # Core identifiers
     workflow_id: str
-    url: str
+    # None when the user query named no URL (extract_url_from_query returns
+    # None rather than guessing a domain — Task 14).
+    url: Optional[str] = None
     
     # Overall metrics (totals)
     total_llm_calls: int
@@ -111,6 +113,28 @@ class WorkflowMetricsBase(
     
     # Per-element approach metrics for pattern analysis
     element_approach_metrics: Optional[List[Dict[str, Any]]] = None
+
+    # identify_s phase breakdown (2026-07-26 efficiency check). Typically
+    # submit_s, queue_s, session_setup_s, agent_setup_s, agent_run_s,
+    # postprocess_s, poll_wait_s — but the browser service owns the span names
+    # and is versioned separately, so the set is not fixed. None on failed runs
+    # and pre-2026-07 rows.
+    #
+    # NOT a partition: poll_wait_s overlaps every service-side span, so summing
+    # these does not reconstruct identify_s.
+    #
+    # Dict[str, Any], matching agent_diagnostics below and the sibling
+    # element_approach_metrics. Dict[str, float] rejects a None the moment the
+    # service adopts the "None means not measured" convention it already uses
+    # for llm_coverage_gap — and because WorkflowMetrics is built inside a
+    # try/except that swallows ValidationError, that would silently discard the
+    # ENTIRE metrics row (cost, tokens, elements), not just the timings.
+    phase_timings: Optional[Dict[str, Any]] = None
+
+    # Agent-history diagnostics: dom_elements_max, dom_elements_median,
+    # llm_429_count, retry_lost_s, llm_total_s, llm_max_s, llm_calls_actual,
+    # steps_total_s, llm_coverage_gap. Historical rows also carry agent_steps.
+    agent_diagnostics: Optional[Dict[str, Any]] = None
 
 
 class WorkflowMetrics(WorkflowMetricsBase):
@@ -237,17 +261,9 @@ class WorkflowMetrics(WorkflowMetricsBase):
         return cls.model_validate(data)
     
     # Tracking methods
-    def track_keyword_search(self, latency_ms: float, returned_keywords: List[str]) -> None:
-        """Track keyword search performance."""
-        self.keyword_search_stats["calls"] += 1
-        self.keyword_search_stats["total_latency_ms"] += latency_ms
-        self.keyword_search_stats["avg_latency_ms"] = (
-            self.keyword_search_stats["total_latency_ms"] / 
-            self.keyword_search_stats["calls"]
-        )
-        all_kws = self.keyword_search_stats["returned_keywords"] + returned_keywords
-        self.keyword_search_stats["returned_keywords"] = list(dict.fromkeys(all_kws))
-    
+    # NOTE: track_keyword_search was removed with the retired keyword-search
+    # tool (its sole caller; 0 recorded calls ever). The keyword_search_stats
+    # FIELD stays — historical rows carry it and the frontend column reads it.
     def track_pattern_learning(self, predicted: bool, keyword_count: int) -> None:
         """Track pattern learning usage."""
         self.pattern_learning_stats["prediction_used"] = predicted
@@ -309,6 +325,8 @@ class WorkflowMetricsResponse(WorkflowMetricsBase):
             custom_action_usage_count=m.custom_action_usage_count,
             session_id=m.session_id,
             element_approach_metrics=m.element_approach_metrics,
+            phase_timings=m.phase_timings,
+            agent_diagnostics=m.agent_diagnostics,
             keyword_search_stats=m.keyword_search_stats,
             pattern_learning_stats=m.pattern_learning_stats,
             context_reduction=m.context_reduction,

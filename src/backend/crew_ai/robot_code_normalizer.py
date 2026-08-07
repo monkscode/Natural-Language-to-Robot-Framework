@@ -29,11 +29,11 @@ Scope rules (conservative: no rewrite beats a wrong rewrite):
     - Full-line comments and `...` continuations: preserved verbatim.
 
 Runs AFTER the Code Assembler returns. Complements the prompt guidance in
-`library_context/browser_context.py` and `library_context/selenium_context.py` as a
-belt-and-suspenders guarantee, since the LLM occasionally ignores prompt rules.
+`library_context/browser_context.py` as a belt-and-suspenders guarantee, since
+the LLM occasionally ignores prompt rules.
 
 Referenced by:
-    src.backend.services.workflow_service._run_crew_thread (after tasks[2] extraction)
+    src.backend.services.workflow_service._run_crew_thread (after tasks[-1] extraction)
 """
 
 import logging
@@ -161,6 +161,149 @@ _LOCATOR_KEYWORDS: dict[str, tuple[int, ...]] = {
     # Two-locator keywords
     "drag and drop": (0, 1),
 }
+
+
+# Browser Library's import default is `timeout=10s` (verified against the runner
+# image's libdoc, Browser 19.14.2). Every timeout in the bench failure corpus is
+# exactly 10000ms, and 0 of 797 generated tests set a timeout, so the default
+# stands everywhere. 30s is a ceiling, not a wait: `get_timeout()` returns it as an
+# upper bound and Playwright proceeds the instant the element is actionable, so
+# passing runs are unaffected.
+#
+# The import is the only lever that reaches navigation: `New Page(url, wait_until)`
+# has no timeout parameter and accounts for 26 of 33 navigation-timeout failures.
+_BROWSER_TIMEOUT = "30s"
+
+# Matches ONLY a bare `Library  Browser` import — the line must end right after the
+# library name. An import that already carries arguments (`timeout=`, `AS`, or
+# anything else) is left untouched, which makes the injection idempotent across the
+# dryrun repair path's second pass. `Browser.Playwright` is a different library and
+# is excluded by the end-of-line anchor. `\r` is captured so CRLF files survive.
+#
+# The casing is asymmetric on purpose — measured in the runner image, not assumed:
+#   `library    Browser`  imports fine (the SETTING name is case-insensitive)
+#   `Library    browser`  dies with ModuleNotFoundError: No module named 'browser'
+#                         (the LIBRARY name is a Python module — case-sensitive)
+# The separator is RF's cell rule (2+ spaces or a tab), the same rule _CELL_SPLIT_RE
+# encodes below. `Library Browser` with one space is not an import at all — RF reads
+# it as a setting literally named "Library Browser" and errors — so it is left alone
+# rather than rewritten into something equally broken.
+# Possessive quantifiers per this module's convention (see _CELL_SPLIT_RE): every
+# quantifier is non-backtracking, so the match is linear regardless of input.
+_BARE_BROWSER_IMPORT_RE = re.compile(
+    r"^((?i:Library)(?:[ \t]{2,}+|\t++)Browser)[ \t]*+(\r?)$", re.MULTILINE
+)
+
+
+def ensure_browser_timeout(robot_code: str) -> str:
+    """Emit `timeout=30s` on a bare `Library    Browser` import.
+
+    Deterministic rather than a prompt rule: an assembler instruction would cost
+    tokens on every run and be honoured inconsistently.
+
+    Leaves the code unchanged when the import already carries any argument, when
+    the import is absent, or when the suite uses SeleniumLibrary.
+
+    Args:
+        robot_code: The Robot Framework source as a string.
+
+    Returns:
+        The same string with the timeout argument appended to a bare Browser import.
+    """
+    if not robot_code:
+        return robot_code
+
+    injected, count = _BARE_BROWSER_IMPORT_RE.subn(
+        rf"\1    timeout={_BROWSER_TIMEOUT}\2", robot_code
+    )
+    if count:
+        logger.info(f"Browser timeout: set timeout={_BROWSER_TIMEOUT} on the Browser import")
+    return injected
+
+
+# Robot Framework locator strategies that the identify stage and the assembler
+# both emit. A cell of the form `css=<strategy>=value` is the assembler applying
+# the "always prefix CSS selectors with css=" prompt rule to a locator that
+# already carries a strategy prefix. The result is never valid CSS — Playwright
+# rejects it with `Unexpected token "=" while parsing css selector` — so the
+# redundant `css=` is always safe to drop.
+#
+# The strategy name must sit immediately after `css=` and be followed by `=`,
+# which is what keeps genuine CSS untouched: `css=[data-x=y]` starts with `[`,
+# `css=input[id=foo]` starts with `input`, and `css=idx=5` fails because `id`
+# is not followed by `=`. `css=` is included in the alternation because
+# `css=css=#foo` is the same mistake applied to an already-css locator.
+#
+# `(?:css=)+` consumes the WHOLE run of prefixes in one match, which single
+# `css=` could not: `re.subn` does not rescan replaced text, so stripping only
+# the outermost left the next `css=` preceded by `=`, where the boundary rule
+# below rejects it — `css=css=id=searchBox` came out as `css=id=searchBox`,
+# still not valid CSS. The repetition is greedy and the lookahead still has to
+# hold after it, so backtracking leaves exactly one `css=` when the locator
+# underneath is genuinely css: `css=css=css=#foo` -> `css=#foo`, while
+# `css=css=css=xpath=//tbody/tr` -> `xpath=//tbody/tr`.
+#
+# The match must also START a cell — line start, or immediately after a Robot
+# cell separator (tab, or two spaces). A stacked prefix is only ever the first
+# thing in the locator cell; the same sequence further in is part of a value
+# that was written correctly, and rewriting it silently changes what the test
+# selects. `css=[data-value="css=id=x"]` and `xpath=//div[@a="css=id=y"]` are
+# both valid and are both left alone by the boundary requirement — the run
+# length makes no difference to that, `css=[data-value="css=css=id=x"]` is
+# left alone for the same reason.
+_REDUNDANT_CSS_PREFIX_RE = re.compile(
+    r"(?:^|(?<=\t)|(?<= {2}))(?:css=)+(?=(?:id|xpath|text|role|data-testid|css)=)",
+    re.MULTILINE,
+)
+
+
+def strip_redundant_css_prefix(robot_code: str) -> str:
+    """Drop a `css=` prefix that was stacked onto an already-prefixed locator.
+
+    Deterministic counterpart to the prompt carve-out in
+    `library_context/browser_context.py`: the prompt lowers how often the model
+    makes this mistake, this guarantees the mistake never reaches the runner.
+    The `robot --dryrun` gate cannot cover it — dryrun validates keyword names
+    and arity without resolving selectors, so `css=id=searchBox` passes the gate
+    and fails only at runtime.
+
+    Scope note — this does not walk cells the way `normalize_robot_code` does,
+    because it does not need to: `css=<strategy>=` is not valid CSS, not a
+    valid Robot locator and not plausible prose, so a bare match is far less
+    ambiguous than the bare `#` that forces the cell walk there. It does still
+    require the match to START a cell, which is where a stacked prefix can
+    only ever appear. Mid-cell the same sequence is part of a value that was
+    already written correctly, and rewriting it would silently change what the
+    test selects — `css=[data-value="css=id=x"]` is valid CSS and
+    `xpath=//div[@a="css=id=y"]` is a valid xpath.
+
+    What the boundary rule still cannot separate is a cell that is genuinely
+    prose yet starts with the sequence, e.g. a `[Documentation]` value of
+    exactly `css=id=foo`. Telling that from a locator needs the row's keyword,
+    which is the cell walk. Accepted: generated output does not contain it.
+
+    Args:
+        robot_code: The Robot Framework source as a string.
+
+    Returns:
+        The same string with every `css=<strategy>=` collapsed to `<strategy>=`.
+        Returns the input unchanged when it contains no `css=` at all.
+    """
+    if not robot_code or "css=" not in robot_code:
+        return robot_code
+
+    stripped, cells = _REDUNDANT_CSS_PREFIX_RE.subn("", robot_code)
+    if cells:
+        # One match can now carry several prefixes, so the match count is
+        # locators, not prefixes. Every character the pattern removes belongs
+        # to a `css=` — the boundary alternatives and the lookahead are all
+        # zero-width — so the length delta divides exactly into the real total.
+        dropped = (len(robot_code) - len(stripped)) // len("css=")
+        logger.info(
+            f"Locator normalizer: dropped {dropped} redundant `css=` prefix(es) "
+            f"from {cells} already-prefixed locator(s)"
+        )
+    return stripped
 
 
 def normalize_robot_code(robot_code: str) -> str:
