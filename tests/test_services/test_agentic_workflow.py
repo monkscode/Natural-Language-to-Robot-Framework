@@ -505,6 +505,35 @@ class TestWorkflowCompletionPaths:
         assert complete["robot_code"]
         assert "error" not in _event_statuses(events)
 
+    def test_unverified_gate_forwards_the_real_reason(self):
+        """The gate's own reason must reach the client.
+
+        'unverified' covers several causes — the executor hop being down, the
+        runner image missing, the container producing no output.xml — and the
+        gate records which one in `message`. It was dropped here, so the UI had
+        nothing to show and asserted a single hard-coded cause ("Docker
+        unavailable"). That actively misdirects: the permission bug fixed in
+        2dff0c4 made the gate fail with Docker perfectly healthy.
+
+        dryrun_errors cannot carry it — only the 'failed' exit sets that key.
+        """
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": "dryrun produced no output.xml — treating as "
+                               "infrastructure failure",
+                    "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert complete is not None
+        assert complete["dryrun_status"] == "unverified"
+        assert "no output.xml" in complete["dryrun_message"]
+
+    def test_passed_gate_carries_no_dryrun_message(self):
+        """A clean run must not grow a warning field the UI would render."""
+        events = _run_workflow()
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert "dryrun_message" not in complete
+
     def test_repair_cost_folded_into_crewai_and_total_metrics(self):
         """The gate's repair_usage is added into crewai_*/total_* WorkflowMetrics
         and the main-crew calls are NOT double-counted (decision 5 / §5)."""

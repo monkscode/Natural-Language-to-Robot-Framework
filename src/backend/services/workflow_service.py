@@ -876,6 +876,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         if gate["dryrun_status"] != "passed":
             complete_event["dryrun_status"] = gate["dryrun_status"]
             complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
+            # The gate's own reason for degrading. 'unverified' has several
+            # causes (executor hop down, runner image missing, container
+            # produced no output.xml) and only the gate knows which; it records
+            # that in `message`, and dryrun_errors cannot carry it because only
+            # the 'failed' exit sets that key. Without this the client had
+            # nothing to show and had to assert one hard-coded cause.
+            if gate.get("message"):
+                complete_event["dryrun_message"] = gate["message"]
         yield complete_event
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
