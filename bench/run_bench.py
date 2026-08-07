@@ -330,12 +330,15 @@ def detach_run(conn, workflow_id: str) -> None:
 def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     """Record a run whose stream died mid-flight for detachment AFTER the sweep.
 
-    The id reaches the client only on the terminal generation event
-    (workflow_service.py yields "workflow_id" on complete/error, never on the
-    in-progress pushes), so the failure this can act on is one during the
-    EXECUTION phase — the long Docker one, and the realistic read-timeout window.
+    The id now arrives on the FIRST event: workflow_service yields workflow_id
+    on the opening "running" push as well as on complete/error, so that a run
+    which dies mid-flight is still attributable to an id. A generation-phase
+    failure is therefore detachable too, where it used to leak (see the
+    no-id branch below, which is now reachable only if the stream dies before
+    the very first chunk). The realistic read-timeout window is still the
+    EXECUTION phase — the long Docker one.
 
-    Which is exactly why it is not detached here. The stream dying is not the
+    That is not detached here either. The stream dying is not the
     RUN dying: at that moment the server is still blocked in
     runner_exec_client.execute, and robot_tests/<id> is a read-write bind mount
     inside the live container (docker_service.py). Deleting it there would pull
@@ -345,13 +348,13 @@ def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     re-attach the run to History moments after we deleted it. By the end of the
     sweep that work has finished, and one capture sees the whole run.
 
-    A failure before generation completes has no id to detach by, and
+    A failure before the opening event has no id to detach by, and
     capture_evidence(None) would write a bench/runs/None directory. Those
     llm_traces rows stay attached and have to be cleaned up by hand, so say so
     rather than returning quietly.
     """
     if not workflow_id:
-        _warn("the stream failed before the generation event that carries the "
+        _warn("the stream failed before the opening event that carries the "
               "workflow_id, so this run could not be detached — any llm_traces "
               "rows it wrote are still attached to History/metrics")
         return

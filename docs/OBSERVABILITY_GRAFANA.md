@@ -32,6 +32,33 @@ friends return `NULL` for every run predating it (351 rows at the time of writin
 `WHERE data ? '<key>'` when a NULL bucket would distort a panel; the examples below do
 this where it matters.
 
+## Read this before writing a time filter
+
+The two tables do not keep time the same way, and mixing them silently shifts results.
+
+| Column | Type | Written by |
+|---|---|---|
+| `workflow_metrics.ts` | `TIMESTAMP` (naive) | the app, as `datetime.now()` — the **backend process's local wall clock** |
+| `test_runs.created_at` | `TIMESTAMPTZ` | Postgres, as `now()` |
+| `llm_traces.created_at` | `TIMESTAMPTZ` | Postgres, as `now()` |
+
+Comparing a naive `timestamp` to a `timestamptz` makes Postgres reinterpret the naive
+value in the **session** time zone. So when the backend and the database disagree about
+time zone, `ts` is read as if it were the database's clock and lands off by the offset.
+
+- **Docker stack** — both containers default to UTC and no `TZ` is set in
+  `docker-compose.yml`, so they agree and `ts` is correct.
+- **Source stack (`./run.sh`)** — the backend runs on your host clock while Postgres runs
+  in a UTC container. On an IST host, `ts` reads 5.5 hours ahead.
+
+A 30-day window absorbs that. A **daily bucket does not** — with a +5:30 offset every run
+after 18:30 local lands in the next day. An hourly panel would be badly wrong.
+
+**So: bucket and window on `test_runs.created_at`, which is tz-aware and authoritative.**
+Use `ts` for ordering within the metrics table, not for calendar arithmetic you care
+about. Making `ts` tz-aware is a column migration with a backfill decision for the
+existing rows — deliberately not done here.
+
 ## Cost and tokens per workflow
 
 ```sql
@@ -142,14 +169,18 @@ GROUP BY site.key;
 
 ## Locator success
 
+Bucketed on `test_runs.created_at`, not `ts` — see the time-filter note above; a daily
+bucket is exactly the granularity the naive-`ts` offset breaks.
+
 ```sql
 SELECT
-    date_trunc('day', ts)                        AS day,
-    round(avg((data->>'success_rate')::numeric), 3) AS avg_locator_success,
-    sum((data->>'total_elements')::int)          AS elements,
-    sum((data->>'failed_elements')::int)         AS failed
-FROM workflow_metrics
-WHERE ts > now() - interval '30 days'
+    date_trunc('day', r.created_at)                   AS day,
+    round(avg((m.data->>'success_rate')::numeric), 3) AS avg_locator_success,
+    sum((m.data->>'total_elements')::int)             AS elements,
+    sum((m.data->>'failed_elements')::int)            AS failed
+FROM workflow_metrics m
+JOIN test_runs r ON r.run_id = m.workflow_id
+WHERE r.created_at > now() - interval '30 days'
 GROUP BY 1
 ORDER BY 1;
 ```
@@ -241,6 +272,68 @@ SELECT
 FROM test_runs
 WHERE created_at > now() - interval '30 days';
 ```
+
+## Tracing one run end to end
+
+This is the path to walk when someone reports a bad run and gives you an id. Everything
+below keys on the same UUID — `workflow_id` in two tables, `run_id` in the third.
+
+**1. What the user asked for, and how it ended.**
+
+```sql
+SELECT status, user_query, error_message, created_at, updated_at
+FROM test_runs WHERE run_id = '<id>';
+```
+
+`status = 'error'` means generation never produced code, and `error_message` is the
+reason. A row still at `'running'` long after `created_at` means the run died without
+reaching either terminal path.
+
+**2. What it cost and what the gate did.**
+
+```sql
+SELECT
+    data->>'workflow_duration_s'  AS duration_s,
+    data->>'total_cost'           AS cost_usd,
+    data->>'dryrun_status'        AS gate,
+    data->>'dryrun_attempts'      AS attempts,
+    data->>'dryrun_repairs'       AS repairs,
+    jsonb_pretty(data->'crew_stage_metrics') AS by_stage,
+    jsonb_pretty(data->'guardrail_attempts') AS guardrails
+FROM workflow_metrics WHERE workflow_id = '<id>';
+```
+
+No row here means the run never got past the gate — go back to step 1 for the reason.
+
+**3. Every model call it made.**
+
+```sql
+SELECT created_at, model, duration_ms, prompt_tokens, completion_tokens, cost_usd, status
+FROM llm_traces WHERE workflow_id = '<id>'
+ORDER BY start_time_ns;
+```
+
+These rows exist **even when the run failed**, because they are written per successful
+LLM call as the run proceeds. So a run that died in the assembler has no metrics row but
+its spend is still attributable here. That is the only place to recover the cost of a
+failed run.
+
+**4. The log lines.** `application.log` is JSON (one object per line) and every record
+carries `workflow_id`, bound once at the start of the run — so no call site had to thread
+it through. The browser service binds the *same* id in its own logs, so one filter spans
+both processes.
+
+```bash
+# local
+jq -c 'select(.workflow_id=="<id>")' logs/application.log
+
+# containers — both services, already labelled in docker-compose.yml
+docker compose logs fastapi browser-service | grep '<id>'
+```
+
+There is no log shipper in this repo. If you want these in Grafana next to the SQL above,
+point any collector at the `json-file` Docker logs — the JSON and the `service=` labels
+are already there, and no application change is needed.
 
 ## A note on `llm_traces`
 

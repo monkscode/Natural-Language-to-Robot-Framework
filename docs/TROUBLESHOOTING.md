@@ -14,6 +14,10 @@ This guide helps you resolve common issues with Mark 1.
 | **`address already in use`** | Another app holds the port — stop it, or edit the port mapping in `docker-compose.yml`. |
 | **Browser service slow to start** | Expected on first start — it downloads browser binaries. Its healthcheck allows a 120s grace period (`start_period` in `docker-compose.yml`), so give it ~2 minutes before treating it as stuck. |
 | **Boot/login errors after an update** | Make sure all four image tags use the **same** `-develop` suffix, then re-run `docker compose pull` followed by `docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d`. |
+| **`429`, `RESOURCE_EXHAUSTED`, or "quota exceeded"** | You are over your Vertex AI / Gemini rate limit. Wait and retry; if it is persistent, raise the quota for the model in the GCP console (IAM & Admin → Quotas, filter on `aiplatform.googleapis.com`). Note that this also distorts run **timing** — check the log window for 429s before trusting any latency number. |
+| **`403` / `PermissionDenied` even though credentials load** | The credentials are valid but the service account lacks the role. Grant it **Vertex AI User** (`roles/aiplatform.user`) on the project in `VERTEXAI_PROJECT`. Authentication failing (`401`) is a different problem — that one is the credentials path. |
+| **`Model not found` / `404` naming the model** | `ONLINE_MODEL` in `src/backend/.env` does not exist in the region set by `VERTEXAI_LOCATION`. Model availability is per-region — check the model is offered in that region, or move `VERTEXAI_LOCATION` to one where it is. |
+| **`Context length exceeded` / `maximum tokens`** | The prompt outgrew the model's context window. Usually a very large page or a very long query — simplify the query, or switch `ONLINE_MODEL` to a larger-context model. |
 
 More Docker-specific fixes: [Docker Guide → Troubleshooting](DOCKER-GUIDE.md#troubleshooting).
 
