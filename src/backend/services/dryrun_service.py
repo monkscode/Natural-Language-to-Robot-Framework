@@ -49,7 +49,7 @@ from src.backend.crew_ai.robot_code_normalizer import (
     normalize_robot_code,
     strip_redundant_css_prefix,
 )
-from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
 from src.backend.services.docker_service import (
     IMAGE_TAG,
     normalize_docker_mount_source,
@@ -302,8 +302,14 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
     """
     container_name = f"robot-test-dryrun-{run_id}"
     dryrun_filename = "dryrun.robot"
-    dryrun_dir = str(get_artifact_store().run_dir(run_id) / "dryrun")
-    os.makedirs(dryrun_dir, exist_ok=True)
+    # Shared mode, same reason as the run directory itself: the runner writes
+    # this dryrun output.xml as root WITHOUT CAP_DAC_OVERRIDE (cap_drop ALL), so
+    # a default-0755 directory owned by appuser makes the gate fail to produce
+    # output.xml at all — which degrades every run to dryrun_status='unverified'
+    # instead of raising, so it is silent.
+    dryrun_dir_path = get_artifact_store().run_dir(run_id, create=True) / "dryrun"
+    make_shared_dir(dryrun_dir_path)
+    dryrun_dir = str(dryrun_dir_path)
     dryrun_filepath = os.path.join(dryrun_dir, dryrun_filename)
     output_xml_path = os.path.join(dryrun_dir, "output.xml")
 

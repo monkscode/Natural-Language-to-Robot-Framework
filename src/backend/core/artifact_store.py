@@ -34,6 +34,44 @@ logger = logging.getLogger(__name__)
 # is src/backend/core/artifact_store.py, so parents[3] is the repo root.
 STAGING_ROOT = Path(__file__).resolve().parents[3] / "robot_tests"
 
+# Staging is a workspace shared by two containers running as DIFFERENT users, so
+# the directory mode is a correctness constraint, not hygiene.
+#
+# The app writes here as appuser (uid 1000, Dockerfile.fastapi). The test-runner
+# container runs as root, but docker_service spawns it with cap_drop=["ALL"] —
+# which removes CAP_DAC_OVERRIDE, the capability that lets root bypass file
+# permission checks. Its root is therefore an ordinary "other" against a
+# directory owned by uid 1000, and mkdir's default 0755 leaves it unable to
+# create output.xml: Robot Framework exits 252 with
+# "PermissionError: [Errno 13] ... output.xml" and no report is produced.
+#
+# 0777 is the tightest mode that works. Group-write would need the two sides to
+# share a gid, which needs chown, which needs the root we deliberately do not
+# have. The alternatives are worse: cap_add DAC_OVERRIDE re-grants root's bypass
+# across the whole filesystem rather than one directory, and running the runner
+# as uid 1000 needs a writable HOME it has no user entry for.
+#
+# NO sticky bit: dryrun_service clears the runner's root-owned stale output.xml
+# as appuser, which +t is precisely designed to forbid.
+SHARED_DIR_MODE = 0o777
+
+
+def make_shared_dir(path: Path) -> None:
+    """Create *path* so the runner container can write into it too.
+
+    chmod AFTER mkdir, not mkdir(mode=...): the mode argument is masked by the
+    process umask (022 here), which is what silently produced 0755.
+
+    Best-effort. Windows cannot set POSIX bits and raises or no-ops, which costs
+    nothing — the Docker Desktop bind mount already presents host-created
+    directories as world-writable, so this only has to hold where it is real.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, SHARED_DIR_MODE)
+    except OSError as e:
+        logger.debug("could not set shared mode on %s: %s", path, e)
+
 
 class ArtifactStore(ABC):
     """Shared local staging + abstract durable operations."""
@@ -47,7 +85,7 @@ class ArtifactStore(ABC):
         """The run's local staging directory (staging_root/<run_id>)."""
         d = self.staging_root / run_id
         if create:
-            d.mkdir(parents=True, exist_ok=True)
+            make_shared_dir(d)
         return d
 
     @staticmethod
