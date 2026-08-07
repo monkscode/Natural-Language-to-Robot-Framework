@@ -20,12 +20,9 @@ CREWAI_STEP_LOG_FILE = "logs/crewai_steps.log"
 CREWAI_STEP_LOG_MAX_BYTES = 20 * 1024 * 1024  # 20MB per file
 CREWAI_STEP_LOG_BACKUP_COUNT = 5               # 5 backups = 100MB max
 
-# Agent role -> stage key. Roles are defined in agents.py; TaskOutput.agent is
-# a plain str carrying the role, not the Agent object.
-_AGENT_STAGE_MAP = {
-    "Test Automation Planner": "planner",
-    "Robot Framework Code Generator": "assembler",
-}
+# The stage a task callback is attributed to before crew.py says otherwise.
+# run_crew's first kickoff is always the planner.
+_FIRST_STAGE = "planner"
 
 
 def _get_step_logger() -> logging.Logger:
@@ -106,9 +103,14 @@ class StageMetricsCallback:
     2. Per-stage duration and LLM usage, drained from the shared wrapper's
        accumulator at the task boundary.
 
-    Draining is unconditional — it happens even for an agent with no stage
-    mapping — because pop_stage_usage() moves a watermark. Skipping the drain
-    would roll that agent's tokens into whichever stage finishes next.
+    The stage is DECLARED by crew.py via mark_stage(), not inferred from
+    TaskOutput.agent. crew.py builds each single-task crew and therefore already
+    knows which kickoff is running; reading the stage back out of a role string
+    crewai copied from the agent was a round trip through data we control at the
+    source. It also had a silent failure mode: a role the lookup table did not
+    recognise drained the accumulator and then discarded the usage, breaking the
+    invariant that the per-stage figures sum to the workflow total (pinned by
+    test_stages_sum_to_the_workflow_total). No stage can be unknown now.
 
     Nothing here may raise. crewai invokes this inside kickoff(), so an
     exception would abort a generation run for the sake of a metric; both
@@ -122,14 +124,16 @@ class StageMetricsCallback:
         # kickoff start to first task completion (the planner's real duration).
         self._last_ts = datetime.now()
         self._stage_started = time.monotonic()
+        self._stage = _FIRST_STAGE
         self.stage_metrics: dict[str, dict] = {}
 
-    def mark_stage_start(self) -> None:
-        """Restart the stage clock.
+    def mark_stage(self, stage: str) -> None:
+        """Name the stage the next task callback belongs to, and restart its clock.
 
         Called before the assembler kickoff: the deterministic element stage
-        runs between the two kickoffs and must not be billed to the assembler.
+        runs between the two kickoffs and is neither agent's time.
         """
+        self._stage = stage
         self._stage_started = time.monotonic()
 
     def __call__(self, task_output) -> None:
@@ -138,7 +142,7 @@ class StageMetricsCallback:
         except Exception:
             logger.debug("[TASK DONE] logging failed", exc_info=True)
         try:
-            self._record(task_output)
+            self._record()
         except Exception:
             logger.debug("stage metrics collection failed", exc_info=True)
 
@@ -162,23 +166,17 @@ class StageMetricsCallback:
         # Surface task timing in application.log for quick cross-log correlation
         logger.info(f"[TASK DONE] {ts}{elapsed_str}: {getattr(task_output, 'description', '')[:60]!r}")
 
-    def _record(self, task_output) -> None:
+    def _record(self) -> None:
         duration_s = round(time.monotonic() - self._stage_started, 3)
         self._stage_started = time.monotonic()
         if self._llm is None:
             return
 
-        # Drain first: the watermark must move whether or not this agent maps
-        # to a stage we report.
+        # pop_stage_usage() moves a watermark, so the drain and the record must
+        # stay together: everything accrued since the last drain belongs to the
+        # stage that just finished.
         usage = self._llm.pop_stage_usage()
-
-        role = str(getattr(task_output, "agent", "") or "")
-        stage = _AGENT_STAGE_MAP.get(role)
-        if stage is None:
-            logger.debug("No stage mapping for agent role %r; usage dropped", role)
-            return
-
-        self.stage_metrics[stage] = {"duration_s": duration_s, **usage}
+        self.stage_metrics[self._stage] = {"duration_s": duration_s, **usage}
 
 
 def get_crew_callbacks(llm=None):

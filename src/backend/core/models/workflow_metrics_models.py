@@ -151,8 +151,9 @@ class WorkflowMetricsBase(
     dryrun_repairs: Optional[int] = None
 
     # Per-crew-stage duration and LLM usage, keyed 'planner' / 'assembler'
-    # (callbacks._AGENT_STAGE_MAP). Each value carries duration_s, llm_calls,
-    # prompt_tokens, completion_tokens, tokens, cost.
+    # (declared by crew.py via StageMetricsCallback.mark_stage), plus 'repair'
+    # when the dryrun gate re-prompted. Each value carries duration_s,
+    # llm_calls, prompt_tokens, completion_tokens, tokens, cost.
     #
     # Dict[str, Any] values for the same reason as phase_timings: WorkflowMetrics
     # is built inside a try/except that swallows ValidationError, so a strict

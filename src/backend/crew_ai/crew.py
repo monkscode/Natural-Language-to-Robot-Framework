@@ -532,9 +532,12 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 register_task(workflow_id, str(assemble_code.id), 2)
 
             assembler_crew = _make_crew(code_assembler_agent, assemble_code)
-            # Restart the stage clock: the deterministic element stage above ran
-            # between the two kickoffs and is not the assembler's time.
-            task_callback.mark_stage_start()
+            # Name the stage the next task callback belongs to, and restart its
+            # clock: the deterministic element stage above ran between the two
+            # kickoffs and is not the assembler's time. Declared here rather
+            # than inferred from the agent's role — this is the only place that
+            # knows which kickoff is about to run.
+            task_callback.mark_stage("assembler")
             result = assembler_crew.kickoff()
 
             logger.info("✅ CrewAI workflow completed successfully")

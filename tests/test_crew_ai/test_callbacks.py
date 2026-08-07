@@ -2,9 +2,13 @@
 Unit tests for the per-stage metrics task callback in src.backend.crew_ai.callbacks.
 
 Purpose: verify that the task callback attributes LLM usage to the right crew
-         stage, that mark_stage_start() keeps the deterministic element stage
-         off the assembler's clock, and — most importantly — that a metrics
-         failure can never abort a generation run.
+         stage, that mark_stage() keeps the deterministic element stage off the
+         assembler's clock, and — most importantly — that a metrics failure can
+         never abort a generation run.
+
+The stage is declared by crew.py, which knows which kickoff it is running; it is
+NOT read back off TaskOutput.agent. That means no agent rename can silently
+misattribute or discard a stage's tokens.
 
 The callback fires inside crew.kickoff(). Anything it raises propagates into
 the pipeline, so "never raises" is a correctness requirement, not politeness.
@@ -19,8 +23,11 @@ PLANNER_ROLE = "Test Automation Planner"
 ASSEMBLER_ROLE = "Robot Framework Code Generator"
 
 
-def _task_output(role: str):
-    """Minimal stand-in for crewai's TaskOutput. `agent` is a plain str."""
+def _task_output(role: str = PLANNER_ROLE):
+    """Minimal stand-in for crewai's TaskOutput. `agent` is a plain str.
+
+    The role only reaches the log line now — stage attribution does not read it.
+    """
     out = Mock()
     out.agent = role
     out.description = "some task description"
@@ -41,16 +48,16 @@ def _llm_returning(**usage):
 
 
 class TestStageAttribution:
-    """Usage lands under the stage whose agent just finished."""
+    """Usage lands under the stage crew.py declared, not one inferred from a role."""
 
-    def test_planner_role_maps_to_planner_stage(self):
+    def test_first_task_is_the_planner_stage(self):
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         llm = _llm_returning(llm_calls=1, prompt_tokens=1000,
                              completion_tokens=200, tokens=1200, cost=0.0008)
         cb = StageMetricsCallback(step_logger=Mock(), llm=llm)
 
-        cb(_task_output(PLANNER_ROLE))
+        cb(_task_output())
 
         assert "planner" in cb.stage_metrics
         stage = cb.stage_metrics["planner"]
@@ -61,28 +68,34 @@ class TestStageAttribution:
         assert stage["cost"] == 0.0008
         assert "duration_s" in stage
 
-    def test_assembler_role_maps_to_assembler_stage(self):
+    def test_mark_stage_switches_attribution(self):
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         llm = _llm_returning(llm_calls=2, tokens=5300)
         cb = StageMetricsCallback(step_logger=Mock(), llm=llm)
 
-        cb(_task_output(ASSEMBLER_ROLE))
+        cb.mark_stage("assembler")
+        cb(_task_output())
 
         assert "assembler" in cb.stage_metrics
         assert cb.stage_metrics["assembler"]["tokens"] == 5300
 
-    def test_unknown_role_records_no_stage(self):
-        """An unmapped agent must not invent a stage key, but must still drain
-        the accumulator — otherwise its tokens leak into the NEXT stage."""
+    def test_the_agent_role_does_not_decide_the_stage(self):
+        """The regression this design exists to prevent.
+
+        The role used to be looked up in a map, and a role the map did not know
+        drained the accumulator and then DISCARDED the usage — silently breaking
+        the invariant that the stages sum to the workflow total. Renaming an
+        agent must now be incapable of losing a token.
+        """
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         llm = _llm_returning(tokens=99)
         cb = StageMetricsCallback(step_logger=Mock(), llm=llm)
 
-        cb(_task_output("Some Unmapped Agent"))
+        cb(_task_output("Some Agent Nobody Mapped"))
 
-        assert cb.stage_metrics == {}
+        assert cb.stage_metrics["planner"]["tokens"] == 99
         llm.pop_stage_usage.assert_called_once()
 
     def test_no_output_len_key(self):
@@ -90,40 +103,40 @@ class TestStageAttribution:
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         cb = StageMetricsCallback(step_logger=Mock(), llm=_llm_returning())
-        cb(_task_output(PLANNER_ROLE))
+        cb(_task_output())
 
         assert "output_len" not in cb.stage_metrics["planner"]
 
 
-class TestMarkStageStart:
+class TestMarkStage:
     """The deterministic element stage runs between the two kickoffs and must
     not be billed to the assembler."""
 
-    def test_mark_stage_start_resets_the_clock(self):
+    def test_mark_stage_resets_the_clock(self):
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         cb = StageMetricsCallback(step_logger=Mock(), llm=_llm_returning())
-        cb(_task_output(PLANNER_ROLE))
+        cb(_task_output())
 
         # Simulate the element stage burning wall time, then re-marking.
         cb._stage_started -= 100.0  # 100s ago
-        cb.mark_stage_start()
-        cb(_task_output(ASSEMBLER_ROLE))
+        cb.mark_stage("assembler")
+        cb(_task_output())
 
         assert cb.stage_metrics["assembler"]["duration_s"] < 5.0
 
     def test_without_mark_the_gap_is_billed(self):
-        """Control for the test above: without mark_stage_start() the elapsed
-        time really does accumulate, so the assertion above is meaningful."""
+        """Control for the test above: without mark_stage() the elapsed time
+        really does accumulate, so the assertion above is meaningful."""
         from src.backend.crew_ai.callbacks import StageMetricsCallback
 
         cb = StageMetricsCallback(step_logger=Mock(), llm=_llm_returning())
-        cb(_task_output(PLANNER_ROLE))
+        cb(_task_output())
 
         cb._stage_started -= 100.0
-        cb(_task_output(ASSEMBLER_ROLE))
+        cb(_task_output())
 
-        assert cb.stage_metrics["assembler"]["duration_s"] >= 100.0
+        assert cb.stage_metrics["planner"]["duration_s"] >= 100.0
 
 
 class TestNeverRaises:
