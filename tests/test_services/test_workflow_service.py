@@ -168,6 +168,56 @@ class TestRunIsRecordedAtStart:
         ])
         assert calls == []
 
+    def test_row_is_opened_even_when_the_client_leaves_after_one_event(self):
+        """The disconnect case is the whole reason the opening row exists.
+
+        Closing an async generator raises GeneratorExit at the suspended
+        `yield`, so anything written after that yield never runs. Recording the
+        id after handing the opening event to the client therefore lost the row
+        for precisely the client that goes away — while the workflow thread
+        keeps running and keeps spending, because a disconnect does not cancel
+        it. That is a vanished run of the exact kind this feature was added to
+        make visible, and the earlier tests all drain to completion so none of
+        them can see it.
+
+        Consume up to and including the first event carrying the id, then close
+        the stream the way a dropped connection does.
+        """
+        calls = []
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status})
+
+        events = [
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "complete", "robot_code": "*** Test Cases ***",
+             "workflow_id": self._WF_ID},
+        ]
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                agen = stream_generate_only("login to github", "gemini",
+                                            "gemini-2.5-flash")
+                async for sse in agen:
+                    if self._WF_ID in sse:
+                        break          # client has the opening event...
+                await agen.aclose()    # ...and now drops the connection
+                return None
+
+            asyncio.run(run_gen())
+
+        assert [c["status"] for c in calls] == ["running"], (
+            "the opening row must be written before the event is handed to the "
+            f"client, not after; got {calls}"
+        )
+        assert calls[0]["run_id"] == self._WF_ID
+
     def test_opening_row_failure_does_not_break_the_stream(self):
         """History bookkeeping must never cost a run.
 

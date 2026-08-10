@@ -1129,8 +1129,14 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
-            yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
+            # BEFORE the yield, not after. Closing an async generator raises
+            # GeneratorExit at the suspended yield, so a client that takes the
+            # opening event and disconnects would never reach this line — and
+            # the disconnect does not stop the workflow thread, which keeps
+            # running and keeps spending. That is exactly the vanished run the
+            # opening row exists to make visible.
             await _note_workflow_id(event)
+            yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
                 result_store["robot_code"] = event["robot_code"]
                 result_store["workflow_id"] = event.get("workflow_id")
@@ -1147,8 +1153,8 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     # Thread finished — drain any remaining buffered events
     while not q.empty():
         event = q.get_nowait()
+        await _note_workflow_id(event)  # before the yield — see the loop above
         yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
-        await _note_workflow_id(event)
         if event.get("status") == "complete" and "robot_code" in event:
             result_store["robot_code"] = event["robot_code"]
             result_store["workflow_id"] = event.get("workflow_id")
