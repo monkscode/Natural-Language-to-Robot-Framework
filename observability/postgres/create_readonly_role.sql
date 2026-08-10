@@ -18,7 +18,13 @@ ALTER ROLE grafana_ro WITH LOGIN PASSWORD :'grafana_password';
 -- Least privilege: connect and read, nothing else. No CREATE on the schema,
 -- and deliberately no grant on audit_log, users, orgs or any auth table —
 -- no dashboard in this profile queries them.
-GRANT CONNECT ON DATABASE nlrf TO grafana_ro;
+--
+-- current_database(), not a literal "nlrf": docker-compose.yml connects psql
+-- with -d ${POSTGRES_DB:-nlrf}, so a hardcoded name here would fail under
+-- ON_ERROR_STOP=1 (and abort grafana-db-init) the moment POSTGRES_DB is set
+-- to anything else.
+SELECT format('GRANT CONNECT ON DATABASE %I TO grafana_ro', current_database())
+\gexec
 GRANT USAGE ON SCHEMA public TO grafana_ro;
 
 -- Revoke first, so a previous, wider version of this script can never leave

@@ -1,8 +1,10 @@
 """Grants and idempotency for the Grafana read-only Postgres role.
 
 Referenced by: nothing — pytest entry point.
-Depends on: a live PostgreSQL reachable at DATABASE_URL with the
-            observability profile's role script already applied.
+Depends on: a live PostgreSQL container named nlrf-postgres. Connection
+            details are hardcoded, not DATABASE_URL-driven: _ro_dsn() targets
+            127.0.0.1:5432/nlrf directly, and _apply_script() runs the role
+            script via `docker exec nlrf-postgres psql`.
 """
 import os
 import subprocess
@@ -70,3 +72,6 @@ def test_role_cannot_read_ungranted_tables():
     with psycopg.connect(_ro_dsn()) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             cur.execute("SELECT 1 FROM audit_log LIMIT 1")
+        conn.rollback()
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute("SELECT 1 FROM users LIMIT 1")
