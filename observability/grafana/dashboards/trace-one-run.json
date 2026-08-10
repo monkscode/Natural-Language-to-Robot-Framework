@@ -5,6 +5,7 @@
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "",
+  "time": {"from": "now-7d", "to": "now"},
   "templating": {
     "list": [
       {
@@ -33,7 +34,7 @@
     {
       "type": "table",
       "title": "2 — Gate outcome and cost",
-      "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. dryrun_status and crew_stage_metrics covered 28/429 rows as of 2026-08-10.",
+      "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. dryrun_status and crew_stage_metrics carry the key on 33/434 rows, but only 13/434 hold a usable (non-null) value, as of 2026-08-10 — the rest carry a JSON null.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
       "targets": [{
@@ -46,33 +47,33 @@
     {
       "type": "table",
       "title": "3 — Cost and duration per crew stage",
-      "description": "planner, assembler, and repair when the gate re-prompted. The deterministic element stage sits between the two kickoffs and is deliberately billed to neither — its time is in panel 5.",
+      "description": "planner, assembler, and repair when the gate re-prompted. The deterministic element stage sits between the two kickoffs and is deliberately billed to neither — its time is in panel 5. crew_stage_metrics carries the key on 33/434 rows; only 13/434 hold a usable object as of 2026-08-10 — the rest carry a JSON null, which this panel excludes via jsonb_typeof so it returns no rows instead of erroring.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 24, "x": 0, "y": 12},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT stage.key AS stage, (stage.value->>'duration_s')::numeric AS duration_s, (stage.value->>'llm_calls')::int AS llm_calls, (stage.value->>'prompt_tokens')::int AS prompt_tokens, (stage.value->>'completion_tokens')::int AS completion_tokens, (stage.value->>'cost')::numeric AS cost_usd FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE m.workflow_id = '$run_id' ORDER BY stage.key"
+        "rawSql": "SELECT stage.key AS stage, (stage.value->>'duration_s')::numeric AS duration_s, (stage.value->>'llm_calls')::int AS llm_calls, (stage.value->>'prompt_tokens')::int AS prompt_tokens, (stage.value->>'completion_tokens')::int AS completion_tokens, (stage.value->>'cost')::numeric AS cost_usd FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE m.workflow_id = '$run_id' AND jsonb_typeof(m.data->'crew_stage_metrics') = 'object' ORDER BY stage.key"
       }]
     },
     {
       "type": "table",
       "title": "4 — Every element, and how its locator was found",
-      "description": "Present on 429/429 metrics rows. fallback_depth above 0 means the primary strategy did not resolve.",
+      "description": "The key is present on 434/434 metrics rows; one of them holds a JSON null rather than an array, as of 2026-08-10 — this panel excludes it via jsonb_typeof so it returns no rows instead of erroring. fallback_depth above 0 means the primary strategy did not resolve.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 19},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = '$run_id'"
+        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = '$run_id' AND jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
       }]
     },
     {
       "type": "table",
       "title": "5 — Where the time went",
-      "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal. phase_timings covered 218/433 rows (50.3%) as of 2026-08-10 — rows without it are hidden by this panel's WHERE clause rather than shown as a false zero.",
+      "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal. phase_timings carries the key on 219/434 rows; only 50/434 (11.5%) hold a usable object as of 2026-08-10. The panel's WHERE clause (data ? 'phase_timings') admits the other 169 JSON-null rows too — they are not hidden, they render every column in this panel blank.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 28},
       "targets": [{
@@ -85,7 +86,7 @@
     {
       "type": "table",
       "title": "6 — Every model call, with prompt and response",
-      "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. Historical rows are largely unattributed: 5,233 of 97,511 carried a workflow_id as of 2026-08-10.",
+      "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. Historical rows are largely unattributed: 5,248 of 97,692 carried a workflow_id as of 2026-08-10.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 34},
       "targets": [{
@@ -98,7 +99,7 @@
     {
       "type": "table",
       "title": "7 — Did the generated test actually pass",
-      "description": "Empty for a run that was generated but never executed. Only 9 of 118 execution records had a matching metrics row as of 2026-08-10, so an empty panel here is common and is not itself a fault.",
+      "description": "Empty for a run that was generated but never executed. Only 14 of 123 execution records had a matching metrics row as of 2026-08-10, so an empty panel here is common and is not itself a fault.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 44},
       "targets": [{
