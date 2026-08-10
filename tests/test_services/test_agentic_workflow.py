@@ -637,6 +637,52 @@ class TestWorkflowCompletionPaths:
 
         assert set(captured["m"].crew_stage_metrics) == {"planner", "assembler"}
 
+    def test_repair_stage_survives_a_usage_collection_failure(self):
+        """A repair that spent wall time must appear even with no usage figures.
+
+        dryrun_service increments dryrun_repairs BEFORE invoking the repair
+        crew and bills repair_duration_s in a `finally`, so a repair that
+        raised, or one whose usage extraction failed, still consumed real
+        time. _repair_usage_dict() swallows its own errors and returns {} —
+        cost tracking must never break the gate — so keying the stage off
+        repair_usage drops the entire stage on that path. The seconds then
+        vanish from the per-stage panel while remaining inside
+        workflow_duration_s, which is exactly the kind of quiet mismatch the
+        stage breakdown exists to prevent.
+
+        Zero-filling keeps the key set identical to planner and assembler, so
+        `GROUP BY stage` on the Grafana panel still needs no special case.
+        """
+        gate_out = {
+            "code": VALID_ROBOT_CODE, "dryrun_status": "passed",
+            "dryrun_attempts": 2, "dryrun_repairs": 1,
+            "repair_duration_s": 12.5,
+            "repair_usage": {},  # usage collection failed; the repair still ran
+        }
+        captured = {}
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=lambda wid, code, *a, **k: gate_out), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        stages = captured["m"].crew_stage_metrics
+        assert set(stages) == {"planner", "assembler", "repair"}
+        assert stages["repair"]["duration_s"] == 12.5
+        # Same keys as the other two stages, zeroed rather than absent.
+        assert set(stages["repair"]) == set(stages["planner"])
+        assert stages["repair"]["llm_calls"] == 0
+        assert stages["repair"]["cost"] == 0.0
+        assert stages["repair"]["tokens"] == 0
+
     def test_run_crew_exception_yields_error_event(self):
         """If run_crew() raises, the generator yields an error event."""
         with patch("src.backend.services.workflow_service.run_crew",
@@ -730,14 +776,23 @@ class TestWorkflowCompletionPaths:
         ws._hint_metadata_cache.pop(workflow_id, None)
 
     def test_metrics_collection_failure_does_not_abort_workflow(self):
-        """If calculate_usage_metrics() fails, the workflow still completes."""
+        """If the usage read fails, the workflow still completes.
+
+        This used to raise from crew.calculate_usage_metrics(), which the
+        metrics block stopped calling — it reads shared_llm.get_workflow_usage()
+        instead, one wrapper per workflow being exact whatever the crew shape.
+        Nothing raised, so the test passed while exercising none of the failure
+        path it is named for. Raise from the method actually on the path.
+        """
         result = _make_run_crew_result()
-        # Make calculate_usage_metrics raise
-        result[1].calculate_usage_metrics.side_effect = Exception("metrics error")
+        result.shared_llm.get_workflow_usage.side_effect = Exception("metrics error")
 
         events = _run_workflow(crew_result=result)
         # Should still complete — metrics failures are non-fatal
         assert any(e.get("status") == "complete" for e in events)
+        # Pins the test to a live path: if the metrics block stops calling this
+        # too, the assertion above would pass again without anything raising.
+        assert result.shared_llm.get_workflow_usage.called
 
 
 class TestTotalLlmCallsUsesActualCalls:

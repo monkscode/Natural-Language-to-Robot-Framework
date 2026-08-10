@@ -700,9 +700,22 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # the mini-crew has no task callback to drain. Same key set for all
             # three, so a Grafana panel can GROUP BY stage without special cases.
             _stage_metrics = dict(crew_stage_metrics or {})
-            if _repair_usage:
+            # Key off the repair COUNT, not the usage dict. dryrun_service
+            # increments dryrun_repairs BEFORE invoking the repair crew and
+            # bills repair_duration_s in a `finally`, so a repair that raised —
+            # or one whose usage extraction failed and returned {}, which
+            # _repair_usage_dict() does by design so cost tracking can never
+            # break the gate — still spent real seconds. Keying off the usage
+            # dropped the whole stage on that path: the time disappeared from
+            # the per-stage panel while remaining inside workflow_duration_s.
+            # Zero-fill first, then overlay whatever usage did survive, so the
+            # key set matches planner/assembler and the Grafana panel's
+            # GROUP BY stage still needs no special case.
+            if int(gate.get("dryrun_repairs", 0) or 0) > 0:
                 _stage_metrics["repair"] = {
                     "duration_s": gate.get("repair_duration_s", 0.0),
+                    "llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "tokens": 0, "cost": 0.0,
                     **_repair_usage,
                 }
 
