@@ -1,0 +1,122 @@
+{
+  "uid": "mark1-trace-run",
+  "title": "Mark 1 — Trace one run",
+  "tags": ["mark1", "root-cause"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "",
+  "templating": {
+    "list": [
+      {
+        "name": "run_id",
+        "label": "Run id",
+        "type": "textbox",
+        "query": "",
+        "current": {"text": "", "value": ""}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "1 — What was asked, and how it ended",
+      "description": "test_runs is the only record of a run that failed before the gate. A row still at 'running' long after created_at died without reaching either terminal path.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT run_id, status, user_query, error_message, created_at, updated_at, now() - created_at AS age FROM test_runs WHERE run_id = '$run_id'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "2 — Gate outcome and cost",
+      "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. dryrun_status and crew_stage_metrics covered 28/429 rows as of 2026-08-10.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT workflow_id, data->>'model_provider' AS provider, data->>'model_name' AS model, (data->>'workflow_duration_s')::numeric AS duration_s, (data->>'total_cost')::numeric AS cost_usd, (data->>'crewai_cost')::numeric AS crewai_cost, (data->>'browser_use_cost')::numeric AS browser_use_cost, data->>'dryrun_status' AS gate, (data->>'dryrun_attempts')::int AS attempts, (data->>'dryrun_repairs')::int AS repairs, data->'guardrail_attempts' AS guardrails, (data->>'optimization_fallback_used')::boolean AS learning_fallback FROM workflow_metrics WHERE workflow_id = '$run_id'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "3 — Cost and duration per crew stage",
+      "description": "planner, assembler, and repair when the gate re-prompted. The deterministic element stage sits between the two kickoffs and is deliberately billed to neither — its time is in panel 5.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 12},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT stage.key AS stage, (stage.value->>'duration_s')::numeric AS duration_s, (stage.value->>'llm_calls')::int AS llm_calls, (stage.value->>'prompt_tokens')::int AS prompt_tokens, (stage.value->>'completion_tokens')::int AS completion_tokens, (stage.value->>'cost')::numeric AS cost_usd FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE m.workflow_id = '$run_id' ORDER BY stage.key"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "4 — Every element, and how its locator was found",
+      "description": "Present on 429/429 metrics rows. fallback_depth above 0 means the primary strategy did not resolve.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 19},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = '$run_id'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "5 — Where the time went",
+      "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 28},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT (data->'phase_timings'->>'queue_s')::numeric AS queue_s, (data->'phase_timings'->>'session_setup_s')::numeric AS session_setup_s, (data->'phase_timings'->>'agent_run_s')::numeric AS agent_run_s, (data->'phase_timings'->>'poll_wait_s')::numeric AS poll_wait_s, (data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric AS poll_overhead_s, (data->'agent_diagnostics'->>'llm_429_count')::int AS llm_429s, (data->'agent_diagnostics'->>'retry_lost_s')::numeric AS retry_lost_s, (data->'agent_diagnostics'->>'dom_elements_max')::int AS dom_elements_max, (data->'agent_diagnostics'->>'llm_coverage_gap')::int AS llm_coverage_gap FROM workflow_metrics WHERE workflow_id = '$run_id'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "6 — Every model call, with prompt and response",
+      "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. Historical rows are largely unattributed: 5,233 of 97,511 carried a workflow_id as of 2026-08-10.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 34},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT created_at, name, model, duration_ms, status, prompt_tokens, completion_tokens, cost_usd, prompt_text, response_text FROM llm_traces WHERE workflow_id = '$run_id' ORDER BY start_time_ns"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "7 — Did the generated test actually pass",
+      "description": "Empty for a run that was generated but never executed. Only 9 of 118 execution records had a matching metrics row as of 2026-08-10, so an empty panel here is common and is not itself a fault.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 44},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT test_status, failure_category, failed_keyword, execution_exit_code, execution_duration_ms, domain, code_structure, error_message FROM execution_records WHERE workflow_id = '$run_id'"
+      }]
+    },
+    {
+      "type": "text",
+      "title": "9 — Artifacts",
+      "description": "",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 50},
+      "options": {
+        "mode": "markdown",
+        "content": "The generated `.robot` code and the Robot `log.html` report are files, not database rows, and are not rendered here.\n\nOpen [Mark 1 History](http://localhost:3000/history) and paste the run id into the search box — it searches run ids server-side — then use the drawer for the code and the report link."
+      }
+    }
+  ]
+}
