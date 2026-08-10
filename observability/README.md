@@ -103,8 +103,17 @@ of scope here.
 
   ```bash
   docker build -f Dockerfile.fastapi -t monkscode/nlrf:fastapi-local .
-  docker compose up -d --force-recreate fastapi runner-exec
+  FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-local \
+    docker compose up -d --force-recreate fastapi runner-exec
   ```
+
+  The tag has to be named on the second line too. `docker-compose.yml`
+  resolves `${FASTAPI_IMAGE_TAG:-monkscode/nlrf:fastapi-latest}`, so without
+  it compose recreates both containers on the *published* image and silently
+  discards the one you just built. The root `.env.example` does set this
+  variable, so an operator who copied it is already fine — the inline
+  assignment makes the command right either way. `runner-exec` reads the same
+  variable, which is why one assignment covers both services.
 
   This matters for these dashboards specifically: a stale image keeps writing
   `workflow_metrics`/`llm_traces` rows that are missing every field a newer
