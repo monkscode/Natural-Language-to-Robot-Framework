@@ -121,7 +121,7 @@ SELECT
     (stage.value->>'cost')::numeric             AS cost_usd
 FROM workflow_metrics m,
      jsonb_each(m.data->'crew_stage_metrics') AS stage
-WHERE m.data ? 'crew_stage_metrics'
+WHERE jsonb_typeof(m.data->'crew_stage_metrics') = 'object'
 ORDER BY m.ts DESC;
 ```
 
@@ -136,6 +136,7 @@ SELECT
 FROM workflow_metrics m,
      jsonb_each(m.data->'crew_stage_metrics') AS stage
 WHERE m.ts > now() - interval '30 days'
+  AND jsonb_typeof(m.data->'crew_stage_metrics') = 'object'
 GROUP BY stage.key
 ORDER BY avg_cost_usd DESC;
 ```
@@ -191,6 +192,7 @@ SELECT
 FROM workflow_metrics m,
      jsonb_each_text(m.data->'guardrail_attempts') AS site
 WHERE m.ts > now() - interval '30 days'
+  AND jsonb_typeof(m.data->'guardrail_attempts') = 'object'
 GROUP BY site.key;
 ```
 
@@ -284,7 +286,12 @@ apart (a row with metrics got as far as delivering code).
 ## Query text alongside metrics
 
 The user's query is deliberately **not** duplicated onto `workflow_metrics` — it already
-lives on `test_runs`. Join for it:
+lives on `test_runs`. Join for it — as a **`LEFT JOIN`**, not the inner join this query
+used to run: on the same 7-day window this query uses, `workflow_metrics` alone returns
+49 rows, and an inner join against `test_runs` drops all but 7 of them (measured
+2026-08-10). The `WHERE` clause below filters only on `m.ts`, not on any `test_runs`
+column, so the `LEFT JOIN` genuinely keeps all 49 — `r.user_query` is simply `NULL` for
+the rows with no `test_runs` partner:
 
 ```sql
 SELECT
@@ -294,7 +301,7 @@ SELECT
     (m.data->>'workflow_duration_s')::numeric AS duration_s,
     m.data->>'dryrun_status'                AS dryrun_status
 FROM workflow_metrics m
-JOIN test_runs r ON r.run_id = m.workflow_id
+LEFT JOIN test_runs r ON r.run_id = m.workflow_id
 WHERE m.ts > now() - interval '7 days'
 ORDER BY cost_usd DESC
 LIMIT 50;
