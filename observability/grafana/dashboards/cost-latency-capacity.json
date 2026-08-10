@@ -1,0 +1,128 @@
+{
+  "uid": "mark1-cost",
+  "title": "Mark 1 — Cost, latency and capacity",
+  "tags": ["mark1", "cost"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-1y", "to": "now"},
+  "panels": [
+    {
+      "type": "table",
+      "title": "Cost by model and provider",
+      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. Covers 5 of 434 rows as of 2026-08-10 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT data->>'model_provider' AS provider, data->>'model_name' AS model, count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_cost_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'workflow_duration_s')::numeric))::numeric, 1) AS median_duration_s FROM workflow_metrics WHERE data ? 'model_name' GROUP BY 1, 2 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Cost split: crewai against browser-use",
+      "description": "total_cost is these two summed. It does NOT include the learning path's LLM spend — see the learning-health dashboard.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'crewai_cost')::numeric))::numeric, 4) AS median_crewai_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'browser_use_cost')::numeric))::numeric, 4) AS median_browser_use_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_total_usd FROM workflow_metrics"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Cost and duration per crew stage",
+      "description": "Covers 13 of 434 rows as of 2026-08-10 — this fills in as traffic accrues on this branch. The other 20 rows that carry the crew_stage_metrics key hold a JSON null rather than an object and are excluded so the panel doesn't error, not filtered as bad data.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT stage.key AS stage, count(*) AS runs, round(avg((stage.value->>'cost')::numeric), 6) AS avg_cost_usd, round(avg((stage.value->>'duration_s')::numeric), 2) AS avg_duration_s, round(avg((stage.value->>'llm_calls')::numeric), 2) AS avg_llm_calls FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE jsonb_typeof(m.data->'crew_stage_metrics') = 'object' GROUP BY 1 ORDER BY avg_cost_usd DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Implicit cache hit rate",
+      "description": "Explains the run-to-run cost swing rather than leaving it as noise. A sample run cached 10,134 of 24,572 browser-use prompt tokens.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, sum((data->>'browser_use_cached_tokens')::bigint) AS cached_tokens, sum((data->>'browser_use_prompt_tokens')::bigint) AS prompt_tokens, round(100.0 * sum((data->>'browser_use_cached_tokens')::bigint) / nullif(sum((data->>'browser_use_prompt_tokens')::bigint), 0), 1) AS cache_hit_pct FROM workflow_metrics WHERE data ? 'browser_use_cached_tokens'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Dryrun gate outcomes",
+      "description": "'unverified' means Docker or the executor was unavailable and the code was still delivered. It is an infrastructure signal, and is excluded from both sides of the pass ratio below. Covers 13 of 434 rows as of 2026-08-10; the other 20 rows that carry the dryrun_status key hold a JSON null rather than a string and are excluded so no blank-status row appears in the mix.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT data->>'dryrun_status' AS status, count(*) AS runs, round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct_of_all FROM workflow_metrics WHERE jsonb_typeof(data->'dryrun_status') = 'string' GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Gate pass rate, excluding unverified",
+      "description": "Covers 13 of 434 rows as of 2026-08-10. All 13 are 'passed' — zero failed, zero unverified in the corpus so far. Read the 100% as 'no failure has been recorded yet', not as a quality guarantee about the product.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE data->>'dryrun_status' = 'passed') / nullif(count(*), 0), 1) AS gate_pass_pct FROM workflow_metrics WHERE jsonb_typeof(data->'dryrun_status') = 'string' AND data->>'dryrun_status' <> 'unverified'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Where the browser stage spends time",
+      "description": "poll_overhead_s is how long the backend kept polling after the agent finished. queue_s above zero means the browser service was at capacity. Covers 50 of 434 rows as of 2026-08-10; the other 169 rows that carry the phase_timings key hold a JSON null rather than an object and are excluded so runs matches what the averages are computed over.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, round(avg((data->'phase_timings'->>'queue_s')::numeric), 2) AS avg_queue_s, round(avg((data->'phase_timings'->>'session_setup_s')::numeric), 2) AS avg_session_setup_s, round(avg((data->'phase_timings'->>'agent_run_s')::numeric), 2) AS avg_agent_run_s, round(avg((data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric), 2) AS avg_poll_overhead_s FROM workflow_metrics WHERE jsonb_typeof(data->'phase_timings') = 'object'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Rate limiting and lost time",
+      "description": "The llm_429_count field is known to undercount against the raw log. Treat a non-zero value as a floor, not a total. Covers 49 of 434 rows as of 2026-08-10; the other 170 rows that carry the agent_diagnostics key hold a JSON null rather than an object and are excluded so runs matches what the sums are computed over.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, sum((data->'agent_diagnostics'->>'llm_429_count')::int) AS total_429s, count(*) FILTER (WHERE (data->'agent_diagnostics'->>'llm_429_count')::int > 0) AS runs_with_a_429, round(sum((data->'agent_diagnostics'->>'retry_lost_s')::numeric), 1) AS total_retry_lost_s FROM workflow_metrics WHERE jsonb_typeof(data->'agent_diagnostics') = 'object'"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM call failure rate",
+      "description": "Spine is llm_traces, whose created_at is tz-aware. History runs 2026-06-19 to 2026-08-10 (52 days), which is why the dashboard defaults to a 1-year window rather than the usual 6h — a shorter default would load looking empty.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) FILTER (WHERE status <> 'OK') AS failed_calls, count(*) AS total_calls FROM llm_traces WHERE created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    }
+  ]
+}
