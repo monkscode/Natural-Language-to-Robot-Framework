@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 DASHBOARD_DIR = Path("observability/grafana/dashboards")
+ROLE_SCRIPT = Path("observability/postgres/create_readonly_role.sql")
 
 GRANTED_TABLES = {
     "workflow_metrics",
@@ -102,6 +103,36 @@ def _sql_targets(dashboard: dict) -> list[str]:
 
 def test_dashboard_dir_is_not_empty():
     assert _dashboards(), "no dashboard JSON found"
+
+
+def test_readonly_role_grants_match_the_dashboards():
+    """The GRANT list in the shipped .sql must equal GRANTED_TABLES.
+
+    test_readonly_role.py can only run against a live nlrf-postgres container
+    holding the app schema, so it skips in CI — the script grants on seven app
+    tables and errors on a database that lacks them. That leaves the realistic
+    regression uncovered: someone adds a panel on an eighth table and forgets
+    the GRANT, and the panel fails at read time with a permission error no test
+    saw. This closes it with no database at all.
+
+    Set equality in BOTH directions is the point. Missing a grant breaks a
+    panel; granting a table no dashboard reads widens the role past least
+    privilege, which is the property observability/README.md advertises by
+    name. Combined with test_every_sql_target_queries_only_granted_tables
+    (dashboards are a subset of GRANTED_TABLES), this pins the whole chain:
+    what panels query == what the constant lists == what the role is granted.
+    """
+    sql = ROLE_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(
+        r"\bGRANT\s+SELECT\s+ON\s+(.*?)\s+TO\s+grafana_ro\b", sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert match, f"{ROLE_SCRIPT.name} has no `GRANT SELECT ON ... TO grafana_ro`"
+    granted = {t.strip().lower() for t in match.group(1).split(",") if t.strip()}
+    assert granted == GRANTED_TABLES, (
+        f"{ROLE_SCRIPT.name} grants {sorted(granted)}, "
+        f"GRANTED_TABLES lists {sorted(GRANTED_TABLES)}"
+    )
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
