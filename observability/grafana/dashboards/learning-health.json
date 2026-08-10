@@ -1,0 +1,111 @@
+{
+  "uid": "mark1-learning",
+  "title": "Mark 1 — Learning health",
+  "tags": ["mark1", "learning"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-1y", "to": "now"},
+  "panels": [
+    {
+      "type": "text",
+      "title": "Read this before drawing a conclusion",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "mode": "markdown",
+        "content": "**The hint comparison below is confounded.** `was_holdout` is 0 on all 330 rows as of 2026-08-10, so there is no control arm — hints are injected where failures already cluster, which biases the comparison against them. Treat the split as a prompt to investigate, not as a measurement of whether hints help.\n\n**This dashboard cannot be filtered by org.** `learning_metrics` and `trigger_events` have no `org_id` column."
+      }
+    },
+    {
+      "type": "table",
+      "title": "Pass rate with and without injected hints",
+      "description": "hint_tokens and avg_cost are NOT populated: both are wired to a literal zero on all 330 rows, including the 90 that did inject hints (hints_available up to 19), so they are dropped from this panel rather than shipped as an always-zero column. The learning path's real token and dollar spend is visible only in the panel below, via trigger_events.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 4},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT CASE WHEN hints_injected > 0 THEN 'hints injected' ELSE 'no hints' END AS arm, count(*) AS runs, round(avg(test_passed)::numeric, 3) AS pass_rate FROM learning_metrics WHERE (timestamp::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Hint availability against injection",
+      "description": "hints_available is what the retriever found; hints_injected is what reached the prompt.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 4},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, round(avg(hints_available)::numeric, 2) AS avg_available, round(avg(hints_injected)::numeric, 2) AS avg_injected, count(*) FILTER (WHERE hints_available > 0 AND hints_injected = 0) AS available_but_not_injected, count(*) FILTER (WHERE is_retry_after_feedback = 1) AS retries_after_feedback FROM learning_metrics WHERE (timestamp::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo()"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Hint lifecycle",
+      "description": "36 rows as of 2026-08-10 — 21 active, 15 disabled, 0 conflict_flagged. The 'flagged' arm is correct but currently unreachable; do not read this dashboard as evidence there are no flagged hints today.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 11},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT CASE WHEN is_active = 0 THEN 'disabled' WHEN conflict_flagged = 1 THEN 'flagged' ELSE 'active' END AS state, count(*) AS hints, sum(applied_count) AS applied, sum(success_count) AS successes, sum(failure_count) AS failures, sum(unused_count) AS unused FROM nl_feedback_corrections GROUP BY 1 ORDER BY hints DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Hints that are earning their place",
+      "description": "A hint applied many times with few successes is a candidate for disabling.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 11},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT id, domain, scope, category, applied_count, success_count, failure_count, unused_count, round(100.0 * success_count / nullif(applied_count, 0), 1) AS success_pct, feedback_text FROM nl_feedback_corrections WHERE is_active = 1 ORDER BY applied_count DESC LIMIT 50"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Learning-path LLM calls, and how often they fail",
+      "description": "This spend is NOT in workflow_metrics.total_cost, which is crewai plus browser-use only. As of 2026-08-10, 4 of 16 LLM-invoking triggers failed, one of them burning 16,313 completion tokens on a parse failure.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT trigger_type, status, count(*) AS events, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, round(avg(llm_latency_ms)) AS avg_latency_ms FROM trigger_events WHERE created_at::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1, 2 ORDER BY events DESC"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Runs that proceeded with learning disabled",
+      "description": "optimization_fallback_used marks a run where learning init failed and generation continued without hints. Silent degradation.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) FILTER (WHERE (data->>'optimization_fallback_used')::boolean) AS fallback_runs, count(*) AS total_runs FROM workflow_metrics WHERE data ? 'optimization_fallback_used'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Model output that needed cleaning or retrying",
+      "description": "empty_response_failures is a silent model failure the run recovered from, or did not.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 26},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, sum((data->'llm_cleaning_stats'->>'formatting_errors_detected')::int) AS formatting_errors, sum((data->'llm_cleaning_stats'->>'formatting_errors_recovered')::int) AS formatting_recovered, sum((data->'llm_cleaning_stats'->>'empty_response_retries')::int) AS empty_retries, sum((data->'llm_cleaning_stats'->>'empty_response_failures')::int) AS empty_failures FROM workflow_metrics WHERE data ? 'llm_cleaning_stats'"
+      }]
+    }
+  ]
+}
