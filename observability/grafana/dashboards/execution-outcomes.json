@@ -1,0 +1,110 @@
+{
+  "uid": "mark1-execution",
+  "title": "Mark 1 — Execution outcomes",
+  "tags": ["mark1", "reliability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-90d", "to": "now"},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Executed-test pass rate",
+      "description": "This is NOT the bench generation gate. It measures whether the generated Robot test passed when it ran. Spine is execution_records; timestamp is TEXT with an offset, so it casts to timestamptz cleanly.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo()"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Outcome mix",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT test_status, count(*) AS runs FROM execution_records WHERE timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Median execution duration",
+      "description": "Coverage note: execution_duration_ms is unpopulated on every execution_records row measured (0/123, 2026-08-10). An empty stat here means no duration data was ever recorded, not a zero-second run.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY execution_duration_ms)::numeric / 1000.0, 1) AS median_s FROM execution_records WHERE execution_duration_ms IS NOT NULL AND timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo()"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Failure categories",
+      "description": "Categories are also present on some passed rows, so this filters to failures explicitly rather than assuming a category implies a failure.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT coalesce(failure_category, '(none recorded)') AS category, count(*) AS failures, round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct FROM execution_records WHERE test_status <> 'passed' AND timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY failures DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Keywords that fail most",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT failed_keyword, count(*) AS failures, count(DISTINCT domain) AS domains FROM execution_records WHERE test_status <> 'passed' AND failed_keyword IS NOT NULL AND timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY failures DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Pass rate by domain",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT domain, count(*) AS runs, round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Pass rate by generated code structure",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT coalesce(code_structure, '(unclassified)') AS structure, count(*) AS runs, round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Recent failures, with the query that produced them",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT timestamp::timestamptz AS at, workflow_id, user_query, failure_category, failed_keyword, error_message FROM execution_records WHERE test_status <> 'passed' AND timestamp::timestamptz BETWEEN $__timeFrom() AND $__timeTo() ORDER BY at DESC LIMIT 100"
+      }]
+    }
+  ]
+}
