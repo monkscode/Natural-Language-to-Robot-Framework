@@ -117,11 +117,23 @@ KEY_FILE="credentials.json"
 existing_key_is_usable() {
     [ -f "$KEY_FILE" ] || return 1
     grep -q "\"client_email\"[[:space:]]*:[[:space:]]*\"${SA_EMAIL}\"" "$KEY_FILE" 2>/dev/null || return 1
-    local key_id
+    local key_id disabled
     key_id=$(sed -n 's/.*"private_key_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$KEY_FILE" | head -n 1)
     [ -n "$key_id" ] || return 1
-    "$GCLOUD" iam service-accounts keys describe "$key_id" \
-        --iam-account="$SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1
+    # `describe` succeeding is not enough: a DISABLED key still describes fine
+    # and still cannot authenticate, so reusing one fails much later, at the
+    # first Vertex call, with an error that says nothing about this file.
+    # Google also disables keys on its own when it detects one as exposed.
+    # The key-listing block below already filters on disabled=false; this
+    # brings the reuse check into line with it.
+    disabled=$("$GCLOUD" iam service-accounts keys describe "$key_id" \
+        --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
+        --format="value(disabled)" 2>/dev/null) || return 1
+    # Only an explicit True rejects. A key that was never disabled can print
+    # False or nothing at all depending on gcloud version, and treating an
+    # empty field as "disabled" would re-mint a key on every run — the exact
+    # key-sprawl this function exists to prevent.
+    [ "$disabled" != "True" ]
 }
 
 if existing_key_is_usable; then
