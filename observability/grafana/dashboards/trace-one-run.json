@@ -109,10 +109,26 @@
       }]
     },
     {
+      "type": "logs",
+      "title": "8 — Log lines from both services",
+      "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted.",
+      "datasource": {"type": "loki", "uid": "nlrf-loki"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Ascending"
+      },
+      "targets": [{
+        "refId": "A",
+        "expr": "{service=~\"fastapi|browser-service\"} |= \"$run_id\""
+      }]
+    },
+    {
       "type": "text",
       "title": "9 — Artifacts",
       "description": "",
-      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 50},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 60},
       "options": {
         "mode": "markdown",
         "content": "The generated `.robot` code and the Robot `log.html` report are files, not database rows, and are not rendered here.\n\nOpen [Mark 1 History](http://localhost:3000/history) and paste the run id into the search box — it searches run ids server-side — then use the drawer for the code and the report link."

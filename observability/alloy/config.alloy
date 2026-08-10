@@ -1,0 +1,57 @@
+// Scrape Docker json-file logs and ship them to Loki.
+//
+// No application change is needed: every application.log line already
+// carries workflow_id — bound once per run in both the backend and the
+// browser service.
+//
+// Label source: docker-compose.yml's json-file logging blocks set
+// `logging.options.labels: "service=<name>"`, but that Docker log-driver
+// option only copies a label onto the JSON log line's "attrs" field if a
+// container label with that exact key ALREADY exists — it does not create
+// one. No service here has a "service" container label (verified via
+// `docker inspect --format '{{json .Config.Labels}}'` and by reading the
+// raw *-json.log line: no "attrs" key at all), so
+// __meta_docker_container_label_service is always empty and a relabel rule
+// keyed on it drops every target. Docker Compose does always inject
+// `com.docker.compose.service=<name>` as a real container label, so that is
+// the label discovery.docker actually exposes and relabeling keys on it
+// instead.
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // Only the two services that bind workflow_id.
+  rule {
+    source_labels = ["service"]
+    regex         = "fastapi|browser-service"
+    action        = "keep"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
