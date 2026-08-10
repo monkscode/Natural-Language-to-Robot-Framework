@@ -1,13 +1,20 @@
 # Observability — querying Mark 1 from Grafana
 
-Point Grafana at the same PostgreSQL database the app uses (`DATABASE_URL`) and run
-these queries. There is no separate metrics pipeline, no log shipper and no extra
-compose file to run: the app already writes everything below on every run.
+Point Grafana — or any Postgres client — at the same database the app uses
+(`DATABASE_URL`) and run these queries by hand. The app already writes everything
+below on every run, so that SQL-only path needs nothing extra; it is one option,
+not the only one.
 
 > **Not to be confused with `OBSERVABILITY_BACKEND=grafana`.** That setting selects
 > where *OpenTelemetry orchestration spans* are exported (Tempo). It is a different
 > path and is unrelated to the SQL here. The Tempo compose file referenced by
 > `docs/LLM_TRACES_GUIDE.md` does not exist in this repo.
+
+> **Running this in Grafana.** The queries below are provisioned as five
+> dashboards behind a Compose profile — see
+> [`observability/README.md`](../observability/README.md). Start them with
+> `docker compose --profile observability up -d`. A plain `docker compose up`
+> is unaffected.
 
 ## The two tables
 
@@ -190,7 +197,16 @@ GROUP BY site.key;
 ## Locator success
 
 Bucketed on `test_runs.created_at`, not `ts` — see the time-filter note above; a daily
-bucket is exactly the granularity the naive-`ts` offset breaks.
+bucket is exactly the granularity the naive-`ts` offset breaks. The join below is a
+`LEFT JOIN`, not the inner join this query used to run. An inner join here silently
+drops every `workflow_metrics` row with no matching `test_runs` row, and as of
+2026-08-10 that is 92% of them (35 of 434 join). Bucketing is still by `r.created_at`,
+so a row needs that partner to land in any day's total even after the fix — the LEFT
+JOIN stops the query from silently excluding rows it has no way to date, it does not
+make this particular day-bucketed view cover all 434. For the honest total across every
+row, not just the ones with a `test_runs` partner, see the locator-reliability Grafana
+dashboard (`observability/grafana/dashboards/locator-reliability.json`), which reads
+`workflow_metrics` directly with no join at all.
 
 ```sql
 SELECT
@@ -199,11 +215,17 @@ SELECT
     sum((m.data->>'total_elements')::int)             AS elements,
     sum((m.data->>'failed_elements')::int)            AS failed
 FROM workflow_metrics m
-JOIN test_runs r ON r.run_id = m.workflow_id
+LEFT JOIN test_runs r ON r.run_id = m.workflow_id
 WHERE r.created_at > now() - interval '30 days'
 GROUP BY 1
 ORDER BY 1;
 ```
+
+`total_elements` and `failed_elements` are the honest source of failure counts on this
+row — keep using them. `success_rate` has the same limitation as the
+`element_approach_metrics` array covered in `observability/README.md`: it is computed
+only from elements the locator pipeline actually located, so it reads higher than the
+real rate.
 
 ## Failures, and what the user asked for
 
@@ -338,22 +360,32 @@ LLM call as the run proceeds. So a run that died in the assembler has no metrics
 its spend is still attributable here. That is the only place to recover the cost of a
 failed run.
 
-**4. The log lines.** `application.log` is JSON (one object per line) and every record
-carries `workflow_id`, bound once at the start of the run — so no call site had to thread
-it through. The browser service binds the *same* id in its own logs, so one filter spans
-both processes.
+**4. The log lines.** Every record carries `workflow_id`, bound once at the start of the
+run — so no call site had to thread it through. The browser service binds the *same* id
+in its own logs, so one filter spans both processes. `application.log`'s format depends
+on how the process was started: under `./run.sh`'s default dev mode it is structlog's
+human-readable console text (`LOG_FORMAT=console`); under bench mode, or in a container,
+it is one JSON object per line (`LOG_FORMAT=json`, or unset — JSON is the default). A
+plain substring grep works against either, so it doesn't matter which one you're looking
+at:
 
 ```bash
-# local
-jq -c 'select(.workflow_id=="<id>")' logs/application.log
+# local — matches whichever format wrote the file
+grep '<id>' logs/application.log
 
-# containers — both services, already labelled in docker-compose.yml
+# containers — same grep, against the container logs directly
 docker compose logs fastapi browser-service | grep '<id>'
 ```
 
-There is no log shipper in this repo. If you want these in Grafana next to the SQL above,
-point any collector at the `json-file` Docker logs — the JSON and the `service=` labels
-are already there, and no application change is needed.
+A log shipper now exists: Loki and Alloy, running behind the `observability` Compose
+profile, ship both services' container logs automatically — see
+[`observability/README.md`](../observability/README.md). Alloy keys on the
+`com.docker.compose.service` label Docker Compose always sets on every container, not on
+the `service=<name>` string under `logging.options.labels` in `docker-compose.yml` — that
+string is a log-driver option, and only becomes an actual container label if a container
+label with that exact key already exists, which none here do (verified with `docker
+inspect --format '{{json .Config.Labels}}'`: no `service` key, only
+`com.docker.compose.service`).
 
 ## A note on `llm_traces`
 
