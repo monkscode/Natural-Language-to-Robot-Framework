@@ -17,6 +17,7 @@ services:
       - ./logs:/app/logs
       - ./chroma_db:/app/chroma_db
       - ./data:/app/data
+      - ./credentials.json:/app/credentials.json:ro
     environment:
       # Application configuration
       - APP_PORT=5000
@@ -106,6 +107,7 @@ services:
     volumes:
       # Shared logs directory
       - ./logs:/app/logs
+      - ./credentials.json:/app/credentials.json:ro
     environment:
       # Browser service configuration
       - BROWSER_USE_SERVICE_URL=http://browser-service:4999
