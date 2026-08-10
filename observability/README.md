@@ -8,9 +8,10 @@ start any of them.
 # NOT src/backend/.env. Compose reads the root file for ${VAR} substitution
 # in docker-compose.yml; src/backend/.env is injected into containers by a
 # separate mechanism (env_file:) that neither of these two services uses, so
-# setting them there has no effect. See .env.example. Skip this and compose
-# falls back to grafana_ro / admin — fine for a throwaway local look, not for
-# anything you'd leave running.
+# setting them there has no effect. See the ROOT .env.example, not
+# src/backend/.env.example. Skip this and compose falls back to
+# grafana_ro / admin — fine for a throwaway local look, not for anything
+# you'd leave running.
 #   GRAFANA_DB_PASSWORD=...
 #   GRAFANA_ADMIN_PASSWORD=...
 
@@ -22,7 +23,7 @@ Grafana: <http://127.0.0.1:3001>, user `admin`, password whatever you set
 
 If you also want the containerised `fastapi`/`browser-service` to be able to run a
 Vertex generation — so there is fresh data for these dashboards to show — read
-"The Vertex key is bind-mounted" below before you start.
+"The Vertex key needs the `docker-compose.vertex.yml` overlay" below before you start.
 
 ## What runs, and why
 
@@ -111,15 +112,23 @@ of scope here.
   anywhere — nothing tells you the image is old. On this deployment a June
   image ran for weeks before anyone noticed, and it was the SPA breaking, not
   a dashboard, that gave it away.
-- **The Vertex key is bind-mounted, and it must exist at the repo root.**
-  `docker-compose.yml` mounts `./credentials.json:/app/credentials.json:ro`
-  into both `fastapi` and `browser-service`. Before this mount existed,
-  `VERTEXAI_CREDENTIALS=credentials.json` was a relative path that resolved
-  under `./run.sh` but not inside a container, so the containerised stack had
-  never once been able to complete a Vertex generation — meaning no fresh
-  rows for any dashboard here to show, silently. The file is gitignored and
-  not shipped; put your own at the repo root before bringing the stack up.
-  Verify it landed inside the container:
+- **The Vertex key needs the `docker-compose.vertex.yml` overlay, and it must
+  exist at the repo root.** The base `docker-compose.yml` does not mount
+  `credentials.json` — that is deliberate, see `docker-compose.vertex.yml`'s
+  own header. Bring the stack up with both files:
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.vertex.yml --profile observability up -d
+  ```
+
+  The overlay mounts the file into both `fastapi` and `browser-service` **and**
+  sets `VERTEXAI_CREDENTIALS=/app/credentials.json` — without it,
+  `VERTEXAI_CREDENTIALS=credentials.json` is a relative path that resolves
+  under `./run.sh` but not inside a container, so the containerised stack can
+  never complete a Vertex generation — meaning no fresh rows for any
+  dashboard here to show, silently. The file is gitignored and not shipped;
+  put your own at the repo root before bringing the stack up (see the root
+  `README.md`'s Quick Start). Verify it landed inside the container:
 
   ```bash
   MSYS_NO_PATHCONV=1 docker exec nlrf-fastapi ls -l /app/credentials.json
@@ -171,6 +180,14 @@ of scope here.
 - **Grafana is not embedded in the Mark 1 SPA, deliberately.** A Postgres
   datasource has one identity and cannot honour the platform-admin / org-admin
   / member scoping the API enforces.
+- **Alloy mounts the Docker socket.** `docker-compose.yml` gives it
+  `/var/run/docker.sock:/var/run/docker.sock:ro` so it can discover
+  `fastapi`/`browser-service` containers and stream their logs. `:ro` only
+  stops Alloy writing to the socket *file* — it does not restrict the Docker
+  API calls made over that socket, so the container has root-equivalent
+  access to the host. This is standard for any log scraper that discovers
+  containers this way, and the profile is opt-in and loopback-bound; this is
+  disclosure, not a change.
 
 ## Editing a dashboard
 
