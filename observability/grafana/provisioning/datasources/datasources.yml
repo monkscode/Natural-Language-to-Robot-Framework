@@ -1,0 +1,27 @@
+# Provisioned datasources for the Mark 1 observability profile.
+# UIDs are fixed strings because every committed dashboard references them.
+apiVersion: 1
+
+datasources:
+  - name: Mark 1 Postgres
+    uid: nlrf-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    database: ${POSTGRES_DB}
+    isDefault: true
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}
+
+  - name: Mark 1 Loki
+    uid: nlrf-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
