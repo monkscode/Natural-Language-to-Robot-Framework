@@ -80,16 +80,41 @@ _FUNCTION_CALL_RE = re.compile(r"^[a-z_][a-z0-9_]*\s*\(", re.IGNORECASE)
 _LEADING_IDENT_RE = re.compile(r"^([a-z_][a-z0-9_]*)", re.IGNORECASE)
 
 
+def _split_top_level_commas(clause: str) -> list[str]:
+    """Split on commas that sit outside every parenthesis.
+
+    `str.split(",")` cuts inside subqueries too: `FROM (SELECT a, b FROM
+    test_runs) x` became the segments `(SELECT a` and `b FROM test_runs) x`,
+    and the second one reads as a table named `b`. No granted-table list will
+    ever hold `b`, so a correct panel failed with a message naming a table
+    that does not exist.
+    """
+    parts, depth, start = [], 0, 0
+    for i, char in enumerate(clause):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)   # tolerate a stray ) rather than going negative
+        elif char == "," and depth == 0:
+            parts.append(clause[start:i])
+            start = i + 1
+    parts.append(clause[start:])
+    return parts
+
+
 def _from_clause_real_tables(sql: str) -> list[str]:
-    """Bare table identifiers in a single FROM clause, comma-separated or
-    not. A `jsonb_each(...)`-shaped segment (a set-returning function, no
-    space before its opening paren) is excluded — that is the lateral
-    expansion idiom, not a second table."""
+    """Bare table identifiers in a single FROM clause, comma-separated or not.
+
+    A `jsonb_each(...)`-shaped segment — an identifier followed by an opening
+    paren, with or without whitespace between them — is excluded: that is the
+    lateral expansion idiom, not a second table. A parenthesised subquery is
+    excluded too, by starting with `(` rather than an identifier.
+    """
     match = _FROM_CLAUSE_RE.search(sql)
     if not match:
         return []
     tables = []
-    for segment in match.group(1).split(","):
+    for segment in _split_top_level_commas(match.group(1)):
         segment = segment.strip()
         if not segment or _FUNCTION_CALL_RE.match(segment):
             continue
@@ -115,6 +140,35 @@ def _sql_targets(dashboard: dict) -> list[str]:
 
 def test_dashboard_dir_is_not_empty():
     assert _dashboards(), "no dashboard JSON found"
+
+
+class TestFromClauseParsing:
+    """_from_clause_real_tables underpins two guards, so its own edges matter.
+
+    Both the granted-tables check and the inner-join check treat whatever it
+    returns as real tables. A phantom name there fails a panel that is
+    perfectly correct, and the failure message names a table that does not
+    exist — which is a long way from the actual mistake for whoever hits it.
+    """
+
+    def test_lateral_expansion_is_not_a_second_table(self):
+        sql = "SELECT 1 FROM workflow_metrics m, jsonb_each(m.data) AS s"
+        assert _from_clause_real_tables(sql) == ["workflow_metrics"]
+
+    def test_comma_join_of_two_real_tables_is_reported(self):
+        sql = "SELECT 1 FROM workflow_metrics m, test_runs r WHERE m.x = r.x"
+        assert _from_clause_real_tables(sql) == ["workflow_metrics", "test_runs"]
+
+    def test_subquery_select_list_is_not_a_table(self):
+        """A comma inside the parentheses belongs to the subquery, not the
+        FROM clause. Splitting on it made `b` look like a second table, and
+        no granted-table list will ever contain `b`."""
+        sql = "SELECT x FROM (SELECT a, b FROM test_runs) x"
+        assert _from_clause_real_tables(sql) == []
+
+    def test_function_call_with_a_space_is_still_a_function(self):
+        sql = "SELECT 1 FROM workflow_metrics m, jsonb_each (m.data) AS s"
+        assert _from_clause_real_tables(sql) == ["workflow_metrics"]
 
 
 def test_readonly_role_grants_match_the_dashboards():
