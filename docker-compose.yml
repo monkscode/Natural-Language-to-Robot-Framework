@@ -230,8 +230,13 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      # Loopback only, matching how postgres is bound.
+      # Loopback-only (IPv4 AND IPv6): same rationale as fastapi/browser-service/
+      # postgres above — Windows resolves `localhost` to ::1 first, and Docker
+      # Desktop black-holes an unbound IPv6 port (hangs, not refused), so a
+      # DevOps user opening http://localhost:3001 would stall for the full
+      # connect timeout instead of reaching Grafana.
       - "127.0.0.1:3001:3000"
+      - "[::1]:3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
