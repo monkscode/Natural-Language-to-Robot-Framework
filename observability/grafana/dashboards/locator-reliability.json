@@ -9,7 +9,7 @@
     {
       "type": "stat",
       "title": "Element success rate, all history",
-      "description": "Spine is workflow_metrics with no join and no time filter, so all 429 rows contribute. Cross-table history is too sparse to put this on a time axis without losing 93% of it.",
+      "description": "Spine is workflow_metrics with no join and no time filter, so all 429 rows contribute except the 1 whose element_approach_metrics value is a JSON null rather than an array — excluded so the panel doesn't error, not filtered as bad data. Cross-table history is too sparse to put this on a time axis without losing 93% of it.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
       "targets": [{
