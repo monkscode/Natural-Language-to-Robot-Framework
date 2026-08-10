@@ -28,7 +28,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT run_id, status, user_query, error_message, created_at, updated_at, now() - created_at AS age FROM test_runs WHERE run_id = '$run_id'"
+        "rawSql": "SELECT run_id, status, user_query, error_message, created_at, updated_at, now() - created_at AS age FROM test_runs WHERE run_id = ${run_id:sqlstring}"
       }]
     },
     {
@@ -41,7 +41,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT workflow_id, data->>'model_provider' AS provider, data->>'model_name' AS model, (data->>'workflow_duration_s')::numeric AS duration_s, (data->>'total_cost')::numeric AS cost_usd, (data->>'crewai_cost')::numeric AS crewai_cost, (data->>'browser_use_cost')::numeric AS browser_use_cost, data->>'dryrun_status' AS gate, (data->>'dryrun_attempts')::int AS attempts, (data->>'dryrun_repairs')::int AS repairs, data->'guardrail_attempts' AS guardrails, (data->>'optimization_fallback_used')::boolean AS learning_fallback FROM workflow_metrics WHERE workflow_id = '$run_id'"
+        "rawSql": "SELECT workflow_id, data->>'model_provider' AS provider, data->>'model_name' AS model, (data->>'workflow_duration_s')::numeric AS duration_s, (data->>'total_cost')::numeric AS cost_usd, (data->>'crewai_cost')::numeric AS crewai_cost, (data->>'browser_use_cost')::numeric AS browser_use_cost, data->>'dryrun_status' AS gate, (data->>'dryrun_attempts')::int AS attempts, (data->>'dryrun_repairs')::int AS repairs, data->'guardrail_attempts' AS guardrails, (data->>'optimization_fallback_used')::boolean AS learning_fallback FROM workflow_metrics WHERE workflow_id = ${run_id:sqlstring}"
       }]
     },
     {
@@ -54,7 +54,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT stage.key AS stage, (stage.value->>'duration_s')::numeric AS duration_s, (stage.value->>'llm_calls')::int AS llm_calls, (stage.value->>'prompt_tokens')::int AS prompt_tokens, (stage.value->>'completion_tokens')::int AS completion_tokens, (stage.value->>'cost')::numeric AS cost_usd FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE m.workflow_id = '$run_id' AND jsonb_typeof(m.data->'crew_stage_metrics') = 'object' ORDER BY stage.key"
+        "rawSql": "SELECT stage.key AS stage, (stage.value->>'duration_s')::numeric AS duration_s, (stage.value->>'llm_calls')::int AS llm_calls, (stage.value->>'prompt_tokens')::int AS prompt_tokens, (stage.value->>'completion_tokens')::int AS completion_tokens, (stage.value->>'cost')::numeric AS cost_usd FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE m.workflow_id = ${run_id:sqlstring} AND jsonb_typeof(m.data->'crew_stage_metrics') = 'object' ORDER BY stage.key"
       }]
     },
     {
@@ -67,7 +67,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = '$run_id' AND jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
+        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = ${run_id:sqlstring} AND jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
       }]
     },
     {
@@ -80,7 +80,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT (data->'phase_timings'->>'queue_s')::numeric AS queue_s, (data->'phase_timings'->>'session_setup_s')::numeric AS session_setup_s, (data->'phase_timings'->>'agent_run_s')::numeric AS agent_run_s, (data->'phase_timings'->>'poll_wait_s')::numeric AS poll_wait_s, (data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric AS poll_overhead_s, (data->'agent_diagnostics'->>'llm_429_count')::int AS llm_429s, (data->'agent_diagnostics'->>'retry_lost_s')::numeric AS retry_lost_s, (data->'agent_diagnostics'->>'dom_elements_max')::int AS dom_elements_max, (data->'agent_diagnostics'->>'llm_coverage_gap')::int AS llm_coverage_gap FROM workflow_metrics WHERE workflow_id = '$run_id' AND data ? 'phase_timings'"
+        "rawSql": "SELECT (data->'phase_timings'->>'queue_s')::numeric AS queue_s, (data->'phase_timings'->>'session_setup_s')::numeric AS session_setup_s, (data->'phase_timings'->>'agent_run_s')::numeric AS agent_run_s, (data->'phase_timings'->>'poll_wait_s')::numeric AS poll_wait_s, (data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric AS poll_overhead_s, (data->'agent_diagnostics'->>'llm_429_count')::int AS llm_429s, (data->'agent_diagnostics'->>'retry_lost_s')::numeric AS retry_lost_s, (data->'agent_diagnostics'->>'dom_elements_max')::int AS dom_elements_max, (data->'agent_diagnostics'->>'llm_coverage_gap')::int AS llm_coverage_gap FROM workflow_metrics WHERE workflow_id = ${run_id:sqlstring} AND data ? 'phase_timings'"
       }]
     },
     {
@@ -93,7 +93,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT created_at, name, model, duration_ms, status, prompt_tokens, completion_tokens, cost_usd, prompt_text, response_text FROM llm_traces WHERE workflow_id = '$run_id' ORDER BY start_time_ns"
+        "rawSql": "SELECT created_at, name, model, duration_ms, status, prompt_tokens, completion_tokens, cost_usd, prompt_text, response_text FROM llm_traces WHERE workflow_id = ${run_id:sqlstring} ORDER BY start_time_ns"
       }]
     },
     {
@@ -106,7 +106,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT test_status, failure_category, failed_keyword, execution_exit_code, execution_duration_ms, domain, code_structure, error_message FROM execution_records WHERE workflow_id = '$run_id'"
+        "rawSql": "SELECT test_status, failure_category, failed_keyword, execution_exit_code, execution_duration_ms, domain, code_structure, error_message FROM execution_records WHERE workflow_id = ${run_id:sqlstring}"
       }]
     },
     {

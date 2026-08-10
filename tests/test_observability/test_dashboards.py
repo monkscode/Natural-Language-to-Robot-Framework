@@ -51,6 +51,18 @@ _TRUNCATE_CAST_RE = re.compile(
 # error on ~5% of real run ids.
 _SRF_RE = re.compile(r"\bjsonb_(?:each|each_text|array_elements)\s*\(", re.IGNORECASE)
 
+# A dashboard template variable inside rawSql. `$__timeFrom()`/`$__timeTo()`/
+# `$__timeFilter()` are Grafana MACROS, not variables — they expand to SQL the
+# datasource builds itself and are never user text, so `$__` is excluded.
+# Matches `$name`, `${name}` and `${name:format}`, capturing the format.
+_SQL_TEMPLATE_VAR_RE = re.compile(
+    r"\$(?!__)\{?([a-zA-Z0-9_]+)(?::([a-zA-Z0-9_]+))?\}?"
+)
+# A variable reference wrapped in literal single quotes, in either spelling.
+# Grafana's own docs call this out: :sqlstring already supplies the quotes, so
+# hand-wrapping produces ''value'' and breaks the query.
+_QUOTED_TEMPLATE_VAR_RE = re.compile(r"'\s*\$(?!__)\{?[a-zA-Z0-9_]+[^']*'")
+
 # A bare `ts` reference anywhere — column, alias target, inside date_trunc,
 # inside $__timeFilter — not just the four literal spellings a substring
 # check would need to enumerate by hand.
@@ -159,6 +171,39 @@ def test_every_sql_target_queries_only_granted_tables(path: Path):
         referenced |= {t.lower() for t in _from_clause_real_tables(sql)}
         unknown = referenced - GRANTED_TABLES - ctes
         assert not unknown, f"{path.name} queries ungranted tables: {sorted(unknown)}"
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_sql_panels_escape_template_variables(path: Path):
+    """Every template variable in rawSql must carry the :sqlstring format.
+
+    `WHERE run_id = '$run_id'` pastes a textbox value straight into the
+    statement. The blast radius is small — Grafana is loopback-only and
+    grafana_ro can only SELECT on seven tables — but it is still a value the
+    reader controls closing the string and appending predicates, and a
+    shareable dashboard URL (`?var-run_id=...`) makes it someone else's
+    browser that runs it. It also breaks on any legitimate value containing a
+    quote.
+
+    `${run_id:sqlstring}` is Grafana's own answer: it quotes the value and
+    doubles embedded single quotes. Verified present as VariableFormatID
+    .SQLString in the pinned grafana/grafana:11.6.0 image.
+
+    Both halves are asserted. The format check catches a raw `$run_id`; the
+    quote check catches `'${run_id:sqlstring}'`, which Grafana's docs warn
+    yields ''value'' because the formatter already supplies the quotes.
+    """
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for sql in _sql_targets(dashboard):
+        assert not _QUOTED_TEMPLATE_VAR_RE.search(sql), (
+            f"{path.name} wraps a template variable in literal single quotes; "
+            f":sqlstring already quotes it: {sql[:200]}"
+        )
+        for name, fmt in _SQL_TEMPLATE_VAR_RE.findall(sql):
+            assert fmt == "sqlstring", (
+                f"{path.name} interpolates ${name} into SQL with format "
+                f"{fmt or 'none'!r} — use ${{{name}:sqlstring}}: {sql[:200]}"
+            )
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
