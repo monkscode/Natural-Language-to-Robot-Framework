@@ -305,28 +305,36 @@ class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator.
 
     stream_execute_only drives the real _stream_docker_execution
-    (workflow_service.py:1154), which writes a test_runs row via
-    get_run_registry() — _record_run before it, _set_run_status inside it —
-    and a test.robot file under robot_tests/ via
-    get_artifact_store().run_dir(run_id, create=True). Both are real
-    Postgres/disk writes, which CLAUDE.md forbids from tests. get_run_registry
-    and get_artifact_store are patched here (one patch each blocks every
-    write path through them, the same reasoning TestRunIsRecordedAtStart uses
-    for _record_run) so only runner_exec_client stands in for the thing that
-    is actually external: the executor. run_dir is pointed at pytest's
-    tmp_path so _write_test_file still succeeds on a real, disposable
-    directory outside robot_tests/, which keeps the happy-path and
-    failure-path behaviour these tests actually assert.
+    (workflow_service.py:1154), which reaches three external dependencies
+    imported at module level: get_run_registry() writes a test_runs row
+    (_record_run before it, _set_run_status inside it); get_artifact_store()
+    writes a test.robot file under robot_tests/
+    (run_dir(run_id, create=True)); and, on the success path, _process_learning
+    (:1222) calls get_feedback_loop() as the first statement in its try block
+    (:361) — before the empty-user_query guard a few lines below it, so it
+    runs even though these tests never reach the learning call itself. With
+    OPTIMIZATION_ENABLED=true (the real .env), that constructs a real
+    FeedbackLoop backed by a live psycopg connection to Postgres. All three
+    are real Postgres/disk writes, which CLAUDE.md forbids from tests, so all
+    three are patched here (one patch each blocks every write path through
+    them, the same reasoning TestRunIsRecordedAtStart uses for _record_run) —
+    only runner_exec_client stands in for the thing that is actually
+    external: the executor. run_dir is pointed at pytest's tmp_path so
+    _write_test_file still succeeds on a real, disposable directory outside
+    robot_tests/, which keeps the happy-path and failure-path behaviour
+    these tests actually assert.
     """
 
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
     @patch("src.backend.services.workflow_service.get_artifact_store")
     @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_yields_events(self, mock_rc, mock_registry, mock_store, tmp_path):
+    def test_yields_events(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
         """Generator yields execution events; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.return_value = {"status": "ready"}
         mock_rc.execute.return_value = {"status": "passed", "test_status": "PASS"}
         mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -338,13 +346,15 @@ class TestStreamExecuteOnly:
         events = asyncio.run(run_gen())
         assert len(events) > 0
 
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
     @patch("src.backend.services.workflow_service.get_artifact_store")
     @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_handles_docker_failure(self, mock_rc, mock_registry, mock_store, tmp_path):
+    def test_handles_docker_failure(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
         """Executor failure yields error event; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.side_effect = Exception("Runner exec not running")
         mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
