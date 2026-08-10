@@ -199,6 +199,29 @@ services:
     networks:
       - nlrf-network
 
+  # --- Observability profile: not started by a plain `docker compose up` ---
+  # Run with: docker compose --profile observability up -d
+  grafana-db-init:
+    image: pgvector/pgvector:pg16
+    container_name: nlrf-grafana-db-init
+    profiles: ["observability"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD:-nlrf}
+    volumes:
+      - ./observability/postgres:/sql:ro
+    entrypoint: ["psql"]
+    command: >-
+      -h postgres -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}
+      -v ON_ERROR_STOP=1
+      -v grafana_password=${GRAFANA_DB_PASSWORD:-grafana_ro}
+      -f /sql/create_readonly_role.sql
+    restart: "no"
+    networks:
+      - nlrf-network
+
 networks:
   nlrf-network:
     driver: bridge
