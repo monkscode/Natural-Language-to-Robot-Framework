@@ -72,14 +72,14 @@
     {
       "type": "table",
       "title": "5 — Where the time went",
-      "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal.",
+      "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal. phase_timings covered 218/433 rows (50.3%) as of 2026-08-10 — rows without it are hidden by this panel's WHERE clause rather than shown as a false zero.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 28},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT (data->'phase_timings'->>'queue_s')::numeric AS queue_s, (data->'phase_timings'->>'session_setup_s')::numeric AS session_setup_s, (data->'phase_timings'->>'agent_run_s')::numeric AS agent_run_s, (data->'phase_timings'->>'poll_wait_s')::numeric AS poll_wait_s, (data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric AS poll_overhead_s, (data->'agent_diagnostics'->>'llm_429_count')::int AS llm_429s, (data->'agent_diagnostics'->>'retry_lost_s')::numeric AS retry_lost_s, (data->'agent_diagnostics'->>'dom_elements_max')::int AS dom_elements_max, (data->'agent_diagnostics'->>'llm_coverage_gap')::int AS llm_coverage_gap FROM workflow_metrics WHERE workflow_id = '$run_id'"
+        "rawSql": "SELECT (data->'phase_timings'->>'queue_s')::numeric AS queue_s, (data->'phase_timings'->>'session_setup_s')::numeric AS session_setup_s, (data->'phase_timings'->>'agent_run_s')::numeric AS agent_run_s, (data->'phase_timings'->>'poll_wait_s')::numeric AS poll_wait_s, (data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric AS poll_overhead_s, (data->'agent_diagnostics'->>'llm_429_count')::int AS llm_429s, (data->'agent_diagnostics'->>'retry_lost_s')::numeric AS retry_lost_s, (data->'agent_diagnostics'->>'dom_elements_max')::int AS dom_elements_max, (data->'agent_diagnostics'->>'llm_coverage_gap')::int AS llm_coverage_gap FROM workflow_metrics WHERE workflow_id = '$run_id' AND data ? 'phase_timings'"
       }]
     },
     {

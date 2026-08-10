@@ -30,6 +30,19 @@ GRANTED_TABLES = {
 _TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 _CTE_RE = re.compile(r"\b([a-z_][a-z0-9_]*)\s+AS\s*\(", re.IGNORECASE)
 
+# Catches LEFT(...)/SUBSTRING(...)/SUBSTR(...) on run_id or workflow_id whether
+# or not the column is table-qualified (e.g. LEFT(m.workflow_id, 8)) — an alias
+# in between defeats a plain substring check on "left(workflow_id".
+_TRUNCATE_CALL_RE = re.compile(
+    r"\b(?:left|substring|substr)\s*\(\s*(?:[a-z_][a-z0-9_]*\.)?(?:run_id|workflow_id)\b",
+    re.IGNORECASE,
+)
+# Catches ::varchar(n)/::char(n) narrowing on the same columns, aliased or not.
+_TRUNCATE_CAST_RE = re.compile(
+    r"\b(?:[a-z_][a-z0-9_]*\.)?(?:run_id|workflow_id)\s*::\s*(?:varchar|char)\s*\(\s*\d+\s*\)",
+    re.IGNORECASE,
+)
+
 
 def _dashboards() -> list[Path]:
     return sorted(DASHBOARD_DIR.glob("*.json"))
@@ -116,13 +129,23 @@ def test_aggregate_dashboards_use_no_inner_join(path: Path):
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
 def test_run_ids_are_never_truncated(path: Path):
-    """Standing owner rule: full uuid, always."""
+    """Standing owner rule: full uuid, always.
+
+    A plain substring check on "left(workflow_id" misses a table-qualified
+    call like LEFT(m.workflow_id, 8) — the alias sits between the function
+    and the column. Use regexes that match with or without a qualifying
+    alias, covering LEFT/SUBSTRING/SUBSTR calls and ::varchar(n)/::char(n)
+    narrowing casts.
+    """
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
         collapsed = " ".join(sql.split()).lower()
-        for column in ("workflow_id", "run_id"):
-            assert f"left({column}" not in collapsed
-            assert f"substring({column}" not in collapsed
+        assert not _TRUNCATE_CALL_RE.search(collapsed), (
+            f"{path.name} truncates a run/workflow id via LEFT/SUBSTRING/SUBSTR"
+        )
+        assert not _TRUNCATE_CAST_RE.search(collapsed), (
+            f"{path.name} truncates a run/workflow id via ::varchar(n)/::char(n)"
+        )
 
 
 def test_trace_dashboard_has_a_run_id_variable():
