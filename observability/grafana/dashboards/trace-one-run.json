@@ -11,8 +11,8 @@
         "name": "run_id",
         "label": "Run id",
         "type": "textbox",
-        "query": "",
-        "current": {"text": "", "value": ""}
+        "query": "00000000-0000-0000-0000-000000000000",
+        "current": {"text": "00000000-0000-0000-0000-000000000000", "value": "00000000-0000-0000-0000-000000000000"}
       }
     ]
   },
@@ -111,7 +111,7 @@
     {
       "type": "logs",
       "title": "8 — Log lines from both services",
-      "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted.",
+      "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted. LogQL's |= line filter has no fail-closed form: |= \"\" matches every line (the empty string is a substring of everything), so a cleared run_id box would otherwise dump the unfiltered stream of both services here. The run_id variable's default is the sentinel 00000000-0000-0000-0000-000000000000, which cannot occur in real logs, so a fresh load or a cleared box shows nothing instead of everything. Paste a real run id to see its lines.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
       "options": {
