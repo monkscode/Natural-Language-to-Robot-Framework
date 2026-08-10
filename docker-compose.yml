@@ -17,7 +17,6 @@ services:
       - ./logs:/app/logs
       - ./chroma_db:/app/chroma_db
       - ./data:/app/data
-      - ./credentials.json:/app/credentials.json:ro
     environment:
       # Application configuration
       - APP_PORT=5000
@@ -107,7 +106,6 @@ services:
     volumes:
       # Shared logs directory
       - ./logs:/app/logs
-      - ./credentials.json:/app/credentials.json:ro
     environment:
       # Browser service configuration
       - BROWSER_USE_SERVICE_URL=http://browser-service:4999
@@ -231,6 +229,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      grafana-db-init:
+        condition: service_completed_successfully
     ports:
       # Loopback-only (IPv4 AND IPv6): same rationale as fastapi/browser-service/
       # postgres above — Windows resolves `localhost` to ::1 first, and Docker
@@ -258,7 +258,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "service=grafana"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
       interval: 30s
