@@ -86,6 +86,29 @@ of scope here.
   — bring the app up as containers (`docker compose up -d fastapi
   browser-service runner-exec postgres`, or the full default stack) for logs
   to show up next to the SQL.
+- **The time picker moves some panels and not others.** Narrow the range to
+  six hours on "Cost, latency and capacity" and exactly one panel of nine
+  changes — "LLM call failure rate", the only one spined on a tz-aware
+  column. The other eight read `workflow_metrics`, and that table's single
+  time column, `ts`, cannot be filtered honestly: it is naive, and it is not
+  consistently naive. Measured 2026-08-10 against `llm_traces.created_at`
+  over the 146 rows that join, 143 sit 5:30:13 ahead of UTC (written by the
+  host process in local time) and 3 sit within seconds of UTC (written by the
+  containerised backend). The skew depends on which process wrote the row, so
+  no `AT TIME ZONE` correction fixes it. Every affected panel now says
+  "All-time" in its description, and a test enforces that. The full picture:
+
+  | Dashboard | Panels that follow the picker |
+  |---|---|
+  | Execution outcomes | 7 of 7 — `execution_records` is tz-aware throughout |
+  | Learning health | 3 of 7 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
+  | Cost, latency and capacity | 1 of 9 |
+  | Locator reliability | 0 of 4 |
+  | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |
+
+  Making `ts` tz-aware is an application change plus a ruling on how to
+  backfill 143 rows whose intended instant is ambiguous. That is a separate
+  effort, not this branch.
 - **The compose stack runs prebuilt images, and `docker compose build` is a
   no-op for them.** `fastapi`, `runner-exec` and `browser-service` are
   declared image-only (`image: ${FASTAPI_IMAGE_TAG}`, etc.) with no `build:`

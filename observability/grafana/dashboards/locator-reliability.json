@@ -9,7 +9,7 @@
     {
       "type": "stat",
       "title": "True element success rate",
-      "description": "sum(successful_elements) / sum(total_elements), counting elements the locator pipeline actually resolved against elements it attempted — the row-level totals workflow-service writes alongside element_approach_metrics. The panel this replaced read 100% because element_approach_metrics only ever stores an entry for an element that was located; a failed locate never reaches the array (see workflow.py:2181, explained below). Excludes 32 synthetic rows dated 2026-06-25 (t1, t2, t3, status-test, msg-test, ts-test, mapping-test, full-e2e-1, live-t1, multi-test) whose workflow_id is not a UUID — the same real-runs filter every panel on this dashboard uses, so all five describe one population.",
+      "description": "sum(successful_elements) / sum(total_elements), counting elements the locator pipeline actually resolved against elements it attempted — the row-level totals workflow-service writes alongside element_approach_metrics. The panel this replaced read 100% because element_approach_metrics only ever stores an entry for an element that was located; a failed locate never reaches the array (see workflow.py:2181, explained below). Excludes 32 synthetic rows dated 2026-06-25 (t1, t2, t3, status-test, msg-test, ts-test, mapping-test, full-e2e-1, live-t1, multi-test) whose workflow_id is not a UUID — the same real-runs filter every panel on this dashboard uses, so all five describe one population. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
       "targets": [{
@@ -22,7 +22,7 @@
     {
       "type": "stat",
       "title": "Elements attempted, found and failed",
-      "description": "Same real-runs filter as every panel on this dashboard (workflow_id matches the UUID shape; 32 synthetic rows dated 2026-06-25 excluded). Reads the row-level total_elements/successful_elements/failed_elements fields on workflow_metrics.data, not element_approach_metrics — that array only ever holds located elements, so counting its entries reports the successes (240) with no failures visible at all. Replaces 'Elements observed', which did exactly that.",
+      "description": "Same real-runs filter as every panel on this dashboard (workflow_id matches the UUID shape; 32 synthetic rows dated 2026-06-25 excluded). Reads the row-level total_elements/successful_elements/failed_elements fields on workflow_metrics.data, not element_approach_metrics — that array only ever holds located elements, so counting its entries reports the successes (240) with no failures visible at all. Replaces 'Elements observed', which did exactly that. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
       "targets": [{
@@ -35,7 +35,7 @@
     {
       "type": "stat",
       "title": "Elements needing a fallback",
-      "description": "fallback_depth above 0 means the primary locator strategy did not resolve. Same real-runs filter as every panel on this dashboard. Conditioned on elements that were found: element_approach_metrics holds no failures (see the panel below), so this reads 'of the elements we resolved, how many needed a fallback' — not a fallback rate over every element attempted.",
+      "description": "fallback_depth above 0 means the primary locator strategy did not resolve. Same real-runs filter as every panel on this dashboard. Conditioned on elements that were found: element_approach_metrics holds no failures (see the panel below), so this reads 'of the elements we resolved, how many needed a fallback' — not a fallback rate over every element attempted. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
       "targets": [{
@@ -57,7 +57,7 @@
     {
       "type": "table",
       "title": "Runs with failed elements",
-      "description": "Same real-runs filter as every panel on this dashboard. This is the only granularity that survives the write-path gap explained above — it replaces 'Worst domains' with a question the data can actually answer: which specific runs had a locator failure, and how many elements did they lose. Full workflow_id, never truncated.",
+      "description": "Same real-runs filter as every panel on this dashboard. This is the only granularity that survives the write-path gap explained above — it replaces 'Worst domains' with a question the data can actually answer: which specific runs had a locator failure, and how many elements did they lose. Full workflow_id, never truncated. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 11},
       "targets": [{

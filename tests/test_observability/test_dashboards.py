@@ -208,8 +208,18 @@ def test_sql_panels_escape_template_variables(path: Path):
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
 def test_no_panel_time_filters_on_naive_ts(path: Path):
-    """workflow_metrics.ts runs 5.5h ahead of the tz-aware columns on this
-    deployment. Bucketing or windowing on it silently shifts every result.
+    """workflow_metrics.ts is naive, and not consistently naive. Bucketing or
+    windowing on it silently shifts results by an amount that varies row to
+    row.
+
+    Re-measured 2026-08-10 against llm_traces.created_at, which is tz-aware,
+    over the 146 rows that join: 143 sit 5:30:13 ahead of UTC — written by the
+    host process in local time — and 3 sit within seconds of UTC, written by
+    the containerised backend, whose clock is UTC. So `ts` is not one column
+    with one offset; it records whatever the writing process thought local
+    meant. No `AT TIME ZONE` correction can repair that, which makes the rule
+    below stronger than the constant-5.5h story it replaces: the column is not
+    merely shifted, it is ambiguous.
 
     A four-literal-substring check (date_trunc('day', m.ts, $__timeFilter(ts))
     only catches those exact spellings — an unaliased date_trunc('hour', ts)
@@ -220,6 +230,42 @@ def test_no_panel_time_filters_on_naive_ts(path: Path):
     for sql in _sql_targets(dashboard):
         assert not _BARE_TS_RE.search(sql), (
             f"{path.name} references the naive ts column: {sql[:200]}"
+        )
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_panels_ignoring_the_time_picker_say_so(path: Path):
+    """A panel the time picker does not move has to admit it.
+
+    Every dashboard ships a picker, and on the aggregate boards most panels
+    cannot honour it. workflow_metrics has exactly one time column, `ts`, and
+    it is unusable: naive, and not even consistently naive. Measured against
+    llm_traces.created_at on 2026-08-10 — 143 rows written by the host process
+    sit 5:30:13 ahead of UTC, 3 rows written by the containerised backend sit
+    within seconds of it. There is no fixed offset that repairs a column whose
+    skew depends on which process wrote the row, which is why
+    test_no_panel_time_filters_on_naive_ts forbids touching it at all.
+
+    That leaves a real trap: narrow the picker to six hours and one panel
+    moves while eight do not, with nothing on screen saying which is which.
+    Requiring the words in the description is crude, but it puts the fact in
+    the ⓘ tooltip the reader is already looking at, and it fails loudly when
+    someone adds a ninth unfiltered panel and says nothing.
+
+    trace-one-run.json is exempt: it selects one run by id, so time is not a
+    dimension there at all.
+    """
+    if path.name == "trace-one-run.json":
+        return
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for panel in dashboard.get("panels", []):
+        sqls = [t["rawSql"] for t in panel.get("targets", []) if t.get("rawSql")]
+        if not sqls or any("$__time" in sql for sql in sqls):
+            continue
+        description = panel.get("description") or ""
+        assert "All-time" in description, (
+            f"{path.name} panel {panel.get('title')!r} applies no time filter "
+            f"but its description does not say so"
         )
 
 

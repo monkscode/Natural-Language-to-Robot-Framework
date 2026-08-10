@@ -10,7 +10,7 @@
     {
       "type": "table",
       "title": "Cost by model and provider",
-      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. Covers 5 of 434 rows as of 2026-08-10 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues.",
+      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. Covers 5 of 434 rows as of 2026-08-10 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
       "targets": [{
@@ -23,7 +23,7 @@
     {
       "type": "table",
       "title": "Cost split: crewai against browser-use",
-      "description": "total_cost is these two summed. It does NOT include the learning path's LLM spend — see the learning-health dashboard.",
+      "description": "total_cost is these two summed. It does NOT include the learning path's LLM spend — see the learning-health dashboard. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
       "targets": [{
@@ -36,7 +36,7 @@
     {
       "type": "table",
       "title": "Cost and duration per crew stage",
-      "description": "Covers 13 of 434 rows as of 2026-08-10 — this fills in as traffic accrues on this branch. The other 20 rows that carry the crew_stage_metrics key hold a JSON null rather than an object and are excluded so the panel doesn't error, not filtered as bad data.",
+      "description": "Covers 13 of 434 rows as of 2026-08-10 — this fills in as traffic accrues on this branch. The other 20 rows that carry the crew_stage_metrics key hold a JSON null rather than an object and are excluded so the panel doesn't error, not filtered as bad data. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
       "targets": [{
@@ -49,7 +49,7 @@
     {
       "type": "table",
       "title": "Implicit cache hit rate",
-      "description": "Explains the run-to-run cost swing rather than leaving it as noise. A sample run cached 10,134 of 24,572 browser-use prompt tokens.",
+      "description": "Explains the run-to-run cost swing rather than leaving it as noise. A sample run cached 10,134 of 24,572 browser-use prompt tokens. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
       "targets": [{
@@ -62,7 +62,7 @@
     {
       "type": "table",
       "title": "Dryrun gate outcomes",
-      "description": "'unverified' means Docker or the executor was unavailable and the code was still delivered. It is an infrastructure signal, and is excluded from both sides of the pass ratio below. Covers 13 of 434 rows as of 2026-08-10; the other 20 rows that carry the dryrun_status key hold a JSON null rather than a string and are excluded so no blank-status row appears in the mix.",
+      "description": "'unverified' means Docker or the executor was unavailable and the code was still delivered. It is an infrastructure signal, and is excluded from both sides of the pass ratio below. Covers 13 of 434 rows as of 2026-08-10; the other 20 rows that carry the dryrun_status key hold a JSON null rather than a string and are excluded so no blank-status row appears in the mix. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
       "targets": [{
@@ -75,7 +75,7 @@
     {
       "type": "stat",
       "title": "Gate pass rate, excluding unverified",
-      "description": "Covers 13 of 434 rows as of 2026-08-10. All 13 are 'passed' — zero failed, zero unverified in the corpus so far. Read the 100% as 'no failure has been recorded yet', not as a quality guarantee about the product.",
+      "description": "Covers 13 of 434 rows as of 2026-08-10. All 13 are 'passed' — zero failed, zero unverified in the corpus so far. Read the 100% as 'no failure has been recorded yet', not as a quality guarantee about the product. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
       "targets": [{
@@ -88,7 +88,7 @@
     {
       "type": "table",
       "title": "Where the browser stage spends time",
-      "description": "poll_overhead_s is how long the backend kept polling after the agent finished. queue_s above zero means the browser service was at capacity. Covers 50 of 434 rows as of 2026-08-10; the other 169 rows that carry the phase_timings key hold a JSON null rather than an object and are excluded so runs matches what the averages are computed over.",
+      "description": "poll_overhead_s is how long the backend kept polling after the agent finished. queue_s above zero means the browser service was at capacity. Covers 50 of 434 rows as of 2026-08-10; the other 169 rows that carry the phase_timings key hold a JSON null rather than an object and are excluded so runs matches what the averages are computed over. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21},
       "targets": [{
@@ -101,7 +101,7 @@
     {
       "type": "table",
       "title": "Rate limiting and lost time",
-      "description": "The llm_429_count field is known to undercount against the raw log. Treat a non-zero value as a floor, not a total. Covers 49 of 434 rows as of 2026-08-10; the other 170 rows that carry the agent_diagnostics key hold a JSON null rather than an object and are excluded so runs matches what the sums are computed over.",
+      "description": "The llm_429_count field is known to undercount against the raw log. Treat a non-zero value as a floor, not a total. Covers 49 of 434 rows as of 2026-08-10; the other 170 rows that carry the agent_diagnostics key hold a JSON null rather than an object and are excluded so runs matches what the sums are computed over. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21},
       "targets": [{

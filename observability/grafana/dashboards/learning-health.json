@@ -45,7 +45,7 @@
     {
       "type": "table",
       "title": "Hint lifecycle",
-      "description": "36 rows as of 2026-08-10 — 21 active, 15 disabled, 0 conflict_flagged. The 'flagged' arm is correct but currently unreachable; do not read this dashboard as evidence there are no flagged hints today.",
+      "description": "36 rows as of 2026-08-10 — 21 active, 15 disabled, 0 conflict_flagged. The 'flagged' arm is correct but currently unreachable; do not read this dashboard as evidence there are no flagged hints today. All-time by design: a snapshot of the hint set as it stands now, so the time picker does not move it.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 11},
       "targets": [{
@@ -58,7 +58,7 @@
     {
       "type": "table",
       "title": "Hints that are earning their place",
-      "description": "A hint applied many times with few successes is a candidate for disabling.",
+      "description": "A hint applied many times with few successes is a candidate for disabling. All-time by design: a snapshot of the hint set as it stands now, so the time picker does not move it.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 11},
       "targets": [{
@@ -84,7 +84,7 @@
     {
       "type": "stat",
       "title": "Runs that proceeded with learning disabled",
-      "description": "optimization_fallback_used marks a run where learning init failed and generation continued without hints. Silent degradation.",
+      "description": "optimization_fallback_used marks a run where learning init failed and generation continued without hints. Silent degradation. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 12, "x": 0, "y": 26},
       "targets": [{
@@ -97,7 +97,7 @@
     {
       "type": "table",
       "title": "Model output that needed cleaning or retrying",
-      "description": "empty_response_failures is a silent model failure the run recovered from, or did not.",
+      "description": "empty_response_failures is a silent model failure the run recovered from, or did not. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 12, "x": 12, "y": 26},
       "targets": [{
