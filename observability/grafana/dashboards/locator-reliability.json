@@ -1,0 +1,97 @@
+{
+  "uid": "mark1-locators",
+  "title": "Mark 1 — Locator reliability",
+  "tags": ["mark1", "reliability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Element success rate, all history",
+      "description": "Spine is workflow_metrics with no join and no time filter, so all 429 rows contribute. Cross-table history is too sparse to put this on a time axis without losing 93% of it.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE (e.value->>'success')::boolean) / nullif(count(*), 0), 2) AS success_pct FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Elements observed",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS elements, count(DISTINCT m.workflow_id) AS runs FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Elements needing a fallback",
+      "description": "fallback_depth above 0 means the primary locator strategy did not resolve.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE (e.value->>'fallback_depth')::int > 0) / nullif(count(*), 0), 2) AS fallback_pct FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Failure rate by locator approach",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT e.value->>'locator_approach' AS approach, count(*) AS elements, count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) AS failed, round(100.0 * count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) / nullif(count(*), 0), 2) AS failure_pct FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array' GROUP BY 1 ORDER BY elements DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Failure rate by element tag",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT e.value->>'element_tag' AS tag, count(*) AS elements, count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) AS failed, round(100.0 * count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) / nullif(count(*), 0), 2) AS failure_pct FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array' GROUP BY 1 HAVING count(*) >= 5 ORDER BY failure_pct DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Failure rate by element shape",
+      "description": "Which structural properties predict a miss — iframe nesting, collections, a usable id, usable text.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, count(*) AS elements, round(100.0 * count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) / nullif(count(*), 0), 2) AS failure_pct FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array' GROUP BY 1,2,3,4 HAVING count(*) >= 5 ORDER BY failure_pct DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Worst domains",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT e.value->>'url_domain' AS domain, count(DISTINCT m.workflow_id) AS runs, count(*) AS elements, round(100.0 * count(*) FILTER (WHERE NOT (e.value->>'success')::boolean) / nullif(count(*), 0), 2) AS failure_pct, round(avg((e.value->>'fallback_depth')::int), 2) AS avg_fallback_depth FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE jsonb_typeof(m.data->'element_approach_metrics') = 'array' GROUP BY 1 HAVING count(*) >= 5 ORDER BY failure_pct DESC"
+      }]
+    }
+  ]
+}
