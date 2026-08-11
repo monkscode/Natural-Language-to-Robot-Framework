@@ -217,6 +217,7 @@ services:
       -h postgres -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}
       -v ON_ERROR_STOP=1
       -v grafana_password=${GRAFANA_DB_PASSWORD:-grafana_ro}
+      -f /sql/create_bench_schema.sql
       -f /sql/create_readonly_role.sql
     restart: "no"
     networks:

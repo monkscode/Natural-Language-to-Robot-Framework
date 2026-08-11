@@ -27,6 +27,45 @@ GRANTED_TABLES = {
     "trigger_events",
 }
 
+BENCH_TABLES = {
+    "bench.sweeps",
+    "bench.runs",
+}
+
+# Dashboards reading the bench corpus. The detachment rule — bench data must
+# never reach History or the production metrics dashboards — is enforced here
+# rather than left to convention, because grafana_ro can read both schemas.
+BENCH_DASHBOARDS = {
+    "bench-weakest-now.json",
+    "bench-change-impact.json",
+}
+
+# A schema-qualified bench.<table> reference. Tolerant of the quoting and
+# whitespace variants real SQL tools emit around a qualified identifier —
+# "bench"."runs", bench . runs, bench."runs", "bench".runs — because mutation
+# testing showed a production dashboard reading any of those forms passed
+# every check in this suite: this regex (via _bench_refs, below) is the only
+# thing keeping bench data out of the production dashboards.
+_SCHEMA_TABLE_RE = re.compile(
+    r'\b(?:FROM|JOIN)\s+"?bench"?\s*\.\s*"?([a-z_][a-z0-9_]*)"?', re.IGNORECASE)
+
+
+def _bench_refs(sql: str) -> set[str]:
+    """Schema-qualified bench.<table> references in `sql`, normalised to
+    `bench.<table>` regardless of which quoting/whitespace variant was used."""
+    return {f"bench.{t.lower()}" for t in _SCHEMA_TABLE_RE.findall(sql)}
+
+
+# A maximal run of 5 or more digits — an account number, a phone number, any
+# other numeric identifier. `(?<!\d)`/`(?!\d)` keep the run maximal so a
+# longer number is not undercounted as a shorter one.
+_LONG_DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{5,}(?!\d)")
+
+# A hostname: a name, a literal dot, then a TLD. Broad enough to catch a real
+# customer domain without this file ever naming one.
+_HOSTLIKE_RE = re.compile(
+    r"\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|in|co)\b", re.IGNORECASE)
+
 # Any FROM/JOIN target that is not a CTE name and not granted is a defect.
 _TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 _CTE_RE = re.compile(r"\b([a-z_][a-z0-9_]*)\s+AS\s*\(", re.IGNORECASE)
@@ -171,6 +210,32 @@ class TestFromClauseParsing:
         assert _from_clause_real_tables(sql) == ["workflow_metrics"]
 
 
+class TestBenchRefDetection:
+    """Mutation testing found that a production dashboard reading
+    `"bench"."runs"` (quoted identifiers) or `bench . runs` (whitespace
+    around the dot) passed every check in this suite — both are ordinary SQL
+    that a client tool commonly emits on copy. These tests prove _bench_refs
+    actually detects each mutated form, not merely that the dashboards
+    shipped today happen to pass.
+    """
+
+    def test_detects_plain_form(self):
+        assert _bench_refs("SELECT 1 FROM bench.runs") == {"bench.runs"}
+
+    def test_detects_fully_quoted_form(self):
+        assert _bench_refs('SELECT 1 FROM "bench"."runs"') == {"bench.runs"}
+
+    def test_detects_whitespace_around_the_dot(self):
+        assert _bench_refs("SELECT 1 FROM bench . runs") == {"bench.runs"}
+
+    def test_detects_partially_quoted_forms(self):
+        assert _bench_refs('SELECT 1 FROM bench."runs"') == {"bench.runs"}
+        assert _bench_refs('SELECT 1 FROM "bench".runs') == {"bench.runs"}
+
+    def test_ignores_unrelated_tables(self):
+        assert _bench_refs("SELECT 1 FROM workflow_metrics") == set()
+
+
 def test_readonly_role_grants_match_the_dashboards():
     """The GRANT list in the shipped .sql must equal GRANTED_TABLES.
 
@@ -214,15 +279,21 @@ def test_every_sql_target_queries_only_granted_tables(path: Path):
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
         ctes = {name.lower() for name in _CTE_RE.findall(sql)}
-        # LATERAL expansions alias jsonb functions, not tables.
+        # LATERAL expansions alias jsonb functions, not tables. `bench` is the
+        # SCHEMA qualifier of bench.<table>, which both collection paths below
+        # see as a bare identifier; the bench tables themselves are checked by
+        # test_bench_and_production_dashboards_never_mix.
+        ignored = {"lateral", "jsonb_each", "jsonb_array_elements",
+                   "jsonb_each_text", "bench"}
         referenced = {
-            t.lower() for t in _TABLE_RE.findall(sql)
-            if t.lower() not in {"lateral", "jsonb_each", "jsonb_array_elements",
-                                 "jsonb_each_text"}
+            t.lower() for t in _TABLE_RE.findall(sql) if t.lower() not in ignored
         }
         # A comma-join (`FROM a, b`) names its second table without a FROM
         # or JOIN keyword in front of it, which _TABLE_RE never sees.
-        referenced |= {t.lower() for t in _from_clause_real_tables(sql)}
+        referenced |= {
+            t.lower() for t in _from_clause_real_tables(sql)
+            if t.lower() not in ignored
+        }
         unknown = referenced - GRANTED_TABLES - ctes
         assert not unknown, f"{path.name} queries ungranted tables: {sorted(unknown)}"
 
@@ -432,3 +503,71 @@ def test_trace_dashboard_has_a_run_id_variable():
     assert loki_exprs, "no Loki target found on the trace dashboard"
     for expr in loki_exprs:
         assert "$run_id" in expr, f"Loki target does not interpolate $run_id: {expr}"
+
+
+def test_bench_grant_is_present_and_exact():
+    """A second GRANT block, matched separately from the seven-table app
+    grant, so neither can silently absorb the other."""
+    sql = ROLE_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(
+        r"\bGRANT\s+SELECT\s+ON\s+((?:bench\.[a-z_]+\s*,?\s*)+)TO\s+grafana_ro\b",
+        sql, re.IGNORECASE)
+    assert match, "create_readonly_role.sql has no GRANT SELECT on bench tables"
+    granted = {t.strip().lower() for t in match.group(1).split(",") if t.strip()}
+    assert granted == BENCH_TABLES, f"grants {sorted(granted)}"
+    assert re.search(r"GRANT\s+USAGE\s+ON\s+SCHEMA\s+bench\s+TO\s+grafana_ro",
+                     sql, re.IGNORECASE), "no USAGE grant on schema bench"
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_bench_and_production_dashboards_never_mix(path: Path):
+    """The detachment requirement, enforced statically.
+
+    A bench dashboard may read only the bench schema; a production dashboard
+    may read only the granted app tables. Blending them would put bench runs
+    into a History-facing number, which is the one thing bench data must never
+    do — and grafana_ro can read both, so nothing else stops it.
+    """
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    is_bench = path.name in BENCH_DASHBOARDS
+    for sql in _sql_targets(dashboard):
+        ctes = {name.lower() for name in _CTE_RE.findall(sql)}
+        bench_refs = _bench_refs(sql)
+        app_refs = {
+            t.lower() for t in _TABLE_RE.findall(sql)
+        } & GRANTED_TABLES
+        app_refs -= ctes
+        if is_bench:
+            assert not app_refs, (
+                f"{path.name} is a bench dashboard but reads production "
+                f"tables: {sorted(app_refs)}")
+            assert bench_refs <= BENCH_TABLES, (
+                f"{path.name} reads ungranted bench tables: "
+                f"{sorted(bench_refs - BENCH_TABLES)}")
+        else:
+            assert not bench_refs, (
+                f"{path.name} is a production dashboard but reads bench "
+                f"data: {sorted(bench_refs)}")
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_no_dashboard_hardcodes_an_identifying_value(path: Path):
+    """The repository is public. No committed dashboard JSON may hardcode a
+    value shaped like an identifier — a long number or a hostname — no
+    matter which specific value it is. A fixed list of known strings only
+    catches the ones someone already found and typed in; a shape check also
+    catches the one nobody has listed yet.
+
+    A run of 5+ digits is flagged unless every digit is 0:
+    trace-one-run.json's run_id variable ships a UUID built from
+    00000000/000000000000 as its empty-safe default sentinel, and that is a
+    placeholder, not an identifying number. A hostname is a name, a literal
+    dot, then a TLD (com/net/org/io/in/co) — broad enough to catch a real
+    domain without this file ever having to name one.
+    """
+    text = path.read_text(encoding="utf-8")
+    long_digit_runs = {m for m in _LONG_DIGIT_RUN_RE.findall(text) if set(m) != {"0"}}
+    assert not long_digit_runs, (
+        f"{path.name} hardcodes a 5+ digit number: {sorted(long_digit_runs)}")
+    hostlike = set(_HOSTLIKE_RE.findall(text))
+    assert not hostlike, f"{path.name} hardcodes a hostname: {sorted(hostlike)}"

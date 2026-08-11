@@ -113,3 +113,29 @@ def test_role_cannot_read_ungranted_tables():
         conn.rollback()
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             cur.execute("SELECT 1 FROM users LIMIT 1")
+
+
+@pytest.mark.integration
+def test_grafana_ro_can_read_bench_but_not_write_it():
+    """Read-only means read-only in the new schema too. A failed statement
+    poisons the transaction, so roll back between the two assertions —
+    otherwise the second raises InFailedSqlTransaction rather than the
+    InsufficientPrivilege the test is actually about."""
+    _apply_script()
+    with psycopg.connect(_ro_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM bench.sweeps")
+        cur.fetchone()
+        cur.execute("SELECT count(*) FROM bench.runs")
+        cur.fetchone()
+
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute(
+                "INSERT INTO bench.sweeps (sweep_name, captured_at, "
+                "captured_at_source, family, run_count, expected_count, "
+                "is_complete, is_flagged_invalid, header_shape) "
+                "VALUES ('x', now(), 'meta', 'public', 0, 30, false, false, 33)")
+        conn.rollback()
+
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cur.execute("DELETE FROM bench.runs")
+        conn.rollback()
