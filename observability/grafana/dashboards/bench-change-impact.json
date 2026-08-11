@@ -1,0 +1,163 @@
+{
+  "uid": "bench-change-impact",
+  "title": "Bench — did my change help",
+  "tags": [
+    "mark1",
+    "bench"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-1y",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "baseline",
+        "label": "Baseline sweep",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "nlrf-postgres"
+        },
+        "definition": "SELECT sweep_name AS __text, sweep_name AS __value\nFROM bench.sweeps\nWHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\nORDER BY captured_at DESC;",
+        "query": {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sweep_name AS __text, sweep_name AS __value\nFROM bench.sweeps\nWHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\nORDER BY captured_at DESC;",
+          "refId": "PostgreSQL-baseline-Variable-Query"
+        },
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "candidate",
+        "label": "Candidate sweep",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "nlrf-postgres"
+        },
+        "definition": "SELECT sweep_name AS __text, sweep_name AS __value\nFROM bench.sweeps\nWHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\nORDER BY captured_at DESC;",
+        "query": {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sweep_name AS __text, sweep_name AS __value\nFROM bench.sweeps\nWHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\nORDER BY captured_at DESC;",
+          "refId": "PostgreSQL-candidate-Variable-Query"
+        },
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "Flip table — per-query pass counts, baseline vs candidate",
+      "description": "All-time corpus; the two sweeps come from the baseline and candidate variables, not the time picker. Per-query pass counts for the two selected sweeps. This is the panel that turns \"26 of 30\" into \"q01 broke\" — which is the difference between knowing a change regressed and knowing what it regressed. Incomplete, INVALID-flagged and re-costed sweeps are kept out of both selectors.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "nlrf-postgres"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS (\n    SELECT query_id,\n           count(*) AS n,\n           count(*) FILTER (WHERE test_status = 'passed') AS passed\n    FROM bench.runs\n    WHERE sweep_name = ${baseline:sqlstring}\n    GROUP BY query_id\n),\ncand AS (\n    SELECT query_id,\n           count(*) AS n,\n           count(*) FILTER (WHERE test_status = 'passed') AS passed\n    FROM bench.runs\n    WHERE sweep_name = ${candidate:sqlstring}\n    GROUP BY query_id\n)\nSELECT base.query_id                                  AS \"query\",\n       base.passed || '/' || base.n                   AS \"baseline\",\n       cand.passed || '/' || cand.n                   AS \"candidate\",\n       cand.passed - base.passed                      AS \"delta\",\n       CASE\n           WHEN cand.passed < base.passed THEN 'BROKE'\n           WHEN cand.passed > base.passed THEN 'FIXED'\n           ELSE ''\n       END                                            AS \"verdict\"\nFROM base\nLEFT JOIN cand ON cand.query_id = base.query_id\nORDER BY \"delta\" ASC, base.query_id;"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Gate row — pass %, locator success, flake minus repairs",
+      "description": "All-time; follows the sweep selectors, not the time picker. Three gate metrics, not four. Planner salvage is NOT here and cannot be: there is no salvage column in any of the four CSV header shapes, no salvage field on the metrics model, and no guardrail span in llm_traces. It is a log-only signal and stays a manual check. Saying so beats rendering a silent 0, which would be exactly the kind of quiet wrong answer the blank-dryrun rule exists to prevent. The standing gate is pass rate at or above 96.7%, locator success 1.0, and flake minus repairs 0.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "nlrf-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH pair AS (\n    SELECT CASE WHEN sweep_name = ${baseline:sqlstring} THEN 'baseline'\n                ELSE 'candidate' END AS arm,\n           test_status, locator_success_rate, flake_retries, dryrun_repairs\n    FROM bench.runs\n    WHERE sweep_name IN (${baseline:sqlstring}, ${candidate:sqlstring})\n)\nSELECT arm                                                             AS \"arm\",\n       round(100.0 * count(*) FILTER (WHERE test_status = 'passed')\n             / count(*), 1)                                            AS \"pass %\",\n       round(avg(locator_success_rate)::numeric, 4)                    AS \"locator success\",\n       sum(flake_retries) - sum(dryrun_repairs)                        AS \"flake - repairs\"\nFROM pair\nGROUP BY arm\nORDER BY arm;"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Reproducibility — observed spread across same-code repeats",
+      "description": "All-time. Every deliberate same-code repeat in the corpus, shown beside the candidate delta so a reader can see the comparison's resolution: 25/30 vs 25/30, 30/30 vs 30/30, and 29/30 vs 30/30. n=3 is the entire evidence base for reproducibility. The 2.40 standard deviation across 53 clean complete public sweeps is NOT a noise floor — it spans a month in which the code genuinely improved from 22/30 to 30/30. The experiment that would close this: run one commit twice and record the pair.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "nlrf-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 'observed |delta| across same-code repeat pairs' AS \"measure\",\n       '0, 0, +1 (n=3)'                                 AS \"value\";"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Cost, tokens and latency — baseline vs candidate",
+      "description": "All-time; follows the sweep selectors, not the time picker. Two standing caveats apply and neither is defensible to ignore. Timing is comparable only within a session — Vertex latency swung from 0.76s to 18.2s inside one day — so a latency delta between sweeps run on different days measures the provider, not the change. Cost swings on the Gemini implicit-cache lottery by around 2% per run, enough to flip a verdict from +7.3% to -1.3%, so never gate on one run. There is deliberately no 429-based trust flag: 32 of the 78 sweeps do not carry llm_429_count at all, and across the 46 that do it correlates at r = +0.29 with pass count — positive, meaning sweeps with more 429s scored slightly better, which is confounding by time rather than a signal. The one sweep manually flagged INVALID at 3/30 recorded an unremarkable 4.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "nlrf-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH pair AS (\n    SELECT CASE WHEN sweep_name = ${baseline:sqlstring} THEN 'baseline'\n                ELSE 'candidate' END AS arm,\n           llm_cost_usd, llm_tokens, prompt_tokens, completion_tokens, total_s\n    FROM bench.runs\n    WHERE sweep_name IN (${baseline:sqlstring}, ${candidate:sqlstring})\n)\nSELECT arm                                              AS \"arm\",\n       round(avg(llm_cost_usd)::numeric, 4)             AS \"median-ish cost $\",\n       round(avg(llm_tokens)::numeric, 0)               AS \"avg tokens\",\n       round(avg(prompt_tokens)::numeric, 0)            AS \"avg prompt\",\n       round(avg(completion_tokens)::numeric, 0)        AS \"avg completion\",\n       round(avg(total_s)::numeric, 1)                  AS \"avg total s\"\nFROM pair\nGROUP BY arm\nORDER BY arm;"
+        }
+      ]
+    }
+  ]
+}
