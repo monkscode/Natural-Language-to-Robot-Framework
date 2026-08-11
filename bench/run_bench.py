@@ -605,7 +605,7 @@ def _load_history_best_effort(out_path) -> None:
         return
     try:
         from bench.load_history import load_corpus
-        with psycopg.connect(database_url) as conn:
+        with psycopg.connect(database_url, connect_timeout=10) as conn:
             result = load_corpus(conn, only=Path(out_path).name)
         _log(f"bench history loaded: {result}")
     except Exception as exc:  # noqa: BLE001 — never fail a paid sweep on this

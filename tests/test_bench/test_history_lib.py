@@ -3,11 +3,15 @@
 Referenced by: nothing — pytest entry point.
 Depends on: bench/history_lib.py, observability/postgres/create_bench_schema.sql
 """
+import ast
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from bench import bench_lib, history_lib
 
@@ -236,10 +240,24 @@ class TestBuildMetaRecordsRevision:
     that cannot be recovered honestly. Every future sweep describes itself."""
 
     def test_meta_carries_git_sha_and_branch(self):
+        """`"git_sha" in meta` alone stays green even if `_git` degrades to
+        None on every call — a fired timeout, a wrong cwd, git missing from
+        an image, or a future edit that just returns None; every future
+        sidecar would silently lose provenance and nothing would catch it.
+        This checkout is a real git repo on a real branch, so assert the
+        actual shape: a 40-character hex sha, and a branch that is not the
+        literal string "HEAD" (the detached-HEAD bug a companion fix
+        corrected — `rev-parse --abbrev-ref HEAD` prints "HEAD" and exits 0
+        on a detached checkout, so the old assertion would have stayed green
+        on exactly the fake value it should catch)."""
+        if shutil.which("git") is None:
+            pytest.skip("git binary not on PATH in this environment")
         meta = bench_lib.build_meta({}, {}, "http://localhost:5000",
                                     "http://localhost:4999")
-        assert "git_sha" in meta
-        assert "git_branch" in meta
+        assert meta["git_sha"] is not None
+        assert re.fullmatch(r"[0-9a-f]{40}", meta["git_sha"]), meta["git_sha"]
+        assert meta["git_branch"] is not None
+        assert meta["git_branch"] != "HEAD"
 
     def test_a_git_failure_does_not_break_the_sweep(self):
         """A detached HEAD, a missing git binary, or a tarball checkout must
@@ -277,3 +295,43 @@ def test_a_finished_sweep_is_loaded_by_name(capsys):
     _, kwargs = mock_load_corpus.call_args
     assert kwargs.get("only") == "2026-08-11-x.csv"
     assert "loaded" in capsys.readouterr().out
+
+
+def test_main_calls_load_history_after_the_done_log():
+    """No behavioural test can catch the call site vanishing: deleting the
+    `_load_history_best_effort(out_path)` line from main() leaves every other
+    test in this suite green, because nothing else calls main() end-to-end
+    and _load_history_best_effort's own tests invoke it directly, off the
+    module, without going through main() at all. So this is a static check —
+    it parses bench/run_bench.py's source with ast and asserts two things
+    about main(): that it still calls _load_history_best_effort at all, and
+    that the call comes AFTER the `done` log line rather than anywhere in the
+    function body. The ordering matters because of the owner's ruling that
+    put the call at the end of main() instead of inside gate_pins() (a
+    preflight helper that runs before a single CSV row exists) — a call
+    placed earlier than `done` would run before the sweep the dashboards are
+    supposed to describe has finished, or would be skipped by gate_pins's
+    early returns entirely."""
+    source = Path("bench/run_bench.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    main_func = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    done_log_line = None
+    call_site_line = None
+    for node in ast.walk(main_func):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "_load_history_best_effort":
+            call_site_line = node.lineno
+        elif node.func.id == "_log" and "done" in ast.unparse(node):
+            done_log_line = node.lineno
+
+    assert done_log_line is not None, "main() no longer logs a 'done' line"
+    assert call_site_line is not None, (
+        "main() no longer calls _load_history_best_effort — a finished "
+        "sweep would never refresh the bench dashboards again")
+    assert call_site_line > done_log_line, (
+        "_load_history_best_effort is called before the 'done' log line — "
+        "it must run only after the sweep's last CSV row is on disk")
