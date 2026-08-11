@@ -113,20 +113,62 @@ def load_corpus(conn, baselines_dir: Path = BASELINES, runs_dir: Path = RUNS,
     known = _existing_sweep_ids(conn, schema)
     for sweep in parsed_sweeps:
         known.setdefault(sweep["name"], sweep["ids"])
+
+    captured_cache: dict[str, object] = {}
+
+    def _captured(name: str):
+        if name not in captured_cache:
+            captured_cache[name] = _captured_of(parsed_sweeps, name, conn, schema)
+        return captured_cache[name]
+
+    def _is_root_candidate(name: str, ids: set[str]) -> bool:
+        """True when `name` wins history_lib.pick_parent against every sweep
+        it overlaps with at DERIVED_THRESHOLD — i.e. it is not itself the
+        derived member of its own overlap group. With three mutually
+        overlapping sweeps (a parent and two re-costings), preferring the
+        candidate that is itself a root resolves a derived_from chain in one
+        hop instead of pointing at a sweep that is itself derived."""
+        for other_name, other_ids in known.items():
+            if other_name == name:
+                continue
+            if history_lib.overlap_ratio(ids, other_ids) < history_lib.DERIVED_THRESHOLD:
+                continue
+            if history_lib.pick_parent(
+                    name, other_name, _captured(name), _captured(other_name)) != name:
+                return False
+        return True
+
     derived_count = 0
     for sweep in parsed_sweeps:
+        # Collect every candidate at or above the threshold instead of
+        # stopping at the first: _existing_sweep_ids groups by an unordered
+        # GROUP BY, so `known` iteration order is not stable across loads,
+        # and stopping early can settle on the wrong candidate before
+        # reaching the real parent when more than one sweep overlaps.
+        candidates = [
+            (other_name, other_ids, history_lib.overlap_ratio(sweep["ids"], other_ids))
+            for other_name, other_ids in known.items()
+            if other_name != sweep["name"]
+        ]
+        candidates = [c for c in candidates if c[2] >= history_lib.DERIVED_THRESHOLD]
+
         parent = None
-        for other_name, other_ids in known.items():
-            if other_name == sweep["name"]:
-                continue
-            ratio = history_lib.overlap_ratio(sweep["ids"], other_ids)
-            if ratio >= history_lib.DERIVED_THRESHOLD:
-                other_captured = _captured_of(parsed_sweeps, other_name, conn, schema)
-                winner = history_lib.pick_parent(
-                    sweep["name"], other_name, sweep["captured"], other_captured)
-                if winner != sweep["name"]:
-                    parent = other_name
-                break
+        if candidates:
+            best_ratio = max(ratio for _, _, ratio in candidates)
+            tier = [c for c in candidates if c[2] == best_ratio]
+            roots = [c for c in tier if _is_root_candidate(c[0], c[1])]
+            tier = roots or tier
+            winner_name = tier[0][0]
+            for other_name, _, _ in tier[1:]:
+                if history_lib.pick_parent(
+                        winner_name, other_name, _captured(winner_name),
+                        _captured(other_name)) != winner_name:
+                    winner_name = other_name
+            final = history_lib.pick_parent(
+                sweep["name"], winner_name, sweep["captured"], _captured(winner_name))
+            if final != sweep["name"]:
+                parent = winner_name
+
         sweep["derived_from"] = parent
         if parent:
             derived_count += 1

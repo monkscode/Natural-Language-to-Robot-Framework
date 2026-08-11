@@ -125,6 +125,9 @@ def test_a_blank_workflow_id_does_not_collide(conn, tmp_path):
     ])
     result = load_history.load_corpus(connection, baselines, runs, schema=schema)
     assert result["runs"] == 2
+    stored = connection.execute(
+        f"SELECT count(*) FROM {schema}.runs").fetchone()[0]
+    assert stored == 2
 
 
 def test_a_re_costed_sweep_is_marked_derived(conn, tmp_path):
@@ -147,6 +150,38 @@ def test_a_re_costed_sweep_is_marked_derived(conn, tmp_path):
         f"SELECT sweep_name, derived_from FROM {schema}.sweeps").fetchall())
     assert derived["2026-08-01-thing.csv"] is None
     assert derived["2026-08-01-thing-ADJ.csv"] == "2026-08-01-thing.csv"
+
+
+def test_two_re_costings_of_the_same_parent_both_point_at_the_root(conn, tmp_path):
+    """One sweep in the real corpus already has a re-costing; a second
+    re-costing of that same parent would create a three-way overlap — a
+    parent and TWO derived sweeps that all share the same workflow ids.
+    Stopping at the first candidate above DERIVED_THRESHOLD (the old
+    behaviour) could settle on one re-costing pointing at the OTHER
+    re-costing instead of the root
+    parent, because _existing_sweep_ids groups by an unordered GROUP BY, so
+    candidate order is not stable across loads. Both re-costings must
+    resolve to the same root parent, and the root itself must never be
+    marked derived."""
+    connection, schema = conn
+    baselines = tmp_path / "baselines"; baselines.mkdir()
+    runs = tmp_path / "runs"; runs.mkdir()
+    rows = [_row("q01", i, f"wid-{i}") for i in range(3)]
+    recost_a = [dict(r, llm_cost_usd="0.09") for r in rows]
+    recost_b = [dict(r, llm_cost_usd="0.11") for r in rows]
+    _write_sweep(baselines, "2026-08-01-thing.csv", rows,
+                 meta={"captured_at": "2026-08-01T10:00:00"})
+    _write_sweep(baselines, "2026-08-01-thing-ADJ-a.csv", recost_a,
+                 meta={"captured_at": "2026-08-01T11:00:00"})
+    _write_sweep(baselines, "2026-08-01-thing-ADJ-b.csv", recost_b,
+                 meta={"captured_at": "2026-08-01T12:00:00"})
+
+    load_history.load_corpus(connection, baselines, runs, schema=schema)
+    derived = dict(connection.execute(
+        f"SELECT sweep_name, derived_from FROM {schema}.sweeps").fetchall())
+    assert derived["2026-08-01-thing.csv"] is None
+    assert derived["2026-08-01-thing-ADJ-a.csv"] == "2026-08-01-thing.csv"
+    assert derived["2026-08-01-thing-ADJ-b.csv"] == "2026-08-01-thing.csv"
 
 
 def test_a_captured_payload_is_attached_and_a_missing_one_is_null(conn, tmp_path):
