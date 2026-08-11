@@ -115,3 +115,87 @@ def split_row(row: dict[str, str]) -> tuple[dict[str, object], dict[str, str]]:
             continue
         typed[CSV_TO_SQL[key]] = coerce(raw, kind)
     return typed, extra
+
+
+# A sweep whose workflow_id set overlaps an already-loaded sweep by at least
+# this much is a re-rendering of it, not a new experiment. The three real
+# cases in the corpus overlap at 1.0; the threshold leaves room for a sweep
+# that was resumed rather than re-costed.
+DERIVED_THRESHOLD = 0.9
+
+_EXPECTED = {"public": 30, "astpp": 18}
+
+
+def normalise_dryrun(generation_status: str | None,
+                     csv_cell: str | None,
+                     recorded: str | None) -> str:
+    """Resolve the dryrun outcome once, here, so no panel author can get it wrong.
+
+    Branch order, and why each branch exists:
+
+    1. A value recorded on the captured metrics row is ground truth. 60 of the
+       1,898 captured runs carry one, and all 60 read `passed`.
+    2. A non-blank CSV cell is the next best evidence. Only `failed` ever
+       appears there, on 2 of 1,984 rows.
+    3. `generation_status = 'error'` means the run never reached the gate.
+       All 34 such rows have a blank cell, and none carries a recorded value,
+       so this branch and branch 1 are disjoint on the real corpus. Calling
+       these `passed` would invent a gate result.
+    4. Blank on a completed run means PASSED. workflow_service.py:889 attaches
+       dryrun_status to the SSE `complete` event only when the gate did not
+       pass, so silence is success — for 1,982 of 1,984 rows.
+
+    Never returns NULL and never returns 'unknown': rendering blank as
+    "unknown" would invert the pipeline's main quality gate on almost the
+    whole corpus.
+    """
+    if recorded:
+        return recorded
+    cell = (csv_cell or "").strip()
+    if cell:
+        return cell
+    if (generation_status or "").strip() == "error":
+        return "not_reached"
+    return "passed"
+
+
+def sweep_family(query_ids: list[str]) -> str:
+    """`public` or `astpp`. Verified: no CSV mixes the two."""
+    if any((q or "").startswith("astpp") for q in query_ids):
+        return "astpp"
+    return "public"
+
+
+def expected_count(family: str) -> int:
+    return _EXPECTED[family]
+
+
+def is_flagged_invalid(sweep_name: str) -> bool:
+    """The owner's manual quarantine marker, carried in the filename."""
+    return sweep_name.upper().startswith("INVALID")
+
+
+def overlap_ratio(ids_a: set[str], ids_b: set[str]) -> float:
+    """Share of the smaller sweep's run ids that also appear in the larger.
+
+    Blank ids are excluded by the caller. Returns 0.0 rather than dividing by
+    zero when either side is empty.
+    """
+    if not ids_a or not ids_b:
+        return 0.0
+    return len(ids_a & ids_b) / min(len(ids_a), len(ids_b))
+
+
+def pick_parent(name_a: str, name_b: str, captured_a, captured_b) -> str:
+    """Of two sweeps that describe the same runs, which is the original.
+
+    Earlier capture wins. The three real derived pairs have no `.meta.json`
+    and fall back to file mtime, which can tie or even invert after a copy, so
+    a tie breaks to the shorter name: in all three cases the derived file
+    appends a suffix to its parent's name.
+    """
+    if captured_a != captured_b:
+        return name_a if captured_a < captured_b else name_b
+    if len(name_a) != len(name_b):
+        return name_a if len(name_a) < len(name_b) else name_b
+    return min(name_a, name_b)

@@ -134,3 +134,80 @@ def test_every_canonical_column_exists_in_the_ddl():
     ddl_cols = _ddl_columns("bench.runs")
     missing = set(history_lib.CSV_TO_SQL.values()) - ddl_cols
     assert not missing, f"DDL is missing columns: {sorted(missing)}"
+
+
+class TestNormaliseDryrun:
+    """Branch order matters and was verified against the corpus: the 34
+    generation-error rows and the 60 rows carrying a recorded value are
+    disjoint sets, so no row can take two branches."""
+
+    def test_recorded_value_wins(self):
+        assert history_lib.normalise_dryrun("complete", "", "passed") == "passed"
+        assert history_lib.normalise_dryrun("complete", "", "failed") == "failed"
+
+    def test_non_blank_csv_cell_is_used_when_nothing_was_recorded(self):
+        assert history_lib.normalise_dryrun("complete", "failed", None) == "failed"
+
+    def test_generation_error_never_reached_the_gate(self):
+        """All 34 generation-error rows have a blank cell. Stamping them
+        'passed' would invent a gate result on a run that never ran one."""
+        assert history_lib.normalise_dryrun("error", "", None) == "not_reached"
+
+    def test_blank_on_a_completed_run_means_passed(self):
+        """1,982 of 1,984 cells are blank. Reading blank as 'unknown' would
+        invert the pipeline's main quality gate on almost every row."""
+        assert history_lib.normalise_dryrun("complete", "", None) == "passed"
+
+    def test_the_result_is_never_null_or_unknown(self):
+        for gen in ("complete", "error", "", None):
+            out = history_lib.normalise_dryrun(gen, "", None)
+            assert out and out != "unknown"
+
+
+class TestSweepMetadata:
+    def test_family_is_astpp_when_any_query_id_is(self):
+        assert history_lib.sweep_family(["q01", "q02"]) == "public"
+        assert history_lib.sweep_family(["astpp_q01"]) == "astpp"
+
+    def test_expected_counts(self):
+        assert history_lib.expected_count("public") == 30
+        assert history_lib.expected_count("astpp") == 18
+
+    def test_invalid_flag_comes_from_the_filename(self):
+        assert history_lib.is_flagged_invalid(
+            "INVALID-429-2026-01-01-example.csv")
+        assert not history_lib.is_flagged_invalid("2026-01-01-example.csv")
+
+
+class TestDerivedSweepDetection:
+    def test_full_overlap_is_derived(self):
+        ids = {f"id{i}" for i in range(30)}
+        assert history_lib.overlap_ratio(ids, ids) == 1.0
+        assert history_lib.overlap_ratio(ids, ids) >= history_lib.DERIVED_THRESHOLD
+
+    def test_disjoint_sweeps_are_independent(self):
+        a = {f"a{i}" for i in range(30)}
+        b = {f"b{i}" for i in range(30)}
+        assert history_lib.overlap_ratio(a, b) == 0.0
+
+    def test_a_sweep_that_shares_a_couple_of_reruns_is_not_derived(self):
+        a = {f"id{i}" for i in range(30)}
+        b = {f"id{i}" for i in range(2)} | {f"new{i}" for i in range(28)}
+        assert history_lib.overlap_ratio(a, b) < history_lib.DERIVED_THRESHOLD
+
+    def test_empty_sets_never_report_overlap(self):
+        assert history_lib.overlap_ratio(set(), {"a"}) == 0.0
+        assert history_lib.overlap_ratio(set(), set()) == 0.0
+
+    def test_parent_is_the_earlier_sweep(self):
+        assert history_lib.pick_parent("later.csv", "earlier.csv",
+                                       "2026-08-02", "2026-08-01") == "earlier.csv"
+
+    def test_ties_break_to_the_shorter_name(self):
+        """The three real derived pairs have no .meta.json and are dated by
+        file mtime, which can tie or invert. In all three the derived file is
+        the longer name — it appends a suffix to its parent's."""
+        assert history_lib.pick_parent(
+            "2026-01-01-example-ADJ.csv",
+            "2026-01-01-example.csv",
+            "2026-01-01", "2026-01-01") == "2026-01-01-example.csv"
