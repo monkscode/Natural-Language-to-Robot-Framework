@@ -195,6 +195,21 @@ class TestDerivedSweepDetection:
         b = {f"id{i}" for i in range(2)} | {f"new{i}" for i in range(28)}
         assert history_lib.overlap_ratio(a, b) < history_lib.DERIVED_THRESHOLD
 
+    def test_a_resumed_subset_sweep_is_still_derived(self):
+        """overlap_ratio divides by the SMALLER set on purpose, not by
+        Jaccard. A resumed sweep is a strict subset of its parent, and
+        dividing by the smaller set is exactly what makes that subset score
+        1.0 instead of some partial number that could fall under the
+        threshold. Measured across the whole corpus: of all 3,003 sweep
+        pairs, the only non-zero overlap ratio that occurs is 1.0, exactly 3
+        times, all equal-sized (the three known -ADJ pairs) — there is no
+        partial-overlap case in the data today, so this test pins intent,
+        not a case that has happened yet."""
+        parent = {f"id{i}" for i in range(30)}
+        resumed_subset = {f"id{i}" for i in range(15)}
+        assert history_lib.overlap_ratio(parent, resumed_subset) == 1.0
+        assert history_lib.overlap_ratio(parent, resumed_subset) >= history_lib.DERIVED_THRESHOLD
+
     def test_empty_sets_never_report_overlap(self):
         assert history_lib.overlap_ratio(set(), {"a"}) == 0.0
         assert history_lib.overlap_ratio(set(), set()) == 0.0
