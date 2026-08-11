@@ -6,10 +6,6 @@ every rule in this module is unit-testable without a corpus or a connection.
 Referenced by: bench/load_history.py, tests/test_bench/test_history_lib.py
 Depends on: nothing outside the standard library
 """
-import logging
-import re
-
-logger = logging.getLogger(__name__)
 
 # Union of all four CSV header shapes observed in bench/baselines: 33 cols
 # (32 sweeps), 45 (1), 50 (2), 51 (43). 52 columns in total. `agent_steps`
