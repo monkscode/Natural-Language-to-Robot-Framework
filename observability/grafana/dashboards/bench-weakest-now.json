@@ -1,0 +1,83 @@
+{
+  "uid": "bench-weakest-now",
+  "title": "Bench — where the framework is weakest now",
+  "tags": ["mark1", "bench"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": { "from": "now-1y", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "window_sweeps",
+        "label": "Window (eligible sweeps)",
+        "type": "custom",
+        "query": "4,8,12,20",
+        "current": { "text": "8", "value": "8" },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "Weakest queries — recent vs all-time",
+      "description": "All-time and windowed pass rate per query, sorted by the regression, worst first. The window is the last N eligible sweeps set by the window_sweeps variable, not the time picker. Sweeps that are incomplete, filename-flagged INVALID, or re-costed duplicates of another sweep are excluded from both columns — admitting the INVALID sweep would drop 9 of the 10 public queries by 12.7 to 14.3 points, make the seven that truly sit at 100% read 85.7%, and evict both ASTPP sweeps from the window, inflating one ASTPP query by 16.7 points. Window sizes are thin: at the default of 8 the window holds 6 public and 2 ASTPP sweeps, so a public query has 18 runs and an ASTPP query 6, and one flipped run moves a public query 5.6 points and an ASTPP query 16.7. Read the n columns before the percentages.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "nlrf-postgres" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH eligible AS (\n    SELECT sweep_name, captured_at\n    FROM bench.sweeps\n    WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\n),\nwindowed AS (\n    SELECT sweep_name FROM eligible\n    ORDER BY captured_at DESC\n    LIMIT (${window_sweeps:sqlstring})::int\n),\nwin AS (\n    SELECT r.query_id,\n           count(*) AS n_recent,\n           count(*) FILTER (WHERE r.test_status = 'passed') AS p_recent\n    FROM bench.runs r\n    LEFT JOIN windowed w ON w.sweep_name = r.sweep_name\n    WHERE w.sweep_name IS NOT NULL\n    GROUP BY r.query_id\n),\nhist AS (\n    SELECT r.query_id,\n           count(*) AS n_all,\n           count(*) FILTER (WHERE r.test_status = 'passed') AS p_all\n    FROM bench.runs r\n    LEFT JOIN eligible e ON e.sweep_name = r.sweep_name\n    WHERE e.sweep_name IS NOT NULL\n    GROUP BY r.query_id\n)\nSELECT win.query_id                                            AS \"query\",\n       round(100.0 * win.p_recent / win.n_recent, 1)           AS \"recent %\",\n       win.n_recent                                            AS \"recent n\",\n       round(100.0 * hist.p_all / hist.n_all, 1)               AS \"all-time %\",\n       hist.n_all                                              AS \"all-time n\",\n       round(100.0 * win.p_recent / win.n_recent\n             - 100.0 * hist.p_all / hist.n_all, 1)             AS \"delta pp\"\nFROM win\nLEFT JOIN hist ON hist.query_id = win.query_id\nORDER BY \"delta pp\" ASC"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Flake by query",
+      "description": "All-time share of sweeps in which a query's repeats disagree with each other — one run passed, another failed, same code. Ranked per query on purpose: the aggregate across eligible sweeps is 16.0%, 97 split groups out of 608, which hides that the instability is concentrated in a handful of queries while the rest are solid. Groups with a single run are excluded, because one run cannot disagree with itself. Not moved by the time picker.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "nlrf-postgres" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH eligible AS (\n    SELECT sweep_name FROM bench.sweeps\n    WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL\n),\ngroups AS (\n    SELECT r.query_id, r.sweep_name,\n           count(*) AS repeats,\n           count(DISTINCT (r.test_status = 'passed')) AS distinct_outcomes\n    FROM bench.runs r\n    LEFT JOIN eligible e ON e.sweep_name = r.sweep_name\n    WHERE e.sweep_name IS NOT NULL\n    GROUP BY r.query_id, r.sweep_name\n    HAVING count(*) > 1\n)\nSELECT query_id                                              AS \"query\",\n       count(*)                                              AS \"sweeps\",\n       count(*) FILTER (WHERE distinct_outcomes > 1)         AS \"split sweeps\",\n       round(100.0 * count(*) FILTER (WHERE distinct_outcomes > 1)\n             / count(*), 1)                                  AS \"flake %\"\nFROM groups\nGROUP BY query_id\nORDER BY \"flake %\" DESC"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Failure shape per query",
+      "description": "All-time failure shape per query. The dryrun column reads the normalised value, not the raw CSV cell: a blank cell means the gate PASSED, because the pipeline reports the status only when it did not. 1,982 of 1,984 raw cells are blank, so treating blank as unknown would invert the main quality gate on almost the whole corpus. The gate-not-reached column is the separate case of a run that failed generation and never reached the gate at all: 5 such rows are visible here. The corpus holds 34, but 27 of them sit in the filename-flagged INVALID sweep and 2 in incomplete sweeps, both of which this panel excludes. step_budget_exhausted is populated on 52.1% of the rows this panel counts. Not moved by the time picker.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "nlrf-postgres" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT r.query_id                                                        AS \"query\",\n       count(*)                                                          AS \"runs\",\n       count(*) FILTER (WHERE r.generation_status = 'error')             AS \"generation errors\",\n       count(*) FILTER (WHERE r.test_status = 'failed')                  AS \"test failures\",\n       count(*) FILTER (WHERE r.dryrun_status_normalised = 'failed')     AS \"dryrun failed\",\n       count(*) FILTER (WHERE r.dryrun_status_normalised = 'not_reached') AS \"gate not reached\",\n       count(*) FILTER (WHERE r.step_budget_exhausted)                   AS \"step budget exhausted\"\nFROM bench.runs r\nLEFT JOIN bench.sweeps s ON s.sweep_name = r.sweep_name\nWHERE s.is_complete AND NOT s.is_flagged_invalid AND s.derived_from IS NULL\nGROUP BY r.query_id\nORDER BY \"generation errors\" DESC, \"test failures\" DESC"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Locator loss per query",
+      "description": "All-time per-element locator outcome, from the row-level total/successful/failed element counts, which are populated on 100% of runs. Deliberately NOT from element_approach_metrics: that array only ever records elements that WERE found, so a success rate computed from it is definitionally 100% and cannot express a failure. A per-approach breakdown stays unavailable until the browser service stops discarding the failure payload. Not moved by the time picker.",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "nlrf-postgres" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT r.query_id                                          AS \"query\",\n       count(*)                                            AS \"runs\",\n       count(*) FILTER (WHERE r.failed_elements > 0)       AS \"runs losing an element\",\n       sum(r.total_elements)                               AS \"elements attempted\",\n       sum(r.successful_elements)                          AS \"found\",\n       sum(r.failed_elements)                               AS \"failed\",\n       round(100.0 * sum(r.successful_elements)\n             / nullif(sum(r.total_elements), 0), 2)        AS \"success %\"\nFROM bench.runs r\nLEFT JOIN bench.sweeps s ON s.sweep_name = r.sweep_name\nWHERE s.is_complete AND NOT s.is_flagged_invalid AND s.derived_from IS NULL\nGROUP BY r.query_id\nORDER BY \"success %\" ASC NULLS LAST"
+        }
+      ]
+    }
+  ]
+}
