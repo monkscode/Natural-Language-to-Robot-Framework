@@ -3,10 +3,13 @@
 Referenced by: nothing — pytest entry point.
 Depends on: bench/history_lib.py, observability/postgres/create_bench_schema.sql
 """
+import os
 import re
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
-from bench import history_lib
+from bench import bench_lib, history_lib
 
 DDL = Path("observability/postgres/create_bench_schema.sql")
 
@@ -226,3 +229,51 @@ class TestDerivedSweepDetection:
             "2026-01-01-example-ADJ.csv",
             "2026-01-01-example.csv",
             "2026-01-01", "2026-01-01") == "2026-01-01-example.csv"
+
+
+class TestBuildMetaRecordsRevision:
+    """The 78 historical sweeps have only their filename as provenance, and
+    that cannot be recovered honestly. Every future sweep describes itself."""
+
+    def test_meta_carries_git_sha_and_branch(self):
+        meta = bench_lib.build_meta({}, {}, "http://localhost:5000",
+                                    "http://localhost:4999")
+        assert "git_sha" in meta
+        assert "git_branch" in meta
+
+    def test_a_git_failure_does_not_break_the_sweep(self):
+        """A detached HEAD, a missing git binary, or a tarball checkout must
+        cost provenance, never the run."""
+        with patch("bench.bench_lib.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(128, "git")):
+            meta = bench_lib.build_meta({}, {}, "http://localhost:5000",
+                                        "http://localhost:4999")
+        assert meta["git_sha"] is None
+        assert meta["git_branch"] is None
+
+
+def test_a_dead_database_does_not_break_a_finished_sweep(capsys):
+    """The CSV is already on disk when this runs. Losing the dashboard
+    refresh is acceptable; losing a 40-minute paid sweep is not."""
+    from bench import run_bench
+    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://nope:1/none"}):
+        run_bench._load_history_best_effort("bench/baselines/whatever.csv")
+    assert "NOT loaded" in capsys.readouterr().out
+
+
+def test_a_finished_sweep_is_loaded_by_name(capsys):
+    """The sweep just written is loaded by filename, not the whole corpus."""
+    from bench import run_bench
+    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://nope:1/none"}):
+        with patch("bench.run_bench.psycopg.connect") as mock_connect:
+            with patch("bench.load_history.load_corpus") as mock_load_corpus:
+                mock_load_corpus.return_value = {
+                    "sweeps": 1, "runs": 30, "derived": 0, "unknown_columns": [],
+                }
+                run_bench._load_history_best_effort(
+                    "bench/baselines/2026-08-11-x.csv")
+    mock_connect.assert_called_once()
+    mock_load_corpus.assert_called_once()
+    _, kwargs = mock_load_corpus.call_args
+    assert kwargs.get("only") == "2026-08-11-x.csv"
+    assert "loaded" in capsys.readouterr().out
