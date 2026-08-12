@@ -164,6 +164,20 @@ def _from_clause_real_tables(sql: str) -> list[str]:
     return tables
 
 
+def _production_table_refs(sql: str, ctes: set[str]) -> set[str]:
+    """Granted app tables this SQL reads, comma-joined ones included.
+
+    _TABLE_RE alone sees only the identifier directly after FROM or JOIN, so
+    the second table of `FROM bench.runs, workflow_metrics` is invisible to
+    it — it captures `bench`, the schema qualifier, and stops. Merging
+    _from_clause_real_tables closes that, exactly as the granted-tables guard
+    already does for its own reader.
+    """
+    refs = {t.lower() for t in _TABLE_RE.findall(sql)}
+    refs |= {t.lower() for t in _from_clause_real_tables(sql)}
+    return (refs & GRANTED_TABLES) - ctes
+
+
 def _dashboards() -> list[Path]:
     return sorted(DASHBOARD_DIR.glob("*.json"))
 
@@ -241,6 +255,45 @@ class TestBenchRefDetection:
             "SELECT 1 FROM execution_records e "
             "CROSS JOIN LATERAL bench.runs r"
         ) == {"bench.runs"}
+
+
+class TestProductionRefDetection:
+    """The mirror of TestBenchRefDetection, for the other direction.
+
+    _bench_refs keeps bench data out of the production dashboards. This helper
+    keeps production data out of the BENCH dashboards, and it had the weaker
+    reader: _TABLE_RE alone sees only the identifier directly after FROM or
+    JOIN, so the second table of a comma-join was invisible to it. The
+    granted-tables guard already compensates with _from_clause_real_tables and
+    says so in a comment; the isolation guard did not, so a bench dashboard
+    could read `FROM bench.runs, workflow_metrics` and pass the one check that
+    enforces detachment.
+    """
+
+    def test_comma_joined_production_table_is_detected(self):
+        """The gap. _TABLE_RE returns only ['bench'] here."""
+        sql = "SELECT 1 FROM bench.runs, workflow_metrics WHERE 1=1"
+        assert _TABLE_RE.findall(sql) == ["bench"], "premise changed"
+        assert _production_table_refs(sql, set()) == {"workflow_metrics"}
+
+    def test_plain_from_and_join_forms_still_detected(self):
+        assert _production_table_refs("SELECT 1 FROM test_runs", set()) == {"test_runs"}
+        assert _production_table_refs(
+            "SELECT 1 FROM bench.runs r JOIN llm_traces t ON t.x = r.x", set()
+        ) == {"llm_traces"}
+
+    def test_cte_name_is_not_a_production_table(self):
+        sql = "WITH test_runs AS (SELECT 1) SELECT 1 FROM test_runs"
+        assert _production_table_refs(sql, {"test_runs"}) == set()
+
+    def test_lateral_expansion_is_not_a_production_table(self):
+        sql = "SELECT 1 FROM bench.runs r, jsonb_each(r.metrics) AS s"
+        assert _production_table_refs(sql, set()) == set()
+
+    def test_ungranted_table_is_not_reported(self):
+        """The guard's job is detachment, not the granted-table check that
+        test_every_sql_target_queries_only_granted_tables already performs."""
+        assert _production_table_refs("SELECT 1 FROM audit_log", set()) == set()
 
 
 def test_readonly_role_grants_match_the_dashboards():
@@ -580,10 +633,7 @@ def test_bench_and_production_dashboards_never_mix(path: Path):
     for sql in _sql_targets(dashboard):
         ctes = {name.lower() for name in _CTE_RE.findall(sql)}
         bench_refs = _bench_refs(sql)
-        app_refs = {
-            t.lower() for t in _TABLE_RE.findall(sql)
-        } & GRANTED_TABLES
-        app_refs -= ctes
+        app_refs = _production_table_refs(sql, ctes)
         if is_bench:
             assert not app_refs, (
                 f"{path.name} is a bench dashboard but reads production "
@@ -595,6 +645,30 @@ def test_bench_and_production_dashboards_never_mix(path: Path):
             assert not bench_refs, (
                 f"{path.name} is a production dashboard but reads bench "
                 f"data: {sorted(bench_refs)}")
+
+
+def test_isolation_guard_fires_on_a_comma_joined_production_table(tmp_path):
+    """The detachment guard's own mutation test, in the style of
+    test_bench_grant_guard_fires_on_a_commented_out_grant above.
+
+    Proving _production_table_refs detects a comma-join is not the same as
+    proving the SHIPPED guard uses it — the guard read _TABLE_RE directly
+    before this, and that is exactly how the hole survived. Mutates a real
+    bench dashboard in a tmp copy, under its own filename so BENCH_DASHBOARDS
+    membership still matches; never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "bench-weakest-now.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    sql = dashboard["panels"][0]["targets"][0]["rawSql"]
+    mutated_sql = sql.replace("FROM bench.sweeps", "FROM bench.sweeps, workflow_metrics", 1)
+    assert mutated_sql != sql, "fixture FROM clause not found to mutate"
+    dashboard["panels"][0]["targets"][0]["rawSql"] = mutated_sql
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="reads production tables"):
+        test_bench_and_production_dashboards_never_mix(mutant)
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
