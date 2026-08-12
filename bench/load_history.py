@@ -188,6 +188,7 @@ def load_corpus(conn, baselines_dir: Path = BASELINES, runs_dir: Path = RUNS,
 
     unknown_total = 0
     run_total = 0
+    skipped_total = 0
     for sweep in parsed_sweeps:
         query_ids = [r.get("query_id") or "" for r in sweep["rows"]]
         family = history_lib.sweep_family(query_ids)
@@ -220,6 +221,20 @@ def load_corpus(conn, baselines_dir: Path = BASELINES, runs_dir: Path = RUNS,
 
         for row in sweep["rows"]:
             typed, extra = history_lib.split_row(row)
+            # query_id and repeat_index are the NOT NULL halves of the primary
+            # key, and both can arrive empty: coerce() maps a blank cell to
+            # None, and split_row omits a key the header never carried. Nothing
+            # commits until the end of this function, so letting the INSERT
+            # raise costs the entire corpus rather than the one bad row. No row
+            # in the 1,984-row corpus hits this today; the loader does not
+            # control what a future sweep writes.
+            if typed.get("query_id") is None or typed.get("repeat_index") is None:
+                skipped_total += 1
+                logger.warning(
+                    "%s: skipping a row with no query_id/repeat — both are "
+                    "primary-key columns; workflow_id=%r",
+                    sweep["name"], (row.get("workflow_id") or "").strip())
+                continue
             if extra:
                 unknown_total += len(extra)
                 logger.warning("%s: unrecognised columns routed to extra: %s",
@@ -243,10 +258,13 @@ def load_corpus(conn, baselines_dir: Path = BASELINES, runs_dir: Path = RUNS,
             run_total += 1
 
     conn.commit()
-    logger.info("loaded %d sweeps / %d runs (%d derived, %d unknown columns)",
-                len(parsed_sweeps), run_total, derived_count, unknown_total)
+    logger.info(
+        "loaded %d sweeps / %d runs (%d derived, %d unknown columns, "
+        "%d skipped)", len(parsed_sweeps), run_total, derived_count,
+        unknown_total, skipped_total)
     return {"sweeps": len(parsed_sweeps), "runs": run_total,
-            "derived": derived_count, "unknown_columns": unknown_total}
+            "derived": derived_count, "unknown_columns": unknown_total,
+            "skipped": skipped_total}
 
 
 def _existing_sweep_ids(conn, schema: str) -> dict[str, set[str]]:

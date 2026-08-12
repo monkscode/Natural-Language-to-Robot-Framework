@@ -228,3 +228,29 @@ def test_a_short_header_omits_typed_columns_without_breaking_the_insert(conn, tm
         f"SELECT plan_s, llm_calls, locator_success_rate FROM {schema}.runs "
         f"WHERE query_id = 'q01'").fetchone()
     assert row == (None, None, None)
+
+
+def test_a_row_with_a_blank_primary_key_costs_one_row_not_the_whole_load(
+        conn, tmp_path, caplog):
+    """coerce() maps a blank cell to None, but query_id and repeat_index are
+    NOT NULL halves of the primary key. A blank one therefore raised inside
+    the row loop, and since nothing commits until the end of load_corpus that
+    took every other sweep down with it — one malformed cell, no dashboards.
+
+    No row in the 1,984-row corpus hits this today. The loader has no control
+    over what a future sweep writes, and the blast radius is total, so it
+    degrades to skip-and-log instead.
+    """
+    connection, schema = conn
+    baselines = tmp_path / "baselines"; baselines.mkdir()
+    runs = tmp_path / "runs"; runs.mkdir()
+    rows = [_row("q01", 0, "wid-0"), _row("", 1, "wid-1"), _row("q03", 2, "wid-2")]
+    _write_sweep(baselines, "2026-08-01-blank-pk.csv", rows)
+
+    result = load_history.load_corpus(connection, baselines, runs, schema=schema)
+
+    loaded = connection.execute(
+        f"SELECT query_id FROM {schema}.runs ORDER BY query_id").fetchall()
+    assert [r[0] for r in loaded] == ["q01", "q03"], "good rows must still load"
+    assert result["runs"] == 2, "the skipped row must not be counted as loaded"
+    assert result.get("skipped") == 1
