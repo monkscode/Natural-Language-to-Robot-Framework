@@ -250,7 +250,7 @@ def _url_candidate(value: Any) -> str | None:
 
     Only the first whitespace-delimited token is considered: planner values
     sometimes carry trailing prose that strip() cannot reach (one captured
-    run: "https://sujal.astppbilling.org/    commit"). A value carrying an
+    run: "https://example.org/    commit"). A value carrying an
     explicit scheme qualifies only when that scheme is navigable — the browser
     service completes a *missing* scheme (prompts/workflow.py:106), so
     "about:blank" or "mailto:sales@x.com" would otherwise be handed to it as a
