@@ -113,15 +113,15 @@
     },
     {
       "type": "timeseries",
-      "title": "LLM call failure rate",
-      "description": "Spine is llm_traces, whose created_at is tz-aware. History runs 2026-06-19 to 2026-08-10 (52 days), which is why the dashboard defaults to a 1-year window rather than the usual 6h — a shorter default would load looking empty.",
+      "title": "LLM calls and failures per hour",
+      "description": "Real LLM calls only — rows where llm_traces.model is set. The table holds 100,907 rows but only 2,829 are model calls; the rest are OpenTelemetry HTTP, agent, task and orchestration spans, and every ERROR row in the table belongs to those. Before 2026-08-12 this panel counted all of them and reported 1,298 failures, none of which were LLM failures. Measured 2026-08-12 with the filter in place: 2,829 calls, 0 failures, p50 2.5 s, p95 17.9 s. Spine is created_at, which is tz-aware, so this panel follows the time picker. History runs 2026-06-19 onward, which is why the dashboard defaults to a 1-year window rather than 6h.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
       "targets": [{
         "refId": "A",
         "format": "time_series",
         "rawQuery": true,
-        "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) FILTER (WHERE status <> 'OK') AS failed_calls, count(*) AS total_calls FROM llm_traces WHERE created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) FILTER (WHERE status <> 'OK') AS failed_calls, count(*) AS llm_calls FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
       }]
     }
   ]

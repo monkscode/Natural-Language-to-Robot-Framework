@@ -170,7 +170,7 @@ should turn it into a link — Grafana cannot serve local files, and a
   to show up next to the SQL.
 - **The time picker moves some panels and not others.** Narrow the range to
   six hours on "Cost, latency and capacity" and exactly one panel of nine
-  changes — "LLM call failure rate", the only one spined on a tz-aware
+  changes — "LLM calls and failures per hour", the only one spined on a tz-aware
   column. The other eight read `workflow_metrics`, and that table's single
   time column, `ts`, cannot be filtered honestly: it is naive, and it is not
   consistently naive. Measured 2026-08-10 against `llm_traces.created_at`
@@ -291,9 +291,14 @@ should turn it into a link — Grafana cannot serve local files, and a
   cannot write there again. `test_runs` is now a small table — **38 rows**
   total, measured 2026-08-10 — so its trace-dashboard panel (one run, by id)
   is the trustworthy use of it; an aggregate over it is thin rather than
-  polluted. `llm_traces`, by contrast, holds **97,692 rows** (also measured
-  2026-08-10) because it is written once per LLM call rather than once per
-  run — do not expect the two tables to be comparable in size.
+  polluted. `llm_traces`, by contrast, holds **100,907 rows** (measured
+  2026-08-12) — but it is not a table of LLM calls. Only **2,829** of those
+  rows carry a `model`; the rest are OpenTelemetry spans written by the same
+  callback path: 60,796 HTTP client spans, 26,293 orchestration spans, 5,515
+  agent spans and 5,474 task spans. Every panel that counts LLM calls must
+  filter on `nullif(model, '') IS NOT NULL`, and a test enforces it. Both
+  `ERROR` classes in the table belong to the span rows — the LLM failure
+  count is 0.
 - **A single run's cost is not comparable to another single run's.** Gemini's
   implicit cache swings it. Compare medians over a window.
 - **Grafana is not embedded in the Mark 1 SPA, deliberately.** A Postgres

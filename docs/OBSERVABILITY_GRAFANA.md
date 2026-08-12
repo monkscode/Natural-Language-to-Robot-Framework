@@ -396,9 +396,14 @@ inspect --format '{{json .Config.Labels}}'`: no `service` key, only
 
 ## A note on `llm_traces`
 
-`llm_traces` holds one row per LiteLLM call with LiteLLM's own `response_cost`, which
-includes cache discounts and is more accurate than the recomputed figure on
-`workflow_metrics`. Historical rows are largely unattributed — the callback used to read
+`llm_traces` holds one row per LiteLLM call **plus** one row per OpenTelemetry span,
+in the same table. Measured 2026-08-12: 100,907 rows, of which 2,829 carry a `model`
+and are LLM calls; the rest are HTTP, agent, task and orchestration spans. Filter with
+`WHERE nullif(model, '') IS NOT NULL` before counting or averaging anything, or you are
+measuring HTTP traffic. The LLM rows carry LiteLLM's own `response_cost`, which includes
+cache discounts and is more accurate than the recomputed figure on `workflow_metrics`;
+`cost_usd` is non-zero on 1,603 of the 2,829 and `total_tokens` on 1,874, so any spend
+total from this table is a floor, not a total. Historical rows are largely unattributed — the callback used to read
 the workflow id from OpenTelemetry baggage, which cannot cross the thread-pool hop
 LiteLLM dispatches callbacks across. Calls are labelled through call metadata now, so
 rows written from this version onward carry `workflow_id`. Older rows do not, and are not

@@ -530,6 +530,70 @@ def test_jsonb_expansion_is_type_guarded(path: Path):
             )
 
 
+# A panel that aggregates over llm_traces without restricting to rows that
+# carry a model is not counting LLM calls. Measured 2026-08-12: the table
+# held 100,907 rows, of which 2,829 were model calls and the rest were
+# OpenTelemetry HTTP/agent/task/orchestration spans — and every one of the
+# 1,298 ERROR rows belonged to those spans, so the shipped "LLM call failure
+# rate" panel reported 1,298 failures while the real LLM failure count was 0.
+# A per-row panel that lists one run's calls (trace-one-run panel 6) does not
+# aggregate and is deliberately out of scope.
+_LLM_TRACES_FROM_RE = re.compile(r"\bFROM\s+llm_traces\b", re.IGNORECASE)
+_AGGREGATE_RE = re.compile(
+    r"\b(?:count|sum|avg|min|max|percentile_cont)\s*\(", re.IGNORECASE)
+# Anchored to WHERE: a bare substring search over the whole SQL string is
+# satisfied by an inert SELECT-list expression like `nullif(model,'') AS
+# model` while the aggregate still counts every span row — that is a real
+# shape a future author would write, since model values are unnormalised
+# and a normalising nullif(model,'') in a SELECT list (e.g. to group by
+# model) is the natural thing to reach for. Requiring the predicate inside
+# a WHERE clause is what actually restricts the rows the aggregate counts.
+_MODEL_RESTRICTION_RE = re.compile(
+    r"\bWHERE\b.*(?:nullif\s*\(\s*model\s*,[^)]*\)\s*IS\s+NOT\s+NULL"
+    r"|\bmodel\s+IS\s+NOT\s+NULL\b)",
+    re.IGNORECASE | re.DOTALL)
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_llm_traces_aggregates_count_only_real_llm_calls(path: Path):
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for sql in _sql_targets(dashboard):
+        if not _LLM_TRACES_FROM_RE.search(sql) or not _AGGREGATE_RE.search(sql):
+            continue
+        assert _MODEL_RESTRICTION_RE.search(sql), (
+            f"{path.name} aggregates over llm_traces without restricting to "
+            f"rows that carry a model, so it counts OpenTelemetry spans as "
+            f"LLM calls: {sql[:200]}"
+        )
+
+
+def test_llm_traces_guard_fires_on_a_select_list_model_filter(tmp_path):
+    """The aggregate guard's own mutation test, in the style of
+    test_bench_grant_guard_fires_on_a_commented_out_grant above.
+
+    Proving _MODEL_RESTRICTION_RE matches a WHERE-clause predicate is not
+    the same as proving it REJECTS one that sits somewhere else: a bare
+    substring search over the whole SQL string is satisfied by
+    `nullif(model,'') AS model` sitting in the SELECT list, with no
+    restriction in the WHERE clause at all — the aggregate still counts
+    every one of the table's 100,907 OpenTelemetry span rows. Mutates a tmp
+    copy of cost-latency-capacity.json with exactly that shape; never
+    touches the committed file.
+    """
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    dashboard["panels"][0]["targets"][0]["rawSql"] = (
+        "SELECT nullif(model,'') AS model, count(*) AS llm_calls "
+        "FROM llm_traces GROUP BY 1"
+    )
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="without restricting"):
+        test_llm_traces_aggregates_count_only_real_llm_calls(mutant)
+
+
 def test_trace_dashboard_has_a_run_id_variable():
     """A bare check that a variable named run_id exists is not enough to pin
     the defect Task 5's review called CRITICAL: LogQL's `|= ""` line filter
