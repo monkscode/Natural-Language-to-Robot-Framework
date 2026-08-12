@@ -23,14 +23,14 @@
     {
       "type": "table",
       "title": "Cost split: crewai against browser-use",
-      "description": "total_cost is these two summed. It does NOT include the learning path's LLM spend — see the learning-health dashboard. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "description": "Median crewai and browser-use spend over the runs that actually recorded a split — 157 of 447 rows as of 2026-08-12. The other 290 carry both keys at zero; including them put every median in the zero mass while total_cost, non-zero on 335 rows, did not, so the panel rendered 0.0000 against a non-zero total and read as broken. The three medians are computed independently and do not sum. total_cost excludes the learning path's LLM spend — see the learning-health dashboard. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'crewai_cost')::numeric))::numeric, 4) AS median_crewai_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'browser_use_cost')::numeric))::numeric, 4) AS median_browser_use_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_total_usd FROM workflow_metrics"
+        "rawSql": "SELECT count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'crewai_cost')::numeric))::numeric, 4) AS median_crewai_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'browser_use_cost')::numeric))::numeric, 4) AS median_browser_use_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_total_usd FROM workflow_metrics WHERE (data->>'crewai_cost')::numeric > 0 OR (data->>'browser_use_cost')::numeric > 0"
       }]
     },
     {

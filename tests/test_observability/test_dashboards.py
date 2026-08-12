@@ -594,6 +594,77 @@ def test_llm_traces_guard_fires_on_a_select_list_model_filter(tmp_path):
         test_llm_traces_aggregates_count_only_real_llm_calls(mutant)
 
 
+# A median over a column where most rows are zero lands in the zero mass and
+# reports 0.0000 next to a non-zero total, which reads as a broken panel.
+# Measured 2026-08-12: of 447 workflow_metrics rows, 157 carry crewai_cost > 0
+# and 97 carry browser_use_cost > 0, while 335 carry total_cost > 0.
+_COST_SPLIT_FIELD_RE = re.compile(
+    r"data->>'(?:crewai_cost|browser_use_cost)'", re.IGNORECASE)
+
+
+def _after_from(sql: str) -> str:
+    """The text from the first FROM onward — where a real WHERE clause lives.
+
+    A select-list `count(*) FILTER (WHERE ...)` also contains the WHERE
+    token, so anchoring on the token alone cannot tell a restriction that
+    narrows the aggregate's row set from one that merely labels a column.
+    Everything before the first FROM is the select list, so bounding the
+    search after it excludes the FILTER form by construction. The mirror of
+    _duration_aliases, which bounds itself to the text before that same FROM.
+    """
+    from_at = sql.upper().find(" FROM ")
+    return sql[from_at:] if from_at != -1 else sql
+
+
+_COST_SPLIT_RESTRICTION_RE = re.compile(
+    r"\bWHERE\b.*data->>'(?:crewai_cost|browser_use_cost)'\s*\)?\s*::\s*numeric\s*>\s*0",
+    re.IGNORECASE | re.DOTALL)
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_cost_split_panels_exclude_runs_that_recorded_no_split(path: Path):
+    if path.name == "trace-one-run.json":
+        return  # per-run panel: a zero split for that one run is the answer
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for sql in _sql_targets(dashboard):
+        if not _COST_SPLIT_FIELD_RE.search(sql) or not _AGGREGATE_RE.search(sql):
+            continue
+        assert _COST_SPLIT_RESTRICTION_RE.search(_after_from(sql)), (
+            f"{path.name} aggregates crewai_cost/browser_use_cost without "
+            f"excluding the runs that recorded no split, so the median falls "
+            f"in the zero mass: {sql[:200]}"
+        )
+
+
+def test_cost_split_guard_fires_on_a_select_list_filter_clause(tmp_path):
+    """The cost-split guard's own mutation test, in the style of
+    test_llm_traces_guard_fires_on_a_select_list_model_filter above.
+
+    A select-list `count(*) FILTER (WHERE (data->>'crewai_cost')::numeric >
+    0)` counts the split runs correctly, but the median still runs over all
+    447 rows because percentile_cont carries no restriction of its own — the
+    exact defect this task fixes. It also contains a literal WHERE token
+    inside the FILTER clause, so a guard anchored on the WHERE token alone,
+    with no bound on where in the SQL it may appear, is satisfied by that
+    inner WHERE and never notices the aggregate itself is unrestricted.
+    Mutates a tmp copy of cost-latency-capacity.json with exactly that shape;
+    never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    dashboard["panels"][0]["targets"][0]["rawSql"] = (
+        "SELECT count(*) FILTER (WHERE (data->>'crewai_cost')::numeric > 0) AS runs, "
+        "round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'crewai_cost')::numeric))::numeric, 4) AS median_crewai_usd "
+        "FROM workflow_metrics"
+    )
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="without excluding"):
+        test_cost_split_panels_exclude_runs_that_recorded_no_split(mutant)
+
+
 def test_trace_dashboard_has_a_run_id_variable():
     """A bare check that a variable named run_id exists is not enough to pin
     the defect Task 5's review called CRITICAL: LogQL's `|= ""` line filter
