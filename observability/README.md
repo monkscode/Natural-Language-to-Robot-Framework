@@ -99,13 +99,13 @@ the whole corpus, or catch up after the database was down for a sweep:
 PYTHONPATH=. DATABASE_URL=... venv/Scripts/python.exe bench/load_history.py
 ```
 
-Verified against the full corpus today: `loaded 78 sweeps / 1984 runs (3
-derived, 0 unknown columns)`.
+Verified against the full corpus on 2026-08-12: `loaded 78 sweeps / 1984 runs
+(3 derived, 0 unknown columns)`.
 
 **The loader is idempotent — re-running it is always safe.** It is an upsert
-over files already on disk, not an append. Run twice back to back today and
-both runs printed the identical line: `loaded 78 sweeps / 1984 runs (3
-derived, 0 unknown columns)`.
+over files already on disk, not an append. Run twice back to back on
+2026-08-12 and both runs printed the identical line: `loaded 78 sweeps / 1984
+runs (3 derived, 0 unknown columns)`.
 
 **Three of the 78 sweeps are dated by file mtime, not a recorded
 `captured_at`.** They have no `.meta.json` sidecar, and mtime is weaker
@@ -134,12 +134,12 @@ But 34 runs never completed generation at all (`generation_status = 'error'`)
 and are also blank — reading those as `passed` invents a gate result they
 never reached. The loader resolves this once, into
 `dryrun_status_normalised`, so no panel has to get it right itself. Measured
-today: 1,948 rows `passed`, 34 `not_reached`, 2 `failed`.
+2026-08-12: 1,948 rows `passed`, 34 `not_reached`, 2 `failed`.
 
 **`llm_429_count` is not a trust signal, and its correlation with pass count
-has the wrong sign to read either way.** 46 of the 78 sweeps carry the column
-at all; 32 don't. Across the 46 that do, more 429s goes with a slightly
-*higher* pass count, r = +0.29 (+0.25 restricted to the 36 that are also
+has the wrong sign to read either way.** As of 2026-08-12, 46 of the 78 sweeps
+carry the column at all; 32 don't. Across the 46 that do, more 429s go with a
+slightly *higher* pass count, r = +0.29 (+0.25 restricted to the 36 that are also
 complete, non-derived and non-invalid). That is confounding by time — later
 sweeps ran busier and also generally scored better — not a quality signal in
 either direction. Counting 429 lines in `application.log` is still the only
@@ -150,11 +150,13 @@ That provenance cannot be recovered after the fact and will not be
 back-filled. Every sweep captured from now on records both.
 
 **Artifacts and `llm_traces` stay on disk — only `bench.sweeps` and
-`bench.runs` are loaded.** They run to 1,895.2 MiB and 94.7 MiB against 9.8
-MiB loaded, and the dashboards say which run, not what to fetch. `artifact_dir`
-is loaded as plain text where a run has one; nothing should turn it into a
-link — Grafana cannot serve local files, and a `file://` link from an
-`http://` page is blocked by every browser.
+`bench.runs` are loaded.** As of 2026-08-12 that's roughly 1.9 GiB of run
+artifacts and about 95 MiB of `llm_traces.json` against under 10 MiB of source
+JSON actually loaded — all three grow with every sweep, so the ratio between
+them is the point, not the digits, and the dashboards say which run, not what
+to fetch. `artifact_dir` is loaded as plain text where a run has one; nothing
+should turn it into a link — Grafana cannot serve local files, and a
+`file://` link from an `http://` page is blocked by every browser.
 
 ## Things that will mislead you if you do not know them
 
