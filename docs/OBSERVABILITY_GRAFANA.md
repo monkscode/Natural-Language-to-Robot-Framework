@@ -49,6 +49,16 @@ The two tables do not keep time the same way, and mixing them silently shifts re
 | `test_runs.created_at` | `TIMESTAMPTZ` | Postgres, as `now()` |
 | `llm_traces.created_at` | `TIMESTAMPTZ` | Postgres, as `now()` |
 
+**Two duration fields, and they are not interchangeable.**
+`workflow_metrics.data->>'workflow_duration_s'` is the wall clock of the whole
+generation run — both crew kickoffs, the element stage and the dryrun gate. It exists
+only on rows written from 2026-08 onward. `data->>'execution_time'` is the browser-use
+element stage alone, passed straight through from the browser service, and it has been
+written since the beginning. Measured 2026-08-12 over the 15 rows carrying both,
+`execution_time` is 45% of `workflow_duration_s` on average and never exceeds it. Alias
+them `run_wall_s` and `browser_stage_s` so a reader can tell which one a column is; a
+test enforces that on the dashboards.
+
 Comparing a naive `timestamp` to a `timestamptz` makes Postgres reinterpret the naive
 value in the **session** time zone. So when the backend and the database disagree about
 time zone, `ts` is read as if it were the database's clock and lands off by the offset.
@@ -76,7 +86,7 @@ SELECT
     (data->>'total_llm_calls')::int       AS llm_calls,
     (data->>'crewai_tokens')::int         AS crewai_tokens,
     (data->>'browser_use_tokens')::int    AS browser_use_tokens,
-    (data->>'workflow_duration_s')::numeric AS duration_s
+    (data->>'workflow_duration_s')::numeric AS run_wall_s
 FROM workflow_metrics
 WHERE ts > now() - interval '7 days'
 ORDER BY ts DESC;
@@ -298,7 +308,7 @@ SELECT
     m.workflow_id,
     r.user_query,
     (m.data->>'total_cost')::numeric        AS cost_usd,
-    (m.data->>'workflow_duration_s')::numeric AS duration_s,
+    (m.data->>'workflow_duration_s')::numeric AS run_wall_s,
     m.data->>'dryrun_status'                AS dryrun_status
 FROM workflow_metrics m
 LEFT JOIN test_runs r ON r.run_id = m.workflow_id
@@ -342,7 +352,7 @@ reaching either terminal path.
 
 ```sql
 SELECT
-    data->>'workflow_duration_s'  AS duration_s,
+    data->>'workflow_duration_s'  AS run_wall_s,
     data->>'total_cost'           AS cost_usd,
     data->>'dryrun_status'        AS gate,
     data->>'dryrun_attempts'      AS attempts,

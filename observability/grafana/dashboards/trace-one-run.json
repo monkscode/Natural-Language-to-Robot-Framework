@@ -34,14 +34,14 @@
     {
       "type": "table",
       "title": "2 — Gate outcome and cost",
-      "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. dryrun_status and crew_stage_metrics carry the key on 33/434 rows, but only 13/434 hold a usable (non-null) value, as of 2026-08-10 — the rest carry a JSON null.",
+      "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. run_wall_s is workflow_duration_s — the whole generation run, not the browser-use element stage timed in panel 5. dryrun_status and crew_stage_metrics carry the key on 33/434 rows, but only 13/434 hold a usable (non-null) value, as of 2026-08-10 — the rest carry a JSON null.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT workflow_id, data->>'model_provider' AS provider, data->>'model_name' AS model, (data->>'workflow_duration_s')::numeric AS duration_s, (data->>'total_cost')::numeric AS cost_usd, (data->>'crewai_cost')::numeric AS crewai_cost, (data->>'browser_use_cost')::numeric AS browser_use_cost, data->>'dryrun_status' AS gate, (data->>'dryrun_attempts')::int AS attempts, (data->>'dryrun_repairs')::int AS repairs, data->'guardrail_attempts' AS guardrails, (data->>'optimization_fallback_used')::boolean AS learning_fallback FROM workflow_metrics WHERE workflow_id = ${run_id:sqlstring}"
+        "rawSql": "SELECT workflow_id, data->>'model_provider' AS provider, data->>'model_name' AS model, (data->>'workflow_duration_s')::numeric AS run_wall_s, (data->>'total_cost')::numeric AS cost_usd, (data->>'crewai_cost')::numeric AS crewai_cost, (data->>'browser_use_cost')::numeric AS browser_use_cost, data->>'dryrun_status' AS gate, (data->>'dryrun_attempts')::int AS attempts, (data->>'dryrun_repairs')::int AS repairs, data->'guardrail_attempts' AS guardrails, (data->>'optimization_fallback_used')::boolean AS learning_fallback FROM workflow_metrics WHERE workflow_id = ${run_id:sqlstring}"
       }]
     },
     {

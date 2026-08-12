@@ -10,14 +10,14 @@
     {
       "type": "table",
       "title": "Cost by model and provider",
-      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. Covers 5 of 434 rows as of 2026-08-10 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. median_run_wall_s is workflow_duration_s: wall time for the whole generation run — both crew kickoffs, the element stage and the dryrun gate. It is not execution_time, which times the browser-use element stage alone and runs 45% of the run's wall time on average, measured over the 15 rows that carry both as of 2026-08-12. Covers 18 of 447 rows as of 2026-08-12 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT data->>'model_provider' AS provider, data->>'model_name' AS model, count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_cost_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'workflow_duration_s')::numeric))::numeric, 1) AS median_duration_s FROM workflow_metrics WHERE data ? 'model_name' GROUP BY 1, 2 ORDER BY runs DESC"
+        "rawSql": "SELECT data->>'model_provider' AS provider, data->>'model_name' AS model, count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_cost_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'workflow_duration_s')::numeric))::numeric, 1) AS median_run_wall_s FROM workflow_metrics WHERE data ? 'model_name' GROUP BY 1, 2 ORDER BY runs DESC"
       }]
     },
     {

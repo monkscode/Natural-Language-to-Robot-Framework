@@ -913,3 +913,68 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
     assert "error" in default and "critical" in default, (
         f"level variable defaults to {default!r}; it must default to the "
         f"error classes, not to everything")
+
+
+# workflow_metrics carries two different durations and they are a part and a
+# whole, not two measurements of one thing:
+#   workflow_duration_s = wall clock of the whole generation run — both crew
+#       kickoffs, the element stage and the dryrun gate (workflow_service.py,
+#       "Wall clock for the whole run. Deliberately NOT execution_time").
+#   execution_time      = browser_metrics['execution_time'], the browser-use
+#       element stage alone, passed straight through.
+# Measured 2026-08-12 over the 15 rows carrying both non-zero: execution_time
+# <= workflow_duration_s on 15 of 15, ratio 0.089-0.623, mean 0.45. An alias
+# of `duration_s` on either one is therefore ambiguous by construction, so
+# each must carry a word that says which span it measures.
+_DURATION_FIELD_RE = re.compile(
+    r"data->>'(workflow_duration_s|execution_time)'", re.IGNORECASE)
+_ALIAS_AFTER_RE = re.compile(r"\bAS\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
+_DURATION_ALIAS_RULE = {"workflow_duration_s": "wall", "execution_time": "browser"}
+
+
+def _duration_aliases(sql: str) -> list[tuple[str, str]]:
+    """(field, alias) for each duration field selected in the SELECT list.
+
+    Only select-list occurrences carry an alias, so the search is bounded to
+    the text before the first FROM — otherwise a field used in a WHERE clause
+    would pick up some later column's alias and fail a correct panel.
+    """
+    from_at = sql.upper().find(" FROM ")
+    select_list = sql[:from_at] if from_at != -1 else sql
+    out = []
+    for match in _DURATION_FIELD_RE.finditer(select_list):
+        alias = _ALIAS_AFTER_RE.search(select_list[match.end():])
+        out.append((match.group(1).lower(), alias.group(1).lower() if alias else ""))
+    return out
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_duration_fields_are_aliased_unambiguously(path: Path):
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for sql in _sql_targets(dashboard):
+        for field, alias in _duration_aliases(sql):
+            required = _DURATION_ALIAS_RULE[field]
+            assert required in alias, (
+                f"{path.name} selects {field} as {alias!r}, which does not "
+                f"say which duration it is — the alias must contain "
+                f"{required!r}: {sql[:200]}"
+            )
+
+
+def test_duration_alias_guard_fires_on_an_ambiguous_execution_time_alias(tmp_path):
+    """No shipped panel reads execution_time yet — Phase 2's runs list will be
+    the first. Without this, that half of the rule is untested until then, and
+    an untested guard is a guard that does not fire. Mutates a tmp copy; never
+    touches the committed file."""
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    dashboard["panels"][0]["targets"][0]["rawSql"] = (
+        "SELECT count(*) AS runs, "
+        "round((data->>'execution_time')::numeric, 1) AS duration_s "
+        "FROM workflow_metrics"
+    )
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="which duration it is"):
+        test_duration_fields_are_aliased_unambiguously(mutant)
