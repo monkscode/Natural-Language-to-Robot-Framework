@@ -278,13 +278,20 @@ def main() -> int:
         description="Load bench sweep CSVs into the Postgres `bench` schema.")
     parser.add_argument("--only", default=None,
                         help="load a single sweep by CSV filename")
+    # run_bench passes the sweep's own directory, so a sweep written outside
+    # bench/baselines still loads. The hand-run recovery path needs the same
+    # reach, or it cannot load the sweep whose automatic load just failed.
+    parser.add_argument("--baselines-dir", default=BASELINES, type=Path,
+                        help="directory to scan for sweep CSVs "
+                             f"(default: {BASELINES})")
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     args = parser.parse_args()
     if not args.database_url:
         logger.error("no DATABASE_URL set and --database-url not given")
         return 2
     with psycopg.connect(args.database_url) as conn:
-        result = load_corpus(conn, only=args.only)
+        result = load_corpus(conn, baselines_dir=args.baselines_dir,
+                             only=args.only)
     logger.info("done: %s", result)
     return 0
 

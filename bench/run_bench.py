@@ -597,21 +597,32 @@ def _load_history_best_effort(out_path) -> None:
     on disk. The failure is logged loudly enough to notice and re-run
     `python bench/load_history.py` by hand.
     """
+    # Look for the sweep where it was actually written. `--out` accepts any
+    # path and append_row() mkdirs the parent, so defaulting to bench/baselines
+    # loses every sweep written anywhere else. The retry command spells both
+    # out for the same reason — a bare `load_history.py` globs bench/baselines
+    # and would report success having loaded nothing.
+    out_path = Path(out_path)
+    # as_posix(): the bench is run from Git Bash, where a Windows backslash in
+    # `bench\private` is an escape character, not a separator.
+    retry_cmd = (f"python bench/load_history.py "
+                 f"--baselines-dir {out_path.parent.as_posix()} "
+                 f"--only {out_path.name}")
     database_url = os.environ.get("DATABASE_URL") or getattr(
         settings, "DATABASE_URL", None)
     if not database_url:
-        _log("bench history not loaded: no DATABASE_URL. "
-             "Run `python bench/load_history.py` by hand to refresh Grafana.")
+        _log(f"bench history not loaded: no DATABASE_URL. "
+             f"Run `{retry_cmd}` by hand to refresh Grafana.")
         return
     try:
         from bench.load_history import load_corpus
         with psycopg.connect(database_url, connect_timeout=10) as conn:
-            result = load_corpus(conn, only=Path(out_path).name)
+            result = load_corpus(
+                conn, baselines_dir=out_path.parent, only=out_path.name)
         _log(f"bench history loaded: {result}")
     except Exception as exc:  # noqa: BLE001 — never fail a paid sweep on this
         _log(f"bench history NOT loaded ({exc.__class__.__name__}: {exc}). "
-             f"The sweep CSV is intact. Run "
-             f"`python bench/load_history.py` to refresh Grafana.")
+             f"The sweep CSV is intact. Run `{retry_cmd}` to refresh Grafana.")
 
 
 def main() -> int:

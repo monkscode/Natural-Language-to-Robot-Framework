@@ -364,7 +364,13 @@ def test_a_dead_database_does_not_break_a_finished_sweep(capsys):
     from bench import run_bench
     with patch.dict(os.environ, {"DATABASE_URL": "postgresql://nope:1/none"}):
         run_bench._load_history_best_effort("bench/baselines/whatever.csv")
-    assert "NOT loaded" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "NOT loaded" in out
+    # The recovery command has to name the sweep it failed on. A bare
+    # `load_history.py` globs bench/baselines and would report success
+    # having loaded nothing when the sweep lives anywhere else.
+    assert "--only whatever.csv" in out
+    assert "--baselines-dir" in out
 
 
 def test_a_finished_sweep_is_loaded_by_name(capsys):
@@ -383,6 +389,63 @@ def test_a_finished_sweep_is_loaded_by_name(capsys):
     _, kwargs = mock_load_corpus.call_args
     assert kwargs.get("only") == "2026-08-11-x.csv"
     assert "loaded" in capsys.readouterr().out
+
+
+def test_a_sweep_written_outside_the_baselines_dir_is_still_found(capsys):
+    """`--out` accepts any path — append_row() even mkdirs the parent — but
+    load_corpus defaults to bench/baselines and matches `only` by filename
+    within it. Passing only the name meant a sweep written anywhere else
+    raised FileNotFoundError, and the operator's first sight of it was
+    "bench history NOT loaded" at the end of a 40-minute paid run.
+    """
+    from bench import run_bench
+    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://nope:1/none"}):
+        with patch("bench.run_bench.psycopg.connect"):
+            with patch("bench.load_history.load_corpus") as mock_load_corpus:
+                mock_load_corpus.return_value = {
+                    "sweeps": 1, "runs": 18, "derived": 0, "unknown_columns": [],
+                }
+                run_bench._load_history_best_effort(
+                    "bench/private/2026-08-12-astpp.csv")
+    _, kwargs = mock_load_corpus.call_args
+    assert kwargs.get("only") == "2026-08-12-astpp.csv"
+    assert kwargs.get("baselines_dir") == Path("bench/private")
+
+
+def test_the_manual_loader_can_be_pointed_at_another_directory():
+    """The best-effort failure message tells the operator to run
+    `python bench/load_history.py` by hand. Without this flag that recovery
+    path globs bench/baselines only, so it silently cannot reach the very
+    sweep the automatic load just failed to find — the manual fallback would
+    report success having loaded nothing.
+    """
+    from bench import load_history
+    with patch("sys.argv", ["load_history.py", "--database-url", "postgresql://x/y",
+                            "--baselines-dir", "bench/private",
+                            "--only", "2026-08-12-astpp.csv"]):
+        with patch("bench.load_history.psycopg.connect"):
+            with patch("bench.load_history.load_corpus") as mock_load_corpus:
+                mock_load_corpus.return_value = {
+                    "sweeps": 1, "runs": 18, "derived": 0, "unknown_columns": []}
+                assert load_history.main() == 0
+    _, kwargs = mock_load_corpus.call_args
+    assert kwargs.get("baselines_dir") == Path("bench/private")
+    assert kwargs.get("only") == "2026-08-12-astpp.csv"
+
+
+def test_the_manual_loader_still_defaults_to_the_baselines_dir():
+    """The flag must not change the no-argument behaviour every existing
+    instruction in bench/README.md and the run_bench failure message rely on."""
+    from bench import load_history
+    with patch("sys.argv", ["load_history.py", "--database-url", "postgresql://x/y"]):
+        with patch("bench.load_history.psycopg.connect"):
+            with patch("bench.load_history.load_corpus") as mock_load_corpus:
+                mock_load_corpus.return_value = {
+                    "sweeps": 78, "runs": 1984, "derived": 3, "unknown_columns": []}
+                assert load_history.main() == 0
+    _, kwargs = mock_load_corpus.call_args
+    assert kwargs.get("baselines_dir") == load_history.BASELINES
+    assert kwargs.get("only") is None
 
 
 def test_main_calls_load_history_after_the_done_log():
