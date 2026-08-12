@@ -412,6 +412,59 @@ def test_a_sweep_written_outside_the_baselines_dir_is_still_found(capsys):
     assert kwargs.get("baselines_dir") == Path("bench/private")
 
 
+class TestSidecarProvenance:
+    """_read_meta decides each sweep's captured_at and how trustworthy it is.
+
+    It already tolerates a sidecar that will not parse as JSON, but read the
+    timestamp inside one without a guard, so a hand-edited or truncated
+    captured_at raised ValueError straight out of load_corpus. Nothing commits
+    until the end of load_corpus, so that one bad character cost the entire
+    load — every sweep, not just the damaged one.
+    """
+
+    def _sweep(self, tmp_path: Path, sidecar_text: str | None) -> Path:
+        csv_path = tmp_path / "2026-08-12-x.csv"
+        csv_path.write_text("query_id,repeat\nq01,1\n", encoding="utf-8")
+        if sidecar_text is not None:
+            Path(f"{csv_path}.meta.json").write_text(sidecar_text, encoding="utf-8")
+        return csv_path
+
+    def test_a_valid_captured_at_is_used_and_marked_as_meta(self, tmp_path):
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, '{"captured_at": "2026-08-01T10:00:00"}')
+        meta, captured, source = load_history._read_meta(csv_path)
+        assert source == "meta"
+        assert captured.isoformat() == "2026-08-01T10:00:00"
+
+    def test_a_malformed_captured_at_falls_back_to_mtime(self, tmp_path):
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, '{"captured_at": "not-a-timestamp"}')
+        meta, captured, source = load_history._read_meta(csv_path)
+        assert source == "mtime", "a bad timestamp must not be trusted as 'meta'"
+        assert captured is not None
+
+    def test_a_non_string_captured_at_falls_back_to_mtime(self, tmp_path):
+        """fromisoformat raises TypeError, not ValueError, on a number."""
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, '{"captured_at": 1754000000}')
+        _, _, source = load_history._read_meta(csv_path)
+        assert source == "mtime"
+
+    def test_an_unparseable_sidecar_still_falls_back_to_mtime(self, tmp_path):
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, "{not json at all")
+        meta, _, source = load_history._read_meta(csv_path)
+        assert source == "mtime"
+        assert meta == {}
+
+    def test_no_sidecar_falls_back_to_mtime(self, tmp_path):
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, None)
+        meta, _, source = load_history._read_meta(csv_path)
+        assert source == "mtime"
+        assert meta == {}
+
+
 def test_the_manual_loader_can_be_pointed_at_another_directory():
     """The best-effort failure message tells the operator to run
     `python bench/load_history.py` by hand. Without this flag that recovery

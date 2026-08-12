@@ -58,7 +58,16 @@ def _read_meta(csv_path: Path) -> tuple[dict, datetime, str]:
             meta = {}
         captured = meta.get("captured_at")
         if captured:
-            return meta, datetime.fromisoformat(captured), "meta"
+            # Symmetric with the JSON guard above. Nothing commits until the
+            # end of load_corpus, so an unparseable timestamp here cost the
+            # whole load — every sweep, not just the damaged one. TypeError
+            # covers a non-string value; fromisoformat rejects it separately.
+            try:
+                return meta, datetime.fromisoformat(captured), "meta"
+            except (TypeError, ValueError):
+                logger.warning(
+                    "unparseable captured_at %r, falling back to mtime: %s",
+                    captured, sidecar)
     else:
         meta = {}
     # 3 of 78 sweeps have no sidecar. mtime is weaker provenance — a copy
