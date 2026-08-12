@@ -79,8 +79,9 @@ _FALSE = {"false", "0", "no", "f"}
 def coerce(value: str | None, kind: str) -> str | int | float | bool | None:
     """CSV cell -> typed value. A blank cell is NULL, never a zero.
 
-    1,982 of 1,984 corpus rows have a blank `dryrun_status` and 33 have blank
-    timings; coercing those to 0 would render as a real measurement.
+    1,982 of 1,984 corpus rows have a blank `dryrun_status` and 33 to 34 have
+    blank timings, depending on the stage column; coercing those to 0 would
+    render as a real measurement.
     """
     if value is None:
         return None
@@ -134,7 +135,8 @@ def normalise_dryrun(generation_status: str | None,
     Branch order, and why each branch exists:
 
     1. A value recorded on the captured metrics row is ground truth. 60 of the
-       1,898 captured runs carry one, and all 60 read `passed`.
+       1,950 rows that carry a captured payload carry one, and all 60 read
+       `passed`.
     2. A non-blank CSV cell is the next best evidence. Only `failed` ever
        appears there, on 2 of 1,984 rows.
     3. `generation_status = 'error'` means the run never reached the gate.

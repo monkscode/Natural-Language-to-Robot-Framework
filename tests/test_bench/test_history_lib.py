@@ -96,8 +96,9 @@ def test_every_canonical_column_has_a_sql_name():
 
 
 def test_blank_cells_become_null_not_zero():
-    """1,982 of 1,984 rows have a blank dryrun_status and 33 of 1,984 have
-    blank timings. A blank coerced to 0 would read as a real measurement."""
+    """1,982 of 1,984 rows have a blank dryrun_status and 33 to 34 of 1,984
+    have blank timings, depending on the stage column. A blank coerced to 0
+    would read as a real measurement."""
     assert history_lib.coerce("", "float") is None
     assert history_lib.coerce("   ", "int") is None
     assert history_lib.coerce(None, "text") is None
