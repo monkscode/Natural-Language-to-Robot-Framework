@@ -244,20 +244,62 @@ class TestBuildMetaRecordsRevision:
         None on every call — a fired timeout, a wrong cwd, git missing from
         an image, or a future edit that just returns None; every future
         sidecar would silently lose provenance and nothing would catch it.
-        This checkout is a real git repo on a real branch, so assert the
-        actual shape: a 40-character hex sha, and a branch that is not the
-        literal string "HEAD" (the detached-HEAD bug a companion fix
-        corrected — `rev-parse --abbrev-ref HEAD` prints "HEAD" and exits 0
-        on a detached checkout, so the old assertion would have stayed green
-        on exactly the fake value it should catch)."""
+        This checkout is a real git repo, so assert the actual shape for
+        git_sha: a 40-character hex string. git_branch cannot be asserted
+        "not None" the same way — CI checks out a detached merge ref (no
+        symbolic ref points at HEAD there), so `git_branch` is honestly None
+        on every PR run, and asserting non-None would turn a green CI branch
+        red the moment this test is pushed. Instead, compare against ground
+        truth measured the same way `_git` measures it, in this same
+        process and cwd, so the assertion is correct in both environments:
+        the real branch name here, None on CI. `!= "HEAD"` stays as a direct
+        regression guard for the detached-HEAD bug a companion fix corrected
+        — `rev-parse --abbrev-ref HEAD` prints the literal string "HEAD" and
+        exits 0 on a detached checkout, so a regression back to it would
+        pass an "is not None" check while reporting a fake branch."""
         if shutil.which("git") is None:
             pytest.skip("git binary not on PATH in this environment")
         meta = bench_lib.build_meta({}, {}, "http://localhost:5000",
                                     "http://localhost:4999")
         assert meta["git_sha"] is not None
         assert re.fullmatch(r"[0-9a-f]{40}", meta["git_sha"]), meta["git_sha"]
-        assert meta["git_branch"] is not None
+        expected = subprocess.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True, text=True,
+            cwd=Path(bench_lib.__file__).resolve().parents[1],
+        ).stdout.strip() or None
+        assert meta["git_branch"] == expected
         assert meta["git_branch"] != "HEAD"
+
+    def test_detached_head_reports_no_branch_but_a_real_sha(self):
+        """CI checks out a detached merge ref (`actions/checkout@v4` with no
+        `ref:` — verified against a real sonarqube.yml run on a PR: `git
+        checkout --force refs/remotes/pull/<n>/merge` leaves the repo in
+        'detached HEAD' state), so the live test above cannot assert a
+        branch exists there — on CI, None is the honest, correct value.
+        This test pins the detached-HEAD CONTRACT deterministically instead,
+        independent of how any given checkout happens to be, by emulating
+        what git prints in that state: `symbolic-ref` fails (no branch
+        points at a detached HEAD), and `rev-parse HEAD` still returns a
+        real sha. A regression back to reading the branch via
+        `rev-parse --abbrev-ref HEAD` — which prints the literal string
+        "HEAD" and exits 0 even when detached — is also emulated and must
+        turn this test red, since that fake value is exactly what the
+        deleted `is not None` assertion used to let through silently."""
+        zero_sha = "0" * 40
+
+        def fake_git(argv, **kwargs):
+            if "symbolic-ref" in argv:
+                raise subprocess.CalledProcessError(1, argv)
+            if "--abbrev-ref" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="HEAD\n")
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{zero_sha}\n")
+
+        with patch("bench.bench_lib.subprocess.run", side_effect=fake_git):
+            meta = bench_lib.build_meta({}, {}, "http://localhost:5000",
+                                        "http://localhost:4999")
+        assert meta["git_branch"] is None
+        assert meta["git_sha"] == zero_sha
 
     def test_a_git_failure_does_not_break_the_sweep(self):
         """A detached HEAD, a missing git binary, or a tarball checkout must
@@ -303,35 +345,70 @@ def test_main_calls_load_history_after_the_done_log():
     test in this suite green, because nothing else calls main() end-to-end
     and _load_history_best_effort's own tests invoke it directly, off the
     module, without going through main() at all. So this is a static check —
-    it parses bench/run_bench.py's source with ast and asserts two things
-    about main(): that it still calls _load_history_best_effort at all, and
-    that the call comes AFTER the `done` log line rather than anywhere in the
-    function body. The ordering matters because of the owner's ruling that
-    put the call at the end of main() instead of inside gate_pins() (a
-    preflight helper that runs before a single CSV row exists) — a call
-    placed earlier than `done` would run before the sweep the dashboards are
-    supposed to describe has finished, or would be skipped by gate_pins's
-    early returns entirely."""
+    it parses bench/run_bench.py's source with ast and inspects main()'s
+    TOP-LEVEL statement list (its body), comparing statement POSITION rather
+    than line number or ast.walk order. Line numbers are not enough: the
+    sweep loop logs its own progress with `_log(f"({done}/{total}) ...")`,
+    and that counter variable is named `done`, so a substring match for
+    "done" also matches those in-loop logs — and ast.walk visits nodes
+    breadth-first, so a naive walk can anchor on one of those instead of the
+    real done-log. Anchoring on top-level statement position sidesteps this
+    entirely: the only thing asserted is that _load_history_best_effort is a
+    top-level statement of main() that comes after the top-level log
+    mentioning "done" in main()'s own statement list. A call nested inside
+    `finally:` (which also runs on Ctrl-C or an unexpected raise, before a
+    single row may exist) or inside the per-run sweep loop (which would
+    reload the corpus once per run) is not a top-level statement of main() at
+    all, so it fails this check structurally rather than by line-number
+    coincidence — which is exactly what the owner's ruling to place the call
+    at the end of main(), never inside the preflight helper or the loop,
+    requires."""
     source = Path("bench/run_bench.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     main_func = next(
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "main")
 
-    done_log_line = None
-    call_site_line = None
-    for node in ast.walk(main_func):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-            continue
-        if node.func.id == "_load_history_best_effort":
-            call_site_line = node.lineno
-        elif node.func.id == "_log" and "done" in ast.unparse(node):
-            done_log_line = node.lineno
+    def is_named_call_stmt(stmt, name):
+        """True if `stmt` is a bare top-level `name(...)` expression statement."""
+        if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+            return False
+        call = stmt.value
+        return isinstance(call.func, ast.Name) and call.func.id == name
 
-    assert done_log_line is not None, "main() no longer logs a 'done' line"
-    assert call_site_line is not None, (
-        "main() no longer calls _load_history_best_effort — a finished "
-        "sweep would never refresh the bench dashboards again")
-    assert call_site_line > done_log_line, (
-        "_load_history_best_effort is called before the 'done' log line — "
-        "it must run only after the sweep's last CSV row is on disk")
+    done_log_indices = [
+        i for i, stmt in enumerate(main_func.body)
+        if is_named_call_stmt(stmt, "_log") and "done" in ast.unparse(stmt.value)
+    ]
+    assert len(done_log_indices) == 1, (
+        "expected exactly one top-level _log(...) statement in main() whose "
+        "source mentions 'done' to anchor this test on; found a different "
+        "count, so a human must re-anchor this test deliberately")
+    done_log_index = done_log_indices[0]
+
+    loader_indices = [
+        i for i, stmt in enumerate(main_func.body)
+        if is_named_call_stmt(stmt, "_load_history_best_effort")
+    ]
+    assert loader_indices, (
+        "main() no longer calls _load_history_best_effort as a top-level "
+        "statement — a finished sweep would never refresh the bench "
+        "dashboards again")
+    assert loader_indices[0] > done_log_index, (
+        "_load_history_best_effort is not a top-level statement of main() "
+        "positioned after the top-level 'done' log — it must run once, "
+        "after the sweep loop has finished and the last CSV row is on "
+        "disk, not from inside a nested block such as finally: or the "
+        "per-run sweep loop")
+
+    all_loader_calls = [
+        node for node in ast.walk(main_func)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_load_history_best_effort"
+    ]
+    assert len(all_loader_calls) == 1, (
+        "main() calls _load_history_best_effort more than once — a correct "
+        "top-level call plus a stray duplicate elsewhere (e.g. left inside "
+        "the sweep loop) would reload the corpus once per run instead of "
+        "once at the end, and the top-level-position checks above cannot "
+        "see a second, nested call")
