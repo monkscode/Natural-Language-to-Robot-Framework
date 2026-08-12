@@ -18,16 +18,24 @@ from bench import bench_lib, history_lib
 DDL = Path("observability/postgres/create_bench_schema.sql")
 
 
-def _ddl_columns(table: str) -> set[str]:
-    """Column names declared inside one CREATE TABLE block of the DDL."""
-    sql = DDL.read_text(encoding="utf-8")
+def _table_body(sql: str, table: str) -> str:
+    """Raw text inside one CREATE TABLE block of `sql`, between the outer
+    parentheses. Scoped to `table` so a search within the result cannot read
+    a different table's constraints — reused by `_ddl_columns` and by the
+    bench.runs PRIMARY KEY guard below."""
     match = re.search(
         rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.*?)\n\);",
         sql, re.IGNORECASE | re.DOTALL,
     )
-    assert match, f"{DDL.name} has no CREATE TABLE for {table}"
+    assert match, f"no CREATE TABLE for {table}"
+    return match.group(1)
+
+
+def _ddl_columns(table: str) -> set[str]:
+    """Column names declared inside one CREATE TABLE block of the DDL."""
+    body = _table_body(DDL.read_text(encoding="utf-8"), table)
     cols = set()
-    for line in match.group(1).splitlines():
+    for line in body.splitlines():
         line = line.strip()
         if not line or line.startswith("--"):
             continue
@@ -65,11 +73,48 @@ def test_runs_primary_key_is_query_and_repeat_not_workflow_id():
     (sweep_name, workflow_id) is unique only by accident of which sweeps they
     landed in. (sweep_name, query_id, repeat) was verified unique across all
     78 files and 1,984 rows."""
-    sql = DDL.read_text(encoding="utf-8")
-    match = re.search(r"PRIMARY KEY\s*\(([^)]*)\)", sql, re.IGNORECASE)
+    body = _table_body(DDL.read_text(encoding="utf-8"), "bench.runs")
+    match = re.search(r"PRIMARY KEY\s*\(([^)]*)\)", body, re.IGNORECASE)
     assert match, "bench.runs declares no PRIMARY KEY"
     key = [c.strip() for c in match.group(1).split(",")]
     assert key == ["sweep_name", "query_id", "repeat_index"], key
+
+
+def test_runs_primary_key_guard_is_scoped_to_bench_runs_not_the_whole_file():
+    """The trap: a future third table sharing bench.runs's key columns,
+    declared ABOVE bench.runs in the DDL, must not let this guard read the
+    wrong table's key. Builds an in-memory DDL that regresses bench.runs's
+    own PRIMARY KEY to (sweep_name, workflow_id) and inserts a decoy table
+    above it whose PRIMARY KEY happens to have the correct shape. An
+    unscoped `re.search` over the whole file takes the first parenthesised
+    PRIMARY KEY it finds — the decoy's, correct — and would report
+    bench.runs as fine while it is actually broken. Never written to
+    observability/postgres/create_bench_schema.sql."""
+    sql = DDL.read_text(encoding="utf-8")
+    regressed = sql.replace(
+        "PRIMARY KEY (sweep_name, query_id, repeat_index)",
+        "PRIMARY KEY (sweep_name, workflow_id)",
+    )
+    assert regressed != sql, "fixture PRIMARY KEY clause not found to mutate"
+    decoy = (
+        "CREATE TABLE IF NOT EXISTS bench.decoy_future_table (\n"
+        "    sweep_name   text NOT NULL,\n"
+        "    query_id     text NOT NULL,\n"
+        "    repeat_index int NOT NULL,\n"
+        "    PRIMARY KEY (sweep_name, query_id, repeat_index)\n"
+        ");\n\n"
+    )
+    marker = "CREATE TABLE IF NOT EXISTS bench.runs ("
+    assert marker in regressed, "fixture bench.runs CREATE TABLE marker not found"
+    mutated = regressed.replace(marker, decoy + marker, 1)
+
+    body = _table_body(mutated, "bench.runs")
+    match = re.search(r"PRIMARY KEY\s*\(([^)]*)\)", body, re.IGNORECASE)
+    assert match, "bench.runs declares no PRIMARY KEY"
+    key = [c.strip() for c in match.group(1).split(",")]
+    assert key != ["sweep_name", "query_id", "repeat_index"], (
+        "guard read the decoy table's key instead of bench.runs's own — "
+        "the scoping fix regressed")
 
 
 def test_runs_table_carries_the_normalised_dryrun_column():

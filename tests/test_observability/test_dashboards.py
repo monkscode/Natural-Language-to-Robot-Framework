@@ -47,7 +47,8 @@ BENCH_DASHBOARDS = {
 # every check in this suite: this regex (via _bench_refs, below) is the only
 # thing keeping bench data out of the production dashboards.
 _SCHEMA_TABLE_RE = re.compile(
-    r'\b(?:FROM|JOIN)\s+"?bench"?\s*\.\s*"?([a-z_][a-z0-9_]*)"?', re.IGNORECASE)
+    r'\b(?:FROM|JOIN)\s+(?:LATERAL\s+)?"?bench"?\s*\.\s*"?([a-z_][a-z0-9_]*)"?',
+    re.IGNORECASE)
 
 
 def _bench_refs(sql: str) -> set[str]:
@@ -234,6 +235,12 @@ class TestBenchRefDetection:
 
     def test_ignores_unrelated_tables(self):
         assert _bench_refs("SELECT 1 FROM workflow_metrics") == set()
+
+    def test_detects_lateral_join_form(self):
+        assert _bench_refs(
+            "SELECT 1 FROM execution_records e "
+            "CROSS JOIN LATERAL bench.runs r"
+        ) == {"bench.runs"}
 
 
 def test_readonly_role_grants_match_the_dashboards():
@@ -505,18 +512,58 @@ def test_trace_dashboard_has_a_run_id_variable():
         assert "$run_id" in expr, f"Loki target does not interpolate $run_id: {expr}"
 
 
+def _bench_grant_columns(sql: str) -> set[str] | None:
+    """Tables granted via an ACTIVE `GRANT SELECT ON bench.<table>, ... TO
+    grafana_ro` in `sql`, or None if no such grant is present. SQL line
+    comments are stripped first, so a commented-out GRANT — which the naive
+    regex still matches, since `--` is not part of the pattern — reads as
+    absent rather than present."""
+    sql = re.sub(r"--[^\n]*", "", sql)
+    match = re.search(
+        r"\bGRANT\s+SELECT\s+ON\s+((?:bench\.[a-z_]+\s*,?\s*)+)TO\s+grafana_ro\b",
+        sql, re.IGNORECASE)
+    if not match:
+        return None
+    return {t.strip().lower() for t in match.group(1).split(",") if t.strip()}
+
+
+def _bench_usage_grant_present(sql: str) -> bool:
+    """True if `sql` has an active (non-commented) `GRANT USAGE ON SCHEMA
+    bench TO grafana_ro`."""
+    sql = re.sub(r"--[^\n]*", "", sql)
+    return bool(re.search(r"GRANT\s+USAGE\s+ON\s+SCHEMA\s+bench\s+TO\s+grafana_ro",
+                          sql, re.IGNORECASE))
+
+
 def test_bench_grant_is_present_and_exact():
     """A second GRANT block, matched separately from the seven-table app
     grant, so neither can silently absorb the other."""
     sql = ROLE_SCRIPT.read_text(encoding="utf-8")
-    match = re.search(
-        r"\bGRANT\s+SELECT\s+ON\s+((?:bench\.[a-z_]+\s*,?\s*)+)TO\s+grafana_ro\b",
-        sql, re.IGNORECASE)
-    assert match, "create_readonly_role.sql has no GRANT SELECT on bench tables"
-    granted = {t.strip().lower() for t in match.group(1).split(",") if t.strip()}
+    granted = _bench_grant_columns(sql)
+    assert granted is not None, "create_readonly_role.sql has no GRANT SELECT on bench tables"
     assert granted == BENCH_TABLES, f"grants {sorted(granted)}"
-    assert re.search(r"GRANT\s+USAGE\s+ON\s+SCHEMA\s+bench\s+TO\s+grafana_ro",
-                     sql, re.IGNORECASE), "no USAGE grant on schema bench"
+    assert _bench_usage_grant_present(sql), "no USAGE grant on schema bench"
+
+
+def test_bench_grant_guard_fires_on_a_commented_out_grant():
+    """The only other thing that would catch a commented-out bench GRANT is
+    test_readonly_role.py::test_grafana_ro_can_read_bench_but_not_write_it,
+    which is @pytest.mark.integration and skips wherever the stack is
+    absent — so in CI a commented-out grant would ship silently and Grafana
+    would lose bench access. Mutates the real file's text in memory only;
+    never writes to create_readonly_role.sql and never runs _apply_script,
+    which would revoke live grants."""
+    sql = ROLE_SCRIPT.read_text(encoding="utf-8")
+    mutated = sql.replace(
+        "GRANT USAGE ON SCHEMA bench TO grafana_ro;",
+        "-- GRANT USAGE ON SCHEMA bench TO grafana_ro;",
+    ).replace(
+        "GRANT SELECT ON bench.sweeps, bench.runs TO grafana_ro;",
+        "-- GRANT SELECT ON bench.sweeps, bench.runs TO grafana_ro;",
+    )
+    assert mutated != sql, "fixture GRANT lines not found to comment out"
+    assert _bench_grant_columns(mutated) is None
+    assert not _bench_usage_grant_present(mutated)
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
