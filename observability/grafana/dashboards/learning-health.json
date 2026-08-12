@@ -19,7 +19,7 @@
     {
       "type": "table",
       "title": "Pass rate with and without injected hints",
-      "description": "hint_tokens and llm_cost are NOT populated: both are wired to a literal zero on all 330 rows, including the 90 that did inject hints (hints_available up to 19), so they are dropped from this panel rather than shipped as an always-zero column. The learning path's real token and dollar spend is visible only in the panel below, via trigger_events.",
+      "description": "hint_tokens and llm_cost are NOT populated: both are wired to a literal zero on all 330 rows, including the 90 that did inject hints (hints_available up to 19), so they are dropped from this panel rather than shipped as an always-zero column. The learning path's real token and dollar spend is visible only in the panel below, via trigger_events.\n\nCoverage: 109 of 123 execution records join to neither workflow_metrics nor test_runs, and 312 of 330 learning_metrics rows have no metrics row. Those 109 are real runs — 30 distinct queries across 9 domains with 62 passes, spanning 2026-02-23 to 2026-07-15 — not pollution, so they are counted here rather than joined away. What they blend is engine eras. The default now-1y window admits every one of them, so narrowing the time picker is a deliberate act, not a floor this dashboard applies for you.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 4},
       "targets": [{
