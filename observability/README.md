@@ -54,9 +54,15 @@ here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
 | Execution outcomes | `mark1-execution` | Asking whether generated tests pass when they run |
 | Cost, latency and capacity | `mark1-cost` | Investigating spend, slowness or rate limiting |
 | Learning health | `mark1-learning` | Asking whether hints are helping, and what they cost |
+| Bench — where the framework is weakest now | `bench-weakest-now` | Ranking queries by how much worse they are doing in a recent window of sweeps than all-time |
+| Bench — did my change help | `bench-change-impact` | Comparing two chosen sweeps head to head — pass rate, locator success, flake and cost |
 
 Open one directly at `http://127.0.0.1:3001/d/<uid>` — Grafana fills in the
 rest of the URL for you.
+
+The two bench dashboards query only the `bench` schema — described below —
+and never an application table. That is the detachment rule this whole corpus
+depends on, and a test enforces it.
 
 **Locator reliability shows the real number, not the flattering one.**
 `element_approach_metrics` — a JSON array on `workflow_metrics` — records only
@@ -75,6 +81,80 @@ arithmetically 0% for every grouping — the array they queried cannot hold a
 failure. That gap only closes if the browser service stops discarding
 rejected-payload metrics, which is a change to a different repository and out
 of scope here.
+
+## Loading the bench sweep corpus
+
+`bench.sweeps` and `bench.runs`, in the same Postgres instance, hold every
+dated bench sweep so the two dashboards above can compare runs across time
+instead of only watching production traffic.
+
+**`run_bench.py` loads the sweep it just finished automatically — you rarely
+need to run the loader by hand.** The call is best-effort: a database that is
+down, or any other failure, costs the dashboard refresh, never the sweep,
+because the sweep's CSV is already safely written to disk before the load is
+attempted; the failure is logged with the exact command to re-run. To load
+the whole corpus, or catch up after the database was down for a sweep:
+
+```bash
+PYTHONPATH=. DATABASE_URL=... venv/Scripts/python.exe bench/load_history.py
+```
+
+Verified against the full corpus today: `loaded 78 sweeps / 1984 runs (3
+derived, 0 unknown columns)`.
+
+**The loader is idempotent — re-running it is always safe.** It is an upsert
+over files already on disk, not an append. Run twice back to back today and
+both runs printed the identical line: `loaded 78 sweeps / 1984 runs (3
+derived, 0 unknown columns)`.
+
+**Three of the 78 sweeps are dated by file mtime, not a recorded
+`captured_at`.** They have no `.meta.json` sidecar, and mtime is weaker
+provenance — copying a file resets it. Find them yourself rather than trusting
+a name in this doc:
+
+```sql
+SELECT sweep_name FROM bench.sweeps WHERE captured_at_source = 'mtime';
+```
+
+Their filenames are deliberately not printed here — this repo is public, and
+one of the three carries an ASTPP customer-query prefix. They are also,
+exactly, the three sweeps `derived_from` marks below: no fourth mtime-only
+sweep, and no derived sweep that has a sidecar.
+
+**Three sweeps carry `derived_from` and are hidden from both sweep selectors
+on Bench — did my change help.** They are re-costings of another sweep
+already in the corpus, sharing every one of its run ids, so comparing one to
+its parent would report a cost delta on a pass delta of zero.
+
+**A blank `dryrun_status` usually means the gate passed — but not on a run
+that never reached it, and you should never re-derive this yourself.**
+`workflow_service.py:889` only attaches `dryrun_status` to the SSE `complete`
+event when the gate did *not* pass, so silence is success on a completed run.
+But 34 runs never completed generation at all (`generation_status = 'error'`)
+and are also blank — reading those as `passed` invents a gate result they
+never reached. The loader resolves this once, into
+`dryrun_status_normalised`, so no panel has to get it right itself. Measured
+today: 1,948 rows `passed`, 34 `not_reached`, 2 `failed`.
+
+**`llm_429_count` is not a trust signal, and its correlation with pass count
+has the wrong sign to read either way.** 46 of the 78 sweeps carry the column
+at all; 32 don't. Across the 46 that do, more 429s goes with a slightly
+*higher* pass count, r = +0.29 (+0.25 restricted to the 36 that are also
+complete, non-derived and non-invalid). That is confounding by time — later
+sweeps ran busier and also generally scored better — not a quality signal in
+either direction. Counting 429 lines in `application.log` is still the only
+honest way to get this number.
+
+**None of the 78 historical sweeps carries a `git_sha` or `git_branch`.**
+That provenance cannot be recovered after the fact and will not be
+back-filled. Every sweep captured from now on records both.
+
+**Artifacts and `llm_traces` stay on disk — only `bench.sweeps` and
+`bench.runs` are loaded.** They run to 1,895.2 MiB and 94.7 MiB against 9.8
+MiB loaded, and the dashboards say which run, not what to fetch. `artifact_dir`
+is loaded as plain text where a run has one; nothing should turn it into a
+link — Grafana cannot serve local files, and a `file://` link from an
+`http://` page is blocked by every browser.
 
 ## Things that will mislead you if you do not know them
 
@@ -180,8 +260,13 @@ of scope here.
   instead; a test enforces it.
 - **Bench runs are absent from SQL but present in logs.** `bench/run_bench.py`
   deletes its own rows from `workflow_metrics`, `llm_traces` and `test_runs`,
-  but its log lines still reach Loki. That is why there is no aggregate log
-  panel — only the run-scoped one, which cannot be polluted.
+  but its log lines still reach Loki. The "Aggregate error logs" panel on
+  Execution outcomes reads that same stream and is knowingly exposed to this
+  pollution — its own description says so, because a bench sweep targets the
+  same containerised backend address `run_bench.py` uses by default, with no
+  label separating the two. The run-scoped panel on Trace one run is still the
+  one that cannot be polluted; use it when you need certainty about which run
+  a log line belongs to.
 - **Cross-table history is sparse.** As of 2026-08-10, 35 of 434
   `workflow_metrics` rows have a matching `test_runs` row; 14 of 123
   `execution_records` join to `workflow_metrics`. Aggregate panels are built
