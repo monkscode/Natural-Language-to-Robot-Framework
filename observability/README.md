@@ -269,6 +269,15 @@ should turn it into a link — Grafana cannot serve local files, and a
   label separating the two. The run-scoped panel on Trace one run is still the
   one that cannot be polluted; use it when you need certainty about which run
   a log line belongs to.
+- **The error-log panel needs two filters, because the app logs errors two
+  ways.** The application writes structlog JSON with a lowercase
+  `"level": "error"`; third-party libraries write ANSI-coloured plain text.
+  Measured over 7 days on 2026-08-12: the JSON arm matched 348 lines, the
+  `|= "ERROR"` substring arm matched 58, and the two sets overlap by
+  **exactly 0**. The panel therefore ships both arms, and the "Structured log
+  level" variable widens only the JSON arm — the substring arm has no level
+  field to filter on. Loki's own `detected_level` is not a substitute:
+  selecting on it returns 0 lines here.
 - **Cross-table history is sparse.** As of 2026-08-10, 35 of 434
   `workflow_metrics` rows have a matching `test_runs` row; 14 of 123
   `execution_records` join to `workflow_metrics`. Aggregate panels are built

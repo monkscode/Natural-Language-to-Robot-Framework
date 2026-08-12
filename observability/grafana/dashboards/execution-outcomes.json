@@ -6,6 +6,22 @@
   "schemaVersion": 39,
   "refresh": "5m",
   "time": {"from": "now-1y", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "level",
+        "label": "Structured log level",
+        "type": "custom",
+        "query": "errors : error|critical, errors and warnings : error|critical|warning, every structured line : .+",
+        "current": {"text": "errors", "value": "error|critical"},
+        "options": [
+          {"text": "errors", "value": "error|critical", "selected": true},
+          {"text": "errors and warnings", "value": "error|critical|warning", "selected": false},
+          {"text": "every structured line", "value": ".+", "selected": false}
+        ]
+      }
+    ]
+  },
   "panels": [
     {
       "type": "stat",
@@ -96,7 +112,7 @@
     {
       "type": "logs",
       "title": "Aggregate error logs",
-      "description": "Aggregate ERROR lines from both services. The filter is a literal substring match over raw log text, not a log-level filter: it does not catch CRITICAL, and on this stack every line containing CRITICAL was LLM prompt text echoed by verbose agent output rather than a log record. The caveat that matters more: when the observability compose stack is running, a bench sweep targets the containerised backend on 127.0.0.1:5000 — the same address run_bench.py uses by default — so bench log lines land in this feed alongside production ones. No label separates them. Use the per-run log panel on the trace dashboard when you need certainty about which run a line belongs to.",
+      "description": "Errors from both services, in the two formats they are actually written in. Arm A parses the structlog JSON the application emits and filters on its lowercase level field, which is what the Structured log level variable moves. Arm B is a literal ERROR substring match, which is the only way third-party loggers writing ANSI-coloured plain text are seen. Measured over 7 days on 2026-08-12: arm A 348 lines, arm B 58, overlap exactly 0 — dropping either arm loses a whole class of error. The shipped panel was arm B alone and missed 84% of the application's errors. level=critical currently matches 0 lines; it is in the pattern so the panel needs no edit when the first one appears, not because it is covering anything today. Arm B does not widen with the variable — it has no level field to filter on. Bench caveat: when the observability stack is running, a bench sweep targets the same containerised backend on 127.0.0.1:5000 that run_bench.py uses by default, so bench log lines land in this feed with no label separating them. Use the per-run log panel on the trace dashboard when you need certainty about which run a line belongs to.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
       "options": {
@@ -104,10 +120,16 @@
         "wrapLogMessage": true,
         "sortOrder": "Descending"
       },
-      "targets": [{
-        "refId": "A",
-        "expr": "{service=~\"fastapi|browser-service\"} |= \"ERROR\""
-      }]
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=~\"fastapi|browser-service\"} | json | level=~\"$level\""
+        },
+        {
+          "refId": "B",
+          "expr": "{service=~\"fastapi|browser-service\"} |= \"ERROR\""
+        }
+      ]
     }
   ]
 }

@@ -871,3 +871,45 @@ def test_no_dashboard_hardcodes_an_identifying_value(path: Path):
         f"{path.name} hardcodes a 5+ digit number: {sorted(long_digit_runs)}")
     hostlike = set(_HOSTLIKE_RE.findall(text))
     assert not hostlike, f"{path.name} hardcodes a hostname: {sorted(hostlike)}"
+
+
+def test_aggregate_error_log_panel_reads_both_log_formats():
+    """The application writes errors in two formats and they do not overlap.
+
+    Measured over 7 days on 2026-08-12: the shipped `|= "ERROR"` substring
+    filter matched 58 lines, `| json | level=~"error|critical"` matched 348,
+    and both filters at once matched 0 — the sets are disjoint. structlog
+    writes a lowercase `"level": "error"` field that a substring match on
+    ERROR cannot see, so the shipped panel missed 84% of the application's
+    errors; the 58 it did see are ANSI-coloured plain text from third-party
+    loggers that the JSON parser cannot read. Both arms are load-bearing.
+
+    Loki's own `detected_level` is not a third option: selecting on it
+    returns 0 lines on this deployment.
+    """
+    path = DASHBOARD_DIR / "execution-outcomes.json"
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+
+    log_panels = [
+        p for p in dashboard.get("panels", [])
+        if (p.get("datasource") or {}).get("type") == "loki"
+    ]
+    assert len(log_panels) == 1, "expected exactly one aggregate log panel"
+    exprs = [t.get("expr", "") for t in log_panels[0].get("targets", [])]
+
+    assert any("| json | level=~" in e for e in exprs), (
+        "no structured-log arm: the panel cannot see structlog's lowercase "
+        "level field")
+    assert any('|= "ERROR"' in e for e in exprs), (
+        "no substring arm: the panel cannot see third-party plain-text loggers")
+    assert any("$level" in e for e in exprs), (
+        "the structured arm does not use the level variable")
+
+    variables = {
+        v["name"]: v for v in dashboard.get("templating", {}).get("list", [])
+    }
+    assert "level" in variables, "no level variable to widen the structured arm"
+    default = variables["level"].get("current", {}).get("value", "")
+    assert "error" in default and "critical" in default, (
+        f"level variable defaults to {default!r}; it must default to the "
+        f"error classes, not to everything")
