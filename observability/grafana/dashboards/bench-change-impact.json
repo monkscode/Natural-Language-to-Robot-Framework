@@ -12,6 +12,9 @@
     "from": "now-1y",
     "to": "now"
   },
+  "timepicker": {
+    "hidden": true
+  },
   "templating": {
     "list": [
       {

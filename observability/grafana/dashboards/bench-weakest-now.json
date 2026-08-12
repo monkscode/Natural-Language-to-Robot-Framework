@@ -6,6 +6,7 @@
   "schemaVersion": 39,
   "refresh": "",
   "time": { "from": "now-1y", "to": "now" },
+  "timepicker": {"hidden": true},
   "templating": {
     "list": [
       {

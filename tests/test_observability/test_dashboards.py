@@ -647,6 +647,50 @@ def test_bench_and_production_dashboards_never_mix(path: Path):
                 f"data: {sorted(bench_refs)}")
 
 
+def _panel_follows_time_picker(panel: dict) -> bool:
+    """True when moving the time picker changes what this panel shows.
+
+    Two ways it can: a Loki query is always bounded by the picker's range, and
+    a SQL query that spells $__timeFrom/$__timeTo/$__timeFilter is filtered by
+    it. Everything else — including every panel reading workflow_metrics, whose
+    only time column is naive and cannot be filtered honestly — ignores it.
+    """
+    datasource = panel.get("datasource")
+    if isinstance(datasource, dict) and datasource.get("type") == "loki":
+        return True
+    for target in panel.get("targets", []):
+        if "$__time" in (target.get("rawSql") or ""):
+            return True
+    return False
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_a_dashboard_no_panel_follows_hides_its_time_picker(path: Path):
+    """A control that changes nothing is worse than no control.
+
+    On these dashboards every panel is all-time — locator-reliability reads
+    only workflow_metrics, and the bench dashboards are scoped by sweep, not
+    by wall-clock. Grafana still rendered a time picker, so narrowing to six
+    hours silently returned the same all-time numbers and the README had to
+    warn operators about it in prose. Hide it instead.
+
+    Stated as a rule rather than a filename list so it stays correct in both
+    directions: add a $__timeFrom panel to one of these and the test tells you
+    to unhide the picker, rather than leaving a live control hidden.
+    """
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    panels = dashboard.get("panels", [])
+    hidden = dashboard.get("timepicker", {}).get("hidden", False)
+    if any(_panel_follows_time_picker(p) for p in panels):
+        assert not hidden, (
+            f"{path.name} has a panel that follows the time picker, but the "
+            f"picker is hidden")
+    else:
+        assert hidden, (
+            f"{path.name}: no panel follows the time picker, so it must set "
+            f'"timepicker": {{"hidden": true}} — otherwise the control lies')
+
+
 def test_isolation_guard_fires_on_a_comma_joined_production_table(tmp_path):
     """The detachment guard's own mutation test, in the style of
     test_bench_grant_guard_fires_on_a_commented_out_grant above.
