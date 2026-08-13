@@ -133,6 +133,53 @@
         "rawQuery": true,
         "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) FILTER (WHERE status <> 'OK') AS failed_calls, count(*) AS llm_calls FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
       }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token burn per hour, prompt against completion",
+      "description": "Prompt and completion tokens per hour over real model calls only — rows where llm_traces.model is set. Follows the time picker, which defaults to a year because this install is bursty: 43 rows in the last 24 hours against 9,044 in the last 7 days and 81,257 in the last 30, with whole days at zero beside a 7,778-row day. Narrow the picker to today and this panel will usually be empty, and that is the traffic, not a fault. The figure is a floor, not a total: total_tokens is recorded on 1,874 of the 2,829 rows carrying a model, so the true burn is higher by an unknown amount. Completion tokens are the ones worth watching — Vertex bills them at a multiple of prompt tokens, and the thinking-budget work exists because they inflated 4-6x once without any prompt change. Browser-use spend never reaches this table at all; it is recoverable only from workflow_metrics, per run, on the trace dashboard.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, sum(prompt_tokens) AS prompt_tokens, sum(completion_tokens) AS completion_tokens FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spend per hour, and cumulative over the window",
+      "description": "Recorded LLM spend per hour, with a running total across the selected window. Real model calls only — rows where llm_traces.model is set. The figure is a floor, not a total: cost_usd is recorded on 1,603 of the 2,829 rows carrying a model, or 56.7%, so the real spend is higher by an unknown amount. That gap has no trend to attribute it to — daily population ranges from 34% to 100% across the whole history with no step change — so do not read a rising line as rising cost without checking the call count beside it. cumulative_usd resets whenever the time picker moves, because it accumulates within the window rather than over all history. Browser-use spend is absent here entirely and is roughly two thirds of a run's cost in the recorded split, so this panel is the CrewAI side of the bill, not the bill.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD"},
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, round(sum(cost_usd)::numeric, 4) AS spend_usd, round(sum(sum(cost_usd)) OVER (ORDER BY date_trunc('hour', created_at))::numeric, 4) AS cumulative_usd FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM call latency per hour, p50 against p95",
+      "description": "Median and 95th-percentile duration of real model calls, per hour. Unlike the spend and token panels beside it, this one carries no coverage caveat and needs none: duration_ms is populated on all 2,829 rows that carry a model, so these percentiles describe the whole population rather than a sample. Measured over the full history the median sits near 2,518 ms and p95 near 17,928 ms, and the p95 line is the one that moves — a single slow call in a quiet hour will lift it sharply, because an hour with three calls has no percentile worth the name. Read a spike together with the call count on the panel above. This is also the honest place to watch for provider-side latency drift, which has swung by more than an order of magnitude within a single day and is the reason bench timing figures are only comparable within one session.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 52},
+      "fieldConfig": {
+        "defaults": {"unit": "ms"},
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::numeric, 0) AS p50_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 0) AS p95_ms FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
     }
   ]
 }

@@ -1749,3 +1749,59 @@ def test_substage_lane_guard_fires_on_a_seven_column_stack(tmp_path):
 
     with pytest.raises(AssertionError, match="double-counts the seconds"):
         test_no_panel_adds_both_identify_substage_lanes(mutant)
+
+
+# Spend and token figures from llm_traces are a floor, not a total. Measured
+# 2026-08-13 over the 2,829 rows that carry a model: cost_usd is populated on
+# 1,603 of them (56.7%) and total_tokens on 1,874 (66.2%), while duration_ms is
+# populated on all 2,829. A reader shown "$20.61 to date" with no caveat will
+# read it as the bill. Latency panels need no such disclosure and are
+# deliberately not covered — the guard keys off the aggregated COLUMN, not the
+# table, so adding a percentile panel never trips it.
+_SPEND_AGGREGATE_RE = re.compile(
+    r"\b(?:sum|avg)\s*\(\s*(?:cost_usd|total_tokens|prompt_tokens|completion_tokens)\b",
+    re.IGNORECASE)
+_COVERAGE_DISCLOSURE = "a floor, not a total"
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_llm_spend_panels_disclose_their_coverage(path: Path):
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for panel in dashboard.get("panels", []):
+        sqls = [t["rawSql"] for t in panel.get("targets", []) if t.get("rawSql")]
+        spends = [
+            sql for sql in sqls
+            if _LLM_TRACES_FROM_RE.search(sql) and _SPEND_AGGREGATE_RE.search(sql)
+        ]
+        if not spends:
+            continue
+        description = panel.get("description") or ""
+        assert _COVERAGE_DISCLOSURE in description, (
+            f"{path.name} panel {panel.get('title')!r} totals a cost or token "
+            f"column from llm_traces but its description never says the figure "
+            f"is {_COVERAGE_DISCLOSURE!r} — cost_usd is recorded on 1,603 of "
+            f"2,829 model calls and total_tokens on 1,874"
+        )
+
+
+def test_coverage_disclosure_guard_fires_on_an_undisclosed_spend_panel(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS a panel that drops the caveat. Mutates a tmp copy of the cost
+    dashboard, stripping the disclosure from whichever spend panel carries it;
+    never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    stripped = 0
+    for panel in dashboard["panels"]:
+        description = panel.get("description") or ""
+        if _COVERAGE_DISCLOSURE in description:
+            panel["description"] = description.replace(_COVERAGE_DISCLOSURE, "exact")
+            stripped += 1
+    assert stripped, "fixture disclosure not found to strip"
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="never says the figure is"):
+        test_llm_spend_panels_disclose_their_coverage(mutant)
