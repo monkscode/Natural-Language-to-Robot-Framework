@@ -10,7 +10,7 @@ not the only one.
 > path and is unrelated to the SQL here. The Tempo compose file referenced by
 > `docs/LLM_TRACES_GUIDE.md` does not exist in this repo.
 
-> **Running this in Grafana.** The queries below are provisioned as five
+> **Running this in Grafana.** The queries below are provisioned as nine
 > dashboards behind a Compose profile — see
 > [`observability/README.md`](../observability/README.md). Start them with
 > `docker compose --profile observability up -d`. A plain `docker compose up`

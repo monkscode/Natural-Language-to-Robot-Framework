@@ -77,7 +77,7 @@ holding both.
 Open one directly at `http://127.0.0.1:3001/d/<uid>` — Grafana fills in the
 rest of the URL for you.
 
-The two bench dashboards query only the `bench` schema — described below —
+The three bench dashboards query only the `bench` schema — described below —
 and never an application table. That is the detachment rule this whole corpus
 depends on, and a test enforces it.
 
@@ -102,7 +102,7 @@ of scope here.
 ## Loading the bench sweep corpus
 
 `bench.sweeps` and `bench.runs`, in the same Postgres instance, hold every
-dated bench sweep so the two dashboards above can compare runs across time
+dated bench sweep so the three dashboards above can compare runs across time
 instead of only watching production traffic.
 
 **`run_bench.py` loads the sweep it just finished automatically — you rarely
@@ -186,9 +186,10 @@ should turn it into a link — Grafana cannot serve local files, and a
   browser-service runner-exec postgres`, or the full default stack) for logs
   to show up next to the SQL.
 - **The time picker moves some panels and not others.** Narrow the range to
-  six hours on "Cost, latency and capacity" and exactly one panel of nine
-  changes — "LLM calls and failures per hour", the only one spined on a tz-aware
-  column. The other eight read `workflow_metrics`, and that table's single
+  six hours on "Cost, latency and capacity" and exactly four panels of twelve
+  change — "LLM calls and failures per hour" and the three LLM trend charts
+  below it, the only ones spined on a tz-aware column. The other eight read
+  `workflow_metrics`, and that table's single
   time column, `ts`, cannot be filtered honestly: it is naive, and it is not
   consistently naive. Measured 2026-08-10 against `llm_traces.created_at`
   over the 146 rows that join, 143 sit 5:30:13 ahead of UTC (written by the
@@ -201,11 +202,11 @@ should turn it into a link — Grafana cannot serve local files, and a
   |---|---|
   | Execution outcomes | 8 of 8 — 7 SQL panels because `execution_records` is tz-aware throughout, plus the Loki aggregate-error-log panel, which follows the picker through Loki rather than through `execution_records` |
   | Learning health | 3 of 7 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
-  | Cost, latency and capacity | 1 of 9 |
+  | Cost, latency and capacity | 4 of 12 |
   | Locator reliability | 0 of 4 |
   | Runs | 0 of 2 — the union it lists is spined on `workflow_metrics.id`, an insertion counter, because 374 of 528 runs carry no timestamp in any app table. Picker hidden |
-  | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |
   | Bench — where the time goes | 0 of 6 — scoped by the sweep window, not the clock. `bench.sweeps.captured_at` is naive and `bench.runs.started_at` is text. Picker hidden |
+  | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |
 
   Making `ts` tz-aware is an application change plus a ruling on how to
   backfill 143 rows whose intended instant is ambiguous. That is a separate
