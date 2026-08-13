@@ -58,6 +58,17 @@ here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
 | Bench — where the framework is weakest now | `bench-weakest-now` | Ranking queries by how much worse they are doing in a recent window of sweeps than all-time |
 | Bench — did my change help | `bench-change-impact` | Comparing two chosen sweeps head to head — pass rate, locator success, flake and cost |
 
+**The debug path runs in both directions.** Runs lists every run on record and
+each row's id opens it in Trace one run; the two aggregate dashboards that name
+a run — Locator reliability's "Runs with failed elements" and Execution
+outcomes' "Recent failures" — link the same way. Going the other way, the Loki
+datasource carries a derived field, so a `workflow_id` inside any log line
+renders a **Trace this run** link. The regex behind it is anchored on the
+`workflow_id` key rather than on the UUID shape, because a log line also
+carries a `user_id` and Grafana links on the first match;
+`tests/test_observability/test_datasources.py` pins that against a sample line
+holding both.
+
 Open one directly at `http://127.0.0.1:3001/d/<uid>` — Grafana fills in the
 rest of the URL for you.
 

@@ -25,3 +25,28 @@ datasources:
     access: proxy
     url: http://loki:3100
     editable: false
+    jsonData:
+      # Turns the workflow id inside a log line into a link back to that run's
+      # trace view, so navigation works from a log line to the run and not only
+      # from the run to its logs.
+      #
+      # The regex is anchored on the workflow_id KEY on purpose. A log line
+      # carries more than one UUID — user_id is written first — and Grafana
+      # uses the first match, so the shorter '([0-9a-f-]{36})' would link every
+      # line to the user's id and open an empty dashboard. tests/
+      # test_observability/test_datasources.py pins this against a sample line
+      # that contains both.
+      derivedFields:
+        - name: workflow_id
+          matcherRegex: '"workflow_id": "([0-9a-f-]{36})"'
+          # $$ is not a typo: provisioning YAML runs every ${...} through env
+          # var expansion first. A single $ here resolves against a
+          # nonexistent __value.raw env var and is silently replaced with an
+          # empty string, so the derived field would link to
+          # /d/mark1-trace-run with no run id at all. $$ escapes to a literal
+          # $, so Grafana's own frontend is what interpolates __value.raw at
+          # click time. Verified empirically against this datasource: the
+          # sibling Postgres block's ${POSTGRES_DB} really does resolve to the
+          # live env value on read-back, proving the expansion pass runs here.
+          url: '/d/mark1-trace-run?var-run_id=$${__value.raw}'
+          urlDisplayLabel: 'Trace this run'
