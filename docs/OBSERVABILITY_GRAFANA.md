@@ -417,4 +417,5 @@ total from this table is a floor, not a total. Historical rows are largely unatt
 the workflow id from OpenTelemetry baggage, which cannot cross the thread-pool hop
 LiteLLM dispatches callbacks across. Calls are labelled through call metadata now, so
 rows written from this version onward carry `workflow_id`. Older rows do not, and are not
-backfilled.
+backfilled. Measured against model-call rows, not the whole table: of the 2,829 rows that
+carry a `model`, 441 carry a `workflow_id`, as of 2026-08-13.

@@ -548,6 +548,22 @@ _AGGREGATE_RE = re.compile(
 # and a normalising nullif(model,'') in a SELECT list (e.g. to group by
 # model) is the natural thing to reach for. Requiring the predicate inside
 # a WHERE clause is what actually restricts the rows the aggregate counts.
+#
+# This guard needs no post-FROM bound the way Task 2's cost-split guard
+# below does, and that is not an oversight — the two situations differ. On
+# llm_traces, a select-list `count(*) FILTER (WHERE nullif(model,'') IS NOT
+# NULL)` genuinely counts only the rows that carry a model: a FILTER clause
+# restricts what its own aggregate sees, so accepting that form here is
+# correct. On the cost-split medians the equivalent FILTER form is exactly
+# the defect Task 2 exists to catch — `percentile_cont` carries no FILTER of
+# its own, so it keeps running over every row no matter what a sibling
+# `count(*) FILTER` restricts. Same surface shape, one safe and one not,
+# because the aggregates in that query don't share a row set the way COUNT
+# and its own FILTER do. Concretely: the shipped "LLM calls and failures per
+# hour" panel is what satisfies this anchor's `\bWHERE\b` token today — its
+# select-list `count(*) FILTER (WHERE status <> 'OK')` comes first in the
+# rawSql, and the real `WHERE nullif(model, '') IS NOT NULL` that actually
+# restricts the row set follows later in the same string.
 _MODEL_RESTRICTION_RE = re.compile(
     r"\bWHERE\b.*(?:nullif\s*\(\s*model\s*,[^)]*\)\s*IS\s+NOT\s+NULL"
     r"|\bmodel\s+IS\s+NOT\s+NULL\b)",
@@ -601,19 +617,31 @@ def test_llm_traces_guard_fires_on_a_select_list_model_filter(tmp_path):
 _COST_SPLIT_FIELD_RE = re.compile(
     r"data->>'(?:crewai_cost|browser_use_cost)'", re.IGNORECASE)
 
+# Shared by _after_from and _duration_aliases below, so the two FROM-clause
+# splits cannot drift apart. Keyword-based on purpose: both helpers used to
+# locate FROM with a literal `sql.upper().find(" FROM ")`, which requires a
+# space on both sides and returns -1 — failing open, not loudly — on a
+# rawSql with a newline or a `)` immediately before FROM.
+_FROM_KEYWORD_RE = re.compile(r"\bFROM\b", re.IGNORECASE)
+
 
 def _after_from(sql: str) -> str:
-    """The text from the first FROM onward — where a real WHERE clause lives.
+    """The text from the first FROM keyword onward — where a real WHERE clause lives.
 
     A select-list `count(*) FILTER (WHERE ...)` also contains the WHERE
     token, so anchoring on the token alone cannot tell a restriction that
     narrows the aggregate's row set from one that merely labels a column.
     Everything before the first FROM is the select list, so bounding the
-    search after it excludes the FILTER form by construction. The mirror of
-    _duration_aliases, which bounds itself to the text before that same FROM.
+    search after it excludes the FILTER form by construction. The split is
+    keyword-based, not space-delimited: a literal " FROM " substring search
+    returns -1 (failing open, handing back the whole statement — including
+    the FILTER form this bound exists to exclude) on any rawSql with a
+    newline or a closing paren immediately before FROM, which a hand-edited
+    dashboard file can easily produce. The mirror of _duration_aliases,
+    which bounds itself to the text before that same FROM.
     """
-    from_at = sql.upper().find(" FROM ")
-    return sql[from_at:] if from_at != -1 else sql
+    match = _FROM_KEYWORD_RE.search(sql)
+    return sql[match.start():] if match else sql
 
 
 _COST_SPLIT_RESTRICTION_RE = re.compile(
@@ -880,8 +908,9 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
     filter matched 58 lines, `| json | level=~"error|critical"` matched 348,
     and both filters at once matched 0 — the sets are disjoint. structlog
     writes a lowercase `"level": "error"` field that a substring match on
-    ERROR cannot see, so the shipped panel missed 84% of the application's
-    errors; the 58 it did see are ANSI-coloured plain text from third-party
+    ERROR cannot see, so the shipped panel — arm B alone — saw only 58 of
+    the combined 406 lines and missed the 348 that only the JSON arm
+    catches; the 58 it did see are ANSI-coloured plain text from third-party
     loggers that the JSON parser cannot read. Both arms are load-bearing.
 
     Loki's own `detected_level` is not a third option: selecting on it
@@ -915,7 +944,7 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
         f"error classes, not to everything")
 
 
-# workflow_metrics carries two different durations and they are a part and a
+# workflow_metrics carries two TOP-LEVEL durations and they are a part and a
 # whole, not two measurements of one thing:
 #   workflow_duration_s = wall clock of the whole generation run — both crew
 #       kickoffs, the element stage and the dryrun gate (workflow_service.py,
@@ -926,6 +955,16 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
 # <= workflow_duration_s on 15 of 15, ratio 0.089-0.623, mean 0.45. An alias
 # of `duration_s` on either one is therefore ambiguous by construction, so
 # each must carry a word that says which span it measures.
+#
+# There is a THIRD duration this rule deliberately does not reach:
+# crew_stage_metrics.<stage>.duration_s, the per-stage time inside a single
+# crew kickoff. It is aliased plain `duration_s`/`avg_duration_s` on the
+# "Cost and duration per crew stage" panel on both dashboards, with no
+# ambiguity to resolve — there is only one duration field at that level, not
+# two candidates a reader could confuse. _DURATION_FIELD_RE matches only
+# `workflow_duration_s`/`execution_time`, so those two panels are out of
+# scope by design; a future author should not read their bare `duration_s`
+# alias as a gap this rule missed.
 _DURATION_FIELD_RE = re.compile(
     r"data->>'(workflow_duration_s|execution_time)'", re.IGNORECASE)
 _ALIAS_AFTER_RE = re.compile(r"\bAS\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
@@ -937,10 +976,16 @@ def _duration_aliases(sql: str) -> list[tuple[str, str]]:
 
     Only select-list occurrences carry an alias, so the search is bounded to
     the text before the first FROM — otherwise a field used in a WHERE clause
-    would pick up some later column's alias and fail a correct panel.
+    would pick up some later column's alias and fail a correct panel. The
+    split is keyword-based, not space-delimited: a literal " FROM " substring
+    search returns -1 (failing open, scanning the whole statement — including
+    text past FROM where a later column's alias could be misattributed) on
+    any rawSql with a newline or a closing paren immediately before FROM. The
+    mirror of _after_from, which bounds itself to the text from that same
+    FROM onward.
     """
-    from_at = sql.upper().find(" FROM ")
-    select_list = sql[:from_at] if from_at != -1 else sql
+    from_match = _FROM_KEYWORD_RE.search(sql)
+    select_list = sql[:from_match.start()] if from_match else sql
     out = []
     for match in _DURATION_FIELD_RE.finditer(select_list):
         alias = _ALIAS_AFTER_RE.search(select_list[match.end():])

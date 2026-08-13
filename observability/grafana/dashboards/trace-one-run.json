@@ -86,7 +86,7 @@
     {
       "type": "table",
       "title": "6 — Every model call, with prompt and response",
-      "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. Historical rows are largely unattributed: 5,248 of 97,692 carried a workflow_id as of 2026-08-10.",
+      "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. This panel's SQL does not filter on model, so a run's root test-generation-workflow span appears in this list alongside its real model calls, as a row with blank model/prompt/response columns. Attribution, measured against model-call rows rather than the whole table (which is ~97% OpenTelemetry spans): of 2,829 llm_traces rows that carry a model, 441 carry a workflow_id, as of 2026-08-13.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 34},
       "targets": [{

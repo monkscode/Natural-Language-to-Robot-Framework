@@ -182,7 +182,7 @@ should turn it into a link — Grafana cannot serve local files, and a
 
   | Dashboard | Panels that follow the picker |
   |---|---|
-  | Execution outcomes | 7 of 7 — `execution_records` is tz-aware throughout |
+  | Execution outcomes | 8 of 8 — 7 SQL panels because `execution_records` is tz-aware throughout, plus the Loki aggregate-error-log panel, which follows the picker through Loki rather than through `execution_records` |
   | Learning health | 3 of 7 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
   | Cost, latency and capacity | 1 of 9 |
   | Locator reliability | 0 of 4 |
