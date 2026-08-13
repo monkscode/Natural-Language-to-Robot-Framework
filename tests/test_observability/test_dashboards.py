@@ -39,6 +39,7 @@ BENCH_TABLES = {
 BENCH_DASHBOARDS = {
     "bench-weakest-now.json",
     "bench-change-impact.json",
+    "bench-time.json",
 }
 
 # Dashboards that show ONE run, selected by id. Three aggregate rules below

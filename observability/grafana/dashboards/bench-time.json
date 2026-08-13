@@ -1,0 +1,76 @@
+{
+  "uid": "bench-time",
+  "title": "Bench — where the time goes",
+  "tags": ["mark1", "bench"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "timepicker": {"hidden": true},
+  "templating": {
+    "list": [
+      {
+        "name": "family",
+        "label": "Query family",
+        "type": "query",
+        "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+        "query": "SELECT DISTINCT family AS __text, family AS __value FROM bench.sweeps ORDER BY 1",
+        "refresh": 1,
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "window_sweeps",
+        "label": "Window (eligible sweeps)",
+        "type": "custom",
+        "query": "4,8,12,20",
+        "current": {"text": "12", "value": "12"},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "0 — What this dashboard covers",
+      "description": "How much of the selected family carries the timings the panels below read. Unlike every other panel here, this one ignores the sweep window and the eligibility filter — it describes the whole family, so the gap between its sweep count and the window tells you how much is being left out. Coverage is uneven and the panels say so individually: of 1,984 runs on record, 1,951 carry the five main stage timings, 1,104 carry the seven sub-stage timings, 1,944 carry a duplicate-lookup rate, 1,880 a cleanup time, 1,876 a cold-start time and only 1,039 a locator latency. agent_steps is populated on 30 runs and is deliberately read by no panel. Families do not blend: public query ids run q01-q10 and the other family's are prefixed, so no panel can silently mix two target sites. All-time: this corpus is scoped by sweep, not by wall clock — bench.sweeps.captured_at is naive and bench.runs.started_at is text, so the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(DISTINCT s.sweep_name) AS sweeps, count(r.query_id) AS runs, count(r.identify_s) AS runs_with_stage_timings, count(r.agent_run_s) AS runs_with_substage_timings, count(r.locator_latency_ms_median) AS runs_with_locator_timing, count(r.cold_start_s) AS runs_with_overhead FROM bench.sweeps s LEFT JOIN bench.runs r ON r.sweep_name = s.sweep_name WHERE s.family = ${family:sqlstring}"
+      }]
+    },
+    {
+      "type": "barchart",
+      "title": "1 — Where a bench run's wall time goes, per sweep",
+      "description": "Mean seconds per run in each of the five pipeline stages, newest sweep first, stacked so the bar length is the whole run. The five stages account for essentially all of it: across the 1,951 runs carrying both, they sum to 61.6 s against a recorded total_s of 61.7 s, leaving 0.1 s unattributed. identify_s dominates every sweep — 38.8 s of that 61.6 s, or 63% of the wall time — which is why it gets a panel of its own below. recorded_total_s is shown beside the stack rather than in it, as the independent check on that sum; if the stack and the recorded total ever diverge by more than a second, the stage instrumentation has drifted and that is a finding. pass_rate_pct rides along for the same reason a speed number is never read alone: a sweep that got faster and lost pass rate did not get better, and this is the one place both are on the same row. It is the executed test status, so it answers a different question from the generation gate the bench reports. Sweeps that are incomplete, flagged invalid in the filename, or re-costed duplicates of another sweep are excluded — admitting the one invalid sweep is measured on the weakest-queries dashboard to move per-query pass rates by 12.7 to 14.3 points. Set the window with the Window variable; the default of 12 shows the last twelve eligible sweeps of the selected family. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 5},
+      "options": {
+        "xField": "sweep",
+        "stacking": "normal",
+        "orientation": "horizontal",
+        "showValue": "never",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "recorded_total_s"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]},
+          {"matcher": {"id": "byName", "options": "pass_rate_pct"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]},
+          {"matcher": {"id": "byName", "options": "runs"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]}
+        ]
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s)::numeric, 2) AS recorded_total_s, round(100.0 * count(*) FILTER (WHERE r.test_status = 'passed') / nullif(count(r.test_status), 0), 1) AS pass_rate_pct, count(r.total_s) AS runs FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+      }]
+    }
+  ]
+}
