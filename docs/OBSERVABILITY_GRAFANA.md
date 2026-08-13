@@ -465,3 +465,38 @@ LiteLLM dispatches callbacks across. Calls are labelled through call metadata no
 rows written from this version onward carry `workflow_id`. Older rows do not, and are not
 backfilled. Measured against model-call rows, not the whole table: of the 2,829 rows that
 carry a `model`, 441 carry a `workflow_id`, as of 2026-08-13.
+
+## Where the bench wall clock goes
+
+The five pipeline stages account for essentially the whole run: across the 1,951 runs
+carrying both, `plan_s + identify_s + assemble_s + dryrun_s + exec_s` sums to 61.6 s
+against a recorded `total_s` of 61.7 s. `identify_s` is 38.8 s of that — **63% of the
+wall time**.
+
+```sql
+SELECT round(avg(plan_s)::numeric, 1)     AS plan_s,
+       round(avg(identify_s)::numeric, 1) AS identify_s,
+       round(avg(assemble_s)::numeric, 1) AS assemble_s,
+       round(avg(dryrun_s)::numeric, 1)   AS dryrun_s,
+       round(avg(exec_s)::numeric, 1)     AS exec_s,
+       round(avg(total_s)::numeric, 1)    AS recorded_total_s,
+       count(*)                           AS runs
+FROM bench.runs
+WHERE plan_s IS NOT NULL AND total_s IS NOT NULL;
+```
+
+To look inside `identify_s`, pick **one** lane — never both. The seven sub-stage
+columns are two overlapping views of the same wall clock, and summing all seven
+returns 1.947× the real figure:
+
+```sql
+-- caller lane, and identify_s restricted to the same rows so they are comparable
+SELECT round(avg(identify_s) FILTER (WHERE agent_run_s IS NOT NULL)::numeric, 2) AS identify_s,
+       round(avg(submit_s + queue_s + poll_wait_s + postprocess_s)::numeric, 2)  AS caller_lane_s,
+       round(avg(session_setup_s + agent_setup_s + agent_run_s)::numeric, 2)     AS agent_lane_s,
+       count(agent_run_s)                                                        AS runs
+FROM bench.runs;
+```
+
+`git_sha` and `git_branch` are null on all 78 sweeps, so per-commit trending is not
+possible yet. `agent_steps` is populated on 30 of 1,984 runs and no panel reads it.

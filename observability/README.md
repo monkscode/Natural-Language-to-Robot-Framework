@@ -50,6 +50,7 @@ here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
 | Dashboard | uid | Use it when |
 |---|---|---|
 | Runs | `mark1-runs` | Finding a run at all — every run this install has a record of, newest first |
+| Bench — where the time goes | `bench-time` | Which pipeline stage is eating the bench wall clock, and whether it is drifting |
 | Trace one run | `mark1-trace-run` | Someone reports a bad run and gives you an id |
 | Locator reliability | `mark1-locators` | Asking how often element location fails, and on which runs — see the caveat below |
 | Execution outcomes | `mark1-execution` | Asking whether generated tests pass when they run |
@@ -204,6 +205,7 @@ should turn it into a link — Grafana cannot serve local files, and a
   | Locator reliability | 0 of 4 |
   | Runs | 0 of 2 — the union it lists is spined on `workflow_metrics.id`, an insertion counter, because 374 of 528 runs carry no timestamp in any app table. Picker hidden |
   | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |
+  | Bench — where the time goes | 0 of 6 — scoped by the sweep window, not the clock. `bench.sweeps.captured_at` is naive and `bench.runs.started_at` is text. Picker hidden |
 
   Making `ts` tz-aware is an application change plus a ruling on how to
   backfill 143 rows whose intended instant is ambiguous. That is a separate
@@ -358,6 +360,25 @@ should turn it into a link — Grafana cannot serve local files, and a
   access to the host. This is standard for any log scraper that discovers
   containers this way, and the profile is opt-in and loopback-bound; this is
   disclosure, not a change.
+
+### The two identify lanes — do not add them together
+
+`bench.runs` carries seven sub-stage timings inside `identify_s`. They are **two
+overlapping views of the same wall clock**, not seven slices of it:
+
+- **caller lane** — `submit_s + queue_s + poll_wait_s + postprocess_s`
+- **agent lane** — `session_setup_s + agent_setup_s + agent_run_s`
+
+Each reconstructs `identify_s` on its own (mean absolute error 0.583 s and 0.647 s
+over 1,104 runs). Stacking all seven gives **1.947×** the real figure, because
+`poll_wait_s` is the caller blocking while `agent_run_s` runs. The
+`test_no_panel_adds_both_identify_substage_lanes` guard rejects any panel that adds
+across the lanes.
+
+When comparing a lane against `identify_s`, restrict `identify_s` to the rows that
+carry sub-stages. One sweep has 30 runs with an `identify_s` and 29 with sub-stages,
+and the missing run took 3,250.73 s — enough to move the sweep's mean from 63.69 s to
+169.92 s and make a correct panel look broken.
 
 ## Editing a dashboard
 
