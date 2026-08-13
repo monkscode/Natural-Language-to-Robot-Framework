@@ -1236,12 +1236,23 @@ def test_per_run_log_panel_keeps_lines_that_carry_no_level_field():
         f"the widest level option is {widest}; '.+' is not a 'show everything' "
         f"option on a single-arm panel")
 
+    assert any("| json" in e for e in exprs), (
+        "no `| json` stage in the log panel's expr, so `.event`/`.level`/"
+        "`.logger` never populate and every line falls to the `__line__` "
+        "fallback — the panel silently reverts to raw JSON")
+    assert any("$level" in e for e in exprs), (
+        "the log panel's expr never consumes $level, so the Log level "
+        "dropdown filters nothing and is inert UI")
+
 
 def test_log_panel_guard_fires_on_the_unguarded_line_format(tmp_path):
     """Proving the guard passes on the shipped file is not the same as proving
     it REJECTS the template the design originally specified — which is the
     exact string a future author would paste back in from the spec. Mutates a
-    tmp copy with both halves reverted; never touches the committed file."""
+    tmp copy with the line_format half reverted to the unguarded template;
+    the level variable is untouched here — see
+    test_log_panel_guard_fires_on_a_level_default_that_drops_lines for the
+    level-default mutant. Never touches the committed file."""
     source = DASHBOARD_DIR / "trace-one-run.json"
     dashboard = json.loads(source.read_text(encoding="utf-8"))
     for panel in dashboard["panels"]:
@@ -1259,4 +1270,36 @@ def test_log_panel_guard_fires_on_the_unguarded_line_format(tmp_path):
 
     with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
         with pytest.raises(AssertionError, match="__line__"):
+            test_per_run_log_panel_keeps_lines_that_carry_no_level_field()
+
+
+def test_log_panel_guard_fires_on_a_level_default_that_drops_lines(tmp_path):
+    """The line_format half has its own mutant above; this one anchors the
+    level-default assertion instead. `expr` is left byte-for-byte untouched
+    here, so the `__line__` assertion cannot be what fires — only the level
+    variable's default and its matching 'every line' option move, from '.*'
+    to '.+'. That is the realistic regression: an author copies
+    execution-outcomes.json's '.+' "every structured line" pattern onto this
+    single-arm panel, where '.*' is the only value that shows every line and
+    '.+' silently drops every line with no level field. Mutates a tmp copy;
+    never touches the committed file."""
+    source = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    variables = {v["name"]: v for v in dashboard["templating"]["list"]}
+    level = variables["level"]
+    assert level["current"]["value"] == ".*", "fixture level default not found to mutate"
+    level["current"]["value"] = ".+"
+    matched = 0
+    for option in level["options"]:
+        if option["value"] == ".*":
+            option["value"] = ".+"
+            matched += 1
+    assert matched == 1, "fixture 'every line' option not found to mutate"
+
+    mutant_dir = tmp_path / "dashboards"
+    mutant_dir.mkdir()
+    (mutant_dir / source.name).write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
+        with pytest.raises(AssertionError, match=r"must default to"):
             test_per_run_log_panel_keeps_lines_that_carry_no_level_field()
