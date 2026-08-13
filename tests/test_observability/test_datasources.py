@@ -14,10 +14,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_observability.test_dashboards import _dashboards
+from tests.test_observability.test_dashboards import _dashboard_uids, _dashboards
 
 DATASOURCE_FILE = Path(
     "observability/grafana/provisioning/datasources/datasources.yml")
+
+# The /d/<uid> segment of a derived field's url — the same shape
+# test_dashboards.py's own link-target guard parses
+# (test_every_data_link_targets_a_dashboard_that_exists). A filename can
+# survive a rename of the uid inside it, so the check that matters is
+# against the uid the url actually names, not the file it happens to live in.
+_DERIVED_FIELD_TARGET_RE = re.compile(r"^/d/([a-z0-9-]+)")
 
 # A real log line's shape, with the hazard in it: user_id is written BEFORE
 # workflow_id, and both are UUIDs. Synthetic values, so this file names no run.
@@ -80,6 +87,25 @@ def test_loki_derived_field_captures_a_whole_workflow_id():
         f"one produces competing links on the same log line")
     known = {p.name for p in _dashboards()}
     assert "trace-one-run.json" in known, "the link target dashboard file is gone"
+
+    # The filename check above proves a file exists; it says nothing about
+    # what uid that file declares. Grafana resolves /d/<uid> by uid, not by
+    # filename, so the check that actually matters is that the uid the url
+    # names is one a committed dashboard declares — change the uid without
+    # renaming the file and the link above would still pass while the click
+    # dead-ends. Kept alongside it rather than in place of it: the two catch
+    # different accidents (file deleted/renamed vs. uid changed in place),
+    # and this one still derives the uid from the url itself rather than a
+    # second hardcoded string, so it can't drift independently of what the
+    # field actually links to.
+    target = _DERIVED_FIELD_TARGET_RE.match(fields[0]["url"])
+    assert target, f"derived field url is not a /d/<uid> path: {fields[0]['url']!r}"
+    assert target.group(1) in _dashboard_uids(), (
+        f"derived field links to dashboard uid {target.group(1)!r}, which no "
+        f"committed dashboard declares — the target file can keep its name "
+        f"while its uid drifts, and the link would render normally and "
+        f"dead-end on click: {fields[0]['url']!r}")
+
     _assert_derived_field_is_sound(fields[0])
 
 
@@ -95,4 +121,23 @@ def test_derived_field_guard_fires_on_a_regex_that_is_not_anchored_to_the_key():
 
     mutated = dict(_loki_derived_fields()[0], matcherRegex=loose_pattern)
     with pytest.raises(AssertionError, match="anchored to the workflow_id key"):
+        _assert_derived_field_is_sound(mutated)
+
+
+def test_derived_field_guard_fires_on_a_single_dollar_url():
+    """Proving the shipped file has $$ is not the same as proving the guard
+    REJECTS a single $ — and a single $ is what a future author reaches for,
+    because $$ reads like a typo. It is not: provisioning YAML sends every
+    ${...} through env var expansion, so a single-$ __value.raw resolves
+    against a nonexistent env var and is silently replaced with an empty
+    string. The link still renders — Grafana has no way to know the value it
+    was supposed to carry is missing — and dead-ends on click with nothing on
+    screen saying why. Drives the real assertion with a mutated copy of the
+    shipped field; never writes to the datasource file."""
+    field = _loki_derived_fields()[0]
+    unescaped_url = field["url"].replace("$${__value.raw}", "${__value.raw}")
+    assert unescaped_url != field["url"], "fixture url has no $${__value.raw} to unescape"
+
+    mutated = dict(field, url=unescaped_url)
+    with pytest.raises(AssertionError, match="must pass the raw captured value"):
         _assert_derived_field_is_sound(mutated)
