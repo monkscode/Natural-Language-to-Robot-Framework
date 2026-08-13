@@ -93,3 +93,13 @@ clients/*/
 bench/runs/
 bench/baselines/
 bench/private/
+
+# Browser-verification artifacts: the Playwright MCP server writes snapshots,
+# console logs and screenshots into the working directory, and a screenshot of
+# any dashboard panel captures live customer data straight from the database —
+# a Grafana verification pass on 2026-08-13 rendered a customer domain and left
+# four such files untracked in the repository root. This repository is public.
+# `/*.png` is anchored to the root, where stray screenshots land, so the three
+# tracked docs/*.png diagrams and any future one are unaffected.
+.playwright-mcp/
+/*.png
