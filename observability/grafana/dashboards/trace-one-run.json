@@ -19,11 +19,24 @@
   },
   "panels": [
     {
+      "type": "stat",
+      "title": "0 — What this run left behind",
+      "description": "Which sources hold anything for this id. Read every zero below as 'no record', not as 'broken'. Measured 2026-08-13: 538 distinct run ids exist across test_runs, workflow_metrics and execution_records, and only 158 of them also have rows in llm_traces — 380 have none, so a run that resolves in every panel on this dashboard is the exception rather than the rule. llm_model_calls counts rows that carry a model, not traced rows: of 2,829 model-call rows in llm_traces only 441 carry a workflow_id, because every span CrewAI emits is unattributed and only the backend's own test-generation-workflow span and LLM calls carrying call metadata bind to a run at all. Panel 6 below lists every traced row for this id, including that workflow span, which appears there with blank model columns. browser-use spend never reaches llm_traces at all — it is recoverable only from workflow_metrics, in panel 2. learning_metrics has no panel of its own here; it is counted so that 'learning recorded nothing for this run' is visible rather than merely absent.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT (SELECT count(*) FROM test_runs WHERE run_id = ${run_id:sqlstring}) AS test_runs_rows, (SELECT count(*) FROM workflow_metrics WHERE workflow_id = ${run_id:sqlstring}) AS workflow_metrics_rows, (SELECT count(*) FROM execution_records WHERE workflow_id = ${run_id:sqlstring}) AS execution_records_rows, (SELECT count(*) FILTER (WHERE nullif(model, '') IS NOT NULL) FROM llm_traces WHERE workflow_id = ${run_id:sqlstring}) AS llm_model_calls, (SELECT count(*) FROM learning_metrics WHERE workflow_id = ${run_id:sqlstring}) AS learning_metrics_rows"
+      }]
+    },
+    {
       "type": "table",
       "title": "1 — What was asked, and how it ended",
       "description": "test_runs is the only record of a run that failed before the gate. A row still at 'running' long after created_at died without reaching either terminal path.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 4},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -36,7 +49,7 @@
       "title": "2 — Gate outcome and cost",
       "description": "No row here means the run never reached the metrics block, which runs after the dryrun gate. Go back to panel 1 for the reason. run_wall_s is workflow_duration_s — the whole generation run, not the browser-use element stage timed in panel 5. dryrun_status and crew_stage_metrics carry the key on 33/434 rows, but only 13/434 hold a usable (non-null) value, as of 2026-08-10 — the rest carry a JSON null.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 10},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -49,7 +62,7 @@
       "title": "3 — Cost and duration per crew stage",
       "description": "planner, assembler, and repair when the gate re-prompted. The deterministic element stage sits between the two kickoffs and is deliberately billed to neither — its time is in panel 5. crew_stage_metrics carries the key on 33/434 rows; only 13/434 hold a usable object as of 2026-08-10 — the rest carry a JSON null, which this panel excludes via jsonb_typeof so it returns no rows instead of erroring.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 12},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 16},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -62,7 +75,7 @@
       "title": "4 — Every element, and how its locator was found",
       "description": "The key is present on 434/434 metrics rows; one of them holds a JSON null rather than an array, as of 2026-08-10 — this panel excludes it via jsonb_typeof so it returns no rows instead of erroring. fallback_depth above 0 means the primary strategy did not resolve.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 19},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -75,7 +88,7 @@
       "title": "5 — Where the time went",
       "description": "poll_overhead_s is how long the backend kept polling after the browser agent had finished. queue_s is the browser-service capacity signal. phase_timings carries the key on 219/434 rows; only 50/434 (11.5%) hold a usable object as of 2026-08-10. The panel's WHERE clause (data ? 'phase_timings') admits the other 169 JSON-null rows too — they are not hidden, they render every column in this panel blank.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 28},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 32},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -88,7 +101,7 @@
       "title": "6 — Every model call, with prompt and response",
       "description": "These rows exist even when the run failed, because they are written per successful LLM call as the run proceeds. This is the only place to recover a failed run's spend. This panel's SQL does not filter on model, so a run's root test-generation-workflow span appears in this list alongside its real model calls, as a row with blank model/prompt/response columns. Attribution, measured against model-call rows rather than the whole table (which is ~97% OpenTelemetry spans): of 2,829 llm_traces rows that carry a model, 441 carry a workflow_id, as of 2026-08-13.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 34},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -101,7 +114,7 @@
       "title": "7 — Did the generated test actually pass",
       "description": "Empty for a run that was generated but never executed. Only 14 of 123 execution records had a matching metrics row as of 2026-08-10, so an empty panel here is common and is not itself a fault.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
-      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 44},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 48},
       "targets": [{
         "refId": "A",
         "format": "table",
@@ -114,7 +127,7 @@
       "title": "8 — Log lines from both services",
       "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted. LogQL's |= line filter has no fail-closed form: |= \"\" matches every line (the empty string is a substring of everything), so a cleared run_id box would otherwise dump the unfiltered stream of both services here. The run_id variable's default is the sentinel 00000000-0000-0000-0000-000000000000, which cannot occur in real logs, so a fresh load or a cleared box shows nothing instead of everything. Paste a real run id to see its lines.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 54},
       "options": {
         "showTime": true,
         "wrapLogMessage": true,
@@ -129,7 +142,7 @@
       "type": "text",
       "title": "9 — Artifacts",
       "description": "",
-      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 60},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 64},
       "options": {
         "mode": "markdown",
         "content": "The generated `.robot` code and the Robot `log.html` report are files, not database rows, and are not rendered here.\n\nOpen [Mark 1 History](http://localhost:3000/history) and paste the run id into the search box — it searches run ids server-side — then use the drawer for the code and the report link."

@@ -638,8 +638,9 @@ def _after_from(sql: str) -> str:
     returns -1 (failing open, handing back the whole statement — including
     the FILTER form this bound exists to exclude) on any rawSql with a
     newline or a closing paren immediately before FROM, which a hand-edited
-    dashboard file can easily produce. The mirror of _duration_aliases,
-    which bounds itself to the text before that same FROM.
+    dashboard file can easily produce. Unlike _duration_aliases, which no
+    longer bounds itself to a fixed span around FROM — it resolves each
+    match within its own top-level comma segment instead.
     """
     match = _FROM_KEYWORD_RE.search(sql)
     return sql[match.start():] if match else sql
@@ -1008,10 +1009,10 @@ def test_duration_fields_are_aliased_unambiguously(path: Path):
 
 
 def test_duration_alias_guard_fires_on_an_ambiguous_execution_time_alias(tmp_path):
-    """No shipped panel reads execution_time yet — Phase 2's runs list will be
-    the first. Without this, that half of the rule is untested until then, and
-    an untested guard is a guard that does not fire. Mutates a tmp copy; never
-    touches the committed file."""
+    """A shipped panel now reads execution_time — mark1-runs.json's runs list,
+    added in Phase 2. This mutation test still proves the guard rejects an
+    ambiguous alias, rather than merely proving today's panels happen to
+    comply. Mutates a tmp copy; never touches the committed file."""
     source = DASHBOARD_DIR / "cost-latency-capacity.json"
     dashboard = json.loads(source.read_text(encoding="utf-8"))
     dashboard["panels"][0]["targets"][0]["rawSql"] = (
@@ -1115,3 +1116,66 @@ def test_runs_list_guard_fires_when_a_union_branch_is_dropped(tmp_path):
     with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
         with pytest.raises(AssertionError, match="reads no execution_records"):
             test_runs_list_unions_every_run_id_source()
+
+
+def test_trace_coverage_strip_counts_every_source_the_dashboard_reads():
+    """An empty panel must read as 'no record', not as 'broken'.
+
+    Measured 2026-08-13: 538 distinct run ids exist across the three app
+    tables and only 158 also have rows in llm_traces — 380 have none. A run
+    that resolves in every panel on this dashboard is the exception, so the
+    strip at the top exists to say up front which sources hold anything for
+    this id.
+
+    The rule with teeth is not 'a strip exists' — it is that the strip must
+    cover every source a panel below it reads. Add a panel on a new table and
+    forget the strip, and its blank output is unexplained again, which is the
+    exact defect the strip was added to fix. Asserted one-directional: the
+    strip may count more sources than the panels read (learning_metrics has no
+    panel here, and 'learning recorded nothing for this run' is worth
+    knowing), never fewer.
+    """
+    path = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    panels = dashboard["panels"]
+
+    strip_sql = " ".join(
+        t["rawSql"] for t in panels[0].get("targets", []) if t.get("rawSql"))
+    assert strip_sql, "the first panel on the trace dashboard runs no SQL"
+
+    read_below = set()
+    for panel in panels[1:]:
+        for target in panel.get("targets", []):
+            read_below |= _production_table_refs(target.get("rawSql") or "", set())
+
+    missing = {
+        table for table in read_below
+        if not re.search(rf"\bFROM\s+{table}\b", strip_sql, re.IGNORECASE)
+    }
+    assert not missing, (
+        f"the coverage strip does not count {sorted(missing)}, which a panel "
+        f"below it reads — an empty panel on that source has nothing above it "
+        f"saying whether the run has a row there at all"
+    )
+
+
+def test_coverage_strip_guard_fires_when_a_source_is_dropped(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS a strip that has fallen behind the panels. Mutates a tmp copy
+    with the llm_traces subquery removed; never touches the committed file."""
+    source = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    target = dashboard["panels"][0]["targets"][0]
+    # Split on the subquery separator and drop the one arm, rather than
+    # regex-surgery on a string full of parentheses and ${...} interpolations.
+    parts = target["rawSql"].split(", (SELECT ")
+    kept = [p for p in parts if "llm_traces" not in p]
+    assert len(kept) == len(parts) - 1, "fixture subquery not found to remove"
+    target["rawSql"] = ", (SELECT ".join(kept)
+    mutant_dir = tmp_path / "dashboards"
+    mutant_dir.mkdir()
+    (mutant_dir / source.name).write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
+        with pytest.raises(AssertionError, match=r"does not count \['llm_traces'\]"):
+            test_trace_coverage_strip_counts_every_source_the_dashboard_reads()
