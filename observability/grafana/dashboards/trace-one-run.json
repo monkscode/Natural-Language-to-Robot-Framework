@@ -123,11 +123,28 @@
       }]
     },
     {
+      "type": "table",
+      "title": "8 — The generated Robot code",
+      "description": "The .robot file this run produced, and the user's correction where one exists. Two sources, deliberately both shown. execution_records.robot_code is populated on 123 of 123 rows (average 1,202 characters) and test_runs.robot_code on 37 of 45, as of 2026-08-13; the two tables share 14 run ids and on all 14 the values were byte-identical. Nothing in the write path guarantees that, so a difference between the two rows is a finding, not a duplicate — preferring one source with coalesce would have hidden it. user_corrected_code is working_code, present on 8 rows, and it is what the user supplied after rejecting the generated test. A row with a blank code column means that table holds a record of the run but no code for it; no row at all means that table has no record of the run — panel 0 at the top says which. Click a cell and choose Inspect value to read or copy the whole file.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 54},
+      "fieldConfig": {
+        "defaults": {"custom": {"inspect": true}},
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT 'execution_records' AS source, robot_code, working_code AS user_corrected_code FROM execution_records WHERE workflow_id = ${run_id:sqlstring} UNION ALL SELECT 'test_runs' AS source, robot_code, NULL AS user_corrected_code FROM test_runs WHERE run_id = ${run_id:sqlstring}"
+      }]
+    },
+    {
       "type": "logs",
-      "title": "8 — Log lines from both services",
+      "title": "9 — Log lines from both services",
       "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted. LogQL's |= line filter has no fail-closed form: |= \"\" matches every line (the empty string is a substring of everything), so a cleared run_id box would otherwise dump the unfiltered stream of both services here. The run_id variable's default is the sentinel 00000000-0000-0000-0000-000000000000, which cannot occur in real logs, so a fresh load or a cleared box shows nothing instead of everything. Paste a real run id to see its lines.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 54},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 64},
       "options": {
         "showTime": true,
         "wrapLogMessage": true,
@@ -140,9 +157,9 @@
     },
     {
       "type": "text",
-      "title": "9 — Artifacts",
+      "title": "10 — Artifacts",
       "description": "",
-      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 64},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 74},
       "options": {
         "mode": "markdown",
         "content": "The generated `.robot` code and the Robot `log.html` report are files, not database rows, and are not rendered here.\n\nOpen [Mark 1 History](http://localhost:3000/history) and paste the run id into the search box — it searches run ids server-side — then use the drawer for the code and the report link."
