@@ -11,6 +11,7 @@ Depends on: observability/grafana/dashboards/*.json
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1023,3 +1024,63 @@ def test_duration_alias_guard_fires_on_an_ambiguous_execution_time_alias(tmp_pat
 
     with pytest.raises(AssertionError, match="which duration it is"):
         test_duration_fields_are_aliased_unambiguously(mutant)
+
+
+# The runs front door is the only inventory of what this install has ever run,
+# and the three app tables it unions do not nest. Measured 2026-08-13 over the
+# 528 UUID-shaped run ids: 415 have a workflow_metrics row, 45 have a test_runs
+# row, 123 have an execution_records row, and 113 have no workflow_metrics row
+# at all. Drop any one branch and a whole class of run stops being listed, with
+# nothing on screen to say so — the one failure a front door cannot afford.
+#
+# A note for whoever hits this guard's neighbours: every branch of that union
+# carries a WHERE clause, and it is load-bearing beyond the filtering it does.
+# _FROM_CLAUSE_RE captures non-greedily up to the first WHERE/GROUP BY/ORDER
+# BY/JOIN/LIMIT, so a branch without one lets the capture run past the CTE and
+# swallow the outer SELECT list, whose commas sit at paren-depth 0. Each alias
+# then reads as a table and both test_aggregate_dashboards_use_no_inner_join
+# and test_every_sql_target_queries_only_granted_tables fail, naming tables
+# called `tr`, `er` and `m` that do not exist. That is fail-closed, not a hole.
+_RUNS_LIST_SOURCES = ("test_runs", "workflow_metrics", "execution_records")
+
+
+def test_runs_list_unions_every_run_id_source():
+    path = DASHBOARD_DIR / "mark1-runs.json"
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    sqls = _sql_targets(dashboard)
+    assert sqls, "mark1-runs.json has no SQL target"
+    for sql in sqls:
+        for table in _RUNS_LIST_SOURCES:
+            assert re.search(rf"\bFROM\s+{table}\b", sql, re.IGNORECASE), (
+                f"mark1-runs.json reads no {table}, so every run that exists "
+                f"only in that table is invisible on the one dashboard whose "
+                f"job is to list every run: {sql[:200]}"
+            )
+
+
+def test_runs_list_guard_fires_when_a_union_branch_is_dropped(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS a query missing a branch. Mutates a tmp copy that drops the
+    execution_records arm — the shape a future author produces by 'simplifying'
+    the union — and asserts the guard notices. Never touches the committed file.
+    """
+    branch = (
+        " UNION SELECT workflow_id FROM execution_records WHERE workflow_id ~ "
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'"
+    )
+    source = DASHBOARD_DIR / "mark1-runs.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    removed = 0
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            if branch in (target.get("rawSql") or ""):
+                target["rawSql"] = target["rawSql"].replace(branch, "", 1)
+                removed += 1
+    assert removed, "fixture union branch not found to remove"
+    mutant_dir = tmp_path / "dashboards"
+    mutant_dir.mkdir()
+    (mutant_dir / source.name).write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
+        with pytest.raises(AssertionError, match="reads no execution_records"):
+            test_runs_list_unions_every_run_id_source()

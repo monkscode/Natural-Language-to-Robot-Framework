@@ -49,6 +49,7 @@ here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
 
 | Dashboard | uid | Use it when |
 |---|---|---|
+| Runs | `mark1-runs` | Finding a run at all — every run this install has a record of, newest first |
 | Trace one run | `mark1-trace-run` | Someone reports a bad run and gives you an id |
 | Locator reliability | `mark1-locators` | Asking how often element location fails, and on which runs — see the caveat below |
 | Execution outcomes | `mark1-execution` | Asking whether generated tests pass when they run |
@@ -186,6 +187,7 @@ should turn it into a link — Grafana cannot serve local files, and a
   | Learning health | 3 of 7 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
   | Cost, latency and capacity | 1 of 9 |
   | Locator reliability | 0 of 4 |
+  | Runs | 0 of 2 — the union it lists is spined on `workflow_metrics.id`, an insertion counter, because 374 of 528 runs carry no timestamp in any app table. Picker hidden |
   | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |
 
   Making `ts` tz-aware is an application change plus a ruling on how to
