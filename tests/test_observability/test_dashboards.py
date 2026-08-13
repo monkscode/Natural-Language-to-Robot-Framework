@@ -973,24 +973,24 @@ _DURATION_ALIAS_RULE = {"workflow_duration_s": "wall", "execution_time": "browse
 
 
 def _duration_aliases(sql: str) -> list[tuple[str, str]]:
-    """(field, alias) for each duration field selected in the SELECT list.
+    """(field, alias) for each duration field selected anywhere in `sql`.
 
-    Only select-list occurrences carry an alias, so the search is bounded to
-    the text before the first FROM — otherwise a field used in a WHERE clause
-    would pick up some later column's alias and fail a correct panel. The
-    split is keyword-based, not space-delimited: a literal " FROM " substring
-    search returns -1 (failing open, scanning the whole statement — including
-    text past FROM where a later column's alias could be misattributed) on
-    any rawSql with a newline or a closing paren immediately before FROM. The
-    mirror of _after_from, which bounds itself to the text from that same
-    FROM onward.
+    Each match is resolved within its own top-level comma segment (reusing
+    _split_top_level_commas), not a fixed prefix before the first FROM. The
+    prefix bound broke on a CTE-fronted query — `WITH ids AS (SELECT ... FROM
+    test_runs ...) SELECT ... (data->>'workflow_duration_s') ...` puts the
+    first FROM inside the CTE, so the outer SELECT list carrying the real
+    alias was never scanned, and the guard silently saw nothing on
+    mark1-runs.json. A CTE's own commas sit inside its parentheses, at
+    depth > 0, so splitting on top-level commas survives it: each field's
+    alias is always the nearest AS within the same comma segment as the
+    field's own match, regardless of what comes before it in the statement.
     """
-    from_match = _FROM_KEYWORD_RE.search(sql)
-    select_list = sql[:from_match.start()] if from_match else sql
     out = []
-    for match in _DURATION_FIELD_RE.finditer(select_list):
-        alias = _ALIAS_AFTER_RE.search(select_list[match.end():])
-        out.append((match.group(1).lower(), alias.group(1).lower() if alias else ""))
+    for segment in _split_top_level_commas(sql):
+        for match in _DURATION_FIELD_RE.finditer(segment):
+            alias = _ALIAS_AFTER_RE.search(segment[match.end():])
+            out.append((match.group(1).lower(), alias.group(1).lower() if alias else ""))
     return out
 
 
@@ -1026,6 +1026,32 @@ def test_duration_alias_guard_fires_on_an_ambiguous_execution_time_alias(tmp_pat
         test_duration_fields_are_aliased_unambiguously(mutant)
 
 
+def test_duration_alias_guard_fires_on_an_ambiguous_alias_behind_a_cte(tmp_path):
+    """_duration_aliases used to bound its search to the text before the
+    first FROM. On a CTE-fronted query — `WITH ids AS (SELECT ... FROM
+    workflow_metrics) SELECT ... FROM ids` — that first FROM sits inside the
+    CTE, so the outer SELECT list carrying the real alias was never scanned:
+    the guard saw nothing at all, not even a wrong answer, on exactly the
+    shape mark1-runs.json ships. Proven: with the pre-fix implementation this
+    mutant's rawSql produced `_duration_aliases(sql) == []`, so
+    test_duration_fields_are_aliased_unambiguously never looked at
+    `duration_s` and did not raise. Mutates a tmp copy of
+    cost-latency-capacity.json with a synthetic CTE-fronted rawSql; never
+    touches the committed file."""
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    dashboard["panels"][0]["targets"][0]["rawSql"] = (
+        "WITH ids AS (SELECT workflow_id AS id FROM workflow_metrics) "
+        "SELECT round((data->>'execution_time')::numeric, 1) AS duration_s "
+        "FROM ids"
+    )
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="which duration it is"):
+        test_duration_fields_are_aliased_unambiguously(mutant)
+
+
 # The runs front door is the only inventory of what this install has ever run,
 # and the three app tables it unions do not nest. Measured 2026-08-13 over the
 # 528 UUID-shaped run ids: 415 have a workflow_metrics row, 45 have a test_runs
@@ -1037,10 +1063,15 @@ def test_duration_alias_guard_fires_on_an_ambiguous_execution_time_alias(tmp_pat
 # carries a WHERE clause, and it is load-bearing beyond the filtering it does.
 # _FROM_CLAUSE_RE captures non-greedily up to the first WHERE/GROUP BY/ORDER
 # BY/JOIN/LIMIT, so a branch without one lets the capture run past the CTE and
-# swallow the outer SELECT list, whose commas sit at paren-depth 0. Each alias
-# then reads as a table and both test_aggregate_dashboards_use_no_inner_join
-# and test_every_sql_target_queries_only_granted_tables fail, naming tables
-# called `tr`, `er` and `m` that do not exist. That is fail-closed, not a hole.
+# swallow the outer SELECT list, whose commas sit at paren-depth 0. Measured:
+# on the table panel, whose bare column aliases (`tr`, `m`) then read as
+# tables, both test_aggregate_dashboards_use_no_inner_join and
+# test_every_sql_target_queries_only_granted_tables fail — `er` never
+# surfaces, because every er reference sits inside a coalesce(...) call that
+# _FUNCTION_CALL_RE excludes. The stat panel's SELECT list is all count(...)
+# calls, so neither guard fires there; its protection is the mutation test
+# below, which drops a whole branch rather than a WHERE. Fail-closed on one
+# panel, narrower on the other.
 _RUNS_LIST_SOURCES = ("test_runs", "workflow_metrics", "execution_records")
 
 
