@@ -2,6 +2,16 @@
   "uid": "mark1-locators",
   "title": "Mark 1 — Locator reliability",
   "tags": ["mark1", "reliability"],
+  "links": [
+    {
+      "title": "All runs",
+      "type": "link",
+      "url": "/d/mark1-runs",
+      "icon": "external link",
+      "tooltip": "Every run this install has a record of",
+      "targetBlank": false
+    }
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "5m",
@@ -61,6 +71,28 @@
       "description": "Same real-runs filter as every panel on this dashboard. This is the only granularity that survives the write-path gap explained above — it replaces 'Worst domains' with a question the data can actually answer: which specific runs had a locator failure, and how many elements did they lose. Full workflow_id, never truncated. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 11},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "workflow_id"},
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run in Trace one run",
+                    "url": "/d/mark1-trace-run?var-run_id=${__value.raw}",
+                    "targetBlank": false
+                  }
+                ]
+              },
+              {"id": "custom.width", "value": 320},
+              {"id": "custom.inspect", "value": true}
+            ]
+          }
+        ]
+      },
       "targets": [{
         "refId": "A",
         "format": "table",

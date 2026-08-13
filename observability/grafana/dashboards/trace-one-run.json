@@ -2,6 +2,16 @@
   "uid": "mark1-trace-run",
   "title": "Mark 1 — Trace one run",
   "tags": ["mark1", "root-cause"],
+  "links": [
+    {
+      "title": "All runs",
+      "type": "link",
+      "url": "/d/mark1-runs",
+      "icon": "external link",
+      "tooltip": "Every run this install has a record of",
+      "targetBlank": false
+    }
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "",

@@ -59,6 +59,28 @@
       "description": "One row per run over the union of test_runs, workflow_metrics and execution_records. Newest first, and 'newest' needs explaining: 374 of the 528 runs carry no timestamp in any app table, because workflow_metrics has only the naive ts column that a guard forbids reading. The sort key is therefore workflow_metrics.id, an identity counter the application never supplies itself, so it is exact insertion order. Checked against the app timestamps on the 41 rows carrying both keys: 0 rank inversions in 820 compared pairs, so this ordering is chronologically faithful rather than a proxy. The 113 runs with no metrics row sort below all of them, ordered by started_at. run_wall_s is workflow_duration_s, the whole generation run — both crew kickoffs, the element stage and the dryrun gate. browser_stage_s is execution_time, the browser-use element stage alone, which runs 45% of the run's wall time on average and never exceeds it. They are a part and a whole, not two measurements of one thing. gate reads '(none recorded)' on the runs whose dryrun_status is absent or a JSON null; that is not a gate failure. No LIMIT by design — an inventory that hides rows is not an inventory, and the unbounded query measured 4.8 ms against 4.6 ms capped at 200. Click a run id to open it in Trace one run. All-time: this dashboard has no usable time column and its picker is hidden — see observability/README.md.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 20, "w": 24, "x": 0, "y": 5},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "run_id"},
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run in Trace one run",
+                    "url": "/d/mark1-trace-run?var-run_id=${__value.raw}",
+                    "targetBlank": false
+                  }
+                ]
+              },
+              {"id": "custom.width", "value": 320},
+              {"id": "custom.inspect", "value": true}
+            ]
+          }
+        ]
+      },
       "targets": [{
         "refId": "A",
         "format": "table",

@@ -1303,3 +1303,105 @@ def test_log_panel_guard_fires_on_a_level_default_that_drops_lines(tmp_path):
     with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
         with pytest.raises(AssertionError, match=r"must default to"):
             test_per_run_log_panel_keeps_lines_that_carry_no_level_field()
+
+
+# A data link is a promise that clicking it lands somewhere real, and nothing
+# else in this repo checks it: Grafana renders a dead link exactly like a live
+# one and only says so after the click. Both halves are guarded — the target
+# must exist, and the id it carries must be whole, because the standing rule
+# that run ids are never truncated has to survive the trip through a URL as
+# well as through SQL.
+_DASHBOARD_LINK_RE = re.compile(r"^/d/([a-z0-9-]+)")
+_RUN_ID_PARAM_RE = re.compile(r"var-run_id=([^&]+)")
+
+
+def _dashboard_uids() -> set[str]:
+    return {json.loads(p.read_text(encoding="utf-8"))["uid"] for p in _dashboards()}
+
+
+def _link_urls(dashboard: dict) -> list[str]:
+    """Every link URL in a dashboard, from all three places Grafana keeps them.
+
+    Dashboard-level `links` are the nav bar. Panel `fieldConfig.defaults.links`
+    apply to every field. Panel `fieldConfig.overrides[].properties[]` with
+    id == "links" apply to one named field, which is the form a per-row link on
+    a single column takes — and the form a check that only read `defaults`
+    would miss entirely.
+    """
+    urls = [link.get("url", "") for link in dashboard.get("links", [])]
+    for panel in dashboard.get("panels", []):
+        config = panel.get("fieldConfig", {})
+        urls += [l.get("url", "") for l in config.get("defaults", {}).get("links", [])]
+        for override in config.get("overrides", []):
+            for prop in override.get("properties", []):
+                if prop.get("id") == "links":
+                    urls += [l.get("url", "") for l in prop.get("value", [])]
+    return [u for u in urls if u]
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_every_data_link_targets_a_dashboard_that_exists(path: Path):
+    known = _dashboard_uids()
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for url in _link_urls(dashboard):
+        match = _DASHBOARD_LINK_RE.match(url)
+        assert match, f"{path.name} has a link that is not a /d/<uid> path: {url}"
+        assert match.group(1) in known, (
+            f"{path.name} links to dashboard uid {match.group(1)!r}, which no "
+            f"committed dashboard declares — the link renders normally and "
+            f"dead-ends on click: {url}")
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_data_links_pass_the_whole_run_id(path: Path):
+    """${__value.raw} is the only form that carries the id untouched.
+
+    ${__value.text} hands over the DISPLAYED value, so a field with a display
+    override — a unit, a decimal count, a value mapping — sends whatever the
+    cell renders rather than the id, and Grafana gives no warning. That is the
+    standing never-truncate rule reaching one step past the SQL it was written
+    for.
+    """
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for url in _link_urls(dashboard):
+        for value in _RUN_ID_PARAM_RE.findall(url):
+            assert value == "${__value.raw}", (
+                f"{path.name} passes var-run_id={value} — only "
+                f"${{__value.raw}} carries the id untouched: {url}")
+
+
+def test_link_guard_fires_on_a_dead_uid(tmp_path):
+    """Mutates a tmp copy of the runs dashboard so its row link points at a uid
+    no dashboard declares; never touches the committed file."""
+    source = DASHBOARD_DIR / "mark1-runs.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    for panel in dashboard["panels"]:
+        for override in panel.get("fieldConfig", {}).get("overrides", []):
+            for prop in override.get("properties", []):
+                if prop.get("id") == "links":
+                    prop["value"][0]["url"] = "/d/mark1-trace-runs?var-run_id=${__value.raw}"
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="which no committed dashboard declares"):
+        test_every_data_link_targets_a_dashboard_that_exists(mutant)
+
+
+def test_link_guard_fires_on_a_display_formatted_run_id(tmp_path):
+    """The plausible mistake is ${__value.text}, not a hand-truncated id —
+    Grafana's own docs list it alongside .raw and it works on an unformatted
+    field, so it survives review and breaks later when someone adds a display
+    override. Mutates a tmp copy; never touches the committed file."""
+    source = DASHBOARD_DIR / "mark1-runs.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    for panel in dashboard["panels"]:
+        for override in panel.get("fieldConfig", {}).get("overrides", []):
+            for prop in override.get("properties", []):
+                if prop.get("id") == "links":
+                    prop["value"][0]["url"] = (
+                        prop["value"][0]["url"].replace("${__value.raw}", "${__value.text}"))
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"passes var-run_id="):
+        test_data_links_pass_the_whole_run_id(mutant)

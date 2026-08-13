@@ -2,6 +2,16 @@
   "uid": "mark1-learning",
   "title": "Mark 1 — Learning health",
   "tags": ["mark1", "learning"],
+  "links": [
+    {
+      "title": "All runs",
+      "type": "link",
+      "url": "/d/mark1-runs",
+      "icon": "external link",
+      "tooltip": "Every run this install has a record of",
+      "targetBlank": false
+    }
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "5m",
