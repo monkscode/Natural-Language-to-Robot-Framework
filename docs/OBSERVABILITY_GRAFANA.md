@@ -116,6 +116,49 @@ ORDER BY runs DESC;
 prefix before the trace callback runs, so those rows read `gemini-3.5-flash` and cannot
 tell Vertex from AI Studio.
 
+## Every run on record, newest first
+
+The Runs dashboard (`/d/mark1-runs`) runs this. It is a three-way union because
+the app tables do not nest — measured 2026-08-13, of 528 UUID-shaped run ids
+415 have a `workflow_metrics` row, 45 a `test_runs` row, 123 an
+`execution_records` row, and 113 have no metrics row at all.
+
+```sql
+WITH ids AS (
+    SELECT run_id AS id FROM test_runs
+     WHERE run_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    UNION SELECT workflow_id FROM workflow_metrics
+     WHERE workflow_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    UNION SELECT workflow_id FROM execution_records
+     WHERE workflow_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+)
+SELECT ids.id                                     AS run_id,
+       m.id                                       AS metrics_seq,
+       tr.created_at                              AS started_at,
+       coalesce(tr.status, '(no run row)')        AS run_status,
+       coalesce(er.test_status, '(not executed)') AS executed_as,
+       (m.data->>'workflow_duration_s')::numeric  AS run_wall_s,
+       (m.data->>'execution_time')::numeric       AS browser_stage_s
+FROM ids
+LEFT JOIN workflow_metrics  m  ON m.workflow_id = ids.id
+LEFT JOIN test_runs         tr ON tr.run_id     = ids.id
+LEFT JOIN execution_records er ON er.workflow_id = ids.id
+ORDER BY m.id DESC NULLS LAST, tr.created_at DESC NULLS LAST;
+```
+
+**Order on `m.id`, not on a timestamp.** 374 of the 528 runs have no tz-aware
+timestamp anywhere, because `workflow_metrics` keeps only the naive `ts` column.
+`workflow_metrics.id` is an identity counter the app never supplies itself, so it
+is exact insertion order; against the app timestamps on the 41 rows carrying
+both, it has 0 rank inversions in 820 compared pairs.
+
+**The `WHERE` in every union branch is load-bearing twice over.** It drops 32
+synthetic rows dated 2026-06-25 whose id is not a UUID, and it keeps the
+dashboard guard suite honest: `_FROM_CLAUSE_RE` captures up to the first
+`WHERE`/`GROUP BY`/`ORDER BY`/`JOIN`/`LIMIT`, so a branch without one lets the
+capture run past the CTE into the outer select list and every alias there reads
+as a table.
+
 ## Cost and duration per stage
 
 `crew_stage_metrics` is a JSONB object keyed by stage — `planner`, `assembler`, and

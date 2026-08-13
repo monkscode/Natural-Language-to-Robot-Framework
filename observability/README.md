@@ -291,6 +291,26 @@ should turn it into a link — Grafana cannot serve local files, and a
   level" variable widens only the JSON arm — the substring arm has no level
   field to filter on. Loki's own `detected_level` is not a substitute:
   selecting on it returns 0 lines here.
+- **Half the runs cannot be dated, so the Runs list is not sorted by a clock.**
+  Measured 2026-08-13 over the 528 UUID-shaped run ids: 41 carry both a
+  `workflow_metrics` row and a timestamp from `test_runs`/`execution_records`,
+  374 carry **only** the metrics row, 113 carry only a timestamp, and none
+  carry neither. `workflow_metrics.ts` is naive and inconsistently naive, and a
+  guard forbids reading it, so those 374 runs have no legal timestamp at all.
+  The list therefore sorts on `workflow_metrics.id`, an identity counter the
+  application never supplies itself, which makes it exact insertion order —
+  checked against the app timestamps on the 41 rows carrying both keys, it has
+  **0 rank inversions in 820 compared pairs**. The 113 runs with no metrics row
+  sort below all of them, by `started_at`. If that inversion count ever stops
+  being zero, the ordering claim on the panel is false and must be rewritten.
+- **The per-run log panel shows every line; narrowing it does not.** `| json`
+  keeps a line it cannot parse rather than dropping it, and 25,784 of the
+  stream's 36,289 lines over 7 days are ANSI-coloured plain text from
+  third-party libraries with no `level` field. The panel's `line_format`
+  carries a `{{ __line__ }}` fallback so those lines pass through intact, and
+  the Log level variable's default is `.*` rather than `.+` because a label
+  filter cannot match an absent label — `.+` returns 10,452 of the 36,289.
+  Both narrowing options are structured-only and their labels say so.
 - **Cross-table history is sparse.** As of 2026-08-10, 35 of 434
   `workflow_metrics` rows have a matching `test_runs` row; 14 of 123
   `execution_records` join to `workflow_metrics`. Aggregate panels are built
