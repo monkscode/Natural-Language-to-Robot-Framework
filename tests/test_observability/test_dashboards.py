@@ -1684,3 +1684,68 @@ def test_bench_boundary_link_guard_fires_on_a_link_into_the_bench_corpus(tmp_pat
     test_every_data_link_targets_a_dashboard_that_exists(mutant)
     with pytest.raises(AssertionError, match="links to bench dashboard uid"):
         test_no_link_crosses_the_bench_boundary(mutant)
+
+
+# The seven bench sub-stage columns look like seven disjoint slices of the
+# identify stage. They are not. Measured 2026-08-13 over the 1,104 runs that
+# carry them, stacking all seven sums to 1.947x the identify_s they decompose,
+# because they are TWO overlapping views of the same wall clock — one timed
+# from the caller, one from inside the agent — and each reconstructs identify_s
+# on its own:
+#
+#   caller lane  submit_s + queue_s + poll_wait_s + postprocess_s
+#                mean |error| 0.583 s, max 5.594 s
+#   agent lane   session_setup_s + agent_setup_s + agent_run_s
+#                mean |error| 0.647 s, max 2.999 s
+#
+# poll_wait_s (avg 28.07 s) is the caller blocking WHILE agent_run_s (avg
+# 26.75 s) runs. Adding them counts the same seconds twice and still produces a
+# plausible-looking number, which is exactly why this is a guard and not a
+# comment in the SQL. Selecting both lanes is correct and is what the shipped
+# panel does; ADDING across them never is.
+_CALLER_LANE = frozenset({"submit_s", "queue_s", "poll_wait_s", "postprocess_s"})
+_AGENT_LANE = frozenset({"session_setup_s", "agent_setup_s", "agent_run_s"})
+
+# A maximal run of identifiers joined by '+', e.g. "r.poll_wait_s + r.agent_run_s".
+# Table aliases are stripped per term, so r.agent_run_s and agent_run_s both match.
+_ADDITIVE_CHAIN_RE = re.compile(
+    r"[a-z_][a-z0-9_.]*(?:\s*\+\s*[a-z_][a-z0-9_.]*)+", re.IGNORECASE)
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_no_panel_adds_both_identify_substage_lanes(path: Path):
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    for sql in _sql_targets(dashboard):
+        for chain in _ADDITIVE_CHAIN_RE.findall(sql):
+            terms = {term.strip().split(".")[-1].lower() for term in chain.split("+")}
+            assert not ((terms & _CALLER_LANE) and (terms & _AGENT_LANE)), (
+                f"{path.name} adds a caller-lane sub-stage to an agent-lane one, "
+                f"which double-counts the seconds they overlap on — measured at "
+                f"1.947x the real identify_s across all seven: {chain.strip()}"
+            )
+
+
+def test_substage_lane_guard_fires_on_a_seven_column_stack(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS the stack. Mutates a tmp copy of bench-time.json so the two lane
+    expressions become one seven-column sum — the exact shape a future author
+    produces by 'simplifying' the panel. Never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "bench-time.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    caller = "r.submit_s + r.queue_s + r.poll_wait_s + r.postprocess_s"
+    agent = "r.session_setup_s + r.agent_setup_s + r.agent_run_s"
+    mutated = 0
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            sql = target.get("rawSql") or ""
+            if caller in sql and agent in sql:
+                target["rawSql"] = sql.replace(caller, caller + " + " + agent, 1)
+                mutated += 1
+    assert mutated == 1, "fixture lane expressions not found to merge"
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="double-counts the seconds"):
+        test_no_panel_adds_both_identify_substage_lanes(mutant)

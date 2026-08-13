@@ -71,6 +71,19 @@
         "rawQuery": true,
         "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s)::numeric, 2) AS recorded_total_s, round(100.0 * count(*) FILTER (WHERE r.test_status = 'passed') / nullif(count(r.test_status), 0), 1) AS pass_rate_pct, count(r.total_s) AS runs FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
       }]
+    },
+    {
+      "type": "table",
+      "title": "2 — The identify stage, decomposed into its two lanes",
+      "description": "What the 63% of wall time inside identify_s is actually spent on. Read the two lane columns as alternatives, never as parts to be added: these seven sub-stage timings are two overlapping views of the same wall clock, one measured from the caller and one from inside the agent, and summing all seven gives 1.947 times the real figure — measured across the 1,104 runs that carry them. Each lane reconstructs identify_s on its own: the caller lane to within 0.583 s on average, the agent lane to within 0.647 s. poll_wait_s is the caller blocking while agent_run_s runs, so those two are the same seconds counted twice. A static guard rejects any panel that adds across the lanes. identify_s here is restricted to the rows that carry sub-stages, which is not cosmetic: on one sweep 30 runs have an identify_s but only 29 have sub-stages, and the missing run took 3,250.73 s, which dragged the unrestricted mean to 169.92 s against lanes of 62.44 and 63.00. Sharing the denominator brings it to 63.69 s and the three agree. runs_with_substages is the row count all four timing columns are computed over — when it is far below the sweep's run count, treat this panel as a sample. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 17},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.identify_s) FILTER (WHERE r.agent_run_s IS NOT NULL)::numeric, 2) AS identify_s, round(avg(r.submit_s + r.queue_s + r.poll_wait_s + r.postprocess_s)::numeric, 2) AS caller_lane_s, round(avg(r.session_setup_s + r.agent_setup_s + r.agent_run_s)::numeric, 2) AS agent_lane_s, round(avg(r.poll_wait_s)::numeric, 2) AS poll_wait_s, round(avg(r.agent_run_s)::numeric, 2) AS agent_run_s, round(avg(r.session_setup_s)::numeric, 2) AS session_setup_s, count(r.agent_run_s) AS runs_with_substages FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+      }]
     }
   ]
 }
