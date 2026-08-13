@@ -618,11 +618,12 @@ def test_llm_traces_guard_fires_on_a_select_list_model_filter(tmp_path):
 _COST_SPLIT_FIELD_RE = re.compile(
     r"data->>'(?:crewai_cost|browser_use_cost)'", re.IGNORECASE)
 
-# Shared by _after_from and _duration_aliases below, so the two FROM-clause
-# splits cannot drift apart. Keyword-based on purpose: both helpers used to
-# locate FROM with a literal `sql.upper().find(" FROM ")`, which requires a
-# space on both sides and returns -1 — failing open, not loudly — on a
-# rawSql with a newline or a `)` immediately before FROM.
+# Used by _after_from below — its only consumer now. _duration_aliases no
+# longer shares this split; it resolves each match within its own top-level
+# comma segment instead. Keyword-based on purpose: _after_from used to locate
+# FROM with a literal `sql.upper().find(" FROM ")`, which requires a space on
+# both sides and returns -1 — failing open, not loudly — on a rawSql with a
+# newline or a `)` immediately before FROM.
 _FROM_KEYWORD_RE = re.compile(r"\bFROM\b", re.IGNORECASE)
 
 
@@ -1179,3 +1180,83 @@ def test_coverage_strip_guard_fires_when_a_source_is_dropped(tmp_path):
     with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
         with pytest.raises(AssertionError, match=r"does not count \['llm_traces'\]"):
             test_trace_coverage_strip_counts_every_source_the_dashboard_reads()
+
+
+def test_per_run_log_panel_keeps_lines_that_carry_no_level_field():
+    """Two independent ways to silently lose most of a run's log lines.
+
+    Measured over 7 days on 2026-08-13 across both services: `| json` returns
+    all 36,289 lines, but 25,784 of them carry __error__="JSONParserErr" —
+    third-party libraries write ANSI-coloured plain text, not structlog JSON,
+    and `| json` keeps a line it cannot parse rather than dropping it.
+
+    1. `line_format "{{.level}} {{.logger}} :: {{.event}}"` — the template the
+       design specified — has no fields to substitute on those 25,784 lines,
+       so it renders each as the literal string "  :: " and the content is
+       gone. Verified live. The `{{ if .event }}...{{ else }}{{ __line__ }}
+       {{ end }}` form passes them through byte for byte.
+    2. A label filter cannot match a label that is absent, so `level=~".+"`
+       returns 10,452 of the 36,289 while `level=~".*"` returns all of them —
+       `.*` matches the empty string and `.+` does not.
+
+    Both traps are invisible on the run this panel was designed against: all
+    280 of its lines parse as JSON. Hence a static guard rather than a
+    measurement someone repeats by hand.
+
+    execution-outcomes.json uses `.+` for its own "every structured line"
+    option and that is CORRECT there — that panel ships a second, substring
+    arm which catches the plain-text class, and the two were measured
+    disjoint. This panel is single-arm, so the default must be `.*`.
+    """
+    path = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+
+    log_panels = [
+        p for p in dashboard["panels"]
+        if (p.get("datasource") or {}).get("type") == "loki"
+    ]
+    assert len(log_panels) == 1, "expected exactly one per-run log panel"
+    exprs = [t.get("expr", "") for t in log_panels[0].get("targets", [])]
+
+    assert any("__line__" in e for e in exprs), (
+        "the log panel's line_format has no {{ __line__ }} fallback, so every "
+        "line the JSON parser cannot read renders as empty separators")
+    assert any("line_format" in e for e in exprs), "no line_format at all"
+
+    variables = {v["name"]: v for v in dashboard["templating"]["list"]}
+    assert "level" in variables, "no level variable on the per-run log panel"
+    level = variables["level"]
+    assert level.get("current", {}).get("value") == ".*", (
+        f"the level variable defaults to "
+        f"{level.get('current', {}).get('value')!r}; it must default to '.*' "
+        f"— '.+' drops every line that carries no level field, which is 71% "
+        f"of this stream")
+    widest = [o["value"] for o in level["options"] if o["value"] in (".*", ".+")]
+    assert widest == [".*"], (
+        f"the widest level option is {widest}; '.+' is not a 'show everything' "
+        f"option on a single-arm panel")
+
+
+def test_log_panel_guard_fires_on_the_unguarded_line_format(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS the template the design originally specified — which is the
+    exact string a future author would paste back in from the spec. Mutates a
+    tmp copy with both halves reverted; never touches the committed file."""
+    source = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    for panel in dashboard["panels"]:
+        if (panel.get("datasource") or {}).get("type") != "loki":
+            continue
+        for target in panel.get("targets", []):
+            target["expr"] = (
+                '{service=~"fastapi|browser-service"} |= "$run_id" | json '
+                '| level=~"$level" '
+                '| line_format "{{.level}} {{.logger}} :: {{.event}}"'
+            )
+    mutant_dir = tmp_path / "dashboards"
+    mutant_dir.mkdir()
+    (mutant_dir / source.name).write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
+        with pytest.raises(AssertionError, match="__line__"):
+            test_per_run_log_panel_keeps_lines_that_carry_no_level_field()

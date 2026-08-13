@@ -14,6 +14,18 @@
         "type": "textbox",
         "query": "00000000-0000-0000-0000-000000000000",
         "current": {"text": "00000000-0000-0000-0000-000000000000", "value": "00000000-0000-0000-0000-000000000000"}
+      },
+      {
+        "name": "level",
+        "label": "Log level",
+        "type": "custom",
+        "query": "every line : .*, structured warnings and worse : error|critical|warning, structured errors only : error|critical",
+        "current": {"text": "every line", "value": ".*"},
+        "options": [
+          {"text": "every line", "value": ".*", "selected": true},
+          {"text": "structured warnings and worse", "value": "error|critical|warning", "selected": false},
+          {"text": "structured errors only", "value": "error|critical", "selected": false}
+        ]
       }
     ]
   },
@@ -142,7 +154,7 @@
     {
       "type": "logs",
       "title": "9 — Log lines from both services",
-      "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted. LogQL's |= line filter has no fail-closed form: |= \"\" matches every line (the empty string is a substring of everything), so a cleared run_id box would otherwise dump the unfiltered stream of both services here. The run_id variable's default is the sentinel 00000000-0000-0000-0000-000000000000, which cannot occur in real logs, so a fresh load or a cleared box shows nothing instead of everything. Paste a real run id to see its lines.",
+      "description": "One filter spans the backend and the browser service, because both bind the same workflow_id. Lines are reformatted for reading — level, logger and the event text — but only where the line is structlog JSON. Lines the JSON parser cannot read pass through byte for byte via the template's {{ __line__ }} fallback. That fallback is load-bearing: measured over 7 days on 2026-08-13, | json returns all 36,289 lines of the combined stream but 25,784 of them fail to parse, because third-party libraries write ANSI-coloured plain text; without the fallback the template renders every one of those as the empty separator '  :: '. The Log level variable defaults to 'every line' for the same reason — its value is .* rather than .+, since a label filter cannot match a level field that is absent and .+ would drop the same 25,784 lines (36,289 down to 10,452). Both narrowing options are therefore structured-only, and their labels say so. A sample run's 280 lines are all JSON-parsable, so neither effect is visible on a single healthy run — which is why a test pins both. Scoped to a single run id by design: bench runs delete their SQL rows but their log lines still reach Loki, so an aggregate log panel would be polluted. LogQL's |= line filter has no fail-closed form: |= \"\" matches every line (the empty string is a substring of everything), so a cleared run_id box would otherwise dump the unfiltered stream of both services here. The run_id variable's default is the sentinel 00000000-0000-0000-0000-000000000000, which cannot occur in real logs, so a fresh load or a cleared box shows nothing instead of everything. Paste a real run id to see its lines.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 64},
       "options": {
@@ -152,7 +164,7 @@
       },
       "targets": [{
         "refId": "A",
-        "expr": "{service=~\"fastapi|browser-service\"} |= \"$run_id\""
+        "expr": "{service=~\"fastapi|browser-service\"} |= \"$run_id\" | json | level=~\"$level\" | line_format \"{{ if .event }}{{.level}} {{.logger}} :: {{.event}}{{ else }}{{ __line__ }}{{ end }}\""
       }]
     },
     {
