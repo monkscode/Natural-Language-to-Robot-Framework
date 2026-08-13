@@ -41,6 +41,19 @@ BENCH_DASHBOARDS = {
     "bench-change-impact.json",
 }
 
+# Dashboards that show ONE run, selected by id. Three aggregate rules below
+# exempt these — the time picker rule, the inner-join rule and the cost-split
+# rule — and all three exemptions rest on the same premise: the panels are
+# already narrowed to a single run, so a missing partner row is informative and
+# time is not a dimension. That premise was asserted nowhere until
+# test_every_per_run_panel_scopes_to_the_run_id below, which is why the name
+# exists as a constant rather than as a filename repeated at four call sites:
+# adding a second per-run dashboard here buys the exemptions AND the guard that
+# makes them true, in one edit.
+PER_RUN_DASHBOARDS = {
+    "trace-one-run.json",
+}
+
 # A schema-qualified bench.<table> reference. Tolerant of the quoting and
 # whitespace variants real SQL tools emit around a qualified identifier —
 # "bench"."runs", bench . runs, bench."runs", "bench".runs — because mutation
@@ -438,10 +451,12 @@ def test_panels_ignoring_the_time_picker_say_so(path: Path):
     the ⓘ tooltip the reader is already looking at, and it fails loudly when
     someone adds a ninth unfiltered panel and says nothing.
 
-    trace-one-run.json is exempt: it selects one run by id, so time is not a
-    dimension there at all.
+    PER_RUN_DASHBOARDS are exempt: they select one run by id, so time is not a
+    dimension there at all. That premise is not taken on trust —
+    test_every_per_run_panel_scopes_to_the_run_id asserts every panel on those
+    dashboards actually carries the id restriction this exemption assumes.
     """
-    if path.name == "trace-one-run.json":
+    if path.name in PER_RUN_DASHBOARDS:
         return
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for panel in dashboard.get("panels", []):
@@ -465,11 +480,12 @@ def test_aggregate_dashboards_use_no_inner_join(path: Path):
     (or LEFT OUTER JOIN / CROSS JOIN) — a bare JOIN or an explicit INNER
     JOIN fails. A comma-join (`FROM a, b`) is also an inner join and has no
     LEFT-JOIN spelling, so two or more real tables in one FROM clause fail
-    outright regardless of the JOIN-keyword scan below. trace-one-run.json
-    is exempt: on a per-id dashboard a missing partner row is informative,
-    not a silently dropped population.
+    outright regardless of the JOIN-keyword scan below. PER_RUN_DASHBOARDS are
+    exempt: on a per-id dashboard a missing partner row is informative, not a
+    silently dropped population — and that the panels really are per-id is
+    asserted by test_every_per_run_panel_scopes_to_the_run_id, not assumed.
     """
-    if path.name == "trace-one-run.json":
+    if path.name in PER_RUN_DASHBOARDS:
         return  # per-id dashboard: a missing partner row is informative
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
@@ -618,12 +634,12 @@ def test_llm_traces_guard_fires_on_a_select_list_model_filter(tmp_path):
 _COST_SPLIT_FIELD_RE = re.compile(
     r"data->>'(?:crewai_cost|browser_use_cost)'", re.IGNORECASE)
 
-# Used by _after_from below — its only consumer now. _duration_aliases no
-# longer shares this split; it resolves each match within its own top-level
-# comma segment instead. Keyword-based on purpose: _after_from used to locate
-# FROM with a literal `sql.upper().find(" FROM ")`, which requires a space on
-# both sides and returns -1 — failing open, not loudly — on a rawSql with a
-# newline or a `)` immediately before FROM.
+# Used by _after_from below and, for the complementary span, by
+# _duration_aliases: one takes the text from the first FROM onward, the other
+# the select list before it. Keyword-based on purpose: _after_from used to
+# locate FROM with a literal `sql.upper().find(" FROM ")`, which requires a
+# space on both sides and returns -1 — failing open, not loudly — on a rawSql
+# with a newline or a `)` immediately before FROM.
 _FROM_KEYWORD_RE = re.compile(r"\bFROM\b", re.IGNORECASE)
 
 
@@ -639,9 +655,9 @@ def _after_from(sql: str) -> str:
     returns -1 (failing open, handing back the whole statement — including
     the FILTER form this bound exists to exclude) on any rawSql with a
     newline or a closing paren immediately before FROM, which a hand-edited
-    dashboard file can easily produce. Unlike _duration_aliases, which no
-    longer bounds itself to a fixed span around FROM — it resolves each
-    match within its own top-level comma segment instead.
+    dashboard file can easily produce. _duration_aliases takes the mirror
+    image of this split — the select list BEFORE the same FROM keyword, after
+    any leading CTE list has been stepped over.
     """
     match = _FROM_KEYWORD_RE.search(sql)
     return sql[match.start():] if match else sql
@@ -654,7 +670,7 @@ _COST_SPLIT_RESTRICTION_RE = re.compile(
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
 def test_cost_split_panels_exclude_runs_that_recorded_no_split(path: Path):
-    if path.name == "trace-one-run.json":
+    if path.name in PER_RUN_DASHBOARDS:
         return  # per-run panel: a zero split for that one run is the answer
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
@@ -729,6 +745,98 @@ def test_trace_dashboard_has_a_run_id_variable():
     assert loki_exprs, "no Loki target found on the trace dashboard"
     for expr in loki_exprs:
         assert "$run_id" in expr, f"Loki target does not interpolate $run_id: {expr}"
+
+
+# The per-run dashboards' whole contract is in the name: every number on the
+# page belongs to the one run in the textbox. Nothing asserted that. Proven by
+# mutation on 2026-08-13 — deleting `WHERE workflow_id = ${run_id:sqlstring}`
+# from the coverage strip's llm_traces arm, and separately from panel 6, each
+# left this entire file green. The strip would then report
+# llm_model_calls = 2,829, the whole table's model-call count, under a heading
+# that says what THIS run left behind; panel 6 would list all 100,907
+# llm_traces rows under a title reading "Every model call" for one run. Both
+# render as data rather than as breakage, which is the worst way for a debug
+# dashboard to be wrong. Three aggregate guards exempt these dashboards on the
+# strength of that contract (see PER_RUN_DASHBOARDS), so it has to be real.
+#
+# The rule is a count, not a parse: a panel must interpolate the run id at
+# least once per granted table it reads. Measured on the shipped file — the
+# coverage strip reads five tables through five subqueries and carries five
+# restrictions, seven panels read one table and carry one, and panel 8 unions
+# two tables and carries two. Counting distinct granted tables reuses
+# _production_table_refs, the same reader the detachment guard and the coverage
+# strip guard already trust, instead of adding a third parser that would have
+# to work out which restriction belongs to which arm.
+#
+# What a count therefore does NOT reach: two arms on the SAME table where only
+# one is scoped. No shipped panel has that shape, and closing it means pulling
+# UNION arms and correlated subqueries out of a string with regexes — which is
+# how a static guard starts failing correct work, the failure mode the
+# duration-alias helper below already had to be walked back from.
+_RUN_ID_INTERPOLATION = "${run_id:sqlstring}"
+
+
+@pytest.mark.parametrize("name", sorted(PER_RUN_DASHBOARDS))
+def test_every_per_run_panel_scopes_to_the_run_id(name: str):
+    dashboard = json.loads((DASHBOARD_DIR / name).read_text(encoding="utf-8"))
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            sql = target.get("rawSql")
+            if not sql:
+                continue
+            ctes = {cte.lower() for cte in _CTE_RE.findall(sql)}
+            tables = _production_table_refs(sql, ctes)
+            # Bounded from the first FROM onward, the same reasoning _after_from
+            # was written for: an interpolation sitting in the outer SELECT list
+            # labels a column, it never narrows a row set. The bound can only
+            # fail open — a FROM inside a string literal starts the window
+            # early, which keeps more text, never less.
+            scoped = _after_from(sql).count(_RUN_ID_INTERPOLATION)
+            assert scoped >= len(tables), (
+                f"{name} panel {panel.get('title')!r} reads {len(tables)} "
+                f"granted table(s) {sorted(tables)} but carries only {scoped} "
+                f"run-id restriction(s), so at least one of them returns the "
+                f"whole table on a dashboard about one run: {sql[:200]}"
+            )
+
+
+def test_run_id_scope_guard_fires_when_one_arm_loses_its_restriction(tmp_path):
+    """Proving the guard passes on the shipped file is not the same as proving
+    it REJECTS an unscoped read — and the mutant is chosen so that a weaker
+    guard could not pass either test by accident.
+
+    The coverage strip's llm_traces arm loses its WHERE clause and the other
+    four arms keep theirs, so the mutated SQL still contains four
+    `${run_id:sqlstring}` interpolations. A guard that merely checked the
+    restriction APPEARS would see those four and stay green while the strip
+    reported the whole table's 2,829 model calls as this run's. Only counting
+    against the tables read catches it. Mutates a tmp copy; never touches the
+    committed file.
+    """
+    source = DASHBOARD_DIR / "trace-one-run.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    clause = f"FROM llm_traces WHERE workflow_id = {_RUN_ID_INTERPOLATION}"
+    mutated = 0
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            sql = target.get("rawSql") or ""
+            if "AS llm_model_calls" not in sql:
+                continue
+            assert clause in sql, "fixture llm_traces arm not found to mutate"
+            target["rawSql"] = sql.replace(clause, "FROM llm_traces", 1)
+            assert target["rawSql"].count(_RUN_ID_INTERPOLATION) == 4, (
+                "the mutant must keep the other four restrictions, otherwise "
+                "it also fires a guard that only checks the phrase appears")
+            mutated += 1
+    assert mutated == 1, "fixture coverage strip not found to mutate"
+
+    mutant_dir = tmp_path / "dashboards"
+    mutant_dir.mkdir()
+    (mutant_dir / source.name).write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with patch(f"{__name__}.DASHBOARD_DIR", mutant_dir):
+        with pytest.raises(AssertionError, match="run-id restriction"):
+            test_every_per_run_panel_scopes_to_the_run_id(source.name)
 
 
 def _bench_grant_columns(sql: str) -> set[str] | None:
@@ -974,22 +1082,76 @@ _ALIAS_AFTER_RE = re.compile(r"\bAS\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 _DURATION_ALIAS_RULE = {"workflow_duration_s": "wall", "execution_time": "browser"}
 
 
-def _duration_aliases(sql: str) -> list[tuple[str, str]]:
-    """(field, alias) for each duration field selected anywhere in `sql`.
+_LEADING_WITH_RE = re.compile(r"\s*WITH\b", re.IGNORECASE)
 
-    Each match is resolved within its own top-level comma segment (reusing
-    _split_top_level_commas), not a fixed prefix before the first FROM. The
-    prefix bound broke on a CTE-fronted query — `WITH ids AS (SELECT ... FROM
-    test_runs ...) SELECT ... (data->>'workflow_duration_s') ...` puts the
-    first FROM inside the CTE, so the outer SELECT list carrying the real
-    alias was never scanned, and the guard silently saw nothing on
-    mark1-runs.json. A CTE's own commas sit inside its parentheses, at
-    depth > 0, so splitting on top-level commas survives it: each field's
-    alias is always the nearest AS within the same comma segment as the
-    field's own match, regardless of what comes before it in the statement.
+
+def _after_leading_ctes(sql: str) -> str:
+    """`sql` with a leading `WITH <name> AS (...), <name> AS (...)` list removed.
+
+    Paren-balanced rather than regex-matched, because a CTE body contains both
+    parentheses and commas of its own and no regex tells those from the ones
+    that end the list. Walks from the start, closes each CTE body when depth
+    returns to 0, and continues only while the next non-space character is the
+    comma that introduces another CTE.
+
+    Fails open on anything it does not recognise — no leading WITH, or an
+    unbalanced statement — by handing back the whole string. For the one caller
+    below that means grading more text, never less, which is the safe direction
+    for a helper whose false positives fail correct panels.
     """
+    if not _LEADING_WITH_RE.match(sql):
+        return sql
+    depth = 0
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                rest = sql[index + 1:]
+                stripped = rest.lstrip()
+                if stripped.startswith(","):
+                    index = len(sql) - len(stripped) + 1
+                    continue
+                return rest
+        index += 1
+    return sql
+
+
+def _duration_aliases(sql: str) -> list[tuple[str, str]]:
+    """(field, alias) for each duration field in `sql`'s outer SELECT list.
+
+    Two bounds, and both were paid for.
+
+    The select-list bound is the original one: only a field being SELECTED
+    needs an alias saying which duration it is. Without it, every mention of
+    the field anywhere in the statement is graded as if it were a select-list
+    entry — `WHERE (data->>'workflow_duration_s')::numeric > 0` returned
+    ('workflow_duration_s', '') and failed a panel that selects nothing of the
+    kind, and a correctly-aliased panel that merely sorts by the column it
+    selects returned its real pair PLUS an empty one from the ORDER BY and
+    failed too. Nothing shipped tripped either, which is the point: a guard
+    that fails correct work is discovered by whoever writes the correct work,
+    and their fix is to weaken the guard.
+
+    The CTE step-over is the newer one: bounding on the first FROM alone broke
+    on `WITH ids AS (SELECT ... FROM workflow_metrics) SELECT ... FROM ids`,
+    where that first FROM sits inside the CTE, so the outer select list holding
+    the real alias was never scanned and the guard saw nothing at all on
+    mark1-runs.json. Stepping over the leading CTE list first restores the
+    select-list bound without giving that back.
+
+    Within the bounded select list, each field's alias is the nearest AS in its
+    own top-level comma segment, so a neighbouring column's alias is never
+    borrowed by a field that has none.
+    """
+    body = _after_leading_ctes(sql)
+    from_keyword = _FROM_KEYWORD_RE.search(body)
+    select_list = body[:from_keyword.start()] if from_keyword else body
     out = []
-    for segment in _split_top_level_commas(sql):
+    for segment in _split_top_level_commas(select_list):
         for match in _DURATION_FIELD_RE.finditer(segment):
             alias = _ALIAS_AFTER_RE.search(segment[match.end():])
             out.append((match.group(1).lower(), alias.group(1).lower() if alias else ""))
@@ -1052,6 +1214,49 @@ def test_duration_alias_guard_fires_on_an_ambiguous_alias_behind_a_cte(tmp_path)
 
     with pytest.raises(AssertionError, match="which duration it is"):
         test_duration_fields_are_aliased_unambiguously(mutant)
+
+
+class TestDurationAliasScope:
+    """_duration_aliases must grade the select list and nothing else.
+
+    The two mutation tests above prove it still REJECTS an ambiguous alias.
+    These prove the other half — that it does not invent one. The helper is
+    shared by both phases' dashboards, so a false positive here fails panels
+    nobody in this phase wrote, and the reported alias is `''`, which reads as
+    a missing alias rather than as a guard looking in the wrong place.
+    """
+
+    def test_a_where_clause_mention_is_not_a_select_list_entry(self):
+        """Selects no duration field at all; the mention is a filter."""
+        sql = ("SELECT count(*) AS runs FROM workflow_metrics "
+               "WHERE (data->>'workflow_duration_s')::numeric > 0")
+        assert _duration_aliases(sql) == []
+
+    def test_an_order_by_mention_is_not_a_second_select_list_entry(self):
+        """A correctly-aliased panel that sorts by the column it selects. The
+        ORDER BY must not produce a second, alias-less pair from the one
+        field."""
+        sql = ("SELECT workflow_id AS run_id, "
+               "round((data->>'execution_time')::numeric,1) AS browser_stage_s "
+               "FROM workflow_metrics ORDER BY (data->>'execution_time')::numeric DESC")
+        assert _duration_aliases(sql) == [("execution_time", "browser_stage_s")]
+
+    def test_the_outer_select_list_behind_a_cte_is_still_scanned(self):
+        """The bug the select-list bound must not bring back: the first FROM
+        sits inside the CTE, so a naive prefix bound scans the CTE body and
+        returns nothing for the outer select list."""
+        sql = ("WITH ids AS (SELECT workflow_id AS id FROM workflow_metrics) "
+               "SELECT round((data->>'execution_time')::numeric, 1) AS duration_s "
+               "FROM ids")
+        assert _duration_aliases(sql) == [("execution_time", "duration_s")]
+
+    def test_a_list_of_several_ctes_is_stepped_over_whole(self):
+        """The comma between two CTEs is a top-level comma, so the step-over
+        has to keep going past it rather than stopping at the first `)`."""
+        sql = ("WITH a AS (SELECT run_id FROM test_runs), "
+               "b AS (SELECT workflow_id FROM workflow_metrics) "
+               "SELECT (data->>'execution_time')::numeric AS browser_s FROM a")
+        assert _duration_aliases(sql) == [("execution_time", "browser_s")]
 
 
 # The runs front door is the only inventory of what this install has ever run,
@@ -1405,3 +1610,76 @@ def test_link_guard_fires_on_a_display_formatted_run_id(tmp_path):
 
     with pytest.raises(AssertionError, match=r"passes var-run_id="):
         test_data_links_pass_the_whole_run_id(mutant)
+
+
+def _bench_dashboard_uids() -> set[str]:
+    """The uids declared by the bench dashboards, resolved from the files.
+
+    _dashboard_uids() deliberately globs every committed dashboard so a link
+    target is checked against everything that exists. That makes it useless for
+    the detachment question: a bench uid is a real uid, so a production
+    dashboard linking to one passes the link-target guard exactly like a
+    correct link does.
+    """
+    return {
+        json.loads(path.read_text(encoding="utf-8"))["uid"]
+        for path in _dashboards() if path.name in BENCH_DASHBOARDS
+    }
+
+
+@pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
+def test_no_link_crosses_the_bench_boundary(path: Path):
+    """Detachment has to survive the nav bar, not only the SQL.
+
+    test_bench_and_production_dashboards_never_mix keeps bench rows out of a
+    production QUERY. A link mixes nothing but it still routes an operator
+    reading production numbers straight into the bench corpus, one click from
+    the dashboard they were trusting — and the two are not comparable
+    populations. Proven open on 2026-08-13: pointing cost-latency-capacity's
+    nav link at /d/bench-weakest-now left this entire file green.
+
+    Both directions, because both are reachable. A production dashboard may
+    not name a bench uid. A bench dashboard may declare no links at all —
+    stricter than the mirror rule, and deliberately so: everything a bench
+    dashboard could usefully link to is production, so there is nothing for an
+    allowed list to hold, and "no links" is a rule with no edge cases.
+    """
+    dashboard = json.loads(path.read_text(encoding="utf-8"))
+    urls = _link_urls(dashboard)
+    if path.name in BENCH_DASHBOARDS:
+        assert not urls, (
+            f"{path.name} is a bench dashboard and declares links: {urls} — a "
+            f"bench board may link nowhere, since everything on the other side "
+            f"of a link is production")
+        return
+    bench_uids = _bench_dashboard_uids()
+    for url in urls:
+        match = _DASHBOARD_LINK_RE.match(url)
+        assert not match or match.group(1) not in bench_uids, (
+            f"{path.name} is a production dashboard and links to bench "
+            f"dashboard uid {match.group(1)!r} — the link resolves, which is "
+            f"why nothing else catches it, and lands the reader in the bench "
+            f"corpus: {url}")
+
+
+def test_bench_boundary_link_guard_fires_on_a_link_into_the_bench_corpus(tmp_path):
+    """The mutation the reviewer used to prove the hole, kept as a test.
+
+    Mutates cost-latency-capacity.json's nav link to point at the bench board.
+    The mutant is chosen precisely because it is a LIVE uid:
+    test_every_data_link_targets_a_dashboard_that_exists passes on it, so this
+    guard is the only thing between the mutation and a green suite. Mutates a
+    tmp copy; never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    bench_uid = sorted(_bench_dashboard_uids())[0]
+    assert dashboard["links"], "fixture nav link not found to mutate"
+    dashboard["links"][0]["url"] = f"/d/{bench_uid}"
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    # The link-target guard cannot see this: the uid it points at is real.
+    test_every_data_link_targets_a_dashboard_that_exists(mutant)
+    with pytest.raises(AssertionError, match="links to bench dashboard uid"):
+        test_no_link_crosses_the_bench_boundary(mutant)

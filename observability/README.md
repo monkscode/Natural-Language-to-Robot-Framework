@@ -62,8 +62,12 @@ here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
 each row's id opens it in Trace one run; the two aggregate dashboards that name
 a run — Locator reliability's "Runs with failed elements" and Execution
 outcomes' "Recent failures" — link the same way. Going the other way, the Loki
-datasource carries a derived field, so a `workflow_id` inside any log line
-renders a **Trace this run** link. The regex behind it is anchored on the
+datasource carries a derived field, so a `workflow_id` inside any raw log line
+renders a **Trace this run** link — Execution outcomes' aggregate log panel,
+which is the only place it is useful. The trace dashboard's own log panel is
+exempt: it reformats every line with `line_format`, so the `workflow_id` is no
+longer in the rendered text and no link appears — and you are already on the
+run. The regex behind it is anchored on the
 `workflow_id` key rather than on the UUID shape, because a log line also
 carries a `user_id` and Grafana links on the first match;
 `tests/test_observability/test_datasources.py` pins that against a sample line
@@ -321,8 +325,8 @@ should turn it into a link — Grafana cannot serve local files, and a
   whether to exclude them.** 32 of its 434 rows carry a non-UUID
   `workflow_id` — `t1`, `t2`, `t3`, `status-test`, `msg-test`, `ts-test`,
   `mapping-test`, `full-e2e-1`, `live-t1`, `multi-test` — all written
-  2026-06-25 by test runs, not real traffic. The locator-reliability
-  dashboard filters them out by UUID shape; the cost and learning dashboards
+  2026-06-25 by test runs, not real traffic. The locator-reliability and Runs
+  dashboards filter them out by UUID shape; the cost and learning dashboards
   do not. Comparing a number across two dashboards means you may be looking
   at slightly different populations — check which filter a panel uses before
   trusting a discrepancy as real.

@@ -118,7 +118,10 @@ tell Vertex from AI Studio.
 
 ## Every run on record, newest first
 
-The Runs dashboard (`/d/mark1-runs`) runs this. It is a three-way union because
+The Runs dashboard (`/d/mark1-runs`) is built on this — the shipped panel adds
+the gate, cost, elements-lost and query columns, and two dropdown filters whose
+defaults match every row, so it returns these rows out of the box. It is a
+three-way union because
 the app tables do not nest — measured 2026-08-13, of 528 UUID-shaped run ids
 415 have a `workflow_metrics` row, 45 a `test_runs` row, 123 an
 `execution_records` row, and 113 have no metrics row at all.
