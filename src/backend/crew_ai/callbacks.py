@@ -164,7 +164,10 @@ class StageMetricsCallback:
 
         self._step_logger.info(line)
         # Surface task timing in application.log for quick cross-log correlation
-        logger.info(f"[TASK DONE] {ts}{elapsed_str}: {getattr(task_output, 'description', '')[:60]!r}")
+        # str() before the slice, matching the line above: this one sits
+        # OUTSIDE that try/except, so a non-str description would raise
+        # TypeError straight out of a callback that runs on every task.
+        logger.info(f"[TASK DONE] {ts}{elapsed_str}: {str(getattr(task_output, 'description', ''))[:60]!r}")
 
     def _record(self) -> None:
         duration_s = round(time.monotonic() - self._stage_started, 3)

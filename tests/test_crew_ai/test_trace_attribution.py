@@ -65,7 +65,7 @@ class TestAttributionFromMetadata:
         from src.backend.crew_ai import cleaned_llm_wrapper as clw
 
         with patch.object(clw, "_workflow_id_from_baggage",
-                          return_value="stale-baggage-id", create=True):
+                          return_value="stale-baggage-id"):
             got = _run_callback(_kwargs_with_metadata({"workflow_id": WF_ID}))
         assert got["workflow_id"] == WF_ID
 
@@ -73,7 +73,7 @@ class TestAttributionFromMetadata:
         from src.backend.crew_ai import cleaned_llm_wrapper as clw
 
         with patch.object(clw, "_workflow_id_from_baggage",
-                          return_value="baggage-id", create=True):
+                          return_value="baggage-id"):
             got = _run_callback({"model": "m"})
         assert got["workflow_id"] == "baggage-id"
 
@@ -81,7 +81,7 @@ class TestAttributionFromMetadata:
         from src.backend.crew_ai import cleaned_llm_wrapper as clw
 
         with patch.object(clw, "_workflow_id_from_baggage",
-                          return_value=None, create=True):
+                          return_value=None):
             got = _run_callback({"model": "m"})
         assert got["workflow_id"] is None
 

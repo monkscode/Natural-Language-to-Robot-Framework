@@ -565,19 +565,12 @@ class TestUsageAccounting:
         assert again == {"llm_calls": 0, "prompt_tokens": 0,
                          "completion_tokens": 0, "tokens": 0, "cost": 0.0}
 
-    def test_the_stages_sum_to_the_workflow_total(self):
-        """The one invariant this instrumentation exists to provide: the
-        per-stage panel and the per-workflow panel must agree."""
-        w = self._wrapper()
-        self._bump(w, 3200, 410, 1)
-        planner = w.pop_stage_usage()
-        self._bump(w, 8100, 1220, 2)
-        assembler = w.pop_stage_usage()
-
-        total = w.get_workflow_usage()
-        assert planner["tokens"] + assembler["tokens"] == total["tokens"]
-        assert planner["llm_calls"] + assembler["llm_calls"] == total["llm_calls"]
-        assert round(planner["cost"] + assembler["cost"], 6) == total["cost"]
+    # test_the_stages_sum_to_the_workflow_total lived here and asserted the
+    # same invariant as test_stages_sum_to_the_workflow_total above, differing
+    # only in its token values and in comparing cost by round() rather than by
+    # tolerance. The names differed by the word "the". 16aef60 added this one,
+    # 63247cb added the other without noticing; the surviving version is the
+    # stricter of the two — it also asserts prompt_tokens and completion_tokens.
 
     def test_a_shared_accumulator_drains_through_either_wrapper(self):
         """RobotAgents aliases planner_llm._token_usage to agents.llm's, so the
