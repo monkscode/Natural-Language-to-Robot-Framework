@@ -1023,7 +1023,24 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
     ERROR cannot see, so the shipped panel — arm B alone — saw only 58 of
     the combined 406 lines and missed the 348 that only the JSON arm
     catches; the 58 it did see are ANSI-coloured plain text from third-party
-    loggers that the JSON parser cannot read. Both arms are load-bearing.
+    loggers that the JSON parser cannot read.
+
+    Both arms are load-bearing as SHAPES, which is all this test asserts.
+    Re-measured 2026-08-14 over the five days Loki actually holds: arm A 534
+    lines, arm B 90, and every one of arm B's 90 was a single LiteLLM message,
+    `Error creating standard logging object` — written once as ANSI plain text
+    and once re-emitted as JSON, so it was also 90 of arm A's 534. Both arms
+    now exclude it, leaving arm A at 444 and arm B matching nothing.
+
+    Measure this over no window longer than the retained data. The same three
+    queries asked over seven days return 348 / 58 / 290 — FEWER lines, not
+    more, because the range sample points fall outside what Loki holds. The
+    2026-08-12 figures above were taken that way and are kept as the record of
+    that day, not as a count to reproduce.
+
+    Do not read arm B's line count as evidence it catches real errors today;
+    it does not, and after the exclusion it is expected to stay empty until a
+    genuine plain-text error appears. That is the case it is kept for.
 
     Loki's own `detected_level` is not a third option: selecting on it
     returns 0 lines on this deployment.

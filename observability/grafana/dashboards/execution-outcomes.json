@@ -144,7 +144,7 @@
     {
       "type": "logs",
       "title": "Aggregate error logs",
-      "description": "Errors from both services, in the two formats they are actually written in. Arm A parses the structlog JSON the application emits and filters on its lowercase level field, which is what the Structured log level variable moves. Arm B is a literal ERROR substring match, which is the only way third-party loggers writing ANSI-coloured plain text are seen. Measured over 7 days on 2026-08-12: arm A 348 lines, arm B 58, overlap exactly 0 — dropping either arm loses a whole class of error. The shipped panel was arm B alone: 58 lines out of the combined 406, missing the 348 that only arm A catches. level=critical currently matches 0 lines; it is in the pattern so the panel needs no edit when the first one appears, not because it is covering anything today. Arm B does not widen with the variable — it has no level field to filter on. Bench caveat: when the observability stack is running, a bench sweep targets the same containerised backend on 127.0.0.1:5000 that run_bench.py uses by default, so bench log lines land in this feed with no label separating them. Use the per-run log panel on the trace dashboard when you need certainty about which run a line belongs to.",
+      "description": "Errors from both services, in the two formats they are actually written in. Arm A parses the structlog JSON the application emits and filters on its lowercase level field, which is what the Structured log level variable moves. Arm B is a literal ERROR substring match, which is the only way third-party loggers writing ANSI-coloured plain text are seen. Measured over 7 days on 2026-08-12: arm A 348 lines, arm B 58, overlap exactly 0 — dropping either arm loses a whole class of error. The shipped panel was arm B alone: 58 lines out of the combined 406, missing the 348 that only arm A catches. Both arms exclude one message, and it is the only thing either arm hides. LiteLLM logs 'Error creating standard logging object' on every LLM call, twice — once as ANSI plain text and once re-emitted as JSON — because its ordinary logging path imports a proxy-only module that this deployment does not install. Nothing in this repository reads the payload it fails to build, so the message reports no fault of ours and cannot be acted on. Re-measured on 2026-08-14 over the five days Loki actually holds: arm A 534 lines of which 90 were this message, arm B 90 lines of which all 90 were, so the exclusion leaves arm A at 444 real errors and arm B empty. Quote no window longer than the retained data: asking for seven days puts the range sample points outside it and silently returns fewer lines, not more. The absolute counts drift with traffic; the invariant is that arm B was entirely this one message, and that it lands twice per occurrence because it is written once as plain text and once as JSON. Arm B stays quiet until a genuine plain-text error appears — which is what an error panel should do when nothing is wrong. Arm B is kept for that case, not because it is catching anything today. Delete both exclusions once the upstream fix ships. level=critical currently matches 0 lines; it is in the pattern so the panel needs no edit when the first one appears, not because it is covering anything today. Arm B does not widen with the variable — it has no level field to filter on. Bench caveat: when the observability stack is running, a bench sweep targets the same containerised backend on 127.0.0.1:5000 that run_bench.py uses by default, so bench log lines land in this feed with no label separating them. Use the per-run log panel on the trace dashboard when you need certainty about which run a line belongs to.",
       "datasource": {"type": "loki", "uid": "nlrf-loki"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
       "options": {
@@ -155,11 +155,11 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service=~\"fastapi|browser-service\"} | json | level=~\"$level\""
+          "expr": "{service=~\"fastapi|browser-service\"} != \"Error creating standard logging object\" | json | level=~\"$level\""
         },
         {
           "refId": "B",
-          "expr": "{service=~\"fastapi|browser-service\"} |= \"ERROR\""
+          "expr": "{service=~\"fastapi|browser-service\"} != \"Error creating standard logging object\" |= \"ERROR\""
         }
       ]
     }
