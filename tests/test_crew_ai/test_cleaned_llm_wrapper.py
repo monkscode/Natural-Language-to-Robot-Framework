@@ -485,3 +485,158 @@ class TestGetLlmResponseFormat:
 
         call_kwargs = MockCleanedLLMWrapper.call_args.kwargs
         assert "response_format" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Token/cost accounting: per-stage drains and workflow totals.
+#
+# Both read crewai BaseLLM._token_usage, which LLM.call updates synchronously
+# in the calling thread. Accounting is a READER — it never wraps call(), so it
+# cannot slow, break, or double-count an LLM call.
+# ---------------------------------------------------------------------------
+
+class TestUsageAccounting:
+    """pop_stage_usage() / get_workflow_usage() on the real wrapper."""
+
+    def _wrapper(self, model="vertex_ai/gemini-2.5-flash"):
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+        return CleanedLLMWrapper(model=model)
+
+    def _bump(self, w, prompt=1000, completion=200, calls=1):
+        """Emulate crewai's _track_token_usage_internal (base_llm.py:586-590)."""
+        w._token_usage["prompt_tokens"] += prompt
+        w._token_usage["completion_tokens"] += completion
+        w._token_usage["total_tokens"] += prompt + completion
+        w._token_usage["successful_requests"] += calls
+
+    def test_workflow_usage_reads_the_shared_accumulator_and_prices_it(self):
+        w = self._wrapper()
+        self._bump(w, 1000, 200, 3)
+        usage = w.get_workflow_usage()
+        assert usage["prompt_tokens"] == 1000
+        assert usage["completion_tokens"] == 200
+        assert usage["tokens"] == 1200
+        assert usage["llm_calls"] == 3
+        assert usage["cost"] > 0
+
+    def test_stages_sum_to_the_workflow_total(self):
+        """The invariant the metrics row depends on.
+
+        crew_stage_metrics and the crewai_* totals are read from two different
+        methods. If they priced differently, a Grafana panel breaking cost down
+        by stage would not add up to the cost shown for the run — and there
+        would be no way to tell which of the two was wrong.
+        """
+        w = self._wrapper()
+
+        self._bump(w, 1200, 300, 2)     # planner
+        planner = w.pop_stage_usage()
+        self._bump(w, 4000, 900, 3)     # assembler
+        assembler = w.pop_stage_usage()
+
+        total = w.get_workflow_usage()
+
+        assert planner["prompt_tokens"] + assembler["prompt_tokens"] == total["prompt_tokens"]
+        assert planner["completion_tokens"] + assembler["completion_tokens"] == total["completion_tokens"]
+        assert planner["tokens"] + assembler["tokens"] == total["tokens"]
+        assert planner["llm_calls"] + assembler["llm_calls"] == total["llm_calls"]
+        # Pricing is linear in tokens, so the stage costs must reconstruct the
+        # total to within the 6dp both are rounded to.
+        assert abs(planner["cost"] + assembler["cost"] - total["cost"]) < 1e-6
+
+    def test_stage_drain_returns_only_what_arrived_since_the_last_drain(self):
+        w = self._wrapper()
+        self._bump(w, 1000, 200, 1)
+        first = w.pop_stage_usage()
+        assert first["tokens"] == 1200 and first["llm_calls"] == 1
+
+        self._bump(w, 500, 100, 2)
+        second = w.pop_stage_usage()
+        assert second["prompt_tokens"] == 500
+        assert second["completion_tokens"] == 100
+        assert second["tokens"] == 600
+        assert second["llm_calls"] == 2
+
+    def test_a_drain_with_nothing_new_is_zero_not_a_repeat(self):
+        w = self._wrapper()
+        self._bump(w)
+        w.pop_stage_usage()
+        again = w.pop_stage_usage()
+        assert again == {"llm_calls": 0, "prompt_tokens": 0,
+                         "completion_tokens": 0, "tokens": 0, "cost": 0.0}
+
+    # test_the_stages_sum_to_the_workflow_total lived here and asserted the
+    # same invariant as test_stages_sum_to_the_workflow_total above, differing
+    # only in its token values and in comparing cost by round() rather than by
+    # tolerance. The names differed by the word "the". 16aef60 added this one,
+    # 63247cb added the other without noticing; the surviving version is the
+    # stricter of the two — it also asserts prompt_tokens and completion_tokens.
+
+    def test_a_shared_accumulator_drains_through_either_wrapper(self):
+        """RobotAgents aliases planner_llm._token_usage to agents.llm's, so the
+        planner's calls must land in a drain taken on agents.llm. No second
+        alias is needed: the baseline is a diff against that one dict."""
+        main = self._wrapper()
+        planner = self._wrapper()
+        planner._token_usage = main._token_usage      # what RobotAgents does
+
+        self._bump(planner, 700, 90, 1)               # planner's own kickoff
+        drained = main.pop_stage_usage()
+        assert drained["prompt_tokens"] == 700
+        assert drained["llm_calls"] == 1
+
+    def test_accounting_never_double_counts_when_crewai_re_enters_call(self):
+        """crewai/llm.py:1715 retries an unsupported 'stop' param with
+        `return self.call(...)`, which re-enters any override of call(). An
+        accounting wrapper around call() therefore bills that retry twice.
+        Reading _token_usage instead is immune — this is the regression guard."""
+        import crewai
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+
+        state = {"n": 0}
+
+        def fake_inner(self, messages, *a, **k):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise Exception("Unsupported parameter: 'stop'")
+            self._token_usage["prompt_tokens"] += 100
+            self._token_usage["completion_tokens"] += 20
+            self._token_usage["total_tokens"] += 120
+            self._token_usage["successful_requests"] += 1
+            return "ok"
+
+        def patched(self, messages, *a, **k):
+            try:
+                return fake_inner(self, messages, *a, **k)
+            except Exception as e:
+                if "Unsupported parameter" in str(e) and "'stop'" in str(e):
+                    return self.call(messages, *a, **k)   # crewai's real recursion
+                raise
+
+        original = crewai.LLM.call
+        crewai.LLM.call = patched
+        try:
+            w = CleanedLLMWrapper(model="vertex_ai/gemini-2.5-flash")
+            w.call([{"role": "user", "content": "hi"}])
+            stage = w.pop_stage_usage()
+        finally:
+            crewai.LLM.call = original
+
+        assert stage["prompt_tokens"] == 100
+        assert stage["completion_tokens"] == 20
+        assert stage["llm_calls"] == 1
+
+    def test_an_unpriceable_model_yields_zero_cost_but_keeps_the_tokens(self):
+        w = self._wrapper(model="not-a-real-provider/not-a-real-model")
+        self._bump(w, 1000, 200, 1)
+        usage = w.get_workflow_usage()
+        assert usage["tokens"] == 1200
+        assert usage["cost"] == 0.0
+
+    def test_neither_reader_raises_when_the_counters_are_missing(self):
+        """Anything constructing this wrapper without BaseLLM.__init__ has no
+        counters. A metrics read must degrade, never take down the caller."""
+        w = self._wrapper()
+        del w._token_usage
+        assert w.get_workflow_usage()["tokens"] == 0
+        assert w.pop_stage_usage()["tokens"] == 0

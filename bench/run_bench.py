@@ -330,12 +330,15 @@ def detach_run(conn, workflow_id: str) -> None:
 def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     """Record a run whose stream died mid-flight for detachment AFTER the sweep.
 
-    The id reaches the client only on the terminal generation event
-    (workflow_service.py yields "workflow_id" on complete/error, never on the
-    in-progress pushes), so the failure this can act on is one during the
-    EXECUTION phase — the long Docker one, and the realistic read-timeout window.
+    The id now arrives on the FIRST event: workflow_service yields workflow_id
+    on the opening "running" push as well as on complete/error, so that a run
+    which dies mid-flight is still attributable to an id. A generation-phase
+    failure is therefore detachable too, where it used to leak (see the
+    no-id branch below, which is now reachable only if the stream dies before
+    the very first chunk). The realistic read-timeout window is still the
+    EXECUTION phase — the long Docker one.
 
-    Which is exactly why it is not detached here. The stream dying is not the
+    That is not detached here either. The stream dying is not the
     RUN dying: at that moment the server is still blocked in
     runner_exec_client.execute, and robot_tests/<id> is a read-write bind mount
     inside the live container (docker_service.py). Deleting it there would pull
@@ -345,13 +348,13 @@ def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     re-attach the run to History moments after we deleted it. By the end of the
     sweep that work has finished, and one capture sees the whole run.
 
-    A failure before generation completes has no id to detach by, and
+    A failure before the opening event has no id to detach by, and
     capture_evidence(None) would write a bench/runs/None directory. Those
     llm_traces rows stay attached and have to be cleaned up by hand, so say so
     rather than returning quietly.
     """
     if not workflow_id:
-        _warn("the stream failed before the generation event that carries the "
+        _warn("the stream failed before the opening event that carries the "
               "workflow_id, so this run could not be detached — any llm_traces "
               "rows it wrote are still attached to History/metrics")
         return
@@ -585,6 +588,43 @@ def gate_pins(args, out_path: Path) -> None:
     _log(f"pins recorded -> {meta_file}")
 
 
+def _load_history_best_effort(out_path) -> None:
+    """Refresh the bench dashboards with the sweep just written.
+
+    Deliberately swallows everything. A sweep costs roughly 40 minutes and real
+    money; a database that is down, a schema that is missing, or a driver error
+    must cost the dashboard refresh, never the run whose CSV is already safely
+    on disk. The failure is logged loudly enough to notice and re-run
+    `python bench/load_history.py` by hand.
+    """
+    # Look for the sweep where it was actually written. `--out` accepts any
+    # path and append_row() mkdirs the parent, so defaulting to bench/baselines
+    # loses every sweep written anywhere else. The retry command spells both
+    # out for the same reason — a bare `load_history.py` globs bench/baselines
+    # and would report success having loaded nothing.
+    out_path = Path(out_path)
+    # as_posix(): the bench is run from Git Bash, where a Windows backslash in
+    # `bench\private` is an escape character, not a separator.
+    retry_cmd = (f"python bench/load_history.py "
+                 f"--baselines-dir {out_path.parent.as_posix()} "
+                 f"--only {out_path.name}")
+    database_url = os.environ.get("DATABASE_URL") or getattr(
+        settings, "DATABASE_URL", None)
+    if not database_url:
+        _log(f"bench history not loaded: no DATABASE_URL. "
+             f"Run `{retry_cmd}` by hand to refresh Grafana.")
+        return
+    try:
+        from bench.load_history import load_corpus
+        with psycopg.connect(database_url, connect_timeout=10) as conn:
+            result = load_corpus(
+                conn, baselines_dir=out_path.parent, only=out_path.name)
+        _log(f"bench history loaded: {result}")
+    except Exception as exc:  # noqa: BLE001 — never fail a paid sweep on this
+        _log(f"bench history NOT loaded ({exc.__class__.__name__}: {exc}). "
+             f"The sweep CSV is intact. Run `{retry_cmd}` to refresh Grafana.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="NL-to-RF benchmark runner (sequential; detaches all bench "
@@ -653,6 +693,7 @@ def main() -> int:
                 _log(f"detaching {len(pending_detach)} run(s) whose stream failed")
                 drain_deferred_detach(conn, pending_detach)
     _log(f"done — {out_path}")
+    _load_history_best_effort(out_path)
     return 0
 
 

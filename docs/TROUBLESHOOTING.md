@@ -2,6 +2,25 @@
 
 This guide helps you resolve common issues with Mark 1.
 
+## Quick Fixes (Docker Quick Start)
+
+| Symptom | Fix |
+|---|---|
+| **App won't load on `:3000`** | Find what holds the port — `netstat -ano \| findstr :3000` on Windows (`lsof -i :3000` on macOS/Linux) — then stop that process, or leave it alone and remap Mark 1 instead: change the frontend's `ports:` entry in `docker-compose.yml` from `"3000:8080"` to e.g. `"3001:8080"` and open `:3001`. |
+| **A container never becomes `healthy`** | Check logs: `docker compose logs fastapi` / `docker compose logs browser-service`. |
+| **`fastapi` exits immediately, log says `JWT_SECRET_KEY is unset or still the placeholder`** | `src/backend/.env` still has `JWT_SECRET_KEY=change-me-in-production`. Generate a real one — `docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"` — put it in `src/backend/.env`, then `docker compose up -d` again. |
+| **`Conflict. The container name "/nlrf-postgres" is already in use`** | You have run the source stack (`./run.sh`) before; it leaves that container running and Compose uses fixed container names. Move it aside with `docker rename nlrf-postgres nlrf-postgres-devstack` (reversible, and it keeps the container). Note that stopping it is **not** enough — a stopped container still holds the name. The two stacks keep separate data volumes either way. |
+| **`401` / `403` / authentication errors** | Check `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION` in `src/backend/.env`, make sure `credentials.json` is in the repo root, and start with the `docker-compose.vertex.yml` override. |
+| **`address already in use`** | Another app holds the port — stop it, or edit the port mapping in `docker-compose.yml`. |
+| **Browser service slow to start** | Expected on first start — it downloads browser binaries. Its healthcheck allows a 120s grace period (`start_period` in `docker-compose.yml`), so give it ~2 minutes before treating it as stuck. |
+| **Boot/login errors after an update** | Make sure all four image tags use the **same** `-develop` suffix, then re-run `docker compose pull` followed by `docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d`. |
+| **`429`, `RESOURCE_EXHAUSTED`, or "quota exceeded"** | You are over your Vertex AI / Gemini rate limit. Wait and retry; if it is persistent, raise the quota for the model in the GCP console (IAM & Admin → Quotas, filter on `aiplatform.googleapis.com`). Note that this also distorts run **timing** — check the log window for 429s before trusting any latency number. |
+| **`403` / `PermissionDenied` even though credentials load** | The credentials are valid but the service account lacks the role. Grant it **Vertex AI User** (`roles/aiplatform.user`) on the project in `VERTEXAI_PROJECT`. Authentication failing (`401`) is a different problem — that one is the credentials path. |
+| **`Model not found` / `404` naming the model** | `ONLINE_MODEL` in `src/backend/.env` does not exist in the region set by `VERTEXAI_LOCATION`. Model availability is per-region — check the model is offered in that region, or move `VERTEXAI_LOCATION` to one where it is. |
+| **`Context length exceeded` / `maximum tokens`** | The prompt outgrew the model's context window. Usually a very large page or a very long query — simplify the query, or switch `ONLINE_MODEL` to a larger-context model. |
+
+More Docker-specific fixes: [Docker Guide → Troubleshooting](DOCKER-GUIDE.md#troubleshooting).
+
 ## Installation Issues
 
 ### "Docker is not available"

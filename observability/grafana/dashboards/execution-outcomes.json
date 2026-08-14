@@ -1,0 +1,167 @@
+{
+  "uid": "mark1-execution",
+  "title": "Mark 1 — Execution outcomes",
+  "tags": ["mark1", "reliability"],
+  "links": [
+    {
+      "title": "All runs",
+      "type": "link",
+      "url": "/d/mark1-runs",
+      "icon": "external link",
+      "tooltip": "Every run this install has a record of",
+      "targetBlank": false
+    }
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-1y", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "level",
+        "label": "Structured log level",
+        "type": "custom",
+        "query": "errors : error|critical, errors and warnings : error|critical|warning, every structured line : .+",
+        "current": {"text": "errors", "value": "error|critical"},
+        "options": [
+          {"text": "errors", "value": "error|critical", "selected": true},
+          {"text": "errors and warnings", "value": "error|critical|warning", "selected": false},
+          {"text": "every structured line", "value": ".+", "selected": false}
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Executed-test pass rate",
+      "description": "This is NOT the bench generation gate. It measures whether the generated Robot test passed when it ran, over whatever range the dashboard time picker is set to — narrowing the range changes this number. Spine is execution_records; timestamp is TEXT holding UTC values in two shapes (verified 2026-08-10: 99 rows naive, 24 rows with an explicit +00:00 offset, no other suffix seen). The cast strips any trailing Z/offset and reinterprets the remainder as UTC explicitly, so the result does not depend on the query session's timezone setting.\n\nCoverage: 109 of 123 execution records join to neither workflow_metrics nor test_runs, and 312 of 330 learning_metrics rows have no metrics row. Neither dashboard joins those tables away — each counts its own spine — so those rows are in the numbers above. They are real runs, not pollution: the 109 cover 30 distinct queries across 9 domains with 62 passes, spanning 2026-02-23 to 2026-07-15; the 312 cover 30 distinct queries with 189 passes, spanning 2026-02-28 to 2026-07-15. What they blend is engine eras. The default now-1y window admits all of them, so narrowing the time picker is a deliberate act, not a floor this dashboard applies for you.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 12, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo()"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Outcome mix",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 12, "x": 12, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT test_status, count(*) AS runs FROM execution_records WHERE (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Failure categories",
+      "description": "Categories are also present on some passed rows, so this filters to failures explicitly rather than assuming a category implies a failure.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT coalesce(failure_category, '(none recorded)') AS category, count(*) AS failures, round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct FROM execution_records WHERE test_status <> 'passed' AND (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY failures DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Keywords that fail most",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT failed_keyword, count(*) AS failures, count(DISTINCT domain) AS domains FROM execution_records WHERE test_status <> 'passed' AND failed_keyword IS NOT NULL AND (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY failures DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Pass rate by domain",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT domain, count(*) AS runs, round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Pass rate by generated code structure",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT coalesce(code_structure, '(unclassified)') AS structure, count(*) AS runs, round(100.0 * count(*) FILTER (WHERE test_status = 'passed') / nullif(count(*), 0), 1) AS pass_pct FROM execution_records WHERE (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Recent failures, with the query that produced them",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "workflow_id"},
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run in Trace one run",
+                    "url": "/d/mark1-trace-run?var-run_id=${__value.raw}",
+                    "targetBlank": false
+                  }
+                ]
+              },
+              {"id": "custom.width", "value": 320},
+              {"id": "custom.inspect", "value": true}
+            ]
+          }
+        ]
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') AS at, workflow_id, user_query, failure_category, failed_keyword, error_message FROM execution_records WHERE test_status <> 'passed' AND (regexp_replace(timestamp, '(Z|[+-][0-9]{2}:?[0-9]{2})$', '')::timestamp AT TIME ZONE 'UTC') BETWEEN $__timeFrom() AND $__timeTo() ORDER BY at DESC LIMIT 100"
+      }]
+    },
+    {
+      "type": "logs",
+      "title": "Aggregate error logs",
+      "description": "Errors from both services, in the two formats they are actually written in. Arm A parses the structlog JSON the application emits and filters on its lowercase level field, which is what the Structured log level variable moves. Arm B is a literal ERROR substring match, which is the only way third-party loggers writing ANSI-coloured plain text are seen. Measured over 7 days on 2026-08-12: arm A 348 lines, arm B 58, overlap exactly 0 — dropping either arm loses a whole class of error. The shipped panel was arm B alone: 58 lines out of the combined 406, missing the 348 that only arm A catches. level=critical currently matches 0 lines; it is in the pattern so the panel needs no edit when the first one appears, not because it is covering anything today. Arm B does not widen with the variable — it has no level field to filter on. Bench caveat: when the observability stack is running, a bench sweep targets the same containerised backend on 127.0.0.1:5000 that run_bench.py uses by default, so bench log lines land in this feed with no label separating them. Use the per-run log panel on the trace dashboard when you need certainty about which run a line belongs to.",
+      "datasource": {"type": "loki", "uid": "nlrf-loki"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=~\"fastapi|browser-service\"} | json | level=~\"$level\""
+        },
+        {
+          "refId": "B",
+          "expr": "{service=~\"fastapi|browser-service\"} |= \"ERROR\""
+        }
+      ]
+    }
+  ]
+}

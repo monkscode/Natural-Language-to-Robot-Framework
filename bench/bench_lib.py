@@ -24,6 +24,7 @@ import json
 import math
 import re
 import statistics
+import subprocess
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -633,11 +634,36 @@ def preflight_violations(nlrf_health: dict, browser_health: dict) -> tuple[list[
     return violations, warnings
 
 
+def _git(*args: str) -> str | None:
+    """A git value for the sweep sidecar, or None if git cannot answer.
+
+    Provenance is worth having and never worth failing a 40-minute paid run
+    for, so every failure mode degrades to None: no git binary (OSError), a
+    non-zero exit such as `symbolic-ref` on a detached HEAD or a tarball
+    checkout with no .git at all (CalledProcessError), a wedged git process
+    (TimeoutExpired — both are subprocess.SubprocessError), and a branch/tag
+    name whose bytes are not valid in the local codec (UnicodeDecodeError,
+    which is a ValueError, raised by `text=True` decoding, not by git itself).
+    The except tuple is intentionally that wide — narrower has already let one
+    real failure mode (a fake branch name) through silently once.
+    """
+    try:
+        result = subprocess.run(
+            ["git", *args], capture_output=True, text=True, check=True,
+            timeout=10, cwd=Path(__file__).resolve().parents[1])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def build_meta(nlrf_health: dict, browser_health: dict,
                base_url: str, browser_url: str) -> dict:
     """Pins snapshot written beside the CSV as <out>.csv.meta.json."""
     return {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "git_sha": _git("rev-parse", "HEAD"),
+        "git_branch": _git("symbolic-ref", "--quiet", "--short", "HEAD"),
         "base_url": base_url,
         "browser_url": browser_url,
         "nlrf_pins": nlrf_health.get("pins") or {},

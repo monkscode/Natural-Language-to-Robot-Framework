@@ -104,3 +104,78 @@ class TestStepsKeyExtraction:
     def test_missing_steps_key_returns_none(self):
         output = json.dumps({"elements": []})
         assert _extract_json_by_key(output, "steps", "PlanOutput") is None
+
+
+class TestGuardrailAttemptCounting:
+    """Guardrail invocations are counted per RobotTasks instance.
+
+    RobotTasks is built once per run_crew and once per repair mini-crew, so the
+    counter is scoped to a workflow by construction — no module-level dict, no
+    lock, no workflow_id key, and nothing to leak between concurrent runs.
+
+    A count above 1 for a site means the assembler needed re-prompting there.
+    """
+
+    def _tasks(self):
+        from src.backend.crew_ai.tasks import RobotTasks
+        return RobotTasks()
+
+    def _valid_output(self):
+        from unittest.mock import MagicMock
+        return MagicMock(raw=json.dumps({"code": "*** Settings ***\nLibrary    Browser\n"}))
+
+    def test_starts_empty(self):
+        assert self._tasks().guardrail_attempts == {}
+
+    def test_assembly_site_counts_under_its_own_name(self):
+        tasks = self._tasks()
+        guardrail = tasks._track_guardrail("assembly_output")
+
+        guardrail(self._valid_output())
+
+        assert tasks.guardrail_attempts == {"assembly_output": 1}
+
+    def test_repair_site_counts_separately(self):
+        """Both sites share assembly_output_guardrail, so the names are the
+        only way to tell a first-pass format fix from a repair-loop one."""
+        tasks = self._tasks()
+        assembly = tasks._track_guardrail("assembly_output")
+        repair = tasks._track_guardrail("repair_output")
+
+        assembly(self._valid_output())
+        repair(self._valid_output())
+        repair(self._valid_output())
+
+        assert tasks.guardrail_attempts == {"assembly_output": 1, "repair_output": 2}
+
+    def test_counts_a_failed_guardrail_too(self):
+        """A retry is exactly what a failure causes — it must be counted, not
+        dropped. The old module-dict version popped only on pass and leaked."""
+        from unittest.mock import MagicMock
+        tasks = self._tasks()
+        guardrail = tasks._track_guardrail("assembly_output")
+
+        is_valid, _ = guardrail(MagicMock(raw="no code here at all"))
+
+        assert is_valid is False
+        assert tasks.guardrail_attempts == {"assembly_output": 1}
+
+    def test_delegates_to_assembly_output_guardrail(self):
+        """The wrapper counts; it must not change the verdict or the payload."""
+        tasks = self._tasks()
+        guardrail = tasks._track_guardrail("assembly_output")
+        task_out = self._valid_output()
+
+        wrapped = guardrail(task_out)
+        direct = assembly_output_guardrail(task_out)
+
+        assert wrapped == direct
+
+    def test_two_instances_do_not_share_a_counter(self):
+        """The main crew and the repair mini-crew build separate RobotTasks."""
+        first, second = self._tasks(), self._tasks()
+
+        first._track_guardrail("assembly_output")(self._valid_output())
+
+        assert first.guardrail_attempts == {"assembly_output": 1}
+        assert second.guardrail_attempts == {}

@@ -1,188 +1,210 @@
-# 🤖 Mark 1 - Natural Language to Robot Framework
+<div align="center">
+
+# 🤖 Mark 1 — Natural Language to Robot Framework
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
-![Python](https://img.shields.io/badge/Python-3.9%2B-green.svg)
+![Docker](https://img.shields.io/badge/Run%20with-Docker-2496ED.svg?logo=docker&logoColor=white)
 ![Robot Framework](https://img.shields.io/badge/Robot%20Framework-6.0%2B-orange.svg)
-![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-purple.svg)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
-**Transform plain English into production-ready test automation.** Mark 1 is your one-stop solution for writing automation tests without coding. Just describe what you want to test in plain English, and watch it generate working Robot Framework tests automatically. Write once, run repeatedly — and when your application changes, regenerate the test from the same plain-English description.
+**Turn plain English into production-ready test automation.**
+Describe what you want to test, and Mark 1's AI agents generate a working
+[Robot Framework](https://robotframework.org/) test for you — no coding required.
 
-```text
-"Open Flipkart and search for shoes and then get the first product name"
-                            ↓
-   [AI planning + real-browser element detection + code generation,
-        gated by a deterministic Robot Framework validation]
-                            ↓
-        ✅ Working, validated Robot Framework Test
-```
+[Quick Start](#-quick-start-docker) • [How It Works](#-how-it-works) • [Configuration](docs/CONFIGURATION.md) • [Troubleshooting](#-troubleshooting) • [Docs](#-documentation)
 
-## 🚀 What Can Mark 1 Do For You?
-
-### ✅ Your One-Stop Solution for Automation Testing
-- **No Coding Required** - Write tests in plain English, not Python or JavaScript
-- **Works on Any Website** - E-commerce, SaaS, web apps—anything with a UI
-- **Generates Professional Code** - Beautiful Robot Framework tests that even manual QAs can read
-- **Fast Test Creation** - 20-30 seconds from idea to working test
-
-### 📝 Write Once, Execute Infinitely
-- **Reusable Tests** - Generate test code once, run it 1000 times
-- **Environment Agnostic** - Same test works on dev, staging, and production
-- **No Re-recording Needed** - Unlike traditional record-and-playback tools, when the UI changes you regenerate from the same plain-English description instead of re-recording
-- **Cost Efficient** - Setup overhead paid once, then unlimited test runs
-
-### 🧠 Gets Smarter Over Time
-- **Learns Your Architecture** - Remembers common navigation patterns and workflows
-- **Contextual Understanding** - AI understands your product's structure and layout
-- **Fewer Tokens Over Time** - As it learns your system, it uses fewer AI tokens per test
-- **Better Outputs** - More specific, stable, and efficient tests with each run
-
-### 👥 Perfect for Manual QA Teams
-- **Easy to Read** - Robot Framework syntax is plain English-like, no technical skills needed
-- **Self-Documenting** - Test code IS the documentation
-- **Low Learning Curve** - Manual QAs can understand and maintain tests immediately
-- **Empowerment Without Complexity** - Keep your QA team without forcing them to become developers
+</div>
 
 ---
 
-## 📈 Quick Comparison
+> 🐳 **Mark 1 runs entirely in Docker.** No Python, Node, or pip installs — just Docker.
 
-| Feature | Mark 1 | Selenium IDE | Playwright Codegen | Manual Coding |
-|---------|--------|--------------|-------------------|---------------|
-| **Input Method** | Natural language | Record actions | Record actions | Write code |
-| **Output Format** | Robot Framework | Selenium code | Python/JS/Java | Any framework |
-| **Element Detection** | AI (95%+) | Record only | Record only | Manual |
-| **Learning Curve** | None | Low | Medium | High |
-| **Maintenance** | Simply Rerun | Re-record | Re-record | Manual updates |
+<!-- 💡 Maintainers: drop a short demo GIF or screenshot of the Generate page here — it's the single biggest boost to a project README. -->
 
 ---
 
-## 🎯 Why Choose Mark 1? (The Bottom Line)
+## ✨ Why Mark 1?
 
-| Your Situation | Mark 1 Solution | Time Saved |
-|---|---|---|
-| **You have manual QA team** | No coding needed, tests are readable English | ✅ 40-60% faster test creation |
-| **UI changes frequently** | Tests auto-adapt via AI | ✅ No test maintenance time |
-| **Need tests for new features** | Write tests before code exists | ✅ Test-driven development ready |
-| **Legacy testing tools too slow** | Batch element detection | ✅ 3-5x faster than Selenium IDE |
-| **Testing is expensive** | Reuse tests indefinitely | ✅ Lower total cost of ownership |
-| **Hard to scale QA** | One engineer → 1000 tests | ✅ Enable non-technical QAs |
+- 🗣️ **No coding required** — write tests in plain English, not Python or JavaScript.
+- 🌐 **Works on any website** — e-commerce, SaaS, internal tools, anything with a UI.
+- ⚡ **Fast** — go from idea to a working test in ~20–30 seconds.
+- ♻️ **Write once, run infinitely** — reuse generated tests across dev, staging, and prod.
+- 🧠 **Gets smarter over time** — learns your app's patterns and uses fewer tokens per test.
+- 👀 **Readable output** — clean Robot Framework code that even manual QAs can maintain.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Docker)
 
-### Prerequisites
+You only need **two** things:
 
-- ✅ **Python 3.9+** - [Download](https://python.org/downloads/)
-- ✅ **Docker Desktop** - [Install](https://docs.docker.com/get-docker/) (must be running!)
-- ✅ **Git** - [Install](https://git-scm.com/downloads)
-- ✅ **Google Gemini API Key** - [Get Free Key](https://aistudio.google.com/app/apikey)
+| Requirement | Get it |
+|---|---|
+| 🐳 **Docker Desktop** (running) | [Download](https://www.docker.com/products/docker-desktop/) — Linux: [Engine](https://docs.docker.com/engine/install/) + [Compose](https://docs.docker.com/compose/install/) |
+| 🔑 **Google Vertex AI service account key** (`credentials.json`) | Created in step 2 below — full walkthrough in the [Vertex AI Setup Guide](docs/VERTEX_AI_SETUP_GUIDE.md) |
 
-### Installation
+No Python. No Node.js. No manual dependency installs.
+
+### 1. Clone the repo
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-repo/mark-1.git
-cd mark-1
-
-# 2. Configure your API key
-cp src/backend/.env.example src/backend/.env
-# Edit src/backend/.env and add your GEMINI_API_KEY
-
-# 3. Start Mark 1
-chmod +x run.sh
-./run.sh
-
-# 4. Start BrowserUse service (in another terminal)
-python tools/browser_use_service.py
+git clone -b develop https://github.com/monkscode/Natural-Language-to-Robot-Framework.git
+cd Natural-Language-to-Robot-Framework
 ```
 
-### Generate Your First Test
+### 2. Create your Vertex AI credentials
 
-1. Open `http://localhost:5000` in your browser
-2. Enter a test description:
-   ```
+For local development, Mark 1 authenticates to Google Cloud Vertex AI with a **service account key** (`credentials.json`). The one-time setup script below creates it for you.
+
+> ⚠️ **This JSON-key workflow is for local development only.** A downloaded service-account key is a long-lived credential sitting on disk, and `.gitignore` only protects you from committing it — not from host compromise or exfiltration from a container. For production, authenticate without a key file: [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation), an attached service account / [ADC](https://cloud.google.com/docs/authentication/application-default-credentials) on Cloud Run, GKE or GCE, or short-lived credentials injected by your deployment's secret manager.
+
+> 🧰 **Prerequisite — the [gcloud CLI](https://cloud.google.com/sdk/docs/install):** Google's command-line tool, which the script uses to talk to your Google Cloud account. If you don't have it yet, install it from the [official install page](https://cloud.google.com/sdk/docs/install) (pick your OS and follow the steps). Forgot to install it? No problem — the script detects that, shows you the link, and waits while you install instead of failing.
+
+
+```bash
+bash setup_google_vertexAI.sh
+```
+
+It logs you in (`gcloud init`), picks up your project ID automatically, enables the Vertex AI API, creates a `vertex-ai-sa` service account with the **Vertex AI User** role, and downloads its key as `credentials.json` into the repo root. The full manual walkthrough (including fixes for organization-policy blocks) is in the [Vertex AI Setup Guide](docs/VERTEX_AI_SETUP_GUIDE.md).
+
+> ⚠️ **Never commit `credentials.json` to Git** — it is already listed in `.gitignore`. If key creation fails with `FAILED_PRECONDITION`, your organization blocks service-account keys; see [§4 of the setup guide](docs/VERTEX_AI_SETUP_GUIDE.md#4-overcoming-the-secure-by-default-json-key-block) for the fix.
+>
+> **Rotating or revoking the key** (do this immediately if it ever leaks):
+>
+> ```bash
+> SA_EMAIL="vertex-ai-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+> gcloud iam service-accounts keys list --iam-account="$SA_EMAIL" --managed-by=user
+> gcloud iam service-accounts keys delete KEY_ID --iam-account="$SA_EMAIL"
+> ```
+>
+> Deleting the key disables it in IAM within minutes. Delete the local `credentials.json` too, then re-run the setup script to mint a replacement. Re-running the script on its own reuses a still-valid key rather than piling up new ones.
+
+### 3. Create the two config files
+
+Mark 1 uses two `.env` files — one for **infrastructure** (which images to run) and one for **your settings** (Vertex AI credentials, model, toggles).
+
+```bash
+cp .env.example .env                              # root: Docker image tags
+cp src/backend/.env.example src/backend/.env      # backend: Vertex AI + settings
+```
+
+In the **root `.env`**, point all four image tags at `-develop`. The file ships with
+`-local` defaults, which are **not** published to Docker Hub — only `frontend` can be
+built locally, so leaving them as-is makes `docker compose pull` fail:
+
+```env
+FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-develop
+BROWSER_SERVICE_IMAGE_TAG=monkscode/nlrf:browser-service-develop
+TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
+FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-develop
+```
+
+All four must carry the **same** suffix — a mixed set is the usual cause of odd boot
+and login errors after an update.
+
+In **`src/backend/.env`**, set the Vertex AI project and location, and add your own
+email as an admin:
+
+```env
+MODEL_PROVIDER=vertex
+VERTEXAI_PROJECT=your-project-id
+VERTEXAI_LOCATION=us-central1
+ONLINE_MODEL=gemini-2.5-flash
+ADMIN_EMAILS=you@example.com
+```
+
+You must also replace the placeholder **`JWT_SECRET_KEY`**. It ships as
+`change-me-in-production`, and the app **refuses to start** with that value — the
+`fastapi` container exits at startup with
+`RuntimeError: JWT_SECRET_KEY is unset or still the placeholder`. Generate one using an
+image you have already pulled, so this needs no Python on your machine:
+
+```bash
+docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Paste the output into `src/backend/.env`:
+
+```env
+JWT_SECRET_KEY=<the generated value>
+```
+
+Those four are the only values you must change; everything below is background on what
+they mean.
+
+- **`ADMIN_EMAILS`** — set this **before the first start**. Mark 1 is approval-gated:
+  a new signup lands `pending` and sees an Access Gate rather than the Generate page.
+  Emails listed here are created `active` and can approve everyone else. Miss it and
+  you lock yourself out of your own instance with no one able to let you in.
+
+- **`VERTEXAI_PROJECT`** — the setup script prints this at the end (it is also the `project_id` field inside `credentials.json`).
+- **`VERTEXAI_LOCATION`** — the Google Cloud region to serve Vertex AI requests from, e.g. `us-central1` or `asia-south1` (Mumbai).
+- **`VERTEXAI_CREDENTIALS`** — already defaults to `credentials.json`; leave it as is. When running in Docker, `docker-compose.vertex.yml` rewrites it to the in-container path automatically.
+
+Everything else has sensible defaults. The database, internal service URLs, and inter-container networking are wired up automatically by Docker Compose — you don't need to touch them.
+
+### 4. Start everything
+
+```bash
+docker compose pull      # first time only — downloads the images (~2–5 min)
+docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
+```
+
+The extra `-f docker-compose.vertex.yml` mounts your `credentials.json` into the containers and tells the app where to find it (see [§6 of the setup guide](docs/VERTEX_AI_SETUP_GUIDE.md#6-using-the-json-key-in-docker)) — include it whenever you start the app.
+
+Check that the services are healthy:
+
+```bash
+docker compose ps
+```
+
+> ⏳ The **browser service can take up to ~2 minutes** to report `healthy` on first start (it's initialising Playwright). This is normal — its healthcheck grants a 120s `start_period` for exactly this reason.
+
+Your generated tests, logs, and database live in local folders (`./robot_tests`, `./logs`, `./data`) and are **preserved** across restarts. For everyday commands (`up`, `down`, `ps`, `logs`, `pull`), see the [Docker Compose CLI reference](https://docs.docker.com/reference/cli/docker/compose/).
+
+### 5. Open the app & generate your first test
+
+Open **[http://localhost:3000](http://localhost:3000)** and **create an account**, using the
+email you put in `ADMIN_EMAILS`. That account is active immediately and lands on the
+**Generate** page; any other email lands on the Access Gate until an admin approves it.
+Then:
+
+1. Enter a description:
+   ```text
    Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
-3. Click **"Generate & Run"**
-4. Watch the magic happen! ✨
+2. Click **Generate & Run** and watch the agents work. ✨
+3. View the generated `.robot` code, live progress, and the HTML report right in the UI.
 
-## 💡 Usage Examples
+> **Pro tip:** Be specific about elements — "first product name" or "search button in the header" beats vague phrasing. Another query to try: `Go to Wikipedia and search for Agentic AI`.
 
-### Example 1: E-commerce Search
-```
-"Open Flipkart and search for shoes and then get the first product name"
-```
+#### Sites with a one-time popup after login
 
-### Example 2: GitHub Navigation
-```
-"Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project"
-```
-**Pro Tip:** Be specific about what you want. Mention exact elements like "first product name" or "search button in header".
+Some sites show an announcement or welcome popup exactly once per login, on the first page that finishes rendering. Add a short wait right after the login step so the popup appears and expires on the landing page — before your real steps run — instead of blocking a click later in the test:
 
-### Example 3: Sites With a One-Time Popup After Login
 ```text
-"Go to https://yourapp.example.com, type admin in the username field, type admin in the password field, click the Sign In button, wait 5 seconds for the dashboard to load, go to the reports page, and click the Filter button"
-```
-**Why the wait step?** Some sites show an announcement or welcome popup exactly once per login, on the first page that finishes rendering. A short wait right after login lets that popup appear and expire on the dashboard — before your real steps run — instead of blocking a click later in the test. Two rules: put the wait immediately after login, and make sure a navigation to another page follows it. Persistent popups (cookie banners, consent dialogs) don't need this trick — just mention them as a step ("accept the cookie banner") and they are automated like any other click.
-
-**In Technical Terms:**
-
-Mark 1 uses **AI agents combined with deterministic validation** to transform your natural language into working tests:
-
-```
-Your Query → [AI Processing] → Robot Framework Code → Execution → Results
+Go to https://yourapp.example.com, type admin in the username field, type admin in the password field, click the Sign In button, wait 5 seconds for the dashboard to load, go to the reports page, and click the Filter button
 ```
 
-**The Process:**
-1. **Intelligent Planning** - Query analyzed and broken into precise steps
-2. **Smart Element Detection** - AI finds web elements with 95%+ accuracy (using computer vision)
-3. **Code Generation** - Transforms steps into production-ready Robot Framework code
-4. **Quality Assurance** - Validates code before execution
-5. **Isolated Execution** - Runs in clean Docker containers
+Two rules: put the wait immediately after login, and make sure a navigation to another page follows it. Persistent popups (cookie banners, consent dialogs) don't need this trick — just mention them as a step ("accept the cookie banner") and they are automated like any other click.
 
-**What You Get:**
-- ✅ Working test code in Robot Framework format
-- ✅ Detailed HTML reports with step-by-step execution logs
-- ✅ Real-time progress updates
-- ✅ Validated locators that work on dynamic websites
+---
 
-**Want deeper details?** See the [Architecture Documentation](docs/ARCHITECTURE.md) for the full technical breakdown.
+## 🧠 How It Works
 
-## 📁 Project Structure
+Mark 1 uses **AI agents combined with deterministic validation**: your plain-English request is broken into precise steps, a live headless browser detects the real page elements, and the agents generate Robot Framework code that is then gated by a deterministic `robot --dryrun` check before it runs in a clean, throwaway Docker container. You get working test code, detailed HTML reports with step-by-step logs, real-time progress, and locators that hold up on dynamic sites.
 
-```
-mark-1/
-├── src/backend/          # FastAPI backend with AI agents
-├── tools/                # Browser automation utilities
-├── robot_tests/          # Generated tests & reports (auto-created)
-│   └── {run-id}/
-│       ├── test.robot    # Your generated test
-│       ├── log.html      # Detailed execution log
-│       └── report.html   # Test summary
-├── docs/                 # Documentation
-├── run.sh                # One-command startup
-└── README.md             # You are here!
-```
+Want the deep dive? See the [Architecture Documentation](docs/ARCHITECTURE.md).
 
-## 📚 Documentation
+### Example output
 
-- **[Configuration Guide](docs/CONFIGURATION.md)** - Environment variables and settings
-- **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Fix common issues
-- **[FAQ](docs/FAQ.md)** - Frequently asked questions
-- **[Best Practices](docs/BEST_PRACTICES.md)** - Get the most out of Mark 1
-- **[Architecture](docs/ARCHITECTURE.md)** - How Mark 1 works under the hood
-- **[Contributing](CONTRIBUTING.md)** - Help improve Mark 1
-
-## 🎬 Example Output
-
-**Your Input:**
-```
+**Input:**
+```text
 Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
 ```
 
-**Generated Code (Browser Library):**
+**Generated test (Browser Library):**
 ```robot
 *** Settings ***
 Library    Browser
@@ -205,97 +227,50 @@ Generated Test
     Close Browser
 ```
 
-**Result:** Working test + detailed HTML report in ~20 seconds.
+---
 
-## 🛠️ Configuration
+> 🔒 **Deploying to production?** The defaults are tuned for local use. Before exposing Mark 1 publicly:
+>
+> - Set a strong `JWT_SECRET_KEY`, `COOKIE_SECURE=true`, and `ENVIRONMENT=production` in `src/backend/.env`.
+> - **Drop the `credentials.json` key file.** The Quick Start's JSON key is a local-development shortcut. In production use [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation), an attached service account / ADC (Cloud Run, GKE, GCE), or short-lived credentials injected by your secret manager — none of which leave a long-lived key on disk.
+> - If you must ship a key, scope it to `roles/aiplatform.user` only, mount it read-only, and put it on a rotation schedule with a documented revocation path (see step 2 above).
+>
+> See the [Configuration Guide](docs/CONFIGURATION.md) for the full hardening checklist.
 
-Create a `.env` file in `src/backend/`:
-
-```env
-# AI Provider
-MODEL_PROVIDER=online
-GEMINI_API_KEY=your-actual-api-key-here
-ONLINE_MODEL=gemini-2.5-flash
-
-# Application
-APP_PORT=5000
-
-# Browser Automation
-BROWSER_USE_SERVICE_URL=http://localhost:4999
-BROWSER_USE_TIMEOUT=900
-
-# Robot Framework Library (only 'browser' is supported)
-ROBOT_LIBRARY=browser
-```
-
-**Get your free Gemini API key:** [Google AI Studio](https://aistudio.google.com/app/apikey)
-
-For detailed configuration options, see the [Configuration Guide](docs/CONFIGURATION.md).
-
-### 🎯 Robot Framework Library Support
-
-Mark 1 generates **Browser Library (Playwright)** tests:
-
-```env
-ROBOT_LIBRARY=browser
-```
-
-**Why Browser Library:**
-- ✅ **2-3x faster** test execution
-- ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
-- ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
-- ✅ **Auto-waiting built-in** - No explicit waits needed
-- ✅ **Powerful locators** - Text-based, role-based, and traditional selectors
-- ✅ **Consistent validation** - Same engine (Playwright) for generation and execution
-
-**SeleniumLibrary is not supported** — the locator pipeline emits Playwright-only
-syntax, so `ROBOT_LIBRARY=selenium` fails fast at startup.
-
-## 🐛 Troubleshooting
-
-**Common Issues:**
-
-- **"Docker is not available"** - Make sure Docker Desktop is running
-- **"GEMINI_API_KEY not found"** - Check your `.env` file in `src/backend/`
-- **"Port 5000 already in use"** - Change `APP_PORT` in your `.env` file
-- **Tests fail with "Element not found"** - Try being more specific in your query
-
-For detailed troubleshooting, see the [Troubleshooting Guide](docs/TROUBLESHOOTING.md).
-
-## 🤝 Contributing
-
-We welcome contributions! Whether it's bug fixes, new features, or documentation improvements, your help makes Mark 1 better for everyone.
-
-Please see our [Contributing Guide](CONTRIBUTING.md) for detailed instructions on:
-- Setting up your development environment
-- Making and testing changes
-- Submitting pull requests
-- Code guidelines and best practices
-
-By submitting a pull request, you agree to our [Contributor License Agreement](CLA.md).
-
-## 📄 License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-- 📚 **Documentation**: Check the [docs](docs/) folder
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/monkscode/Natural-Language-to-Robot-Framework/discussions)
-- 💡 **Feature Requests**: Open an issue with the `enhancement` label
-
-## ⭐ Show Your Support
-
-If Mark 1 helps streamline your testing workflow:
-- ⭐ Star this repository
-- 🐛 Report issues and help us improve
-- 💡 Suggest features
-- 🤝 Contribute code
-- 📢 Share your experience
 
 ---
 
-**Built with ❤️ for the test automation community**
+## 🐛 Troubleshooting
 
-*Mark 1 is not affiliated with or endorsed by Google, Robot Framework, or any mentioned websites. All trademarks belong to their respective owners.*
+Hit a snag? Common symptoms and their fixes are collected in the [Troubleshooting Guide](docs/TROUBLESHOOTING.md), with more Docker-specific help in the [Docker Guide → Troubleshooting](docs/DOCKER-GUIDE.md#troubleshooting).
+
+
+---
+
+## 📚 Documentation
+
+- 🐳 **[Docker Guide](docs/DOCKER-GUIDE.md)** — run Mark 1 with Docker
+- 🔐 **[Vertex AI Setup Guide](docs/VERTEX_AI_SETUP_GUIDE.md)** — create the service account & `credentials.json`
+- ⚙️ **[Configuration Guide](docs/CONFIGURATION.md)** — every setting explained
+- 🏗️ **[Architecture](docs/ARCHITECTURE.md)** — how Mark 1 works under the hood
+- 🐛 **[Troubleshooting](docs/TROUBLESHOOTING.md)** · ❓ **[FAQ](docs/FAQ.md)** · ✅ **[Best Practices](docs/BEST_PRACTICES.md)**
+- 🤝 **[Contributing](CONTRIBUTING.md)**
+
+---
+
+## 🤝 Contributing & Support
+
+Contributions are welcome — bug fixes, features, or docs. See the [Contributing Guide](CONTRIBUTING.md) for how to set up your environment and open a PR; by submitting one you agree to our [Contributor License Agreement](CLA.md). For bugs and feature requests, open a [GitHub Issue](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues); for questions, use [GitHub Discussions](https://github.com/monkscode/Natural-Language-to-Robot-Framework/discussions).
+
+## 📄 License
+
+Licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+  <b>⭐ If Mark 1 saves you time, star the repo and share it!</b><br/>
+  Built with ❤️ for the test automation community
+  <br/><br/>
+  <sub>Mark 1 is not affiliated with or endorsed by Google, Robot Framework, or any mentioned websites. All trademarks belong to their respective owners.</sub>
+</div>

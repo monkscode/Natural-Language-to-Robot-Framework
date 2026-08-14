@@ -3,6 +3,7 @@ import uuid
 import logging
 import json
 import asyncio
+import time
 from queue import Queue, Empty
 from threading import Thread
 import threading
@@ -556,6 +557,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     workflow_id = str(uuid.uuid4())
     logging.info(f"🆔 Workflow ID: {workflow_id}")
 
+    # Wall clock for the whole run. Deliberately NOT execution_time, which is
+    # browser_metrics['execution_time'] — the browser-use figure this function
+    # passes straight through and which excludes both crew kickoffs and the gate.
+    _t0 = time.monotonic()
+
     # Bind workflow context so all subsequent log entries include workflow_id
     # without modifying any individual log call sites.
     bind_workflow_context(
@@ -567,8 +573,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         user_id=user_id,
     )
 
-    # Start with welcome message
-    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
+    # Start with welcome message. Carries workflow_id so the caller can open a
+    # history row immediately: this is the only event guaranteed to be emitted
+    # before anything can fail, so a run that dies mid-flight is still
+    # attributable to an id.
+    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...",
+           "progress": 0, "workflow_id": workflow_id}
 
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
@@ -623,7 +633,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
-            _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+            (_crew_output, crew_with_results, optimization_metrics, hint_metadata,
+             llm_monitor, crew_stage_metrics, shared_llm,
+             crew_guardrail_attempts) = run_crew(
                 natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
 
@@ -657,44 +669,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # ============================================
         try:
             # 1. Extract CrewAI metrics
-            # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
-            try:
-                usage_metrics_obj = crew_with_results.calculate_usage_metrics()
-
-                # Convert UsageMetrics object to dict
-                usage_metrics_dict = {
-                    'total_tokens': usage_metrics_obj.total_tokens,
-                    'prompt_tokens': usage_metrics_obj.prompt_tokens,
-                    'completion_tokens': usage_metrics_obj.completion_tokens,
-                    'successful_requests': usage_metrics_obj.successful_requests
-                }
-
-                logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
-                # calculate_usage_metrics() covers the WHOLE pipeline: the planner
-                # and assembler wrappers are separate instances (Task 22 gave the
-                # planner its own response_format) that ALIAS one _token_usage dict
-                # (RobotAgents.__init__), so it accumulates across both kickoffs and
-                # CrewAI sums it once per agent (here: once — the old
-                # 3-agent crew triple-counted). The authoritative call count is in
-                # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
-                # (agents.llm._monitor) — incremented exactly once per
-                # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-
-            except Exception as e:
-                logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
-                # Fallback to empty metrics
-                usage_metrics_dict = {
-                    'total_tokens': 0,
-                    'prompt_tokens': 0,
-                    'completion_tokens': 0,
-                    'successful_requests': 0
-                }
-
-            crewai_metrics = calculate_crewai_cost(
-                usage_metrics_dict,
-                model_name=model_name
-            )
+            # Read the shared wrapper's accumulator directly instead of the
+            # assembler crew's calculate_usage_metrics(). Both give the same
+            # numbers today, but only because the crew is single-agent:
+            # calculate_usage_metrics() adds the shared _token_usage once PER
+            # AGENT, which triple-counted on the old 3-agent crew. One wrapper
+            # per workflow is exact regardless of crew shape, and it prices
+            # through the same path as the per-stage figures, so the stages sum
+            # to the total. Never raises — returns zeroed usage on failure.
+            crewai_metrics = shared_llm.get_workflow_usage()
             logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
             # Fold the dryrun repair crew's LLM cost into the CrewAI bucket. The repair
             # mini-crew replaced the removed validator agent (whose cost used to live
@@ -710,6 +693,38 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 crewai_metrics['prompt_tokens'] += _repair_usage.get('prompt_tokens', 0)
                 crewai_metrics['completion_tokens'] += _repair_usage.get('completion_tokens', 0)
                 logging.info(f"📊 Folded dryrun repair usage into CrewAI metrics: {_repair_usage}")
+
+            # 1b. Per-stage breakdown. The planner/assembler entries are drained
+            # in-thread at each task boundary (crew_ai/callbacks.py); repair is
+            # composed here from the gate's usage plus its own wall time, since
+            # the mini-crew has no task callback to drain. Same key set for all
+            # three, so a Grafana panel can GROUP BY stage without special cases.
+            _stage_metrics = dict(crew_stage_metrics or {})
+            # Key off the repair COUNT, not the usage dict. dryrun_service
+            # increments dryrun_repairs BEFORE invoking the repair crew and
+            # bills repair_duration_s in a `finally`, so a repair that raised —
+            # or one whose usage extraction failed and returned {}, which
+            # _repair_usage_dict() does by design so cost tracking can never
+            # break the gate — still spent real seconds. Keying off the usage
+            # dropped the whole stage on that path: the time disappeared from
+            # the per-stage panel while remaining inside workflow_duration_s.
+            # Zero-fill first, then overlay whatever usage did survive, so the
+            # key set matches planner/assembler and the Grafana panel's
+            # GROUP BY stage still needs no special case.
+            if int(gate.get("dryrun_repairs", 0) or 0) > 0:
+                _stage_metrics["repair"] = {
+                    "duration_s": gate.get("repair_duration_s", 0.0),
+                    "llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "tokens": 0, "cost": 0.0,
+                    **_repair_usage,
+                }
+
+            # Guardrail invocations from BOTH RobotTasks instances: the main
+            # crew's (assembly_output) and the repair mini-crew's (repair_output).
+            # The names never collide, so a plain merge is unambiguous.
+            _guardrail_attempts = dict(crew_guardrail_attempts or {})
+            for _name, _count in (gate.get("guardrail_attempts") or {}).items():
+                _guardrail_attempts[_name] = _guardrail_attempts.get(_name, 0) + _count
 
             # 2. Read browser-use metrics from temp file
             temp_storage = get_temp_metrics_storage()
@@ -748,6 +763,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 timestamp=datetime.now(),
                 url=extract_url_from_query(natural_language_query),
 
+                # What produced the cost and token figures below. Taken from
+                # this call's arguments, not from settings: a caller may pass a
+                # provider/model other than the configured default.
+                model_provider=model_provider,
+                model_name=model_name,
+
                 # Totals
                 total_llm_calls=crewai_metrics['llm_calls'] + browser_calls_for_total,
                 total_cost=crewai_metrics['cost'] + browser_actual_cost,
@@ -785,6 +806,17 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 # identify_s phase breakdown (2026-07-26 efficiency check)
                 phase_timings=browser_metrics.get('phase_timings'),
                 agent_diagnostics=browser_metrics.get('agent_diagnostics'),
+
+                # Workflow wall time — crew kickoffs + element stage + gate.
+                workflow_duration_s=round(time.monotonic() - _t0, 3),
+
+                # The deterministic gate's own account of what it did.
+                dryrun_status=gate.get("dryrun_status"),
+                dryrun_attempts=gate.get("dryrun_attempts"),
+                dryrun_repairs=gate.get("dryrun_repairs"),
+
+                crew_stage_metrics=_stage_metrics,
+                guardrail_attempts=_guardrail_attempts,
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
@@ -857,6 +889,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         if gate["dryrun_status"] != "passed":
             complete_event["dryrun_status"] = gate["dryrun_status"]
             complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
+            # The gate's own reason for degrading. 'unverified' has several
+            # causes (executor hop down, runner image missing, container
+            # produced no output.xml) and only the gate knows which; it records
+            # that in `message`, and dryrun_errors cannot carry it because only
+            # the 'failed' exit sets that key. Without this the client had
+            # nothing to show and had to assert one hard-coded cause.
+            if gate.get("message"):
+                complete_event["dryrun_message"] = gate["message"]
         yield complete_event
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
@@ -922,7 +962,8 @@ class _GenerationError(Exception):
 
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
-                robot_code: str | None = None, rerun_of: str | None = None) -> None:
+                robot_code: str | None = None, rerun_of: str | None = None,
+                error_message: str | None = None) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
@@ -933,9 +974,79 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
         get_run_registry().record_start(
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
+            error_message=error_message,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
+
+
+_ERROR_MESSAGE_MAX_CHARS = 2000
+
+
+def _store_failure(result_store: dict, event: dict) -> None:
+    """Remember a generation failure so the caller can record a test_runs row.
+
+    The error SSE already carries workflow_id (so the bench can detach failed
+    runs); this keeps it, plus the reason, for the history row.
+    """
+    result_store["error_message"] = (event.get("message") or "Generation failed")[
+        :_ERROR_MESSAGE_MAX_CHARS]
+    if event.get("workflow_id"):
+        result_store["workflow_id"] = event["workflow_id"]
+
+
+def _make_start_recorder(user: dict | None, user_query: str | None):
+    """Return an async callback that opens a test_runs row at status 'running'.
+
+    Without an opening row, a run that dies before either terminal path — the
+    process is killed, the container restarts, the machine runs out of memory —
+    leaves no trace anywhere, and "never started" is indistinguishable from
+    "started and vanished". A row left sitting at 'running' makes that
+    difference visible.
+
+    'running' is not a new status: the execute path already writes it. The
+    terminal upsert overwrites it, and record_start COALESCEs ownership and
+    query, so the later write fills in anything missing here.
+    """
+    async def _record(workflow_id: str) -> None:
+        try:
+            run_id = str(uuid.UUID(workflow_id))
+        except ValueError:
+            logging.warning("[RUN_REGISTRY] non-UUID workflow_id at start; run not opened")
+            return
+        try:
+            await asyncio.to_thread(_record_run, run_id, user, user_query, "running")
+        except Exception as e:
+            # _record_run swallows registry errors itself; this guards the hop
+            # into the thread as well. Opening a row is bookkeeping — it must
+            # never take down a run that is otherwise fine.
+            logging.error("[RUN_REGISTRY] could not open run %s: %s", run_id, e)
+
+    return _record
+
+
+def _record_generation_failure(result_store: dict, user: dict | None,
+                               user_query: str | None) -> None:
+    """Write a test_runs row for a run that never produced code.
+
+    Without this a generation failure leaves no trace anywhere: the metrics
+    block runs after the dryrun gate, so _GenerationError returns before any
+    row is written and the run is invisible to History and to Grafana.
+
+    Status 'error' already exists in test_runs and in the SPA's RunStatus and
+    filter list, so this adds no vocabulary and needs no UI change.
+    """
+    wf_id = result_store.get("workflow_id")
+    if not wf_id:
+        # No id means nothing to key the row on; the SSE already told the user.
+        return
+    try:
+        run_id = str(uuid.UUID(wf_id))
+    except ValueError:
+        logging.warning("[RUN_REGISTRY] non-UUID workflow_id on failure; run not recorded")
+        return
+    _record_run(run_id, user, user_query, status="error",
+                error_message=result_store.get("error_message"))
 
 
 def _set_run_status(run_id: str, status: str) -> None:
@@ -987,17 +1098,44 @@ def _start_workflow_thread(
     return thread
 
 
-async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict):
+async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict,
+                                  on_workflow_id=None):
     """Drain the workflow queue, yielding SSE generation events.
 
     Populates result_store with 'robot_code' and 'workflow_id' on completion.
     Raises _GenerationError when an error event is seen or no code is produced,
     so the caller can return early.  The error SSE is always yielded before
     raising, so the client receives it.
+
+    on_workflow_id, when given, is awaited ONCE with the workflow_id the first
+    time any event carries it — which is the opening 'running' event, long
+    before either terminal path. That is what lets the caller open a history row
+    for a run that may never reach a terminal event at all.
     """
+    async def _note_workflow_id(event: dict) -> None:
+        """Fire on_workflow_id once, on the first event that carries an id.
+
+        Called from BOTH drain loops: a short run can finish before the
+        is_alive() loop runs at all, leaving every event to the buffered drain
+        below — which is exactly the vanished-run case this exists to catch.
+        """
+        if on_workflow_id is None or not event.get("workflow_id"):
+            return
+        already_seen = result_store.get("workflow_id") is not None
+        result_store["workflow_id"] = event["workflow_id"]
+        if not already_seen:
+            await on_workflow_id(event["workflow_id"])
+
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
+            # BEFORE the yield, not after. Closing an async generator raises
+            # GeneratorExit at the suspended yield, so a client that takes the
+            # opening event and disconnects would never reach this line — and
+            # the disconnect does not stop the workflow thread, which keeps
+            # running and keeps spending. That is exactly the vanished run the
+            # opening row exists to make visible.
+            await _note_workflow_id(event)
             yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
                 result_store["robot_code"] = event["robot_code"]
@@ -1005,6 +1143,7 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
                 workflow_thread.join()
                 return
             elif event.get("status") == "error":
+                _store_failure(result_store, event)
                 workflow_thread.join()
                 raise _GenerationError()
         except Empty:
@@ -1014,16 +1153,19 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     # Thread finished — drain any remaining buffered events
     while not q.empty():
         event = q.get_nowait()
+        await _note_workflow_id(event)  # before the yield — see the loop above
         yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
         if event.get("status") == "complete" and "robot_code" in event:
             result_store["robot_code"] = event["robot_code"]
             result_store["workflow_id"] = event.get("workflow_id")
         elif event.get("status") == "error":
+            _store_failure(result_store, event)
             raise _GenerationError()
 
     if not result_store.get("robot_code"):
         msg = "Agentic workflow finished without generating code."
         logging.error(msg)
+        _store_failure(result_store, {"message": msg})
         yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': msg})}\n\n"
         raise _GenerationError()
 
@@ -1137,9 +1279,12 @@ async def stream_generate_only(
         workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(user, user_query)):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
             return
 
         # History row: a generate-only run is terminal at 'generated' until the
@@ -1268,9 +1413,12 @@ async def stream_generate_and_run(
 
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(user, user_query)):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
             return
 
         robot_code = result_store["robot_code"]

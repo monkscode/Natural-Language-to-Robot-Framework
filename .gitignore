@@ -75,6 +75,16 @@ FuturePlans/*
 
 tests/test_clients/
 clients/integrity/*
+# Customer configs stay local: this repository is public, and a client config
+# carries the customer's name, their URL patterns, and prompt text describing
+# their internal screens. Matched by SHAPE rather than by name, so this rule
+# names no customer and a new one is covered without anyone remembering to add
+# it. clients/loader.py discovers client dirs by iterating this folder and
+# falls back to _default, so an absent one costs nothing; tests/test_clients/
+# is already local-only for the same reason.
+# Untracking does NOT remove anything from history — that is a separate rewrite.
+clients/*/
+!clients/_default/
 
 # Bench harness: bench data stays local — run evidence, new baseline CSVs
 # (operational metrics), and private/ (customer query sets) are never committed.
@@ -83,3 +93,13 @@ clients/integrity/*
 bench/runs/
 bench/baselines/
 bench/private/
+
+# Browser-verification artifacts: the Playwright MCP server writes snapshots,
+# console logs and screenshots into the working directory, and a screenshot of
+# any dashboard panel captures live customer data straight from the database —
+# a Grafana verification pass on 2026-08-13 rendered a customer domain and left
+# four such files untracked in the repository root. This repository is public.
+# `/*.png` is anchored to the root, where stray screenshots land, so the three
+# tracked docs/*.png diagrams and any future one are unaffected.
+.playwright-mcp/
+/*.png

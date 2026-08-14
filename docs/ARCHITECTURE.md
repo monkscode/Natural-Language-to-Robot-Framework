@@ -313,6 +313,15 @@ Measured on the 30-query benchmark, 2026-07-11 (Vertex, gemini-flash pins):
 - **LLM calls per run**: median 4 (planner 1, assembler 1, browser-use ~2-3)
 - **LLM cost per run**: median ~$0.07
 
+Each successful run writes one `workflow_metrics` row (JSONB). Alongside the cost and
+locator totals it carries `workflow_duration_s` (whole-run wall time — distinct from
+`execution_time`, which is the browser-use figure), the dryrun gate's own
+`dryrun_status`/`dryrun_attempts`/`dryrun_repairs`, `crew_stage_metrics` (duration and
+LLM usage for `planner`, `assembler`, and `repair` when the gate re-prompted), and
+`guardrail_attempts` per attachment site. Generation *failures* write no metrics row —
+they are recorded in `test_runs` with status `'error'` and an `error_message`. See
+[OBSERVABILITY_GRAFANA.md](OBSERVABILITY_GRAFANA.md) for the queries.
+
 ## Scalability
 
 - Up to `MAX_CONCURRENT_WORKFLOWS` (default 10, see `config.py`) workflows in parallel

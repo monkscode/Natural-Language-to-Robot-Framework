@@ -66,14 +66,325 @@ class TestStreamGenerateOnly:
         assert any("error" in str(e).lower() for e in events)
 
 
-class TestStreamExecuteOnly:
-    """Tests for stream_execute_only generator."""
+class TestRunIsRecordedAtStart:
+    """A run must be countable from the moment it starts, not only when it ends.
 
+    Both terminal paths write a row — 'generated' on success, 'error' on a
+    generation failure — but a run that dies without reaching either (the
+    process is killed, the container restarts, the machine OOMs) left no trace
+    at all. Nothing could tell "never started" apart from "started and
+    vanished", so the failure rate any dashboard computed was optimistic by
+    exactly the runs that disappeared.
+
+    An opening row fixes that: a vanished run shows up as a row still sitting
+    at 'running' long after it was created. 'running' is an existing status
+    (the execute path already uses it), so no vocabulary or UI change.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def _run(self, events, user=None):
+        """Drive stream_generate_only, collecting EVERY _record_run call."""
+        calls = []
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status,
+                          "user_query": user_query, "user": user_arg, **kw})
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, sse
+
+    def test_row_is_opened_before_anything_can_fail(self):
+        """The opening row is written from the first event that carries an id.
+
+        A truly vanished run — killed process, container restart — cannot be
+        simulated here, because this harness always reaches the generator's
+        "finished without generating code" fallback. What it does pin is the
+        thing that makes a vanished run visible: the 'running' row exists
+        first, written before any terminal path is reached.
+        """
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+        ])
+        assert calls[0]["status"] == "running"
+        assert calls[0]["run_id"] == self._WF_ID
+        assert calls[0]["user_query"] == "login to github"
+
+    def test_opening_row_precedes_the_terminal_row(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "complete", "robot_code": "*** Test Cases ***\nT\n    Log    hi",
+             "workflow_id": self._WF_ID},
+        ])
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert {c["run_id"] for c in calls} == {self._WF_ID}
+
+    def test_opening_row_precedes_an_error_row(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "error", "message": "LLM offline", "workflow_id": self._WF_ID},
+        ])
+        assert [c["status"] for c in calls] == ["running", "error"]
+
+    def test_written_once_however_many_events_carry_the_id(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "a", "workflow_id": self._WF_ID},
+            {"status": "running", "message": "b", "workflow_id": self._WF_ID},
+            {"status": "running", "message": "c", "workflow_id": self._WF_ID},
+        ])
+        assert len([c for c in calls if c["status"] == "running"]) == 1
+
+    def test_carries_the_user_so_the_row_is_org_scoped(self):
+        user = {"user_id": "u-1", "email": "someone@example.com", "org_id": "org-9"}
+        calls, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=user,
+        )
+        assert calls[0]["user"] == user
+
+    def test_no_row_before_the_id_is_known(self):
+        """Events without a workflow_id cannot be attributed to a run."""
+        calls, _ = self._run([{"status": "running", "message": "planning"}])
+        assert [c for c in calls if c["status"] == "running"] == []
+
+    def test_non_uuid_id_is_not_recorded(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": "not-a-uuid"},
+        ])
+        assert calls == []
+
+    def test_row_is_opened_even_when_the_client_leaves_after_one_event(self):
+        """The disconnect case is the whole reason the opening row exists.
+
+        Closing an async generator raises GeneratorExit at the suspended
+        `yield`, so anything written after that yield never runs. Recording the
+        id after handing the opening event to the client therefore lost the row
+        for precisely the client that goes away — while the workflow thread
+        keeps running and keeps spending, because a disconnect does not cancel
+        it. That is a vanished run of the exact kind this feature was added to
+        make visible, and the earlier tests all drain to completion so none of
+        them can see it.
+
+        Consume up to and including the first event carrying the id, then close
+        the stream the way a dropped connection does.
+        """
+        calls = []
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status})
+
+        events = [
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "complete", "robot_code": "*** Test Cases ***",
+             "workflow_id": self._WF_ID},
+        ]
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                agen = stream_generate_only("login to github", "gemini",
+                                            "gemini-2.5-flash")
+                async for sse in agen:
+                    if self._WF_ID in sse:
+                        break          # client has the opening event...
+                await agen.aclose()    # ...and now drops the connection
+                return None
+
+            asyncio.run(run_gen())
+
+        assert [c["status"] for c in calls] == ["running"], (
+            "the opening row must be written before the event is handed to the "
+            f"client, not after; got {calls}"
+        )
+        assert calls[0]["run_id"] == self._WF_ID
+
+    def test_opening_row_failure_does_not_break_the_stream(self):
+        """History bookkeeping must never cost a run.
+
+        Only the opening write is made to fail: _record_run swallows registry
+        errors internally, so in production it does not raise at all — this
+        pins the extra guard around the thread hop the opening write adds.
+        """
+        def _explode_on_open(run_id, user, user_query, status, **kw):
+            if status == "running":
+                raise RuntimeError("postgres down")
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter([
+                       {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+                       {"status": "complete", "robot_code": "*** Test Cases ***",
+                        "workflow_id": self._WF_ID},
+                   ])), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_explode_on_open), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                return [e async for e in stream_generate_only(
+                    "login to github", "gemini", "gemini-2.5-flash")]
+
+            sse = asyncio.run(run_gen())  # must not raise
+        assert any("complete" in str(e) for e in sse)
+
+
+class TestGenerationFailureIsRecorded:
+    """A generation failure must leave a row behind.
+
+    Before this, _GenerationError returned before _record_run and the metrics
+    block runs only after the dryrun gate — so a run that never produced code
+    was invisible to History and to Grafana alike. Status 'error' already
+    exists in test_runs and in the SPA's filter list, so nothing new is needed
+    downstream.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def _run(self, events, user=None):
+        """Drive stream_generate_only over a scripted generation event list."""
+        recorded = {}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            recorded.update({"run_id": run_id, "status": status,
+                             "user_query": user_query, **kw})
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return recorded, sse
+
+    def test_error_event_writes_an_error_row(self):
+        recorded, _ = self._run([
+            {"status": "running", "message": "planning"},
+            {"status": "error", "message": "LLM offline",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["run_id"] == self._WF_ID
+        assert recorded["status"] == "error"
+        assert recorded["user_query"] == "login to github"
+
+    def test_row_carries_the_failure_reason(self):
+        """Angle E: countable is not enough — a failure has to be diagnosable."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "Vertex 429 Resource exhausted",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Vertex 429 Resource exhausted"
+
+    def test_reason_is_truncated(self):
+        """A stack-trace-sized message must not bloat every history query."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "x" * 9000, "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+
+    def test_no_row_without_a_workflow_id(self):
+        """Nothing to key the row on; the SSE already told the user."""
+        recorded, sse = self._run([{"status": "error", "message": "died early"}])
+        assert recorded == {}
+        assert any("error" in str(e).lower() for e in sse)
+
+    def test_non_uuid_workflow_id_records_nothing(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "boom", "workflow_id": "not-a-uuid"},
+        ])
+        assert recorded == {}
+
+    def test_finished_without_code_is_now_attributable(self):
+        """This was a documented limitation and is no longer one.
+
+        The fallback used to have no workflow_id to key a row on, because only
+        complete/error events carried one. The opening 'running' event now
+        carries it too, so the run is already in result_store by the time this
+        path fires and the failure lands on the right row.
+
+        Still true: an event stream with no id at all records nothing — see
+        test_no_row_without_a_workflow_id.
+        """
+        recorded, sse = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+        ])
+        assert recorded["run_id"] == self._WF_ID
+        assert recorded["status"] == "error"
+        assert "without generating code" in recorded["error_message"]
+        assert any("without generating code" in str(e) for e in sse)
+
+    def test_successful_generation_is_not_recorded_as_error(self):
+        recorded, _ = self._run([
+            {"status": "complete", "robot_code": "*** Test Cases ***\nT\n    Log    hi",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["status"] == "generated"
+
+
+class TestStreamExecuteOnly:
+    """Tests for stream_execute_only generator.
+
+    stream_execute_only drives the real _stream_docker_execution
+    (workflow_service.py:1154), which reaches three external dependencies
+    imported at module level: get_run_registry() writes a test_runs row
+    (_record_run before it, _set_run_status inside it); get_artifact_store()
+    writes a test.robot file under robot_tests/
+    (run_dir(run_id, create=True)); and, on the success path, _process_learning
+    (:1222) calls get_feedback_loop() as the first statement in its try block
+    (:361) — before the empty-user_query guard a few lines below it, so it
+    runs even though these tests never reach the learning call itself. With
+    OPTIMIZATION_ENABLED=true (the real .env), that constructs a real
+    FeedbackLoop backed by a live psycopg connection to Postgres. All three
+    are real Postgres/disk writes, which CLAUDE.md forbids from tests, so all
+    three are patched here (one patch each blocks every write path through
+    them, the same reasoning TestRunIsRecordedAtStart uses for _record_run) —
+    only runner_exec_client stands in for the thing that is actually
+    external: the executor. run_dir is pointed at pytest's tmp_path so
+    _write_test_file still succeeds on a real, disposable directory outside
+    robot_tests/, which keeps the happy-path and failure-path behaviour
+    these tests actually assert.
+    """
+
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    @patch("src.backend.services.workflow_service.get_artifact_store")
+    @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_yields_events(self, mock_rc):
-        """Generator yields execution events."""
+    def test_yields_events(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
+        """Generator yields execution events; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.return_value = {"status": "ready"}
         mock_rc.execute.return_value = {"status": "passed", "test_status": "PASS"}
+        mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -85,10 +396,15 @@ class TestStreamExecuteOnly:
         events = asyncio.run(run_gen())
         assert len(events) > 0
 
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    @patch("src.backend.services.workflow_service.get_artifact_store")
+    @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_handles_docker_failure(self, mock_rc):
-        """Executor failure yields error event."""
+    def test_handles_docker_failure(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
+        """Executor failure yields error event; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.side_effect = Exception("Runner exec not running")
+        mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio

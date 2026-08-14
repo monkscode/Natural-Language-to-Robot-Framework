@@ -95,8 +95,9 @@ class TestExtractUrlFromQueryLive:
 class TestLiveLLMCrewOnline:
     """Tests that invoke the real configured LLM (vertex or gemini)."""
 
-    def test_run_crew_returns_five_values(self):
-        """run_crew() always returns (output, crew, metrics, hint_metadata, llm_monitor)."""
+    def test_run_crew_returns_eight_values(self):
+        """run_crew() returns a RunCrewResult: the original five members plus
+        stage_metrics, shared_llm and guardrail_attempts."""
         from src.backend.crew_ai.crew import run_crew
         result = run_crew(
             "click the login button on example.com",
@@ -104,7 +105,7 @@ class TestLiveLLMCrewOnline:
             model_name=_MODEL,
             workflow_id="live-test-001",
         )
-        assert len(result) == 5
+        assert len(result) == 8
 
     def test_run_crew_output_is_non_empty_string(self):
         """The assembler task's raw output is a non-empty string.
@@ -116,7 +117,7 @@ class TestLiveLLMCrewOnline:
         validator agent).
         """
         from src.backend.crew_ai.crew import run_crew
-        _, crew_obj, _, _, _ = run_crew(
+        _, crew_obj, *_ = run_crew(
             "click the login button on example.com",
             model_provider=_PROVIDER,
             model_name=_MODEL,
@@ -129,7 +130,7 @@ class TestLiveLLMCrewOnline:
     def test_run_crew_output_contains_robot_sections(self):
         """Generated code (tasks[-1].output.raw) has Robot Framework section markers."""
         from src.backend.crew_ai.crew import run_crew
-        _, crew_obj, _, _, _ = run_crew(
+        _, crew_obj, *_ = run_crew(
             "navigate to google.com and search for python",
             model_provider=_PROVIDER,
             model_name=_MODEL,
@@ -143,7 +144,7 @@ class TestLiveLLMCrewOnline:
     def test_hint_metadata_is_dict(self):
         """Fourth return value is always a dict (possibly empty)."""
         from src.backend.crew_ai.crew import run_crew
-        _, _, _, hint_metadata, _ = run_crew(
+        _, _, _, hint_metadata, *_ = run_crew(
             "click the submit button on example.com",
             model_provider=_PROVIDER,
             model_name=_MODEL,
@@ -154,7 +155,7 @@ class TestLiveLLMCrewOnline:
     def test_optimization_metrics_structure(self):
         """optimization_metrics is None or has expected numeric fields."""
         from src.backend.crew_ai.crew import run_crew
-        _, _, optimization_metrics, _, _ = run_crew(
+        _, _, optimization_metrics, *_ = run_crew(
             "open the home page of example.com",
             model_provider=_PROVIDER,
             model_name=_MODEL,
@@ -168,7 +169,7 @@ class TestLiveLLMCrewOnline:
         """Fifth return value is an LLMFormattingMonitor scoped to this workflow only."""
         from src.backend.crew_ai.crew import run_crew
         from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
-        _, _, _, _, llm_monitor = run_crew(
+        _, _, _, _, llm_monitor, *_ = run_crew(
             "click the submit button on example.com",
             model_provider=_PROVIDER,
             model_name=_MODEL,

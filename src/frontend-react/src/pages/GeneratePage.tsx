@@ -631,9 +631,15 @@ export default function GeneratePage() {
           setCode(data.robot_code)
           workflowId.current = data.workflow_id || null
           if (data.dryrun_status === 'failed' || data.dryrun_status === 'unverified') {
+            // Do NOT name a cause here. 'unverified' means the gate could not
+            // run, and Docker being down is only one of several reasons — the
+            // backend sends the actual one as dryrun_message. Asserting
+            // "Docker unavailable" sent people to check a healthy Docker while
+            // the real fault was elsewhere.
             addGen('error', data.dryrun_status === 'failed'
               ? 'Delivered — dryrun found issues you may want to review'
-              : 'Delivered — dryrun could not run (Docker unavailable)')
+              : 'Delivered — this test was NOT verified, because the dryrun could not run')
+            if (data.dryrun_message) addGen('error', String(data.dryrun_message))
             if (data.dryrun_errors) addGen('error', String(data.dryrun_errors))
           } else {
             addGen('success', `Generated test.robot (${String(data.robot_code).split('\n').length} lines)`)

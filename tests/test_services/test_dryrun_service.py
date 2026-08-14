@@ -270,7 +270,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
+                          side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
                           side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
@@ -293,7 +293,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})), \
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="fixed code"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.side_effect = results
@@ -307,7 +307,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=3)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="same code"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
@@ -368,6 +368,126 @@ class TestValidateAndRepair:
             msgs.append(q.get_nowait())
         # at least the "Verifying generated test..." push (progress 88)
         assert any(m.get("progress") == 88 for m in msgs)
+
+
+class TestGateCounters:
+    """The gate returns its own counters instead of leaving them to be scraped.
+
+    Before this, the only record of a repair round was the SSE progress string
+    "🔧 Fixing test code..." — bench/bench_lib.py counts occurrences of it to
+    compute dryrun_repairs, which makes a quality gate depend on a UI message.
+    """
+
+    def _settings(self, enabled=True, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = enabled
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _repair(self, guardrails=None):
+        """A repair_robot_code stand-in returning the full 3-tuple."""
+        return lambda rid, code, errs, *a, **k: (
+            MagicMock(), {"llm_calls": 1, "cost": 0.001},
+            guardrails if guardrails is not None else {"repair_output": 1},
+        )
+
+    def test_skipped_reports_zero_attempts(self):
+        with patch.object(ds, "settings", self._settings(enabled=False)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client"):
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "skipped"
+        assert out["dryrun_attempts"] == 0
+        assert out["dryrun_repairs"] == 0
+        assert out["guardrail_attempts"] == {}
+
+    def test_unverified_before_any_dryrun_reports_zero_attempts(self):
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.side_effect = ds.RunnerExecUnavailable("no executor")
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "unverified"
+        assert out["dryrun_attempts"] == 0
+        assert out["dryrun_repairs"] == 0
+
+    def test_passed_first_try_counts_one_attempt_no_repair(self):
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "passed"
+        assert out["dryrun_attempts"] == 1
+        assert out["dryrun_repairs"] == 0
+
+    def test_failed_counts_every_attempt_and_repair(self):
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["dryrun_attempts"] == 3   # MAX_DRYRUN_FIXES + 1
+        assert out["dryrun_repairs"] == 2
+
+    def test_attempt_that_raises_is_still_counted(self):
+        """An attempt that times out was still attempted. Counting after the
+        call would report 0 for a run that spawned a container and waited."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = RuntimeError("timed out")
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "unverified"
+        assert out["dryrun_attempts"] == 1
+
+    def test_repair_that_raises_is_still_counted(self):
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=RuntimeError("LLM down")):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["dryrun_repairs"] == 1
+
+    def test_guardrail_attempts_come_back_from_the_repair_crew(self):
+        """The repair mini-crew builds its own RobotTasks, so its guardrail
+        counter is unreachable except through this return value."""
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          side_effect=self._repair(guardrails={"repair_output": 2})), \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
+        # Two repair rounds, each reporting 2 → summed across rounds.
+        assert out["guardrail_attempts"] == {"repair_output": 4}
+
+    def test_repair_duration_present_only_when_a_repair_ran(self):
+        """Angle D: workflow_service composes crew_stage_metrics['repair'] from
+        repair_usage plus this duration."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            passed = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert passed["repair_duration_s"] == 0.0
+
+        with patch.object(ds, "settings", self._settings(max_fixes=1)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value="fixed"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad", "exit_code": 1}
+            repaired = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert repaired["repair_duration_s"] >= 0.0
+        assert repaired["repair_usage"]["llm_calls"] == 1
 
 
 # ---------------------------------------------------------------------------

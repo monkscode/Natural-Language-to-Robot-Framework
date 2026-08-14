@@ -175,7 +175,7 @@ class TestExtractPlanUrl:
         assert extract_plan_url([_step("New Page", value="about:blank")]) is None
 
     def test_value_with_trailing_junk_is_trimmed_to_the_url(self):
-        """Measured once: value 'https://sujal.astppbilling.org/    commit'.
+        """Measured once on a real run: value 'https://example.org/    commit'.
         strip() only touches the ends, so the junk rode through into
         NavigateAction."""
         steps = [_step("New Page", value="https://example.org/    commit")]

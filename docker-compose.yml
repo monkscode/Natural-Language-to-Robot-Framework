@@ -199,9 +199,114 @@ services:
     networks:
       - nlrf-network
 
+  # --- Observability profile: not started by a plain `docker compose up` ---
+  # Run with: docker compose --profile observability up -d
+  grafana-db-init:
+    image: pgvector/pgvector:pg16
+    container_name: nlrf-grafana-db-init
+    profiles: ["observability"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD:-nlrf}
+    volumes:
+      - ./observability/postgres:/sql:ro
+    entrypoint: ["psql"]
+    command: >-
+      -h postgres -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}
+      -v ON_ERROR_STOP=1
+      -v grafana_password=${GRAFANA_DB_PASSWORD:-grafana_ro}
+      -f /sql/create_bench_schema.sql
+      -f /sql/create_readonly_role.sql
+    restart: "no"
+    networks:
+      - nlrf-network
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: nlrf-grafana
+    profiles: ["observability"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grafana-db-init:
+        condition: service_completed_successfully
+    ports:
+      # Loopback-only (IPv4 AND IPv6): same rationale as fastapi/browser-service/
+      # postgres above — Windows resolves `localhost` to ::1 first, and Docker
+      # Desktop black-holes an unbound IPv6 port (hangs, not refused), so a
+      # DevOps user opening http://localhost:3001 would stall for the full
+      # connect timeout instead of reaching Grafana.
+      - "127.0.0.1:3001:3000"
+      - "[::1]:3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Not embedded anywhere — see decision D2 in the spec.
+      - GF_SECURITY_ALLOW_EMBEDDING=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - POSTGRES_DB=${POSTGRES_DB:-nlrf}
+      - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-grafana_ro}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - nlrf-network
+
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: nlrf-loki
+    profiles: ["observability"]
+    ports:
+      # Loopback-only (IPv4 AND IPv6): same rationale as fastapi/browser-service/
+      # postgres/grafana above — Windows resolves `localhost` to ::1 first, and
+      # Docker Desktop black-holes an unbound IPv6 port (hangs, not refused).
+      - "127.0.0.1:3100:3100"
+      - "[::1]:3100:3100"
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+    networks:
+      - nlrf-network
+
+  alloy:
+    image: grafana/alloy:v1.7.1
+    container_name: nlrf-alloy
+    profiles: ["observability"]
+    depends_on:
+      - loki
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    restart: unless-stopped
+    networks:
+      - nlrf-network
+
 networks:
   nlrf-network:
     driver: bridge
 
 volumes:
   pgdata:
+  grafana-data:
+  loki-data:
+  alloy-data:

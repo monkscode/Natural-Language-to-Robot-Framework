@@ -65,6 +65,40 @@ logger = logging.getLogger(__name__)
 # LiteLLM per-call trace callback
 # ---------------------------------------------------------------------------
 
+def _workflow_id_from_metadata(kwargs: dict) -> str | None:
+    """Read workflow.id off the call's own metadata.
+
+    Preferred over baggage because it travels inside the call kwargs: litellm
+    dispatches this callback with executor.submit (litellm/utils.py:1262), and
+    contextvars — which OTel baggage is built on — do not cross a thread-pool
+    hop. Verified on litellm 1.75.3: metadata passed to completion() arrives
+    here as kwargs["litellm_params"]["metadata"].
+    """
+    try:
+        metadata = (kwargs.get("litellm_params") or {}).get("metadata")
+        if isinstance(metadata, dict):
+            return metadata.get("workflow_id") or None
+    except Exception as _exc:
+        logger.debug("[LLM_TRACE] metadata unreadable: %s", _exc)
+    return None
+
+
+def _workflow_id_from_baggage() -> str | None:
+    """Fallback attribution from OTel baggage.
+
+    Kept rather than deleted: some rows do carry a workflow_id today, and the
+    async path that produces them (utils.py:838 awaits async_success_handler
+    inline, preserving context) is not fully characterised. It costs one dict
+    lookup and can only help.
+    """
+    try:
+        from opentelemetry import baggage
+        return baggage.get_baggage("workflow.id")
+    except Exception as _exc:
+        logger.debug("[LLM_TRACE] baggage unavailable: %s", _exc)
+        return None
+
+
 def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datetime, end_time: datetime) -> None:
     """
     LiteLLM success_callback — writes one row to the trace store per LLM call.
@@ -128,16 +162,18 @@ def _litellm_trace_callback(kwargs: dict, completion_response, start_time: datet
         # single "0000..." bucket in the trace DB.
         trace_id_hex = uuid.uuid4().hex
         parent_span_id_hex: str | None = None
-        workflow_id: str | None = None
         try:
-            from opentelemetry import baggage, trace as otel_trace
+            from opentelemetry import trace as otel_trace
             span_ctx = otel_trace.get_current_span().get_span_context()
             if span_ctx and span_ctx.trace_id:
                 trace_id_hex = format(span_ctx.trace_id, "032x")
                 parent_span_id_hex = format(span_ctx.span_id, "016x")
-            workflow_id = baggage.get_baggage("workflow.id")
         except Exception as _exc:
             logger.warning("[LLM_TRACE] OTel context unavailable: %s", _exc)
+
+        # Metadata first: it rides on the call itself and survives the
+        # thread-pool hop this callback is dispatched across. Baggage second.
+        workflow_id = _workflow_id_from_metadata(kwargs) or _workflow_id_from_baggage()
 
         # Each LiteLLM call gets its own span_id so it appears as a distinct row.
         span_id_hex = uuid.uuid4().hex[:16]
@@ -249,7 +285,147 @@ class CleanedLLMWrapper(LLM):
         """Initialize the wrapper with the same arguments as LLM."""
         super().__init__(*args, **kwargs)
         self._monitor = LLMFormattingMonitor()
+        # Watermark for pop_stage_usage(): the value of BaseLLM._token_usage at
+        # the last drain. Per-stage usage is the diff against it, NOT a counter
+        # maintained by an override of call(). See pop_stage_usage().
+        self._stage_baseline = dict(getattr(self, "_token_usage", {}) or {})
         logger.info("🧹 Initialized CleanedLLMWrapper - will clean Action/ActionInput lines")
+
+    # ------------------------------------------------------------------
+    # Token/cost accounting
+    #
+    # Both readers below diff or read crewai's BaseLLM._token_usage, which
+    # LLM.call updates synchronously in the calling thread (llm.py ~1150).
+    # They are pure READERS — deliberately not an override of call().
+    #
+    # An accounting wrapper around call() double-counts: crewai retries an
+    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:1715),
+    # which re-enters the override, so the inner and outer frames each bill the
+    # same tokens. It also misses any call that does not go through the
+    # override, and it puts a metrics read on the LLM call path, where a
+    # failure can take down the call it was only meant to measure.
+    # ------------------------------------------------------------------
+
+    _ZERO_USAGE = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                   "tokens": 0, "cost": 0.0}
+
+    def _cost_for(self, prompt_tokens: int, completion_tokens: int) -> float:
+        """Price a token count via LiteLLM's tables. 0.0 on any failure.
+
+        Pricing is linear in tokens, so aggregating before pricing is exact for
+        a single model.
+        """
+        if not (prompt_tokens or completion_tokens):
+            return 0.0
+        try:
+            import litellm
+            prompt_cost, completion_cost = litellm.cost_per_token(
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            return round(prompt_cost + completion_cost, 6)
+        except Exception as e:
+            # Loud enough to notice: a model LiteLLM cannot price reports $0
+            # while its tokens report correctly, which reads as "free" on a
+            # cost panel rather than as "unknown".
+            logger.warning(
+                "LLM cost lookup failed for model=%s (%d prompt / %d completion "
+                "tokens reported at $0): %s",
+                self.model, prompt_tokens, completion_tokens, e,
+            )
+            return 0.0
+
+    def pop_stage_usage(self) -> dict:
+        """Usage accrued since the last drain, priced, and move the watermark.
+
+        Called at each task boundary. Execution is sequential, so everything
+        accumulated since the previous drain belongs to the task that just
+        finished. Diffing the shared accumulator (rather than counting in an
+        override) means a call attributes correctly however it entered — and
+        means the planner's wrapper needs no second alias, since it already
+        aliases the one _token_usage dict.
+
+        Never raises; returns zeroed usage on any failure.
+        """
+        try:
+            current = self._token_usage
+            # max(0, ...) is defensive only: crewai assigns _token_usage once in
+            # BaseLLM.__init__ and never resets it. A negative would silently
+            # corrupt a panel, so clamp rather than trust.
+            prompt = max(0, int(current.get("prompt_tokens", 0) or 0)
+                         - int(self._stage_baseline.get("prompt_tokens", 0) or 0))
+            completion = max(0, int(current.get("completion_tokens", 0) or 0)
+                             - int(self._stage_baseline.get("completion_tokens", 0) or 0))
+            calls = max(0, int(current.get("successful_requests", 0) or 0)
+                        - int(self._stage_baseline.get("successful_requests", 0) or 0))
+            self._stage_baseline = dict(current)
+            return {
+                "llm_calls": calls,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                "cost": self._cost_for(prompt, completion),
+            }
+        except Exception:
+            logger.debug("pop_stage_usage failed", exc_info=True)
+            return dict(self._ZERO_USAGE)
+
+    def set_workflow_id(self, workflow_id: str | None) -> None:
+        """Label every subsequent LiteLLM call with this workflow_id.
+
+        additional_params is the only attribute crewai's
+        _prepare_completion_params forwards untouched to LiteLLM
+        (crewai/llm.py:702), so it is the injection point; the value comes back
+        to _litellm_trace_callback as kwargs["litellm_params"]["metadata"].
+
+        Without this, llm_traces rows carry a NULL workflow_id and
+        bench/run_bench.py's detach_run (DELETE ... WHERE workflow_id = %s)
+        cannot match them — bench traces then stay in the live store forever.
+
+        Merges rather than replaces: the Vertex thinking guard also lives in
+        additional_params. Never raises — a labelling failure must not cost a
+        run.
+        """
+        try:
+            if not workflow_id:
+                return
+            params = getattr(self, "additional_params", None)
+            if params is None:
+                return
+            metadata = dict(params.get("metadata") or {})
+            metadata["workflow_id"] = workflow_id
+            params["metadata"] = metadata
+        except Exception:
+            logger.debug("set_workflow_id failed", exc_info=True)
+
+    def get_workflow_usage(self) -> dict:
+        """This wrapper's lifetime usage with cost — the workflow totals.
+
+        Preferred over Crew.calculate_usage_metrics(), which adds the shared LLM
+        instance's _token_usage once per agent in the crew and so is only
+        correct while the crew stays single-agent (it reported 3x on the old
+        3-agent crew). One wrapper per workflow makes this exact regardless of
+        crew shape.
+
+        Prices through the same path as pop_stage_usage(), so the workflow total
+        and the sum of the per-stage figures agree. Drains nothing. Never
+        raises; returns zeroed usage on any failure.
+        """
+        try:
+            u = self._token_usage
+            prompt = int(u.get("prompt_tokens", 0) or 0)
+            completion = int(u.get("completion_tokens", 0) or 0)
+            return {
+                "llm_calls": int(u.get("successful_requests", 0) or 0),
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "tokens": prompt + completion,
+                "cost": self._cost_for(prompt, completion),
+            }
+        except Exception:
+            logger.debug("get_workflow_usage failed", exc_info=True)
+            return dict(self._ZERO_USAGE)
 
     def get_context_window_size(self) -> int:
         """Return the context window size for the configured model.
