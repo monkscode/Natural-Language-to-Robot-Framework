@@ -6,6 +6,8 @@ every rule in this module is unit-testable without a corpus or a connection.
 Referenced by: bench/load_history.py, tests/test_bench/test_history_lib.py
 Depends on: nothing outside the standard library
 """
+import math
+
 
 # Union of all four CSV header shapes observed in bench/baselines: 33 cols
 # (32 sweeps), 45 (1), 50 (2), 51 (43). 52 columns in total. `agent_steps`
@@ -88,11 +90,32 @@ def coerce(value: str | None, kind: str) -> str | int | float | bool | None:
     text = value.strip()
     if not text:
         return None
-    if kind == "int":
+    # Both numeric kinds degrade to NULL rather than raising, for the same
+    # reason the bool branch below already returns None on an unknown spelling:
+    # nothing commits until the end of load_corpus, so one bad cell — an "n/a"
+    # or a "NaN%" from a future sweep — aborted the whole corpus, and
+    # run_bench._load_history_best_effort then swallowed the error, leaving the
+    # operator with "bench history NOT loaded" and no column named. NULL keeps
+    # the drift visible in the dashboards instead of fatal at the loader. No
+    # cell in the 1,984-row corpus needs this today; the loader does not
+    # control what a future sweep writes.
+    if kind in ("int", "float"):
         # Some sweeps write counts as floats ("3.0"); int("3.0") raises.
-        return int(float(text))
-    if kind == "float":
-        return float(text)
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        # isfinite is not belt-and-braces, it is the half that matters more.
+        # "inf", "Infinity" and "1e400" all parse CLEANLY to a float, so they
+        # never reach the guard above: in an int column they then raise
+        # OverflowError out of int(), and in a float column they reach Postgres
+        # as real values and poison every avg() over that column for the whole
+        # sweep — measured, avg(40.5, 41.2, Infinity) is Infinity, and NaN
+        # likewise. A corrupt cell renders as a plausible-looking timing rather
+        # than as the gap it is, which is the worse of the two failures.
+        if not math.isfinite(number):
+            return None
+        return int(number) if kind == "int" else number
     if kind == "bool":
         lowered = text.lower()
         if lowered in _TRUE:

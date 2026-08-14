@@ -56,6 +56,15 @@ def _read_meta(csv_path: Path) -> tuple[dict, datetime, str]:
         except json.JSONDecodeError:
             logger.warning("unparseable sidecar, falling back to mtime: %s", sidecar)
             meta = {}
+        # Parsing cleanly is not the same as being usable. `null`, a bare
+        # string, an array and a number all decode without raising and then
+        # take AttributeError out of the .get below — uncaught, so one such
+        # sidecar cost the whole load. Same isinstance check _payload makes.
+        if not isinstance(meta, dict):
+            logger.warning(
+                "sidecar is %s, not a JSON object; falling back to mtime: %s",
+                type(meta).__name__, sidecar)
+            meta = {}
         captured = meta.get("captured_at")
         if captured:
             # Symmetric with the JSON guard above. Nothing commits until the
@@ -121,7 +130,14 @@ def load_corpus(conn, baselines_dir: Path = BASELINES, runs_dir: Path = RUNS,
     # is caught whether or not its parent was loaded on an earlier run.
     known = _existing_sweep_ids(conn, schema)
     for sweep in parsed_sweeps:
-        known.setdefault(sweep["name"], sweep["ids"])
+        # Assign, not setdefault. For a sweep in this batch the CSV on disk is
+        # the truth about its run ids; the database holds whatever the last
+        # load saw. setdefault kept the stale set whenever a CSV had been
+        # regenerated since, so derived detection compared the batch against
+        # the previous content of a file it had just re-read — and `known` is
+        # shared, so one stale entry can mis-attribute derived_from on OTHER
+        # sweeps too. Sweeps absent from this batch keep their database ids.
+        known[sweep["name"]] = sweep["ids"]
 
     captured_cache: dict[str, object] = {}
 
@@ -316,7 +332,12 @@ def main() -> int:
     if not args.database_url:
         logger.error("no DATABASE_URL set and --database-url not given")
         return 2
-    with psycopg.connect(args.database_url) as conn:
+    # Same 10 s bound run_bench uses on its own connect. This is the recovery
+    # path an operator reaches for precisely when the automatic load failed —
+    # most often because the database is down — so inheriting the OS default
+    # TCP timeout here means the one command that reports the problem is the
+    # one that hangs on it.
+    with psycopg.connect(args.database_url, connect_timeout=10) as conn:
         result = load_corpus(conn, baselines_dir=args.baselines_dir,
                              only=args.only)
     logger.info("done: %s", result)

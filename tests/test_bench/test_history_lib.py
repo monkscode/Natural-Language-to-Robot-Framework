@@ -156,6 +156,34 @@ def test_numeric_coercion():
     assert history_lib.coerce("3", "int") == 3
 
 
+@pytest.mark.parametrize("token", ["n/a", "NaN%", "-", "unknown", "1,024"])
+def test_a_non_numeric_cell_becomes_null_instead_of_aborting_the_load(token):
+    """The bool branch already degrades to None on a spelling it does not
+    know; the numeric branches raised ValueError instead. Nothing commits
+    until the end of load_corpus, so one such cell took down the whole corpus
+    — every sweep, not just the damaged one — and
+    run_bench._load_history_best_effort swallowed it, so the operator saw only
+    "bench history NOT loaded" with no column named. NULL keeps the drift
+    visible in the dashboards rather than fatal at the loader.
+    """
+    assert history_lib.coerce(token, "float") is None
+    assert history_lib.coerce(token, "int") is None
+
+
+@pytest.mark.parametrize("token", ["inf", "Infinity", "-inf", "nan", "1e400"])
+def test_a_non_finite_cell_becomes_null_rather_than_poisoning_an_average(token):
+    """These parse CLEANLY as floats, so catching ValueError alone never sees
+    them. In an int column they raise OverflowError out of int() and abort the
+    load exactly as before; in a float column they are worse than an abort —
+    they reach Postgres as real values, and one of them takes the whole
+    sweep's average with it. Measured on double precision:
+    avg(40.5, 41.2, Infinity) is Infinity, and NaN the same. The panel then
+    shows a corrupt cell as a timing rather than as the gap it is.
+    """
+    assert history_lib.coerce(token, "float") is None
+    assert history_lib.coerce(token, "int") is None
+
+
 def test_boolean_coercion_accepts_the_spellings_the_corpus_uses():
     assert history_lib.coerce("True", "bool") is True
     assert history_lib.coerce("true", "bool") is True
@@ -362,8 +390,16 @@ def test_a_dead_database_does_not_break_a_finished_sweep(capsys):
     """The CSV is already on disk when this runs. Losing the dashboard
     refresh is acceptable; losing a 40-minute paid sweep is not."""
     from bench import run_bench
+    # psycopg.connect is mocked rather than left to fail for real: the bogus
+    # host cost a measured 3.06 s of DNS resolution per suite run, and a
+    # resolver that answers wildcards would connect somewhere instead of
+    # failing. The two sibling tests below already mock it. Nothing is lost —
+    # _load_history_best_effort catches bare Exception by design, so the
+    # exception class here is not what the assertions turn on.
     with patch.dict(os.environ, {"DATABASE_URL": "postgresql://nope:1/none"}):
-        run_bench._load_history_best_effort("bench/baselines/whatever.csv")
+        with patch("bench.run_bench.psycopg.connect",
+                   side_effect=OSError("database unavailable")):
+            run_bench._load_history_best_effort("bench/baselines/whatever.csv")
     out = capsys.readouterr().out
     assert "NOT loaded" in out
     # The recovery command has to name the sweep it failed on. A bare
@@ -463,6 +499,25 @@ class TestSidecarProvenance:
         meta, _, source = load_history._read_meta(csv_path)
         assert source == "mtime"
         assert meta == {}
+
+    @pytest.mark.parametrize("payload", ["null", '"a string"', "[1, 2]", "42"],
+                             ids=["null", "string", "array", "number"])
+    def test_a_sidecar_that_is_not_an_object_falls_back_to_mtime(
+            self, tmp_path, payload):
+        """The JSONDecodeError guard above catches text that will not parse. It
+        does not catch text that parses to something that is not a dict — and
+        `null`, a bare string, an array and a number all parse cleanly. Each
+        then reached `.get` and raised AttributeError, which is uncaught, so a
+        sidecar containing the four characters `null` cost the entire corpus
+        load rather than the one sweep. `_payload` twenty lines below already
+        makes exactly this isinstance check on its own parsed JSON.
+        """
+        from bench import load_history
+        csv_path = self._sweep(tmp_path, payload)
+        meta, captured, source = load_history._read_meta(csv_path)
+        assert source == "mtime"
+        assert meta == {}
+        assert captured is not None
 
 
 def test_the_manual_loader_can_be_pointed_at_another_directory():

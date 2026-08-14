@@ -184,6 +184,47 @@ def test_two_re_costings_of_the_same_parent_both_point_at_the_root(conn, tmp_pat
     assert derived["2026-08-01-thing-ADJ-b.csv"] == "2026-08-01-thing.csv"
 
 
+def test_a_regenerated_csv_is_compared_by_its_new_ids_not_the_stored_ones(
+        conn, tmp_path):
+    """`known` seeds from the database and is then topped up from this batch.
+    Doing that with setdefault let the STORED id set win for a sweep whose CSV
+    had been regenerated since the last load, so derived detection compared
+    the batch against the previous contents of a file it had just re-read.
+
+    Here sweep A is loaded, then rewritten with a completely different id set
+    that sweep B also carries. B is a 100% overlap of A-as-it-is-now and must
+    be marked derived. Under setdefault, A's stale stored ids overlap B by 0%
+    and the re-costing goes undetected — the exact silent failure the derived
+    column exists to prevent. `known` is shared across the batch, so a stale
+    entry mis-attributes OTHER sweeps too, not only its own.
+    """
+    connection, schema = conn
+    baselines = tmp_path / "baselines"; baselines.mkdir()
+    runs = tmp_path / "runs"; runs.mkdir()
+
+    original = [_row("q01", i, f"old-{i}") for i in range(3)]
+    _write_sweep(baselines, "2026-08-01-a.csv", original,
+                 meta={"captured_at": "2026-08-01T10:00:00"})
+    first = load_history.load_corpus(connection, baselines, runs, schema=schema)
+    assert first["derived"] == 0, "one sweep on its own is never derived"
+
+    regenerated = [_row("q01", i, f"new-{i}") for i in range(3)]
+    _write_sweep(baselines, "2026-08-01-a.csv", regenerated,
+                 meta={"captured_at": "2026-08-01T10:00:00"})
+    _write_sweep(baselines, "2026-08-01-b.csv",
+                 [dict(r, llm_cost_usd="0.09") for r in regenerated],
+                 meta={"captured_at": "2026-08-01T11:00:00"})
+
+    load_history.load_corpus(connection, baselines, runs, schema=schema)
+
+    derived = dict(connection.execute(
+        f"SELECT sweep_name, derived_from FROM {schema}.sweeps").fetchall())
+    assert derived["2026-08-01-a.csv"] is None
+    assert derived["2026-08-01-b.csv"] == "2026-08-01-a.csv", (
+        "b shares every id with a's CURRENT contents, so it is a re-costing; "
+        "comparing against a's stored ids instead finds no overlap at all")
+
+
 def test_a_captured_payload_is_attached_and_a_missing_one_is_null(conn, tmp_path):
     connection, schema = conn
     baselines = tmp_path / "baselines"; baselines.mkdir()
@@ -254,3 +295,7 @@ def test_a_row_with_a_blank_primary_key_costs_one_row_not_the_whole_load(
     assert [r[0] for r in loaded] == ["q01", "q03"], "good rows must still load"
     assert result["runs"] == 2, "the skipped row must not be counted as loaded"
     assert result.get("skipped") == 1
+    # The count alone would still pass if the loader dropped the row silently.
+    # Skipping is only acceptable because it is loud — the operator has to be
+    # able to find which sweep lost a row and why.
+    assert "skipping a row with no query_id/repeat" in caplog.text
