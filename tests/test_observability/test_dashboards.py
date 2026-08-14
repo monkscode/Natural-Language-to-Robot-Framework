@@ -1537,11 +1537,14 @@ def _link_urls(dashboard: dict) -> list[str]:
     urls = [link.get("url", "") for link in dashboard.get("links", [])]
     for panel in dashboard.get("panels", []):
         config = panel.get("fieldConfig", {})
-        urls += [l.get("url", "") for l in config.get("defaults", {}).get("links", [])]
+        urls += [
+            link.get("url", "")
+            for link in config.get("defaults", {}).get("links", [])
+        ]
         for override in config.get("overrides", []):
             for prop in override.get("properties", []):
                 if prop.get("id") == "links":
-                    urls += [l.get("url", "") for l in prop.get("value", [])]
+                    urls += [link.get("url", "") for link in prop.get("value", [])]
     return [u for u in urls if u]
 
 
@@ -1782,19 +1785,36 @@ _AGENT_LANE = frozenset({"session_setup_s", "agent_setup_s", "agent_run_s",
 # `WITH a AS (SELECT caller_lane_s AS x ...), b AS (SELECT x + agent_lane_s
 # ...)` is silent. The text says `x`, and only following that alias back
 # through the CTE list would say otherwise. No text guard reaches it; closing
-# it means parsing SQL.
+# it means parsing SQL. That list was written as though it were exhaustive and
+# it was not: the grouping-paren shapes below were uncaught on a34d28c while it
+# claimed to enumerate everything that got through. Read it as the cases known
+# to be open, never as proof that the rest are closed.
+#
+# The leading run is spelled as an alternation — a wrapper CALL `avg(` or a
+# bare GROUPING paren `(` — because both open a term the same way and only the
+# first was admitted before. With the identifier mandatory,
+# `caller_lane_s + (agent_lane_s)` produced no chain AT ALL and the guard went
+# silent on it; measured 2026-08-14, three shapes in the list above.
+# Written as an alternation rather than `(?:(?:ident\s*)?\(\s*)*`: both forms
+# are correct and grade the same sixteen shapes, but an optional group inside a
+# repeat backtracks harder — measured 139 ms against 122 ms on a pathological
+# `avg(a` x400 input. Both patterns here were already quadratic in input length
+# before this change and remain so; the shipped dashboards run in microseconds.
 _CHAIN_TERM = (
-    r"(?:[a-z_][a-z0-9_]*\s*\(\s*)*"
+    r"(?:[a-z_][a-z0-9_]*\s*\(\s*|\(\s*)*"
     r"[a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?"
     r"(?:\s*(?:,\s*[a-z0-9_.']+|\)))*"
 )
 _ADDITIVE_CHAIN_RE = re.compile(
     rf"{_CHAIN_TERM}(?:\s*\+\s*{_CHAIN_TERM})+", re.IGNORECASE)
-# Bare terms only: a dotted name and nothing else. No wrapper and no argument
-# tail, so a match reaches past no comma at any depth — which is what leaves it
-# reading the true terms in the two spellings above.
+# Bare terms only: a dotted name, optionally wrapped in grouping parens, and
+# nothing else. No wrapper CALL and no argument tail, so a match still reaches
+# past no comma at any depth — which is what leaves it reading the true terms
+# in the two spellings above. The parens are balanced-agnostic on purpose: this
+# pattern grades identifiers, and a stray paren cannot invent one.
 _BARE_ADDITIVE_CHAIN_RE = re.compile(
-    r"[a-z_][a-z0-9_.]*(?:\s*\+\s*[a-z_][a-z0-9_.]*)+", re.IGNORECASE)
+    r"\(*\s*[a-z_][a-z0-9_.]*\s*\)*(?:\s*\+\s*\(*\s*[a-z_][a-z0-9_.]*\s*\)*)+",
+    re.IGNORECASE)
 _IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]*", re.IGNORECASE)
 
 
@@ -1990,6 +2010,28 @@ _LANE_BYPASS_SHAPES = [
         ("caller_lane_s", "agent_lane_s"),
         id="the-two-lane-aliases-with-a-coalesce-on-the-second",
     ),
+    # Measured 2026-08-14. A grouping paren around a term made BOTH patterns
+    # find no chain at all — not a mis-graded chain, an empty result — so the
+    # guard went silent on the plainest spelling of the defect it exists for.
+    # The wrapped pattern required an IDENTIFIER before every `(`, so a bare
+    # `(` matched nothing; the bare pattern admitted no parens whatsoever.
+    # `a + (b)` is what an author writes the moment they group a term to force
+    # precedence or paste one back from another query.
+    pytest.param(
+        "SELECT caller_lane_s + (agent_lane_s) AS identify_s FROM lanes",
+        ("caller_lane_s", "agent_lane_s"),
+        id="a-parenthesized-right-hand-term",
+    ),
+    pytest.param(
+        "SELECT poll_wait_s + (agent_run_s) AS identify_s FROM bench.runs",
+        ("poll_wait_s", "agent_run_s"),
+        id="a-parenthesized-right-hand-raw-column",
+    ),
+    pytest.param(
+        "SELECT (poll_wait_s) + (agent_run_s) AS identify_s FROM bench.runs",
+        ("poll_wait_s", "agent_run_s"),
+        id="both-terms-parenthesized",
+    ),
 ]
 
 
@@ -2054,6 +2096,16 @@ _LANE_LEGITIMATE_SHAPES = [
         "SELECT submit_s + queue_s AS caller_lane_s, "
         "session_setup_s + agent_setup_s AS agent_lane_s FROM bench.runs",
         id="one-aliased-sum-per-lane-side-by-side",
+    ),
+    # The mirror of the three parenthesized bypasses above, and the reason the
+    # grouping-paren change is not simply "match more": grouping a lane's own
+    # sum is ordinary SQL and must stay silent. A pattern loose enough to read
+    # `a + (b)` across lanes is loose enough to misread this, so it is asserted
+    # rather than assumed.
+    pytest.param(
+        "SELECT (submit_s + queue_s) AS caller_lane_s, "
+        "(session_setup_s + agent_setup_s) AS agent_lane_s FROM bench.runs",
+        id="a-parenthesized-sum-per-lane-side-by-side",
     ),
 ]
 
