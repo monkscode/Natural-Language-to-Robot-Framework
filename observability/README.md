@@ -201,9 +201,9 @@ should turn it into a link — Grafana cannot serve local files, and a
   | Dashboard | Panels that follow the picker |
   |---|---|
   | Execution outcomes | 8 of 8 — 7 SQL panels because `execution_records` is tz-aware throughout, plus the Loki aggregate-error-log panel, which follows the picker through Loki rather than through `execution_records` |
-  | Learning health | 3 of 7 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
+  | Learning health | 3 of 8 — `learning_metrics`/`trigger_events` cast their text timestamps; the two hint-lifecycle panels are all-time on purpose, being a snapshot of the current hint set |
   | Cost, latency and capacity | 4 of 12 |
-  | Locator reliability | 0 of 4 |
+  | Locator reliability | 0 of 5 |
   | Runs | 0 of 2 — the union it lists is spined on `workflow_metrics.id`, an insertion counter, because 374 of 528 runs carry no timestamp in any app table. Picker hidden |
   | Bench — where the time goes | 0 of 6 — scoped by the sweep window, not the clock. `bench.sweeps.captured_at` is naive and `bench.runs.started_at` is text. Picker hidden |
   | Trace one run | SQL panels select one run by id, so time is not a dimension; the Loki log panel does follow the picker |

@@ -14,7 +14,7 @@
         "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
         "query": "SELECT DISTINCT family AS __text, family AS __value FROM bench.sweeps ORDER BY 1",
         "refresh": 1,
-        "current": {},
+        "current": {"text": "public", "value": "public"},
         "options": []
       },
       {
@@ -69,7 +69,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s)::numeric, 2) AS recorded_total_s, round(100.0 * count(*) FILTER (WHERE r.test_status = 'passed') / nullif(count(r.test_status), 0), 1) AS pass_rate_pct, count(r.total_s) AS runs FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s) FILTER (WHERE r.plan_s IS NOT NULL)::numeric, 2) AS recorded_total_s, round(100.0 * count(*) FILTER (WHERE r.test_status = 'passed') / nullif(count(r.test_status), 0), 1) AS pass_rate_pct, count(r.total_s) AS runs FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
       }]
     },
     {
@@ -87,15 +87,15 @@
     },
     {
       "type": "table",
-      "title": "3 — Locator lookup cost, and how much of it is repeat work",
-      "description": "The levers underneath the identify stage. locator_median_ms and locator_p90_ms are per-run medians averaged over the sweep, so treat them as a trend line rather than a true percentile of the population. duplicate_lookup_rate is the share of element probes that repeated a lookup already done in the same run, and probes and unique_probes are the raw counts behind it. All three read zero on every sweep, and that is not good news: they are derived from LOCATOR_PROBE log lines, no emitter for those lines exists in this repo or in browser-service, and the parser records a zero rather than a null when it finds none. Measured 2026-08-13: 1,944 of 1,984 runs carry a value for all three and the maximum across the whole corpus is zero. Read them as not-yet-instrumented rather than as a pipeline that does no repeat work; the bench README parks the metric explicitly. cold_start_s and cleanup_s are container overhead that no pipeline stage owns; they sit outside the five-stage sum, so improving them improves wall time without moving any stage figure. Coverage differs per column and is the reason runs_with_locator_timing is shown: locator latency is recorded on 1,039 of 1,984 runs across the whole corpus, against 1,944 for the duplicate rate, 1,880 for cleanup and 1,876 for cold start. A blank cell means the sweep predates that instrumentation. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "title": "3 — Locator lookup cost and container overhead",
+      "description": "The levers underneath the identify stage. locator_median_ms and locator_p90_ms are per-run medians averaged over the sweep, so treat them as a trend line rather than a true percentile of the population. cold_start_s and cleanup_s are container overhead that no pipeline stage owns; they sit outside the five-stage sum, so improving them improves wall time without moving any stage figure. Repeat lookups are deliberately not plotted here: bench.runs still carries duplicate_lookup_rate, probe_total and probe_unique, but every value in the corpus is zero because the LOCATOR_PROBE log line they are parsed from was measured and then removed on 2026-07-07 — the duplicate rate came in at 0.35% of calls, six repeats in about 1,700 lookups, and the owner closed the caching question rather than schedule a cache. Do not read those columns as a pipeline that does no repeat work, and do not re-add them to a panel without re-opening that decision first. Coverage differs per column and is the reason runs_with_locator_timing is shown: locator latency is recorded on 1,039 of 1,984 runs across the whole corpus, against 1,880 for cleanup and 1,876 for cold start. A blank cell means the sweep predates that instrumentation. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 27},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.locator_latency_ms_median)::numeric, 0) AS locator_median_ms, round(avg(r.locator_latency_ms_p90)::numeric, 0) AS locator_p90_ms, round(avg(r.duplicate_lookup_rate)::numeric, 3) AS duplicate_lookup_rate, sum(r.probe_total) AS probes, sum(r.probe_unique) AS unique_probes, round(avg(r.cold_start_s)::numeric, 2) AS cold_start_s, round(avg(r.cleanup_s)::numeric, 2) AS cleanup_s, count(r.locator_latency_ms_median) AS runs_with_locator_timing FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.locator_latency_ms_median)::numeric, 0) AS locator_median_ms, round(avg(r.locator_latency_ms_p90)::numeric, 0) AS locator_p90_ms, round(avg(r.cold_start_s)::numeric, 2) AS cold_start_s, round(avg(r.cleanup_s)::numeric, 2) AS cleanup_s, count(r.locator_latency_ms_median) AS runs_with_locator_timing FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
       }]
     },
     {
@@ -108,7 +108,7 @@
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT r.query_id AS query, count(r.total_s) AS runs, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s)::numeric, 2) AS total_s FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1 ORDER BY avg(r.total_s) DESC NULLS LAST"
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT r.query_id AS query, count(r.total_s) AS runs, round(avg(r.plan_s)::numeric, 2) AS plan_s, round(avg(r.identify_s)::numeric, 2) AS identify_s, round(avg(r.assemble_s)::numeric, 2) AS assemble_s, round(avg(r.dryrun_s)::numeric, 2) AS dryrun_s, round(avg(r.exec_s)::numeric, 2) AS exec_s, round(avg(r.total_s) FILTER (WHERE r.plan_s IS NOT NULL)::numeric, 2) AS total_s FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1 ORDER BY avg(r.total_s) FILTER (WHERE r.plan_s IS NOT NULL) DESC NULLS LAST"
       }]
     },
     {
