@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     ENABLE_CUSTOM_ACTIONS: bool = Field(default=True, description="Enable/disable custom actions for browser automation")
     MAX_LOCATOR_STRATEGIES: int = Field(default=21, description="Maximum number of locator strategies to try")
     TRACK_LLM_COSTS: bool = Field(default=True, description="Enable/disable LLM cost tracking and logging")
+    CREWAI_VERBOSE: bool = Field(default=False, description="Echo CrewAI agent reasoning and the full prompt to stdout. Off by default: measured 2026-08-14 it was 73.7% of the fastapi container's log stream, carries no workflow_id so it cannot be filtered to a run, and the same prompts are already in llm_traces.prompt_text on every model call")
     
     # Optimization Configuration
     OPTIMIZATION_ENABLED: bool = Field(default=True, description="Enable/disable optimization system (pattern learning, pgvector semantic search)")
