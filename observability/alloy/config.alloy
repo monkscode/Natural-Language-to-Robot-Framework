@@ -47,7 +47,60 @@ discovery.relabel "containers" {
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
   targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.level.receiver]
+}
+
+// Stamp detected_level from the level the application actually recorded.
+//
+// Loki's own level discovery guesses a level out of raw text, and CrewAI
+// echoes our prompt to stdout verbatim, so the prompt was being classified.
+// Measured 2026-08-14 over the five days Loki held, counting only lines that
+// are NOT structlog records: 7,769 carried a guessed level, of which 1,053
+// were CrewAI box-drawing prompt echo and every one of those was wrong —
+// 270 stamped critical, 232 warn, 551 error. Discovery was correct on all
+// 16,436 real structlog records.
+//
+// It is not only the `KEYWORD:` shape. `--- CRITICAL: ONLY EXPLICIT ELEMENTS
+// ---` is stamped critical, but so is a prompt line that merely contains the
+// bare word `error` in prose, which is where 551 of the 1,053 came from.
+//
+// The `unknown` default below only holds because discover_log_levels is off
+// in observability/loki/loki-config.yml. Loki honours an incoming
+// detected_level only when it names a real level — it treats the literal
+// string `unknown` as absent and re-runs discovery over it. Both halves are
+// required, and neither reads as broken alone: drop either and every
+// component stays healthy, every line still flows, and the prompt goes back
+// to being reported as critical.
+//
+// This only works while the services emit JSON. Under LOG_FORMAT=console
+// there is no `level` field to read and every line falls to unknown.
+loki.process "level" {
   forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = { level = "level" }
+  }
+
+  // uvicorn does not write JSON — it prefixes its level at the start of the
+  // line (`INFO:     127.0.0.1:44866 - "GET /health HTTP/1.1" 200 OK`), and
+  // Loki classified those 6,408 lines CORRECTLY. Dropping them to unknown
+  // would be a regression, so read the prefix instead. Anchored at line
+  // start, which is why it cannot reach prompt text: every CrewAI echo line
+  // begins with a box-drawing character, never with `LEVEL:`. Today this
+  // channel carries only INFO, but it is the same one uvicorn uses for
+  // `ERROR:    Exception in ASGI application`.
+  stage.regex {
+    expression = "^(?P<uvicorn_level>INFO|WARNING|ERROR|CRITICAL): "
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ if .Value }}{{ ToLower .Value }}{{ else if .uvicorn_level }}{{ ToLower .uvicorn_level }}{{ else }}unknown{{ end }}"
+  }
+
+  stage.structured_metadata {
+    values = { detected_level = "level" }
+  }
 }
 
 loki.write "default" {

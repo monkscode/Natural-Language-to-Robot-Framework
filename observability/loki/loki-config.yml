@@ -31,6 +31,12 @@ schema_config:
 limits_config:
   retention_period: 168h
   reject_old_samples: false
+  # Off because Alloy stamps detected_level from the application's own level
+  # field (observability/alloy/config.alloy). Left on, Loki re-guesses the
+  # level from raw text and overrides every line Alloy stamped `unknown` —
+  # it treats that string as absent rather than as a stamp. Our prompt
+  # headings, `--- CRITICAL: ... ---`, were stored as critical that way.
+  discover_log_levels: false
 
 compactor:
   working_directory: /loki/compactor
