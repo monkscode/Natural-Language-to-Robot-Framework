@@ -1713,21 +1713,43 @@ _CALLER_LANE = frozenset({"submit_s", "queue_s", "poll_wait_s", "postprocess_s",
 _AGENT_LANE = frozenset({"session_setup_s", "agent_setup_s", "agent_run_s",
                          "agent_lane_s"})
 
-# One term of an additive chain. A bare `r.poll_wait_s` is the easy case; the
-# shapes that defeated a plainer pattern are the wrapped ones —
-# `round(avg(r.poll_wait_s) + avg(r.agent_run_s), 2)` and
-# `sum(r.postprocess_s) + sum(r.session_setup_s)` double-count exactly as the
-# bare stack does, and a term pattern that cannot cross a parenthesis sees no
-# chain in either. This is the same lesson _TRUNCATE_CALL_RE records above: the
-# aliased and wrapped spellings are ordinary SQL, not exotic ones.
+# TWO patterns read a chain here and the guard grades the union of what they
+# find. Neither is redundant, and each covers exactly what the other cannot:
+# the wrapped one is the only one that sees a term behind a function call, the
+# bare one the only one that sees a chain sitting after a comma in the select
+# list. Measured 2026-08-14, one pattern at a time, on the six mutants below.
 #
-# So a term is any number of wrapper calls, then the column with an optional
-# table alias, then whatever closing parens and extra arguments those wrappers
-# bring. The argument tail is what lets a chain span
-# `sum(coalesce(a, 0)) + sum(coalesce(b, 0))`; it can also swallow a
-# neighbouring select-list entry after the last term, which is why
-# _chain_term_column cuts the term back at its first comma before reading a
-# column out of it.
+# The wrapped pattern exists for the shapes a plainer regex cannot see:
+# `round(avg(r.poll_wait_s) + avg(r.agent_run_s), 2)` and
+# `sum(r.postprocess_s) + sum(r.session_setup_s)` double-count exactly as a bare
+# stack does, and a term that cannot cross a parenthesis finds no chain in
+# either. This is the same lesson _TRUNCATE_CALL_RE records above: the aliased
+# and wrapped spellings are ordinary SQL, not exotic ones. So a term there is
+# any number of wrapper calls, then the column with an optional table alias,
+# then whatever closing parens and extra arguments those wrappers bring — and
+# that trailing `(?:\s*(?:,\s*ident|\)))*` is what lets one chain span
+# `sum(coalesce(a, 0)) + sum(coalesce(b, 0))`.
+#
+# That same tail is why the wrapped pattern ALONE is not enough: it crosses a
+# comma even when no wrapper paren is open. Measured 2026-08-14 — in
+# `SELECT sweep_name, poll_wait_s + agent_run_s ...` the head term matches
+# `sweep_name, poll_wait_s`, _chain_term_column cuts it back at the comma to
+# `sweep_name`, the caller lane drops out of the term set and the guard goes
+# silent on a real cross-lane sum. It happens only when the term after the
+# comma is BARE — a `(` stops the tail, so `SELECT sweep, round(avg(a) +
+# avg(b), 2)` was caught throughout. That made the blind spot the likeliest
+# future edit rather than an exotic one: panel 2 groups by sweep, so lifting it
+# into a CTE necessarily puts a column ahead of the sum in the outer select.
+#
+# The bare pattern closes that by construction — no wrapper, no tail, so
+# nothing it matches can cross a comma or a paren. It sees no wrapped term at
+# all; that is the other pattern's half of the job.
+#
+# What NEITHER pattern catches, stated as an accepted limit: a lane column
+# renamed on its way out of a CTE and added under the new name — `WITH a AS
+# (SELECT caller_lane_s AS x ...), b AS (SELECT x + agent_lane_s ...)`. The
+# text says `x`, and only following that alias back through the CTE list would
+# say otherwise. No text guard reaches it; closing it means parsing SQL.
 _CHAIN_TERM = (
     r"(?:[a-z_][a-z0-9_]*\s*\(\s*)*"
     r"[a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?"
@@ -1735,7 +1757,22 @@ _CHAIN_TERM = (
 )
 _ADDITIVE_CHAIN_RE = re.compile(
     rf"{_CHAIN_TERM}(?:\s*\+\s*{_CHAIN_TERM})+", re.IGNORECASE)
+# Bare terms only: an optionally table-qualified column and nothing else, so a
+# match can never reach past a comma into a neighbouring select-list entry.
+_BARE_ADDITIVE_CHAIN_RE = re.compile(
+    r"[a-z_][a-z0-9_.]*(?:\s*\+\s*[a-z_][a-z0-9_.]*)+", re.IGNORECASE)
 _IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]*", re.IGNORECASE)
+
+
+def _additive_chains(sql: str) -> list[str]:
+    """Every additive chain in `sql`, as seen by both patterns.
+
+    The two lists overlap — a chain of bare terms is generally matched by both
+    — and the duplication costs nothing: each chain is graded on its own and
+    two readings of one chain reach the same verdict. What the union buys is
+    that neither reader can hide a chain the other one sees.
+    """
+    return _ADDITIVE_CHAIN_RE.findall(sql) + _BARE_ADDITIVE_CHAIN_RE.findall(sql)
 
 
 def _chain_term_column(term: str) -> str:
@@ -1744,8 +1781,15 @@ def _chain_term_column(term: str) -> str:
     `r.poll_wait_s`, `avg(r.poll_wait_s)` and `sum(coalesce(r.poll_wait_s, 0))`
     all reduce to `poll_wait_s`. The wrapper names and the table alias are
     identifiers too, but the column is always the last identifier before the
-    term's first comma — and cutting at that comma is what keeps a swallowed
-    neighbour, the `, c` of `a + b, c`, from reading as a term of the chain.
+    term's first comma.
+
+    Cutting at that comma is not purely protective, and reading it that way is
+    what hid the regression above. It does keep a swallowed TRAILING neighbour
+    — the `, c` of `a + b, c` — from reading as a term of the chain. But on a
+    term that swallowed a LEADING neighbour it discards the real column and
+    returns the neighbour instead: `sweep_name, poll_wait_s` reduces to
+    `sweep_name`. What makes the cut safe is the bare pattern running beside
+    the wrapped one, since it matches those chains with no neighbour attached.
     """
     identifiers = _IDENTIFIER_RE.findall(term.split(",")[0])
     return identifiers[-1].lower() if identifiers else ""
@@ -1755,7 +1799,7 @@ def _chain_term_column(term: str) -> str:
 def test_no_panel_adds_both_identify_substage_lanes(path: Path):
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
-        for chain in _ADDITIVE_CHAIN_RE.findall(sql):
+        for chain in _additive_chains(sql):
             terms = {_chain_term_column(term) for term in chain.split("+")}
             assert not ((terms & _CALLER_LANE) and (terms & _AGENT_LANE)), (
                 f"{path.name} adds a caller-lane sub-stage to an agent-lane one, "
@@ -1790,16 +1834,35 @@ def test_substage_lane_guard_fires_on_a_seven_column_stack(tmp_path):
         test_no_panel_adds_both_identify_substage_lanes(mutant)
 
 
-# Three shapes that computed the same double-counted stack and that the guard
-# did NOT see before the wrapper/alias widening above. Each is asserted to fire
-# on the two lane columns it actually names, not merely to raise: the mutants
-# below carry legitimate single-lane chains too, so matching the message alone
-# would not prove which chain tripped it.
+# Six shapes that compute the same double-counted stack, from two fix rounds.
+# Each is asserted to fire on the two lane columns it actually names, not merely
+# to raise: the mutants carry legitimate single-lane chains too, so matching the
+# message alone would not prove which chain tripped it.
 #
-# The third is the likeliest of the three. Panel 2 emits caller_lane_s and
-# agent_lane_s as named columns, so lifting it into a CTE and adding the two
-# reads as a tidy-up rather than as a measurement error — and it never mentions
-# a raw sub-stage column at all.
+# Which change each one needs — measured 2026-08-14 by running the patterns
+# separately, because "the previous round added it" is not the same as "the
+# previous round's regex is what catches it":
+#
+#   1, 2  the WRAPPED pattern. The bare pattern finds no chain at all in
+#         either — verified, both return [].
+#   3     NEITHER pattern; both find `caller_lane_s + agent_lane_s` on their
+#         own. What this one needed was caller_lane_s/agent_lane_s being added
+#         to the frozensets above, in that same round.
+#   4-6   the BARE pattern beside the wrapped one, and they are the cases that
+#         say why the union exists. All three put a column ahead of the sum in
+#         the select list, which is where the wrapped pattern's argument tail
+#         swallows the neighbour and _chain_term_column then cuts the lane
+#         column away. Every mutant of the first round put the sum FIRST, which
+#         is why the suite could not see it: against the pre-fix regex all
+#         three raised `DID NOT RAISE`.
+#
+# The sixth is the likeliest shape of all six, and it was blind before AND
+# after the first round. Panel 2 emits caller_lane_s and agent_lane_s as named
+# columns AND groups by sweep, so lifting it into a CTE and adding the two
+# reads as a tidy-up rather than as a measurement error — it never mentions a
+# raw sub-stage column, and the GROUP BY guarantees sweep_name sits ahead of
+# the sum. Case 3 is its sum-first cousin, kept because it is the spelling the
+# first round actually measured.
 _LANE_BYPASS_SHAPES = [
     pytest.param(
         "SELECT round(avg(r.poll_wait_s) + avg(r.agent_run_s), 2) AS identify_s "
@@ -1822,13 +1885,39 @@ _LANE_BYPASS_SHAPES = [
         ("caller_lane_s", "agent_lane_s"),
         id="the-two-lane-aliases-behind-a-cte",
     ),
+    pytest.param(
+        "SELECT sweep_name, r.poll_wait_s + r.agent_run_s AS identify_s "
+        "FROM bench.runs r",
+        ("poll_wait_s", "agent_run_s"),
+        id="a-bare-chain-that-is-not-first-in-the-select-list",
+    ),
+    pytest.param(
+        "SELECT identify_s, poll_wait_s + agent_run_s FROM bench.runs",
+        ("poll_wait_s", "agent_run_s"),
+        id="an-unaliased-bare-chain-after-another-column",
+    ),
+    pytest.param(
+        "WITH lanes AS (SELECT r.sweep_name, "
+        "avg(r.submit_s + r.queue_s + r.poll_wait_s + r.postprocess_s) AS caller_lane_s, "
+        "avg(r.session_setup_s + r.agent_setup_s + r.agent_run_s) AS agent_lane_s "
+        "FROM bench.runs r GROUP BY 1) "
+        "SELECT sweep_name, caller_lane_s + agent_lane_s AS identify_s FROM lanes",
+        ("caller_lane_s", "agent_lane_s"),
+        id="the-two-lane-aliases-behind-a-cte-grouped-by-sweep",
+    ),
 ]
 
 
 @pytest.mark.parametrize("mutant_sql,lanes", _LANE_BYPASS_SHAPES)
 def test_substage_lane_guard_fires_on_wrapped_and_aliased_stacks(
         tmp_path, mutant_sql: str, lanes: tuple[str, str]):
-    """Each bypass measured on 2026-08-13, kept as a test.
+    """Each bypass measured, kept as a test — the first three on 2026-08-13,
+    the last three on 2026-08-14.
+
+    The function name records the first round's shapes; the list it is
+    parametrized over now also carries three where the spelling is ordinary and
+    it is the chain's POSITION in the select list that used to hide it. Both
+    classes mutate the same way, so they share one harness rather than two.
 
     Mutates a tmp copy of bench-time.json, replacing panel 2's query with a
     shape that adds across the lanes in a spelling the guard used to miss;
@@ -1873,7 +1962,17 @@ def test_substage_lane_guard_fires_on_wrapped_and_aliased_stacks(
 # gap this disclosure exists to declare, so the author most likely to reach for
 # coalesce is the one who most needs the guard. Both slipped past a pattern
 # that required the column name immediately after the opening paren. Same
-# lesson as _TRUNCATE_CALL_RE: allow an alias, allow a wrapper.
+# lesson as _TRUNCATE_CALL_RE for the alias half: an alias is ordinary SQL.
+#
+# The wrapper half is narrower than "allow a wrapper" and the pattern below is
+# the authority, not this sentence: exactly ONE wrapper is allowed and it is
+# `coalesce` by name. Measured 2026-08-14 — `sum(nullif(cost_usd, 0))`,
+# `sum(greatest(cost_usd, 0))`, `sum(round(cost_usd, 4))` and a doubled
+# `sum(coalesce(coalesce(cost_usd, 0), 0))` all go unmatched, so a panel
+# spelling its total any of those ways would carry no disclosure and nothing
+# here would say so. That is a known and accepted limit (owner ruling), not an
+# oversight — written down so the next reader finds a stated boundary rather
+# than rediscovering it as a hole.
 _SPEND_AGGREGATE_RE = re.compile(
     r"\b(?:sum|avg)\s*\(\s*(?:coalesce\s*\(\s*)?(?:[a-z_][a-z0-9_]*\s*\.\s*)?"
     r"(?:cost_usd|total_tokens|prompt_tokens|completion_tokens)\b",
