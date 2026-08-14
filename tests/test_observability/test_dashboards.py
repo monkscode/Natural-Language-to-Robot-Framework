@@ -1703,13 +1703,52 @@ def test_bench_boundary_link_guard_fires_on_a_link_into_the_bench_corpus(tmp_pat
 # plausible-looking number, which is exactly why this is a guard and not a
 # comment in the SQL. Selecting both lanes is correct and is what the shipped
 # panel does; ADDING across them never is.
-_CALLER_LANE = frozenset({"submit_s", "queue_s", "poll_wait_s", "postprocess_s"})
-_AGENT_LANE = frozenset({"session_setup_s", "agent_setup_s", "agent_run_s"})
+# The two lane ALIASES sit in these sets beside the raw columns they sum.
+# Panel 2 already emits caller_lane_s and agent_lane_s as named columns, so
+# wrapping it in a CTE and adding the two is one obvious "simplification" — and
+# with only raw column names listed, `SELECT caller_lane_s + agent_lane_s FROM
+# lanes` reproduces the 1.947x stack while every guard in this file stays green.
+_CALLER_LANE = frozenset({"submit_s", "queue_s", "poll_wait_s", "postprocess_s",
+                          "caller_lane_s"})
+_AGENT_LANE = frozenset({"session_setup_s", "agent_setup_s", "agent_run_s",
+                         "agent_lane_s"})
 
-# A maximal run of identifiers joined by '+', e.g. "r.poll_wait_s + r.agent_run_s".
-# Table aliases are stripped per term, so r.agent_run_s and agent_run_s both match.
+# One term of an additive chain. A bare `r.poll_wait_s` is the easy case; the
+# shapes that defeated a plainer pattern are the wrapped ones —
+# `round(avg(r.poll_wait_s) + avg(r.agent_run_s), 2)` and
+# `sum(r.postprocess_s) + sum(r.session_setup_s)` double-count exactly as the
+# bare stack does, and a term pattern that cannot cross a parenthesis sees no
+# chain in either. This is the same lesson _TRUNCATE_CALL_RE records above: the
+# aliased and wrapped spellings are ordinary SQL, not exotic ones.
+#
+# So a term is any number of wrapper calls, then the column with an optional
+# table alias, then whatever closing parens and extra arguments those wrappers
+# bring. The argument tail is what lets a chain span
+# `sum(coalesce(a, 0)) + sum(coalesce(b, 0))`; it can also swallow a
+# neighbouring select-list entry after the last term, which is why
+# _chain_term_column cuts the term back at its first comma before reading a
+# column out of it.
+_CHAIN_TERM = (
+    r"(?:[a-z_][a-z0-9_]*\s*\(\s*)*"
+    r"[a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?"
+    r"(?:\s*(?:,\s*[a-z0-9_.']+|\)))*"
+)
 _ADDITIVE_CHAIN_RE = re.compile(
-    r"[a-z_][a-z0-9_.]*(?:\s*\+\s*[a-z_][a-z0-9_.]*)+", re.IGNORECASE)
+    rf"{_CHAIN_TERM}(?:\s*\+\s*{_CHAIN_TERM})+", re.IGNORECASE)
+_IDENTIFIER_RE = re.compile(r"[a-z_][a-z0-9_]*", re.IGNORECASE)
+
+
+def _chain_term_column(term: str) -> str:
+    """The column name a chain term reduces to, wrapper calls and alias stripped.
+
+    `r.poll_wait_s`, `avg(r.poll_wait_s)` and `sum(coalesce(r.poll_wait_s, 0))`
+    all reduce to `poll_wait_s`. The wrapper names and the table alias are
+    identifiers too, but the column is always the last identifier before the
+    term's first comma — and cutting at that comma is what keeps a swallowed
+    neighbour, the `, c` of `a + b, c`, from reading as a term of the chain.
+    """
+    identifiers = _IDENTIFIER_RE.findall(term.split(",")[0])
+    return identifiers[-1].lower() if identifiers else ""
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
@@ -1717,7 +1756,7 @@ def test_no_panel_adds_both_identify_substage_lanes(path: Path):
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     for sql in _sql_targets(dashboard):
         for chain in _ADDITIVE_CHAIN_RE.findall(sql):
-            terms = {term.strip().split(".")[-1].lower() for term in chain.split("+")}
+            terms = {_chain_term_column(term) for term in chain.split("+")}
             assert not ((terms & _CALLER_LANE) and (terms & _AGENT_LANE)), (
                 f"{path.name} adds a caller-lane sub-stage to an agent-lane one, "
                 f"which double-counts the seconds they overlap on — measured at "
@@ -1751,6 +1790,74 @@ def test_substage_lane_guard_fires_on_a_seven_column_stack(tmp_path):
         test_no_panel_adds_both_identify_substage_lanes(mutant)
 
 
+# Three shapes that computed the same double-counted stack and that the guard
+# did NOT see before the wrapper/alias widening above. Each is asserted to fire
+# on the two lane columns it actually names, not merely to raise: the mutants
+# below carry legitimate single-lane chains too, so matching the message alone
+# would not prove which chain tripped it.
+#
+# The third is the likeliest of the three. Panel 2 emits caller_lane_s and
+# agent_lane_s as named columns, so lifting it into a CTE and adding the two
+# reads as a tidy-up rather than as a measurement error — and it never mentions
+# a raw sub-stage column at all.
+_LANE_BYPASS_SHAPES = [
+    pytest.param(
+        "SELECT round(avg(r.poll_wait_s) + avg(r.agent_run_s), 2) AS identify_s "
+        "FROM bench.runs r",
+        ("poll_wait_s", "agent_run_s"),
+        id="an-aggregate-around-each-term",
+    ),
+    pytest.param(
+        "SELECT sum(r.postprocess_s) + sum(r.session_setup_s) AS identify_s "
+        "FROM bench.runs r",
+        ("postprocess_s", "session_setup_s"),
+        id="a-sum-around-each-term",
+    ),
+    pytest.param(
+        "WITH lanes AS (SELECT "
+        "avg(r.submit_s + r.queue_s + r.poll_wait_s + r.postprocess_s) AS caller_lane_s, "
+        "avg(r.session_setup_s + r.agent_setup_s + r.agent_run_s) AS agent_lane_s "
+        "FROM bench.runs r) "
+        "SELECT caller_lane_s + agent_lane_s AS identify_s FROM lanes",
+        ("caller_lane_s", "agent_lane_s"),
+        id="the-two-lane-aliases-behind-a-cte",
+    ),
+]
+
+
+@pytest.mark.parametrize("mutant_sql,lanes", _LANE_BYPASS_SHAPES)
+def test_substage_lane_guard_fires_on_wrapped_and_aliased_stacks(
+        tmp_path, mutant_sql: str, lanes: tuple[str, str]):
+    """Each bypass measured on 2026-08-13, kept as a test.
+
+    Mutates a tmp copy of bench-time.json, replacing panel 2's query with a
+    shape that adds across the lanes in a spelling the guard used to miss;
+    never touches the committed file.
+    """
+    source = DASHBOARD_DIR / "bench-time.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    agent = "r.session_setup_s + r.agent_setup_s + r.agent_run_s"
+    mutated = 0
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            if agent in (target.get("rawSql") or ""):
+                target["rawSql"] = mutant_sql
+                mutated += 1
+    assert mutated == 1, "fixture lane panel not found to replace"
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="double-counts the seconds") as raised:
+        test_no_panel_adds_both_identify_substage_lanes(mutant)
+    reported = str(raised.value)
+    for lane in lanes:
+        assert lane in reported, (
+            f"the guard fired, but not on {lane} — the chain it names is "
+            f"{reported.rsplit(':', 1)[-1].strip()!r}, so this mutant does not "
+            f"prove the {lanes} shape is caught")
+
+
 # Spend and token figures from llm_traces are a floor, not a total. Measured
 # 2026-08-13 over the 2,829 rows that carry a model: cost_usd is populated on
 # 1,603 of them (56.7%) and total_tokens on 1,874 (66.2%), while duration_ms is
@@ -1758,8 +1865,18 @@ def test_substage_lane_guard_fires_on_a_seven_column_stack(tmp_path):
 # read it as the bill. Latency panels need no such disclosure and are
 # deliberately not covered — the guard keys off the aggregated COLUMN, not the
 # table, so adding a percentile panel never trips it.
+#
+# The column may arrive table-qualified or wrapped, and both are ordinary SQL
+# rather than exotic spellings: `sum(t.cost_usd)` is what a panel writes the
+# moment it aliases llm_traces to join something, and `sum(coalesce(cost_usd,
+# 0))` is the natural reflex for a column populated on 56.7% of rows — the very
+# gap this disclosure exists to declare, so the author most likely to reach for
+# coalesce is the one who most needs the guard. Both slipped past a pattern
+# that required the column name immediately after the opening paren. Same
+# lesson as _TRUNCATE_CALL_RE: allow an alias, allow a wrapper.
 _SPEND_AGGREGATE_RE = re.compile(
-    r"\b(?:sum|avg)\s*\(\s*(?:cost_usd|total_tokens|prompt_tokens|completion_tokens)\b",
+    r"\b(?:sum|avg)\s*\(\s*(?:coalesce\s*\(\s*)?(?:[a-z_][a-z0-9_]*\s*\.\s*)?"
+    r"(?:cost_usd|total_tokens|prompt_tokens|completion_tokens)\b",
     re.IGNORECASE)
 _COVERAGE_DISCLOSURE = "a floor, not a total"
 
@@ -1805,3 +1922,50 @@ def test_coverage_disclosure_guard_fires_on_an_undisclosed_spend_panel(tmp_path)
 
     with pytest.raises(AssertionError, match="never says the figure is"):
         test_llm_spend_panels_disclose_their_coverage(mutant)
+
+
+# The two spellings that totalled a spend column while the guard looked away,
+# both measured on 2026-08-13. An alias appears the moment a panel joins
+# anything to llm_traces; a coalesce appears the moment an author notices the
+# column is null on 43% of rows — which is precisely the reader this disclosure
+# is written for.
+_SPEND_BYPASS_SHAPES = [
+    pytest.param(
+        "SELECT round(sum(t.cost_usd)::numeric, 4) AS spend_usd FROM llm_traces t "
+        "WHERE nullif(t.model, '') IS NOT NULL",
+        id="a-table-alias-on-the-column",
+    ),
+    pytest.param(
+        "SELECT sum(coalesce(total_tokens, 0)) AS tokens FROM llm_traces "
+        "WHERE nullif(model, '') IS NOT NULL",
+        id="a-coalesce-around-the-column",
+    ),
+]
+
+
+@pytest.mark.parametrize("mutant_sql", _SPEND_BYPASS_SHAPES)
+def test_coverage_disclosure_guard_fires_on_wrapped_and_aliased_totals(
+        tmp_path, mutant_sql: str):
+    """Each bypass kept as a test.
+
+    Puts the shape on cost-latency-capacity.json's first panel, which totals
+    nothing from llm_traces today and carries no disclosure, so the guard has to
+    reach the new query to fire at all — the disclosed spend panels beside it
+    stay untouched and keep passing. Mutates a tmp copy; never touches the
+    committed file.
+    """
+    source = DASHBOARD_DIR / "cost-latency-capacity.json"
+    dashboard = json.loads(source.read_text(encoding="utf-8"))
+    panel = dashboard["panels"][0]
+    assert _COVERAGE_DISCLOSURE not in (panel.get("description") or ""), (
+        "fixture panel already carries the disclosure, so this mutant would "
+        "pass for the wrong reason")
+    panel["targets"][0]["rawSql"] = mutant_sql
+
+    mutant = tmp_path / source.name
+    mutant.write_text(json.dumps(dashboard), encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="never says the figure is") as raised:
+        test_llm_spend_panels_disclose_their_coverage(mutant)
+    assert panel["title"] in str(raised.value), (
+        "the guard fired on a different panel than the mutated one")
