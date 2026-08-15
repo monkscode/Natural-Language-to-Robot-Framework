@@ -489,7 +489,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             agents=[agent],
             tasks=[task],
             process=Process.sequential,
-            verbose=True,
+            verbose=settings.CREWAI_VERBOSE,
             output_log_file=CREWAI_LOG_FILE,
             step_callback=step_callback,
             task_callback=task_callback,

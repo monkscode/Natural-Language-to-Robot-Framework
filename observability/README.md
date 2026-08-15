@@ -177,6 +177,16 @@ should turn it into a link — Grafana cannot serve local files, and a
 
 ## Things that will mislead you if you do not know them
 
+- **Almost every line reads `unknown` in Explore's level breakdown, and that
+  is correct.** Since 2026-08-14 the level comes from the `level` field the
+  application itself writes, not from Loki guessing one out of the raw text.
+  Only 4.6% of the fastapi stream is a structlog record; 73.7% of it is
+  CrewAI echoing our own prompt to stdout, and prompt text has no level to
+  report. uvicorn's plain-text access lines keep their level because it is a
+  line-start prefix Alloy reads explicitly. Before this, 1,053 prompt-echo
+  lines carried a level Loki had invented, 270 of them `critical`. For
+  plain-text errors that carry no level at all, use the `|= "ERROR"` arm on
+  the Execution outcomes panel rather than the level breakdown.
 - **The log panel stays empty if you're running the app with `./run.sh`.**
   Alloy only scrapes Docker `json-file` container logs. `./run.sh` runs
   FastAPI and the browser service as local processes, not containers, so
@@ -296,8 +306,16 @@ should turn it into a link — Grafana cannot serve local files, and a
   `|= "ERROR"` substring arm matched 58, and the two sets overlap by
   **exactly 0**. The panel therefore ships both arms, and the "Structured log
   level" variable widens only the JSON arm — the substring arm has no level
-  field to filter on. Loki's own `detected_level` is not a substitute:
-  selecting on it returns 0 lines here.
+  field to filter on. Loki's own `detected_level` is not a substitute either,
+  but not for the reason recorded here until 2026-08-14: it was tested as a
+  stream selector, `{service=~"...", detected_level="error"}`, which matches
+  0 lines because `detected_level` is structured metadata, not an indexed
+  label. Filtered after the pipe it works — `| detected_level="error"`
+  matched 1,196 lines **before** the level pipeline changed that day, of
+  which 535 were real records and 661 were plain text Loki had guessed a
+  level for. Since the change it tracks the JSON arm instead, so it is a
+  duplicate of one arm rather than a replacement for both: plain-text errors
+  carry no level field, read `unknown`, and are only ever seen by arm B.
 - **Half the runs cannot be dated, so the Runs list is not sorted by a clock.**
   Measured 2026-08-13 over the 528 UUID-shaped run ids: 41 carry both a
   `workflow_metrics` row and a timestamp from `test_runs`/`execution_records`,

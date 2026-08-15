@@ -460,7 +460,7 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
         agents=[assembler],
         tasks=[fix_task],
         process=Process.sequential,
-        verbose=True,
+        verbose=settings.CREWAI_VERBOSE,
         output_log_file=None,  # §8.5 — keep repair noise out of logs/crewai.log
         embedder=None,
         # No step_callback/task_callback and NOT registered in progress_events:

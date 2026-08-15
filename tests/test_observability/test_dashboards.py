@@ -1042,8 +1042,18 @@ def test_aggregate_error_log_panel_reads_both_log_formats():
     it does not, and after the exclusion it is expected to stay empty until a
     genuine plain-text error appears. That is the case it is kept for.
 
-    Loki's own `detected_level` is not a third option: selecting on it
-    returns 0 lines on this deployment.
+    Loki's own `detected_level` is not a third option, but the reason
+    recorded here until 2026-08-14 was wrong: it was tested as a stream
+    selector, `{service=~"...", detected_level="error"}`, which matches 0
+    lines because `detected_level` is structured metadata rather than an
+    indexed label. After the pipe it works — `| detected_level="error"`
+    matched 1,196 lines that day, of which 535 were log records; the other
+    661 were plain text Loki had guessed a level for, and 551 of those were
+    CrewAI echoing our own prompt. Since 2026-08-14
+    Alloy stamps it from the application's own level field, so it now
+    duplicates this arm for records that carry a level and reads `unknown`
+    for everything else, which is exactly the class arm B is kept for. See
+    tests/test_observability/test_log_pipeline.py.
     """
     path = DASHBOARD_DIR / "execution-outcomes.json"
     dashboard = json.loads(path.read_text(encoding="utf-8"))
