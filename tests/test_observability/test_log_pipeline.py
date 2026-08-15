@@ -160,8 +160,7 @@ def test_uvicorn_keeps_its_level_and_the_rule_cannot_reach_prompt_text():
     both prompt-echo shapes still store unknown.
     """
     expression = _stage("stage.regex")
-    assert expression.lstrip().count("^") and re.search(
-        r'expression\s*=\s*"\^', expression), (
+    assert re.search(r'expression\s*=\s*"\^', expression), (
         "the uvicorn level rule is not anchored to the start of the line; "
         "unanchored it matches prompt text and re-creates the bug")
     assert "uvicorn_level" in expression, (

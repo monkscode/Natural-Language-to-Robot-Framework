@@ -73,20 +73,43 @@ class TestCrewsHonourTheSetting:
 
     @pytest.mark.parametrize("verbose", [True, False])
     def test_repair_crew_verbose_follows_setting(self, verbose):
-        """dryrun_service builds its own Crew on the repair path."""
+        """dryrun_service builds its own Crew on the repair path.
+
+        `Crew` is imported INSIDE repair_robot_code, so the patch target is
+        `crewai.Crew` rather than a module attribute — the name is resolved
+        fresh on each call. kickoff() is then the mock's, so no model is
+        reached and no trace is written.
+        """
+        import crewai
         import src.backend.services.dryrun_service as mod
 
-        source = mod.__file__
-        with open(source, encoding="utf-8") as handle:
-            text = handle.read()
+        with patch.object(crewai, "Crew") as crew_cls, \
+             patch.object(mod.settings, "CREWAI_VERBOSE", verbose):
+            mod.repair_robot_code(
+                "run-id", "*** Settings ***",
+                ["No keyword with name 'Clik' found."],
+                "vertex", "gemini-3.5-flash")
 
-        assert "verbose=True" not in text, (
-            "dryrun_service still hardcodes verbose=True; the repair crew "
-            "echoes the assembler prompt on every dryrun repair")
-        assert "settings.CREWAI_VERBOSE" in text, (
-            "dryrun_service does not read CREWAI_VERBOSE")
+        assert crew_cls.call_args.kwargs["verbose"] is verbose, (
+            f"the repair crew was built with verbose="
+            f"{crew_cls.call_args.kwargs['verbose']!r} when the setting was "
+            f"{verbose!r}; it echoes the assembler prompt on every repair")
 
     def test_generation_crew_reads_the_setting(self):
+        """crew.py is checked by source, not by construction, on purpose.
+
+        Its Crew is built in `_make_crew`, a closure inside `run_crew`
+        (crew.py:487). There is no way in without invoking the whole
+        generation pipeline — planner LLM, element stage, progress queue —
+        which is an integration test's job, not this one's.
+
+        The substring scan is weaker in one direction only: an expression
+        that mentions the setting but always evaluates true, such as
+        `settings.CREWAI_VERBOSE or True`, would pass. It is stronger in
+        another — it catches a hardcoded `verbose=True` at ANY site in the
+        file, including one added later, which a single-call-site assertion
+        would miss.
+        """
         import src.backend.crew_ai.crew as mod
 
         with open(mod.__file__, encoding="utf-8") as handle:
