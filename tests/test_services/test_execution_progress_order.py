@@ -52,12 +52,12 @@ class TestProgressPrecedesImageProvisioning:
 
         with patch.object(ws.runner_exec_client, "ensure_image", fake_ensure_image), \
              patch.object(ws.runner_exec_client, "execute", fake_execute), \
-             patch.object(ws, "_set_run_status", lambda *a, **k: None), \
-             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None), \
-             patch.object(ws, "_process_learning", lambda *a, **k: None), \
+             patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
+             patch.object(ws, "_process_learning", return_value=None), \
              patch.object(ws.json, "dumps", recording_dumps):
             store = ws.get_artifact_store()
-            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
                 _drain(ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
 
         assert "ensure_image" in order, "ensure_image was never called"
@@ -75,13 +75,13 @@ class TestProgressPrecedesImageProvisioning:
         def fake_execute(run_id, test_filename):
             return {"test_status": "passed", "logs": ""}
 
-        with patch.object(ws.runner_exec_client, "ensure_image", lambda: None), \
+        with patch.object(ws.runner_exec_client, "ensure_image", return_value=None), \
              patch.object(ws.runner_exec_client, "execute", fake_execute), \
-             patch.object(ws, "_set_run_status", lambda *a, **k: None), \
-             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None), \
-             patch.object(ws, "_process_learning", lambda *a, **k: None):
+             patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
+             patch.object(ws, "_process_learning", return_value=None):
             store = ws.get_artifact_store()
-            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
                 captured = _drain(
                     ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
 
@@ -102,10 +102,10 @@ class TestExecutionErrorsAreAlwaysReadable:
             raise TimeoutError()
 
         with patch.object(ws.runner_exec_client, "ensure_image", blank_failure), \
-             patch.object(ws, "_set_run_status", lambda *a, **k: None), \
-             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None):
+             patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None):
             store = ws.get_artifact_store()
-            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
                 captured = _drain(
                     ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
 
@@ -122,11 +122,11 @@ class TestExecutionErrorsAreAlwaysReadable:
         def leaky_open(*_a, **_kw):
             raise OSError(f"cannot write /run/secrets/env?key={key}")
 
-        with patch.object(ws, "_set_run_status", lambda *a, **k: None), \
-             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None), \
+        with patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
              patch("builtins.open", leaky_open):
             store = ws.get_artifact_store()
-            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
                 captured = _drain(
                     ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
 
