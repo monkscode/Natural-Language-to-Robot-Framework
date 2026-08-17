@@ -23,6 +23,8 @@ from src.backend.core.workflow_metrics import (
 )
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.provider_errors import friendly_setup_error
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
@@ -905,7 +907,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_evict_hint_metadata(workflow_id)
         # workflow_id lets the bench detach a failed run — its pre-failure LLM
         # calls are already recorded in llm_traces.
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+        yield {"status": "error",
+               "message": f"Failed to generate valid Robot Framework code: {redact_secrets(str(e))}",
                "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
@@ -914,7 +917,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+        # A setup failure (bad API key, unmounted credentials, billing/API off) is
+        # the most likely reason a first run dies here, and litellm reports all of
+        # them as a nested google.rpc JSON blob. Translate the ones we recognise
+        # into an instruction; anything else keeps the raw text, redacted — the
+        # provider quotes the failing request URL, which carries the API key.
+        setup_hint = friendly_setup_error(e)
+        message = setup_hint or f"An error occurred: {redact_secrets(str(e))}"
+        yield {"status": "error", "message": message,
                "workflow_id": workflow_id}
     
 
