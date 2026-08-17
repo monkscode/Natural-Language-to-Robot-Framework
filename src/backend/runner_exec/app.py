@@ -13,23 +13,62 @@ Depends on: services/docker_service.py, services/dryrun_service.py,
 runner_exec/validation.py.
 """
 import logging
+import os
+import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from src.backend.runner_exec.validation import safe_run_id, safe_test_filename
 from src.backend.services.docker_service import (
+    IMAGE_PROVISION_LOCK,
     get_docker_client,
     build_image,
     run_test_in_container,
     rebuild_image,
     get_docker_status,
     cleanup_test_containers,
+    warm_image_cache,
 )
 from src.backend.services.dryrun_service import run_dryrun_in_container
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="nlrf-runner-exec")
+
+# Pre-fetch the runner image at boot so the first Run Test does not pay for it.
+# Set RUNNER_IMAGE_WARMUP=false on metered or air-gapped hosts, where reaching for
+# the registry at startup is unwelcome; the image is then provisioned on first use.
+WARMUP_ENABLED = os.getenv("RUNNER_IMAGE_WARMUP", "true").strip().lower() != "false"
+
+
+def _warm_image_background() -> None:
+    try:
+        warm_image_cache(get_docker_client())
+    except Exception as e:  # noqa: BLE001 — a startup thread must never escalate
+        logger.warning("[WARMUP] Skipped: %s", e)
+
+
+def _start_image_warmup() -> None:
+    """Spawn the warm-up off the startup path.
+
+    Daemon thread: the download is ~0.5 GB and must not delay the executor
+    becoming healthy, nor hold up shutdown if it is still running.
+    """
+    if not WARMUP_ENABLED:
+        logger.info("[WARMUP] Disabled via RUNNER_IMAGE_WARMUP=false.")
+        return
+    threading.Thread(
+        target=_warm_image_background, daemon=True, name="runner-image-warmup"
+    ).start()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _start_image_warmup()
+    yield
+
+
+app = FastAPI(title="nlrf-runner-exec", lifespan=lifespan)
 
 
 class ExecuteRequest(BaseModel):
@@ -65,8 +104,13 @@ def health() -> dict:
 @app.post("/ensure-image")
 def ensure_image() -> dict:
     client = get_docker_client()
-    for _event in build_image(client):
-        pass  # consume the generator to guarantee the image is present
+    # Share the provisioning lock with the boot-time warm-up. If a warm-up pull is
+    # in flight this blocks until it finishes and then finds the image present,
+    # instead of starting a second pull of the same ~0.5 GB image. The caller's
+    # read timeout covers the wait.
+    with IMAGE_PROVISION_LOCK:
+        for _event in build_image(client):
+            pass  # consume the generator to guarantee the image is present
     return {"status": "ready"}
 
 

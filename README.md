@@ -152,11 +152,13 @@ The extra `-f docker-compose.vertex.yml` mounts your `credentials.json` into the
 
 > 📦 **Why the second `docker pull`?** Your tests execute in a throwaway `test-runner`
 > container that the app launches on demand, so it is deliberately not a Compose
-> service and `docker compose pull` does not fetch it. Pulling it now means your first
-> test run starts immediately. Skip it and the app downloads it during your first run
-> instead — that still works, it just makes that one run take a couple of minutes
-> (measured: 99s on a cold machine). Keep the tag suffix the same as the four in your
-> root `.env`. It is ~0.5 GB compressed and expands to ~1.9 GB on disk.
+> service and `docker compose pull` does not fetch it. It is ~0.5 GB compressed
+> (~1.9 GB on disk) and takes about 99 seconds.
+>
+> Pulling it here is belt-and-braces: the app also fetches it in the background as
+> soon as it starts, so it is normally ready by the time you finish signing up and
+> writing your first test. Doing it now just guarantees that. Keep the tag suffix
+> the same as the four in your root `.env`.
 
 Check that the services are healthy:
 

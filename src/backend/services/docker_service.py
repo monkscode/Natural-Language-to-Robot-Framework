@@ -2,6 +2,7 @@ import os
 import re
 import docker
 import logging
+import threading
 import traceback
 import requests as _requests
 import xml.etree.ElementTree as ET
@@ -175,6 +176,60 @@ def get_docker_client():
                              f"Docker connection failed: {e}", "error")
         raise ConnectionError(
             f"Docker is not available. Please ensure Docker Desktop is installed and running. Details: {e}")
+
+
+# Serialises image provisioning so a boot-time warm-up and a Run Test click never
+# start two pulls of the same ~0.5 GB image. Whichever arrives second waits, then
+# finds the image already present and returns immediately. Held only by callers
+# that fully consume build_image (the ensure-image endpoint) or by warm_image_cache
+# — never inside the generator itself, where an abandoned consumer would leak it.
+IMAGE_PROVISION_LOCK = threading.Lock()
+
+
+def warm_image_cache(client: docker.DockerClient) -> bool:
+    """Pull the runner image ahead of time. Returns True if it pulled one.
+
+    Called in the background at runner-exec startup. The download is ~0.5 GB and
+    measured 99s; starting it here overlaps it with signup, query entry and the
+    generation stage, instead of making the user watch it after clicking Run Test.
+
+    PULL ONLY — it never falls back to a local build. A build is minutes of CPU and
+    disk, and silently starting one on every boot is a surprise; the on-demand path
+    in build_image still builds when that is how the deployment is configured.
+
+    Never raises: this runs on a startup thread, and a Docker hiccup at boot must
+    not take the executor down. A failure just means the first run pays the cost,
+    which is the behaviour without warm-up anyway.
+    """
+    if not PREFER_REMOTE_IMAGE:
+        logging.info("[WARMUP] Remote pull disabled; leaving image provisioning to first use.")
+        return False
+    with IMAGE_PROVISION_LOCK:
+        try:
+            client.images.get(IMAGE_TAG)
+            logging.info(f"[WARMUP] Runner image '{IMAGE_TAG}' already present.")
+            return False
+        except docker.errors.ImageNotFound:
+            pass
+        except Exception as e:  # noqa: BLE001 — socket unavailable at boot, etc.
+            logging.warning(f"[WARMUP] Could not inspect local images: {e}")
+            return False
+
+        logging.info(f"[WARMUP] Pre-fetching runner image {REMOTE_IMAGE} in the background...")
+        try:
+            for log in client.api.pull(REMOTE_IMAGE, stream=True, decode=True):
+                if 'error' in log:
+                    # The daemon reports most pull failures this way rather than
+                    # by raising, so this branch is the common one.
+                    raise docker.errors.APIError(log['error'])
+            client.images.get(REMOTE_IMAGE).tag(IMAGE_TAG)
+            logging.info(f"[WARMUP] Runner image ready as '{IMAGE_TAG}'.")
+            return True
+        except Exception as e:  # noqa: BLE001 — best-effort by design
+            logging.warning(
+                f"[WARMUP] Pre-fetch of {REMOTE_IMAGE} failed ({e}); "
+                "the first test run will provision the image instead.")
+            return False
 
 
 def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, None]:

@@ -236,6 +236,24 @@ yourself: the pulled image is re-tagged locally as `TEST_RUNNER_IMAGE_TAG`, so
 naming a different build here puts the wrong content under that tag. Unset, it
 tracks `TEST_RUNNER_IMAGE_TAG` automatically.
 
+### RUNNER_IMAGE_WARMUP
+
+Pre-fetch the runner image when the executor starts, rather than on the first
+**Run Test**.
+
+```env
+RUNNER_IMAGE_WARMUP=true
+```
+
+**Default:** `true`. The download is ~0.5 GB and takes about 99 seconds; starting
+it at boot overlaps it with signup, writing your first query and the ~23s
+generation stage, so by the time you click **Run Test** the image is normally
+already there. It runs on a background thread, never delays the service becoming
+healthy, and is pull-only — it will not start a local image build. If it fails,
+the image is provisioned on first use exactly as before.
+
+Set to `false` on metered connections or air-gapped hosts.
+
 ### TEST_EXECUTION_TIMEOUT
 
 Maximum seconds to wait for a test container to finish. Set in the **root `.env`**.
