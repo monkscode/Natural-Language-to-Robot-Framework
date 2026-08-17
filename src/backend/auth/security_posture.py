@@ -22,6 +22,8 @@ Depends on: src/backend/core/config.py.
 import logging
 import os
 import secrets
+import stat
+import tempfile
 from pathlib import Path
 
 from src.backend.core.config import settings
@@ -42,6 +44,10 @@ _SECRET_PATH = Path("data") / "jwt_secret"
 # Entropy per generated secret. 48 bytes -> 64 urlsafe chars, comfortably above
 # _MIN_RANDOM_CHARS.
 _GENERATED_ENTROPY_BYTES = 48
+
+# How many times to retry publishing before giving up and running memory-only.
+# Each retry means another starter won the link, so a small bound cannot spin.
+_ADOPT_ATTEMPTS = 3
 
 # Production secret strength: the minimum character length a JWT secret must
 # reach to be accepted. token_urlsafe(48) yields 64 chars, so 32 is a
@@ -84,10 +90,22 @@ def _mint_secret() -> str:
 def _read_secret_file() -> str | None:
     """Return the persisted development secret, or None if absent or unusable.
 
+    lstat + S_ISREG rejects a symlink (or any other non-regular file) without
+    following it. Nothing legitimate puts one there, and reading through one
+    would adopt a signing key chosen by whoever planted it.
+
+    File mode is deliberately NOT checked. A host-created file on a Docker
+    Desktop bind mount reports mode 0777 owned by root to a container running as
+    uid 1000, so rejecting "unsafe" permissions would rotate the secret on every
+    boot and sign everybody out — the exact failure this module exists to
+    prevent. Confidentiality rests on the 0600 the file is created with.
+
     ValueError covers UnicodeDecodeError: a truncated or corrupted file must be
     replaced, not crash the boot it exists to keep working.
     """
     try:
+        if not stat.S_ISREG(_SECRET_PATH.lstat().st_mode):
+            return None
         stored = _SECRET_PATH.read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
         return None
@@ -97,24 +115,38 @@ def _read_secret_file() -> str | None:
 def _write_secret_file(secret: str) -> str:
     """Persist the secret, returning the value that actually landed on disk.
 
-    The create is O_EXCL (0600), so concurrent starters converge on the first
-    writer's key rather than each signing with its own — an atomic
-    write-then-replace would be last-writer-wins, which does not converge. A
-    file that already exists is adopted when usable; only an unusable one
-    (empty, truncated, corrupt) is overwritten, and there any winner is correct
-    because every writer is replacing garbage.
+    The secret is written to a private temp file (mkstemp creates it 0600) and
+    published with os.link, which is atomic AND refuses an existing target. That
+    buys first-writer-wins without an interprocess lock, and the published path
+    is never observable half-written. An O_EXCL create followed by a write is:
+    a second starter that saw the empty file would truncate it and go on signing
+    with a secret the disk never kept, so its tokens verified nowhere. Refusing
+    an existing target also means a symlink there is never written through.
+
+    Only a target that is unusable (corrupt, empty, or not a regular file) is
+    removed and retried; any winner is correct there because every writer is
+    replacing garbage.
     """
     _SECRET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=_SECRET_PATH.parent, prefix=".jwt_secret-")
     try:
-        fd = os.open(_SECRET_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        landed = _read_secret_file()
-        if landed is not None:
-            return landed
-        fd = os.open(_SECRET_PATH, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(secret)
-    return secret
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(secret)
+        for _ in range(_ADOPT_ATTEMPTS):
+            try:
+                os.link(tmp, _SECRET_PATH)
+                return secret
+            except FileExistsError:
+                landed = _read_secret_file()
+                if landed is not None:
+                    return landed
+                _SECRET_PATH.unlink(missing_ok=True)
+        raise OSError(
+            f"could not publish a JWT secret to {_SECRET_PATH} after "
+            f"{_ADOPT_ATTEMPTS} attempts"
+        )
+    finally:
+        os.unlink(tmp)
 
 
 def _provision_development_secret() -> str:

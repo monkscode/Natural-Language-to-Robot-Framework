@@ -4,11 +4,17 @@ Verifies that a production deployment refuses to boot with a forgeable JWT
 secret or non-Secure auth cookies, while development provisions a strong secret
 of its own and only warns, so local http dev keeps working out of the box.
 """
+import os
+import sys
 from unittest.mock import patch
 
 import pytest
 
 from src.backend.auth import security_posture as sp
+
+# Windows can create symlinks only with elevation or Developer Mode, and the
+# deployment target is Linux containers, so the symlink guards are asserted there.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 
 _STRONG = "k7Qw9Z2pX4mN8sV1tR6yB3uC0aF5gH7jL2dE4wQ9zP1xM8nS3vT6yB0uC2aF4gH"
 _PLACEHOLDERS = ["", "change-me-in-production"]
@@ -90,6 +96,46 @@ def test_unusable_existing_secret_is_overwritten(secret_file):
     """The adopt-don't-clobber rule must not strand a corrupt file forever."""
     secret_file.write_text("", encoding="utf-8")
     assert sp._write_secret_file(_STRONG) == _STRONG
+    assert secret_file.read_text(encoding="utf-8") == _STRONG
+
+
+def test_the_returned_secret_is_always_the_one_on_disk(secret_file):
+    """Regression: publishing via an empty O_EXCL create let a second starter
+    truncate the file mid-write and go on signing with a secret the disk never
+    kept, so its tokens verified nowhere."""
+    returned = sp._write_secret_file(_STRONG)
+    assert secret_file.read_text(encoding="utf-8") == returned
+
+
+def test_provisioning_gives_up_rather_than_spinning(secret_file):
+    """A peer that keeps winning the link must not livelock the boot."""
+    with patch.object(sp.os, "link", side_effect=FileExistsError), \
+         patch.object(sp, "_read_secret_file", return_value=None):
+        with pytest.raises(OSError):
+            sp._write_secret_file(_STRONG)
+    assert not list(secret_file.parent.glob(".jwt_secret-*")), "temp file leaked"
+
+
+@posix_only
+def test_a_symlinked_secret_is_never_adopted(secret_file):
+    """Reading through a symlink would adopt a signing key chosen by whoever
+    planted it."""
+    target = secret_file.parent / "planted"
+    target.write_text(_STRONG, encoding="utf-8")
+    os.symlink(target, secret_file)
+    assert sp._read_secret_file() is None
+
+
+@posix_only
+def test_a_symlinked_secret_is_replaced_not_written_through(secret_file):
+    """Publishing through a symlink would write a live secret outside data/."""
+    target = secret_file.parent / "planted"
+    target.write_text("", encoding="utf-8")
+    os.symlink(target, secret_file)
+
+    assert sp._write_secret_file(_STRONG) == _STRONG
+    assert not secret_file.is_symlink()
+    assert target.read_text(encoding="utf-8") == "", "secret escaped through the link"
     assert secret_file.read_text(encoding="utf-8") == _STRONG
 
 
