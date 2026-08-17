@@ -244,8 +244,7 @@ Natural-Language-to-Robot-Framework/
 │
 ├── robot_tests/             ← Generated .robot test files + HTML results
 ├── logs/                    ← Application logs (also viewable in the UI)
-├── chroma_db/               ← Vector database for keyword search (auto-created)
-├── data/                    ← Pattern learning SQLite database (auto-created)
+├── data/                    ← Generated JWT secret + local artifacts (auto-created)
 │
 └── src/
     └── backend/
@@ -347,7 +346,7 @@ All settings below go in `src/backend/.env`. Only `GEMINI_API_KEY` is required t
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROBOT_LIBRARY` | `browser` | `browser` (Playwright-based) or `selenium` |
+| `ROBOT_LIBRARY` | `browser` | `browser` (Playwright) — the only supported value; `selenium` fails at startup |
 | `MAX_AGENT_ITERATIONS` | `3` | How many times agents retry on failure (1–5) |
 
 ### Browser Automation

@@ -23,6 +23,8 @@ from src.backend.core.workflow_metrics import (
 )
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.provider_errors import friendly_setup_error
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
@@ -905,7 +907,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_evict_hint_metadata(workflow_id)
         # workflow_id lets the bench detach a failed run — its pre-failure LLM
         # calls are already recorded in llm_traces.
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+        yield {"status": "error",
+               "message": f"Failed to generate valid Robot Framework code: {redact_secrets(str(e))}",
                "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
@@ -914,7 +917,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+        # A setup failure (bad API key, unmounted credentials, billing/API off) is
+        # the most likely reason a first run dies here, and litellm reports all of
+        # them as a nested google.rpc JSON blob. Translate the ones we recognise
+        # into an instruction; anything else keeps the raw text, redacted — the
+        # provider quotes the failing request URL, which carries the API key.
+        setup_hint = friendly_setup_error(e)
+        message = setup_hint or f"An error occurred: {redact_secrets(str(e))}"
+        yield {"status": "error", "message": message,
                "workflow_id": workflow_id}
     
 
@@ -1196,7 +1206,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
         await asyncio.to_thread(_set_run_status, run_id, "error")
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {redact_secrets(str(e))}'})}\n\n"
         return
 
     try:
@@ -1204,8 +1214,15 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # no longer touches Docker. ensure_image is required — if it raises
         # (executor unreachable / image build failed) the except below converts
         # it to an execution-error event, since there is no image to run on.
+        # Announce BEFORE ensure_image, not after. On a first run this call pulls
+        # the runner image and returns only when it is on disk — measured 98.8s on
+        # a cold machine — and yielding afterwards left the client silent for that
+        # entire wait, which reads as a hang. This also moves the execution stage's
+        # first event ahead of image provisioning, so exec_s now covers it; on a
+        # warm machine ensure_image is a local image lookup, so the difference is
+        # sub-second and the bench is unaffected.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment (on the first run this downloads the test runner image, which can take a few minutes)...'})}\n\n"
         await asyncio.to_thread(runner_exec_client.ensure_image)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
         logging.info(f"🚀 Executing test: {test_filename}")
         result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
@@ -1250,7 +1267,12 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # report is served only from the originating replica's local staging and
         # 404s on any other replica in an S3 deployment.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        # Unlike its siblings above, this message has no prefix — so an exception
+        # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
+        # would leave the client with status='error' and nothing to show, and the
+        # log line above as the only record of the cause. Name the type instead.
+        detail = redact_secrets(str(e)) or type(e).__name__
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': detail})}\n\n"
 
 
 async def stream_generate_only(

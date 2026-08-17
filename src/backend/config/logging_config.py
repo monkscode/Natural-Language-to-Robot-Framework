@@ -18,6 +18,38 @@ from pathlib import Path
 
 import structlog
 
+from src.backend.core.secret_redaction import SecretRedactingFilter, redact_processor
+
+# Loggers that ship their OWN handler and therefore never reach our formatter.
+# litellm logs the provider request URL, which for Google carries the API key.
+_THIRD_PARTY_LOGGERS_WITH_OWN_HANDLERS = (
+    "LiteLLM", "LiteLLM Router", "LiteLLM Proxy", "litellm",
+)
+
+
+def _install_secret_redaction() -> None:
+    """Install SecretRedactingFilter so no sink can print a credential.
+
+    Two attachment points, because neither alone is sufficient:
+
+    * On the named third-party LOGGERS. setup_logging() runs before litellm is
+      imported, so its stderr handler does not exist yet and there is nothing to
+      attach to — measured: the filter installed cleanly and the key still leaked.
+      getLogger() returns a singleton, so a filter placed here survives litellm
+      adding its handler later, and runs for anything logged through that logger.
+    * On the root HANDLERS, which is where records propagating up from any other
+      library are formatted.
+
+    Idempotent — setup_logging can run more than once in a process.
+    """
+    for name in _THIRD_PARTY_LOGGERS_WITH_OWN_HANDLERS:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, SecretRedactingFilter) for f in logger.filters):
+            logger.addFilter(SecretRedactingFilter())
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, SecretRedactingFilter) for f in handler.filters):
+            handler.addFilter(SecretRedactingFilter())
+
 # Cache OTel span getter at module level — avoids a sys.modules lookup inside
 # _add_otel_context, which fires for every log entry.
 _get_current_span = None
@@ -46,6 +78,10 @@ _SHARED_PROCESSORS = [
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.StackInfoRenderer(),
     structlog.processors.format_exc_info,
+    # MUST stay after format_exc_info: that processor is what turns exc_info into
+    # the 'exception' string, and provider tracebacks quote the failing request
+    # URL — which for Google carries the caller's API key.
+    redact_processor,
     _add_otel_context,
 ]
 
@@ -103,6 +139,12 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
 
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Last, so the root handlers configured above are all in place to be filtered.
+    # The third-party loggers are a different case: main.py calls setup_logging()
+    # before litellm is imported, so its handler does not exist yet — see
+    # _install_secret_redaction for why the filter goes on the logger there.
+    _install_secret_redaction()
 
 
 def bind_workflow_context(

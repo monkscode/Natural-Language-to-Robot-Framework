@@ -13,18 +13,24 @@ const config: Config = {
   	},
   	extend: {
   		fontFamily: {
+  			// '<name> Variable' is what the bundled @fontsource-variable packages
+  			// register; the plain name is kept after it so a locally-installed
+  			// static copy still wins over the system fallback.
   			sans: [
+  				'Inter Variable',
   				'Inter',
   				'system-ui',
   				'sans-serif'
   			],
   			mono: [
+  				'JetBrains Mono Variable',
   				'JetBrains Mono',
   				'ui-monospace',
   				'Menlo',
   				'monospace'
   			],
   			display: [
+  				'Space Grotesk Variable',
   				'Space Grotesk',
   				'system-ui',
   				'sans-serif'

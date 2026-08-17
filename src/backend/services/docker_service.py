@@ -2,6 +2,7 @@ import os
 import re
 import docker
 import logging
+import threading
 import traceback
 import requests as _requests
 import xml.etree.ElementTree as ET
@@ -17,9 +18,19 @@ from typing import Any
 from src.backend.core import config as _config  # noqa: F401
 
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
-IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
-# Default remote image - fallback if local image not found
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-latest')
+_DEFAULT_LOCAL_IMAGE_TAG = 'robot-test-runner:latest'
+_DEFAULT_REMOTE_IMAGE = 'monkscode/nlrf:test-runner-latest'
+IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', _DEFAULT_LOCAL_IMAGE_TAG)
+# Remote image pulled when IMAGE_TAG is missing locally. The pulled image is then
+# tagged AS IMAGE_TAG, so these two must name the same build — otherwise the user's
+# configured tag silently holds different content. Hard-coding the published
+# -latest default did exactly that: a user following the README and setting
+# TEST_RUNNER_IMAGE_TAG=...-develop received the main-branch image under the
+# -develop name. Track IMAGE_TAG unless the operator names a mirror explicitly.
+# IMAGE_TAG's own default is a local-only name with no registry, so that case
+# keeps the published image as the pull source.
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', '').strip() or (
+    _DEFAULT_REMOTE_IMAGE if IMAGE_TAG == _DEFAULT_LOCAL_IMAGE_TAG else IMAGE_TAG)
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
 # Maximum seconds to wait for a test container to finish (default: 30 minutes)
@@ -165,6 +176,61 @@ def get_docker_client():
                              f"Docker connection failed: {e}", "error")
         raise ConnectionError(
             f"Docker is not available. Please ensure Docker Desktop is installed and running. Details: {e}")
+
+
+# Serialises image provisioning so a boot-time warm-up and a Run Test click never
+# start two pulls of the same ~0.5 GB image. Whichever arrives second waits, then
+# finds the image already present and returns immediately. Held by every writer of
+# IMAGE_TAG: warm_image_cache, rebuild_image, and callers that fully consume
+# build_image (the ensure-image endpoint) — never inside the generator itself,
+# where an abandoned consumer would leak it.
+IMAGE_PROVISION_LOCK = threading.Lock()
+
+
+def warm_image_cache(client: docker.DockerClient) -> bool:
+    """Pull the runner image ahead of time. Returns True if it pulled one.
+
+    Called in the background at runner-exec startup. The download is ~0.5 GB and
+    measured 99s; starting it here overlaps it with signup, query entry and the
+    generation stage, instead of making the user watch it after clicking Run Test.
+
+    PULL ONLY — it never falls back to a local build. A build is minutes of CPU and
+    disk, and silently starting one on every boot is a surprise; the on-demand path
+    in build_image still builds when that is how the deployment is configured.
+
+    Never raises: this runs on a startup thread, and a Docker hiccup at boot must
+    not take the executor down. A failure just means the first run pays the cost,
+    which is the behaviour without warm-up anyway.
+    """
+    if not PREFER_REMOTE_IMAGE:
+        logging.info("[WARMUP] Remote pull disabled; leaving image provisioning to first use.")
+        return False
+    with IMAGE_PROVISION_LOCK:
+        try:
+            client.images.get(IMAGE_TAG)
+            logging.info(f"[WARMUP] Runner image '{IMAGE_TAG}' already present.")
+            return False
+        except docker.errors.ImageNotFound:
+            pass
+        except Exception as e:  # noqa: BLE001 — socket unavailable at boot, etc.
+            logging.warning(f"[WARMUP] Could not inspect local images: {e}")
+            return False
+
+        logging.info(f"[WARMUP] Pre-fetching runner image {REMOTE_IMAGE} in the background...")
+        try:
+            for log in client.api.pull(REMOTE_IMAGE, stream=True, decode=True):
+                if 'error' in log:
+                    # The daemon reports most pull failures this way rather than
+                    # by raising, so this branch is the common one.
+                    raise docker.errors.APIError(log['error'])
+            client.images.get(REMOTE_IMAGE).tag(IMAGE_TAG)
+            logging.info(f"[WARMUP] Runner image ready as '{IMAGE_TAG}'.")
+            return True
+        except Exception as e:  # noqa: BLE001 — best-effort by design
+            logging.warning(
+                f"[WARMUP] Pre-fetch of {REMOTE_IMAGE} failed ({e}); "
+                "the first test run will provision the image instead.")
+            return False
 
 
 def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, None]:
@@ -688,19 +754,27 @@ def cleanup_test_containers(client: docker.DockerClient) -> dict[str, Any]:
 
 
 def rebuild_image(client: docker.DockerClient) -> dict[str, str]:
-    try:
+    # Third writer of IMAGE_TAG, so it takes the same lock as warm_image_cache and
+    # the ensure-image endpoint. Unguarded it interleaves: rebuild removes the tag
+    # and builds from source while a pull is already in flight, and whichever
+    # finishes last wins — an admin's rebuild silently replaced by the registry
+    # image, or vice versa. The remove and the build are one operation and the lock
+    # spans both. rebuild-image's read timeout is the execution-length budget, which
+    # covers waiting out a 15-minute pull.
+    with IMAGE_PROVISION_LOCK:
         try:
-            client.images.remove(image=IMAGE_TAG, force=True)
-            logging.info(f"Removed existing Docker image '{IMAGE_TAG}'.")
-        except docker.errors.ImageNotFound:
-            logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
+            try:
+                client.images.remove(image=IMAGE_TAG, force=True)
+                logging.info(f"Removed existing Docker image '{IMAGE_TAG}'.")
+            except docker.errors.ImageNotFound:
+                logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
 
-        client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
-        logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
-        return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
-    except docker.errors.DockerException as e:
-        logging.error(f"Failed to rebuild Docker image: {e}")
-        raise ConnectionError(f"Docker error: {e}")
+            client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
+            logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
+            return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
+        except docker.errors.DockerException as e:
+            logging.error(f"Failed to rebuild Docker image: {e}")
+            raise ConnectionError(f"Docker error: {e}")
 
 
 def get_docker_status(client: docker.DockerClient) -> dict[str, Any]:
