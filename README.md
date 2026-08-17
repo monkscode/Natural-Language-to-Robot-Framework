@@ -144,7 +144,7 @@ Everything else has sensible defaults. The database, internal service URLs, and 
 
 ```bash
 docker compose pull                                   # the services (~2–5 min)
-docker pull monkscode/nlrf:test-runner-develop        # the test runner (~1.9 GB)
+docker pull monkscode/nlrf:test-runner-develop        # the test runner (~0.5 GB)
 docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
 ```
 
@@ -154,8 +154,9 @@ The extra `-f docker-compose.vertex.yml` mounts your `credentials.json` into the
 > container that the app launches on demand, so it is deliberately not a Compose
 > service and `docker compose pull` does not fetch it. Pulling it now means your first
 > test run starts immediately. Skip it and the app downloads it during your first run
-> instead — that still works, it just makes the first run take several minutes longer.
-> Keep the tag suffix the same as the four in your root `.env`.
+> instead — that still works, it just makes that one run take a couple of minutes
+> (measured: 99s on a cold machine). Keep the tag suffix the same as the four in your
+> root `.env`. It is ~0.5 GB compressed and expands to ~1.9 GB on disk.
 
 Check that the services are healthy:
 

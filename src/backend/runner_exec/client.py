@@ -29,9 +29,9 @@ except Exception:  # pragma: no cover — config may be absent in isolated unit 
 _CONNECT_TIMEOUT_S = 5
 _QUICK_READ_TIMEOUT_S = 30           # status/cleanup — calls that answer immediately
 # ensure-image provisions the runner image. On a first run the image is absent and
-# this call downloads ~1.9 GB, which measured ~94s even with most layers already
-# cached locally. Under the 30s quick budget it always timed out and the caller
-# reported "runner-exec unreachable" — a network error for what is really a
+# this call downloads it (~0.5 GB compressed, ~1.9 GB extracted), measured at 99s
+# end-to-end on a cold machine. Under the 30s quick budget it always timed out and
+# the caller reported "runner-exec unreachable" — a network error for what is really a
 # download in progress. The pull keeps running and the next attempt succeeds, so
 # the only effect was failing every new user's first "Run Test". 15 minutes covers
 # a cold pull on a slow connection. (rebuild-image may also BUILD from source, which

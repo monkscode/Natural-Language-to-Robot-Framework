@@ -217,7 +217,7 @@ TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
 
 Keep the suffix the same as the other three image tags in that file. Pre-pull it
 with `docker pull monkscode/nlrf:test-runner-develop` so your first run does not
-wait on a ~1.9 GB download.
+wait on the download (~0.5 GB compressed, ~1.9 GB on disk).
 
 ### PREFER_REMOTE_DOCKER_IMAGE
 
