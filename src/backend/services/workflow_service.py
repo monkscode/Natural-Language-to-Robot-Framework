@@ -1214,8 +1214,15 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # no longer touches Docker. ensure_image is required — if it raises
         # (executor unreachable / image build failed) the except below converts
         # it to an execution-error event, since there is no image to run on.
+        # Announce BEFORE ensure_image, not after. On a first run this call pulls
+        # the runner image and returns only when it is on disk — measured 98.8s on
+        # a cold machine — and yielding afterwards left the client silent for that
+        # entire wait, which reads as a hang. This also moves the execution stage's
+        # first event ahead of image provisioning, so exec_s now covers it; on a
+        # warm machine ensure_image is a local image lookup, so the difference is
+        # sub-second and the bench is unaffected.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment (on the first run this downloads the test runner image, which can take a few minutes)...'})}\n\n"
         await asyncio.to_thread(runner_exec_client.ensure_image)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
         logging.info(f"🚀 Executing test: {test_filename}")
         result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
@@ -1260,7 +1267,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # report is served only from the originating replica's local staging and
         # 404s on any other replica in an S3 deployment.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': redact_secrets(str(e))})}\n\n"
 
 
 async def stream_generate_only(
