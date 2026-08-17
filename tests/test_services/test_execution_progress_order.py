@@ -88,3 +88,49 @@ class TestProgressPrecedesImageProvisioning:
         messages = [e.get("message", "") for e in _events(captured)
                     if e.get("stage") == "execution"]
         assert any("first run" in m.lower() for m in messages), messages
+
+
+class TestExecutionErrorsAreAlwaysReadable:
+    """An execution error the user cannot read is the failure mode this branch
+    exists to remove — and one that quotes a credential is worse than useless."""
+
+    def test_an_error_with_no_text_still_names_its_cause(self, tmp_path):
+        """Several exception types stringify to '' (a no-arg TimeoutError, a
+        bare DockerException). Forwarding that verbatim shows the client
+        status='error' with nothing to display."""
+        def blank_failure():
+            raise TimeoutError()
+
+        with patch.object(ws.runner_exec_client, "ensure_image", blank_failure), \
+             patch.object(ws, "_set_run_status", lambda *a, **k: None), \
+             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None):
+            store = ws.get_artifact_store()
+            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+                captured = _drain(
+                    ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
+
+        errors = [e for e in _events(captured) if e.get("status") == "error"]
+        assert errors, "no error event was emitted"
+        assert errors[-1]["message"].strip(), "error event carried an empty message"
+        assert "TimeoutError" in errors[-1]["message"]
+
+    def test_a_failed_test_file_write_does_not_echo_a_credential(self, tmp_path):
+        """The save-failure branch is the one client-facing error message the
+        redaction pass missed; every other one goes through redact_secrets."""
+        key = "AIzaSy" + "D" * 33
+
+        def leaky_open(*_a, **_kw):
+            raise OSError(f"cannot write /run/secrets/env?key={key}")
+
+        with patch.object(ws, "_set_run_status", lambda *a, **k: None), \
+             patch.object(ws, "_safe_evict_hint_metadata", lambda *a, **k: None), \
+             patch("builtins.open", leaky_open):
+            store = ws.get_artifact_store()
+            with patch.object(type(store), "run_dir", lambda self, rid, create=False: tmp_path):
+                captured = _drain(
+                    ws._stream_docker_execution("run-1", "*** Test Cases ***", None, lambda: None))
+
+        errors = [e for e in _events(captured) if e.get("status") == "error"]
+        assert errors, "no error event was emitted"
+        assert key not in errors[-1]["message"]
+        assert "[REDACTED]" in errors[-1]["message"]

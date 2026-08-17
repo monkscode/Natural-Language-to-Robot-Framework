@@ -120,6 +120,48 @@ class TestSerialisation:
 
         assert not overlapped, "the provisioning lock was free during an active pull"
 
+    def test_rebuild_waits_for_a_pull_in_flight(self):
+        """rebuild_image is the third writer of IMAGE_TAG and must queue behind
+        the other two.
+
+        Unguarded it overlaps a warm-up: rebuild removes IMAGE_TAG and builds it
+        from source, then the pull that was already running finishes and tags the
+        registry image as IMAGE_TAG — silently discarding the admin's rebuild.
+        """
+        started = threading.Event()
+        release = threading.Event()
+        rebuild_touched_the_image = threading.Event()
+
+        def slow_pull(*_a, **_kw):
+            started.set()
+            release.wait(timeout=5)
+            return [{"status": "done"}]
+
+        client = MagicMock()
+        client.images.get.side_effect = (
+            lambda *_a, **_kw: (_ for _ in ()).throw(docker.errors.ImageNotFound("absent")))
+        client.api.pull.side_effect = slow_pull
+        client.images.remove.side_effect = lambda *_a, **_kw: rebuild_touched_the_image.set()
+
+        def warm():
+            with patch.object(ds, "PREFER_REMOTE_IMAGE", True):
+                ds.warm_image_cache(client)
+
+        t = threading.Thread(target=warm, daemon=True)
+        t.start()
+        assert started.wait(timeout=5), "warm-up never began pulling"
+
+        r = threading.Thread(target=lambda: ds.rebuild_image(client), daemon=True)
+        r.start()
+        assert not rebuild_touched_the_image.wait(timeout=0.3), (
+            "rebuild removed the image while a pull was still in flight; the pull "
+            "will re-tag over the rebuilt image when it completes")
+
+        release.set()
+        t.join(timeout=5)
+        r.join(timeout=5)
+        assert rebuild_touched_the_image.is_set(), "rebuild never ran after the lock freed"
+
 
 class TestStartupHook:
     def test_startup_thread_is_a_daemon_and_does_not_block(self):

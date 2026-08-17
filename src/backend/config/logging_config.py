@@ -140,8 +140,10 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    # Last: the third-party handlers this must cover are created when those
-    # libraries are imported, which has already happened by the time we get here.
+    # Last, so the root handlers configured above are all in place to be filtered.
+    # The third-party loggers are a different case: main.py calls setup_logging()
+    # before litellm is imported, so its handler does not exist yet — see
+    # _install_secret_redaction for why the filter goes on the logger there.
     _install_secret_redaction()
 
 

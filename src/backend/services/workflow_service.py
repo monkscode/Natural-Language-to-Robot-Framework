@@ -1206,7 +1206,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
         await asyncio.to_thread(_set_run_status, run_id, "error")
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {redact_secrets(str(e))}'})}\n\n"
         return
 
     try:
@@ -1267,7 +1267,12 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # report is served only from the originating replica's local staging and
         # 404s on any other replica in an S3 deployment.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': redact_secrets(str(e))})}\n\n"
+        # Unlike its siblings above, this message has no prefix — so an exception
+        # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
+        # would leave the client with status='error' and nothing to show, and the
+        # log line above as the only record of the cause. Name the type instead.
+        detail = redact_secrets(str(e)) or type(e).__name__
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': detail})}\n\n"
 
 
 async def stream_generate_only(

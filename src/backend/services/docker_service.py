@@ -180,9 +180,10 @@ def get_docker_client():
 
 # Serialises image provisioning so a boot-time warm-up and a Run Test click never
 # start two pulls of the same ~0.5 GB image. Whichever arrives second waits, then
-# finds the image already present and returns immediately. Held only by callers
-# that fully consume build_image (the ensure-image endpoint) or by warm_image_cache
-# — never inside the generator itself, where an abandoned consumer would leak it.
+# finds the image already present and returns immediately. Held by every writer of
+# IMAGE_TAG: warm_image_cache, rebuild_image, and callers that fully consume
+# build_image (the ensure-image endpoint) — never inside the generator itself,
+# where an abandoned consumer would leak it.
 IMAGE_PROVISION_LOCK = threading.Lock()
 
 
@@ -753,19 +754,27 @@ def cleanup_test_containers(client: docker.DockerClient) -> dict[str, Any]:
 
 
 def rebuild_image(client: docker.DockerClient) -> dict[str, str]:
-    try:
+    # Third writer of IMAGE_TAG, so it takes the same lock as warm_image_cache and
+    # the ensure-image endpoint. Unguarded it interleaves: rebuild removes the tag
+    # and builds from source while a pull is already in flight, and whichever
+    # finishes last wins — an admin's rebuild silently replaced by the registry
+    # image, or vice versa. The remove and the build are one operation and the lock
+    # spans both. rebuild-image's read timeout is the execution-length budget, which
+    # covers waiting out a 15-minute pull.
+    with IMAGE_PROVISION_LOCK:
         try:
-            client.images.remove(image=IMAGE_TAG, force=True)
-            logging.info(f"Removed existing Docker image '{IMAGE_TAG}'.")
-        except docker.errors.ImageNotFound:
-            logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
+            try:
+                client.images.remove(image=IMAGE_TAG, force=True)
+                logging.info(f"Removed existing Docker image '{IMAGE_TAG}'.")
+            except docker.errors.ImageNotFound:
+                logging.info(f"No existing Docker image '{IMAGE_TAG}' to remove.")
 
-        client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
-        logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
-        return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
-    except docker.errors.DockerException as e:
-        logging.error(f"Failed to rebuild Docker image: {e}")
-        raise ConnectionError(f"Docker error: {e}")
+            client.images.build(path=DOCKERFILE_PATH, dockerfile='Dockerfile.test-runner', tag=IMAGE_TAG, rm=True)
+            logging.info(f"Successfully rebuilt Docker image '{IMAGE_TAG}'.")
+            return {"status": "success", "message": f"Docker image '{IMAGE_TAG}' rebuilt successfully."}
+        except docker.errors.DockerException as e:
+            logging.error(f"Failed to rebuild Docker image: {e}")
+            raise ConnectionError(f"Docker error: {e}")
 
 
 def get_docker_status(client: docker.DockerClient) -> dict[str, Any]:
