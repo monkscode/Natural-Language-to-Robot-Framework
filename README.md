@@ -114,24 +114,13 @@ ONLINE_MODEL=gemini-2.5-flash
 ADMIN_EMAILS=you@example.com
 ```
 
-You must also replace the placeholder **`JWT_SECRET_KEY`**. It ships as
-`change-me-in-production`, and the app **refuses to start** with that value — the
-`fastapi` container exits at startup with
-`RuntimeError: JWT_SECRET_KEY is unset or still the placeholder`. Generate one using an
-image you have already pulled, so this needs no Python on your machine:
+Those three — project, location and admin email — are the only values you must change;
+everything below is background on what they mean.
 
-```bash
-docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
-
-Paste the output into `src/backend/.env`:
-
-```env
-JWT_SECRET_KEY=<the generated value>
-```
-
-Those four are the only values you must change; everything below is background on what
-they mean.
+- **`JWT_SECRET_KEY`** — leave it alone. It ships commented out, and on first start the
+  app generates a strong random secret and stores it in `data/jwt_secret`, so you stay
+  signed in across restarts. Delete that file and everyone is signed out. Production is
+  different — see the hardening note at the end of this section.
 
 - **`ADMIN_EMAILS`** — set this **before the first start**. Mark 1 is approval-gated:
   a new signup lands `pending` and sees an Access Gate rather than the Generate page.
@@ -231,7 +220,7 @@ Generated Test
 
 > 🔒 **Deploying to production?** The defaults are tuned for local use. Before exposing Mark 1 publicly:
 >
-> - Set a strong `JWT_SECRET_KEY`, `COOKIE_SECURE=true`, and `ENVIRONMENT=production` in `src/backend/.env`.
+> - Set `ENVIRONMENT=production` and `COOKIE_SECURE=true` in `src/backend/.env`, and set `JWT_SECRET_KEY` **explicitly**. Production never uses the auto-generated `data/jwt_secret` — inject the secret from your environment or secret manager, or the app refuses to start. To keep everyone signed in across the switch, copy the value out of `data/jwt_secret` first.
 > - **Drop the `credentials.json` key file.** The Quick Start's JSON key is a local-development shortcut. In production use [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation), an attached service account / ADC (Cloud Run, GKE, GCE), or short-lived credentials injected by your secret manager — none of which leave a long-lived key on disk.
 > - If you must ship a key, scope it to `roles/aiplatform.user` only, mount it read-only, and put it on a rotation schedule with a documented revocation path (see step 2 above).
 >
