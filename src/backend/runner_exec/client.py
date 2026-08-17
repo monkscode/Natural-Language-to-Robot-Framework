@@ -27,7 +27,16 @@ except Exception:  # pragma: no cover — config may be absent in isolated unit 
     _BASE_URL = "http://127.0.0.1:4998"  # NOSONAR — internal Docker network, no TLS needed
 
 _CONNECT_TIMEOUT_S = 5
-_QUICK_READ_TIMEOUT_S = 30           # status/cleanup/ensure-image (rebuild uses the long timeout)
+_QUICK_READ_TIMEOUT_S = 30           # status/cleanup — calls that answer immediately
+# ensure-image provisions the runner image. On a first run the image is absent and
+# this call downloads ~1.9 GB, which measured ~94s even with most layers already
+# cached locally. Under the 30s quick budget it always timed out and the caller
+# reported "runner-exec unreachable" — a network error for what is really a
+# download in progress. The pull keeps running and the next attempt succeeds, so
+# the only effect was failing every new user's first "Run Test". 15 minutes covers
+# a cold pull on a slow connection. (rebuild-image may also BUILD from source, which
+# can run longer still, so it keeps the execution-length budget.)
+_IMAGE_PROVISION_READ_TIMEOUT_S = 900
 # The /execute call blocks for the WHOLE test. Derive the read timeout from the
 # container's own wait cap so raising TEST_EXECUTION_TIMEOUT can never make the
 # HTTP read time out first (which would wrongly trip the breaker). +60s margin
@@ -127,7 +136,7 @@ def _call(method: str, path: str, *, read_timeout: int, json_body: dict | None =
 
 
 def ensure_image() -> dict:
-    return _call("POST", "/ensure-image", read_timeout=_QUICK_READ_TIMEOUT_S)
+    return _call("POST", "/ensure-image", read_timeout=_IMAGE_PROVISION_READ_TIMEOUT_S)
 
 
 def execute(run_id: str, test_filename: str) -> dict:

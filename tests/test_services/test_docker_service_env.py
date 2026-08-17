@@ -93,3 +93,35 @@ class TestImportTimeEnvReads:
                 tmp_path, monkeypatch, ["UNRELATED=1"]) as ds_mod:
             assert "\n" not in ds_mod.REMOTE_IMAGE
             assert ds_mod.REMOTE_IMAGE == "monkscode/nlrf:test-runner-latest"
+
+    def test_remote_image_follows_the_configured_runner_tag(
+            self, tmp_path, monkeypatch):
+        # The pulled image is tagged locally AS IMAGE_TAG, so a REMOTE_IMAGE that
+        # does not match silently substitutes different content under the name the
+        # user configured. Shipping -latest as the remote default meant a user who
+        # set the tag to -develop (as the README instructs) got the main-branch
+        # image labelled -develop. With no explicit override, remote must track the
+        # tag the user actually asked for.
+        with _fresh_import_with_env_file(
+                tmp_path, monkeypatch,
+                ["TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop"]) as ds_mod:
+            assert ds_mod.REMOTE_IMAGE == "monkscode/nlrf:test-runner-develop"
+            assert ds_mod.REMOTE_IMAGE == ds_mod.IMAGE_TAG
+
+    def test_explicit_remote_image_still_wins(self, tmp_path, monkeypatch):
+        # Pointing at a private mirror or a pinned build stays supported.
+        with _fresh_import_with_env_file(
+                tmp_path, monkeypatch,
+                ["TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop",
+                 "REMOTE_DOCKER_IMAGE=my-registry.internal/runner:pinned"]) as ds_mod:
+            assert ds_mod.REMOTE_IMAGE == "my-registry.internal/runner:pinned"
+
+    def test_blank_remote_image_falls_back_to_the_runner_tag(
+            self, tmp_path, monkeypatch):
+        # .env.example ships the key commented out, but a user who uncomments it and
+        # leaves it empty must not end up pulling the literal empty string.
+        with _fresh_import_with_env_file(
+                tmp_path, monkeypatch,
+                ["TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop",
+                 "REMOTE_DOCKER_IMAGE="]) as ds_mod:
+            assert ds_mod.REMOTE_IMAGE == "monkscode/nlrf:test-runner-develop"

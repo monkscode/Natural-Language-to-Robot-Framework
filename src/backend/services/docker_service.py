@@ -17,9 +17,19 @@ from typing import Any
 from src.backend.core import config as _config  # noqa: F401
 
 # Test runner image - can be overridden by TEST_RUNNER_IMAGE_TAG env var
-IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', 'robot-test-runner:latest')
-# Default remote image - fallback if local image not found
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', 'monkscode/nlrf:test-runner-latest')
+_DEFAULT_LOCAL_IMAGE_TAG = 'robot-test-runner:latest'
+_DEFAULT_REMOTE_IMAGE = 'monkscode/nlrf:test-runner-latest'
+IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', _DEFAULT_LOCAL_IMAGE_TAG)
+# Remote image pulled when IMAGE_TAG is missing locally. The pulled image is then
+# tagged AS IMAGE_TAG, so these two must name the same build — otherwise the user's
+# configured tag silently holds different content. Hard-coding the published
+# -latest default did exactly that: a user following the README and setting
+# TEST_RUNNER_IMAGE_TAG=...-develop received the main-branch image under the
+# -develop name. Track IMAGE_TAG unless the operator names a mirror explicitly.
+# IMAGE_TAG's own default is a local-only name with no registry, so that case
+# keeps the published image as the pull source.
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE') or (
+    _DEFAULT_REMOTE_IMAGE if IMAGE_TAG == _DEFAULT_LOCAL_IMAGE_TAG else IMAGE_TAG)
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'
 # Maximum seconds to wait for a test container to finish (default: 30 minutes)
