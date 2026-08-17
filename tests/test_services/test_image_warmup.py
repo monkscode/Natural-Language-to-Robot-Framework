@@ -162,6 +162,29 @@ class TestSerialisation:
         r.join(timeout=5)
         assert rebuild_touched_the_image.is_set(), "rebuild never ran after the lock freed"
 
+    def test_the_ensure_image_endpoint_holds_the_lock(self):
+        """The test above exercises the lock object directly; this one goes through
+        the HTTP handler, which is the caller a Run Test click actually reaches."""
+        from fastapi.testclient import TestClient
+        from src.backend.runner_exec import app as runner_app
+
+        held = []
+
+        def fake_build_image(_client):
+            held.append(ds.IMAGE_PROVISION_LOCK.locked())
+            yield {"status": "running"}
+
+        with patch.object(runner_app, "get_docker_client", return_value=MagicMock()), \
+             patch.object(runner_app, "build_image", fake_build_image):
+            # No context manager: entering it would run lifespan and spawn a real
+            # warm-up thread against the patched client.
+            resp = TestClient(runner_app.app).post("/ensure-image")
+
+        assert resp.status_code == 200
+        assert held == [True], (
+            "ensure-image consumed build_image without holding IMAGE_PROVISION_LOCK; "
+            "a Run Test click would start a second pull alongside the warm-up")
+
 
 class TestStartupHook:
     def test_startup_thread_is_a_daemon_and_does_not_block(self):
@@ -199,6 +222,35 @@ class TestStartupHook:
             runner_app._start_image_warmup()
 
         assert not spawned, "RUNNER_IMAGE_WARMUP=false must skip the warm-up entirely"
+
+    def test_lifespan_is_what_actually_starts_the_warmup(self):
+        """The two tests above call `_start_image_warmup` directly, so nothing
+        asserted it is reachable from FastAPI startup.
+
+        Measured 2026-08-17: deleting the call from `lifespan` — removing this
+        branch's headline feature outright — left 236 tests passing. The service
+        stays healthy and every endpoint still answers, so the loss is silent.
+        This asserts the wiring, not the function.
+        """
+        from fastapi.testclient import TestClient
+        from src.backend.runner_exec import app as runner_app
+
+        with patch.object(runner_app, "_start_image_warmup") as start:
+            with TestClient(runner_app.app):  # entering the context runs lifespan
+                pass
+
+        start.assert_called_once()
+
+    def test_docker_being_down_at_boot_does_not_escalate(self):
+        """`_warm_image_background` is the thread target, so an exception escaping
+        it is an unhandled error on a thread nobody is watching. `get_docker_client`
+        raises ConnectionError when the socket is not up yet, which at container
+        boot is the ordinary case, not the exotic one."""
+        from src.backend.runner_exec import app as runner_app
+
+        with patch.object(runner_app, "get_docker_client",
+                          side_effect=ConnectionError("docker socket not ready")):
+            runner_app._warm_image_background()  # must return, not raise
 
 
 @pytest.fixture(autouse=True)
