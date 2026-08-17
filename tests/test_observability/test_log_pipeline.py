@@ -22,6 +22,13 @@ import yaml
 
 ALLOY_CONFIG = Path("observability/alloy/config.alloy")
 LOKI_CONFIG = Path("observability/loki/loki-config.yml")
+COMPOSE = Path("docker-compose.yml")
+
+# The application services whose logs must reach Loki. runner-exec joined them
+# once it configured logging and bound a workflow_id; before that it was
+# dropped at discovery, which is why a failed image pull at boot left no trace
+# anywhere an operator would look.
+COLLECTED_SERVICES = {"fastapi", "browser-service", "runner-exec"}
 
 # The stages, in the only order that works. json first so a real record wins;
 # regex second so uvicorn's line-start prefix is read only when json found
@@ -77,6 +84,58 @@ def _stage(name: str) -> str:
     spaces, and this has to hold either way.
     """
     return _block(re.escape(name), _process_block(), closing=r"[ \t]+")
+
+
+def _kept_services() -> set[str]:
+    """The service names the relabel `keep` rule admits.
+
+    Matched on the rule that carries `action = "keep"` rather than on the
+    first `regex =` in the block — the container-name rule above it has one
+    too, and reading that one instead would assert nothing about collection.
+    """
+    keep = re.search(r'rule\s*\{[^{}]*action\s*=\s*"keep"[^{}]*\}', _alloy(), re.S)
+    assert keep, "the relabel block has no keep rule; every container is collected"
+    pattern = re.search(r'regex\s*=\s*"([^"]+)"', keep.group(0))
+    assert pattern, "the keep rule has no regex"
+    return set(pattern.group(1).split("|"))
+
+
+def test_every_application_service_is_collected():
+    """A service missing here is invisible in Grafana and looks healthy.
+
+    Nothing reports the omission: Alloy drops the target at discovery, all
+    components stay green, and `docker logs` still shows uvicorn's own output,
+    so the service reads as logging normally. Verified live against the stack
+    before runner-exec was added — /loki/api/v1/label/service/values returned
+    exactly ["browser-service","fastapi"].
+    """
+    kept = _kept_services()
+
+    missing = COLLECTED_SERVICES - kept
+    assert not missing, (
+        f"{sorted(missing)} are dropped at discovery and never reach Loki")
+
+
+def test_every_collected_service_caps_its_docker_log():
+    """Collection and a size cap have to arrive together.
+
+    The cap is on the Docker side, so the file grows whether or not Alloy
+    reads it — but while a service logs nothing, an absent cap is invisible.
+    runner-exec was in exactly that state: the only application service with
+    no `logging:` block, harmless only because it had no logging configured
+    to produce output.
+    """
+    services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+    for name in sorted(COLLECTED_SERVICES):
+        assert name in services, f"{name} is collected by Alloy but absent from compose"
+        options = (services[name].get("logging") or {}).get("options") or {}
+        assert options.get("max-size"), (
+            f"{name} sets no max-size, so its json-file log falls back to the "
+            f"daemon default and grows without bound")
+        assert options.get("max-file"), (
+            f"{name} sets no max-file, so nothing bounds the number of "
+            f"rotated files kept")
 
 
 def test_docker_source_forwards_only_through_the_level_stage():

@@ -36,10 +36,18 @@ discovery.relabel "containers" {
     target_label  = "container"
   }
 
-  // Only the two services that bind workflow_id.
+  // Only the services that bind workflow_id — every other container here
+  // (postgres, frontend, grafana, loki) logs nothing a run query can reach.
+  //
+  // runner-exec joined the list once it configured logging and started binding
+  // the run_id it is handed (src/backend/runner_exec/app.py). Before that it
+  // was dropped right here, which is why a failed image pull at boot left no
+  // trace in Grafana: /loki/api/v1/label/service/values returned exactly
+  // ["browser-service","fastapi"]. Adding a service without a binding would
+  // have been the other half of the same mistake — lines nothing can filter.
   rule {
     source_labels = ["service"]
-    regex         = "fastapi|browser-service"
+    regex         = "fastapi|browser-service|runner-exec"
     action        = "keep"
   }
 }

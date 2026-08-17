@@ -242,13 +242,22 @@ def bind_workflow_context(
 
 
 def clear_workflow_context() -> None:
-    """Drop whatever bind_workflow_context bound.
+    """Drop whatever bind_workflow_context bound. Pair the two on any handler.
 
-    Pair the two on any handler that runs on a REUSED thread. FastAPI's sync
-    endpoints are dispatched to a threadpool, so a binding left behind stamps
-    the next thing that thread logs — another run, a health poll — with the
-    previous run's id. A wrong workflow_id is worse than none: it corrupts the
-    filter the log pipeline exists to serve.
+    This is NOT what isolates one request from the next under Starlette. A sync
+    endpoint is dispatched through anyio, which copies a fresh context per work
+    item and runs the handler inside it (`copy_context()` at
+    anyio/_backends/_asyncio.py:2633, `context.run(func, *args)` at :1033), so
+    a binding already cannot survive to the next request on that thread. Read
+    from the installed source rather than assumed — the earlier claim here was
+    that the threadpool made clearing mandatory, and it does not.
+
+    What the clear buys is independence from the dispatch mechanism: it holds
+    for a direct call, for a background task sharing the caller's context, and
+    for any future change to how endpoints are run. One function call, against
+    a failure — a line stamped with the WRONG workflow_id — that is worse than
+    no stamp, because it silently corrupts the filter the log pipeline exists
+    to serve.
     """
     structlog.contextvars.clear_contextvars()
 

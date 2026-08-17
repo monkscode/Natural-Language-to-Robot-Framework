@@ -15,11 +15,16 @@ runner_exec/validation.py.
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from src.backend.config.logging_config import (
+    bind_workflow_context,
+    clear_workflow_context,
+    setup_logging,
+)
 from src.backend.runner_exec.validation import safe_run_id, safe_test_filename
 from src.backend.services.docker_service import (
     IMAGE_PROVISION_LOCK,
@@ -62,8 +67,44 @@ def _start_image_warmup() -> None:
     ).start()
 
 
+@contextmanager
+def _run_context(run_id: str):
+    """Bind run_id as workflow_id for the duration of one request.
+
+    run_id IS the workflow id — workflow_service normalises it through
+    uuid.UUID before the hop — so binding it here is what lets this service's
+    lines be filtered alongside the rest of the run in Loki. Without it the
+    executor contributes lines that no run query can reach.
+
+    Always cleared on the way out. anyio already gives each sync endpoint a
+    fresh copied context, so that is defence in depth rather than the thing
+    isolating one request from the next — see clear_workflow_context.
+    """
+    bind_workflow_context(run_id)
+    try:
+        yield
+    finally:
+        clear_workflow_context()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # BEFORE the warm-up, which is the thing we want to be able to see. Root
+    # logging is otherwise unconfigured in this process — level WARNING, no
+    # handlers — so warm_image_cache's four INFO outcomes are discarded and
+    # its one WARNING falls through to logging.lastResort as bare, untimestamped
+    # stderr. uvicorn configures its own loggers, which is why the container
+    # still looks like it is logging normally.
+    #
+    # log_dir=None (stdout only) is load-bearing: this container and the API
+    # container share ./logs through a bind mount, and run.sh starts both
+    # processes in one working directory. Alloy scrapes stdout, not the file.
+    #
+    # In lifespan rather than at import, unlike main.py: that module must beat
+    # api/endpoints, which logs while being imported. Nothing here logs at
+    # import time, so the later call site is enough and keeps process-global
+    # logging state untouched by a bare `import`.
+    setup_logging(log_dir=None)
     _start_image_warmup()
     yield
 
@@ -118,26 +159,28 @@ def ensure_image() -> dict:
 def execute(req: ExecuteRequest) -> dict:
     run_id = _validated(req.run_id, safe_run_id)
     test_filename = _validated(req.test_filename, safe_test_filename)
-    client = get_docker_client()
-    try:
-        # run_test_in_container raises RuntimeError only on infra/system failure;
-        # surface its detailed message (which carries the container's stderr) so
-        # the FastAPI side can show it instead of a generic 500.
-        return run_test_in_container(client, run_id, test_filename)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    with _run_context(run_id):
+        client = get_docker_client()
+        try:
+            # run_test_in_container raises RuntimeError only on infra/system failure;
+            # surface its detailed message (which carries the container's stderr) so
+            # the FastAPI side can show it instead of a generic 500.
+            return run_test_in_container(client, run_id, test_filename)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/dryrun")
 def dryrun(req: DryrunRequest) -> dict:
     run_id = _validated(req.run_id, safe_run_id)
-    client = get_docker_client()
-    try:
-        return run_dryrun_in_container(client, run_id, req.code)
-    except RuntimeError as e:
-        # Infra failure (no output.xml / timeout). FastAPI's validate_and_repair
-        # turns the resulting hop error into dryrun_status='unverified'.
-        raise HTTPException(status_code=500, detail=str(e))
+    with _run_context(run_id):
+        client = get_docker_client()
+        try:
+            return run_dryrun_in_container(client, run_id, req.code)
+        except RuntimeError as e:
+            # Infra failure (no output.xml / timeout). FastAPI's validate_and_repair
+            # turns the resulting hop error into dryrun_status='unverified'.
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/rebuild-image")
