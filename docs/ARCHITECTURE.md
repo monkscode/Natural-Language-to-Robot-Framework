@@ -331,7 +331,9 @@ they are recorded in `test_runs` with status `'error'` and an `error_message`. S
 ## Security Model
 
 - **JWT authentication** on the API (`require_user` / `require_admin`,
-  `src/backend/auth/`); the app refuses to start with a placeholder `JWT_SECRET_KEY`
+  `src/backend/auth/`); with `ENVIRONMENT=production` the app refuses to start
+  without an explicit `JWT_SECRET_KEY`, and in development it generates one into
+  `data/jwt_secret` on first boot
 - **Persistence in PostgreSQL**: auth/users, learning store, LLM traces, workflow
   metrics (the system is NOT stateless)
 - Docker isolation for test execution
@@ -543,8 +545,9 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 
 ### Security Considerations
 
-1. **API authentication**: JWT (`require_user`/`require_admin`); startup fails
-   on placeholder `JWT_SECRET_KEY`.
+1. **API authentication**: JWT (`require_user`/`require_admin`); production
+   startup fails without an explicit `JWT_SECRET_KEY`, development provisions
+   one into `data/jwt_secret`.
 2. **API key isolation**: provider credentials live in `.env` / service-account
    files, never hardcoded.
 3. **Docker isolation**: each test runs in a clean, isolated container.
