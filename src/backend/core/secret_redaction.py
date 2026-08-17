@@ -32,8 +32,19 @@ _GOOGLE_API_KEY = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
 # key=/api_key=/access_token= as a URL query param, a bare assignment, or a JSON
 # field (where the name itself is quoted). Stops at the first delimiter so the rest
 # of the URL or object stays readable.
+#
+# Two tiers, because a single loose "key" alternative over-redacts badly: this
+# codebase logs cache_key, hint_key and pattern_key, and even "monkey=5" matched,
+# masking the diagnostics the log exists for. Names that are credentials whatever
+# precedes them match anywhere; a bare key/token must be a standalone word, which
+# the lookbehind enforces.
+_CREDENTIAL_NAME = (
+    r"""(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token"""
+    r"""|client[_-]?secret|password|passwd|secret"""
+    r"""|(?<![A-Za-z0-9_])(?:key|token))"""
+)
 _QUERY_SECRET = re.compile(
-    r"""(["']?(?:api[_-]?key|key|access[_-]?token|token)["']?\s*[=:]\s*)"""
+    rf"""(["']?{_CREDENTIAL_NAME}["']?\s*[=:]\s*)"""
     r"""("[^"]*"|'[^']*'|[^\s&"',}]+)""",
     re.IGNORECASE,
 )

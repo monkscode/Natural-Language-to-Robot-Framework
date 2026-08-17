@@ -76,6 +76,43 @@ class TestRecognisedMisconfigurations:
         assert "rate" in msg.lower() or "quota" in msg.lower()
 
 
+class TestDoesNotMisdiagnose:
+    """A wrong instruction is worse than a raw error — it sends the user to fix
+    something that was never broken. These are all shapes that a substring match
+    on '429' or 'permission denied' would have mislabelled."""
+
+    @pytest.mark.parametrize("raw", [
+        "Workflow 429abc-def failed to assemble code",
+        "completion_tokens=4290 exceeded budget",
+        "Run id 8996de27-429f-4b92 produced no output.xml",
+    ])
+    def test_a_bare_429_substring_is_not_a_rate_limit(self, raw):
+        assert friendly_setup_error(Exception(raw)) is None
+
+    @pytest.mark.parametrize("raw", [
+        "PermissionError: [Errno 13] Permission denied: '/app/robot_tests/run-1'",
+        "docker: permission denied while trying to connect to the Docker daemon socket",
+    ])
+    def test_filesystem_permission_errors_are_not_vertex_iam(self, raw):
+        # A Linux bind-mount ownership problem is common and has nothing to do
+        # with roles/aiplatform.user.
+        assert friendly_setup_error(Exception(raw)) is None
+
+    def test_a_real_vertex_permission_error_is_still_caught(self):
+        raw = ('VertexAIException - {"error": {"code": 403, "message": "Permission '
+               '\'aiplatform.endpoints.predict\' denied", "status": "PERMISSION_DENIED"}}')
+        msg = friendly_setup_error(Exception(raw))
+        assert msg is not None
+        assert "aiplatform.user" in msg
+
+    def test_a_real_rate_limit_is_still_caught(self):
+        for raw in ("litellm.RateLimitError: 429 Resource exhausted",
+                    'VertexAIException - {"code": 429, "status": "RESOURCE_EXHAUSTED"}'):
+            msg = friendly_setup_error(Exception(raw))
+            assert msg is not None, raw
+            assert "rate" in msg.lower() or "quota" in msg.lower()
+
+
 class TestPassthrough:
     @pytest.mark.parametrize("raw", [
         "Failed to generate valid Robot Framework code: unexpected token",

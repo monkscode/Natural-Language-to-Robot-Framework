@@ -28,7 +28,7 @@ IMAGE_TAG = os.getenv('TEST_RUNNER_IMAGE_TAG', _DEFAULT_LOCAL_IMAGE_TAG)
 # -develop name. Track IMAGE_TAG unless the operator names a mirror explicitly.
 # IMAGE_TAG's own default is a local-only name with no registry, so that case
 # keeps the published image as the pull source.
-REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE') or (
+REMOTE_IMAGE = os.getenv('REMOTE_DOCKER_IMAGE', '').strip() or (
     _DEFAULT_REMOTE_IMAGE if IMAGE_TAG == _DEFAULT_LOCAL_IMAGE_TAG else IMAGE_TAG)
 # Whether to prefer remote images - can be overridden by PREFER_REMOTE_DOCKER_IMAGE env var
 PREFER_REMOTE_IMAGE = os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false').lower() == 'true'

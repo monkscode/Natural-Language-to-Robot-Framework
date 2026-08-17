@@ -58,6 +58,30 @@ class TestRedactSecrets:
         assert "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQ" not in out
         assert "failed to load" in out
 
+    @pytest.mark.parametrize("line", [
+        "cache_key=abc123 lookup hit",
+        "hint_key: kw_search_v2",
+        "the monkey=5 counter",
+        "idempotency_key=run-42",
+        "pattern_key: browser.click",
+        "prompt_tokens=1523 completion_tokens=88",
+    ])
+    def test_does_not_eat_non_secret_identifiers(self, line):
+        """Over-redaction is its own outage: this codebase logs cache/hint/pattern
+        keys, and masking them removes the diagnostics the log exists for. A bare
+        'key'/'token' only counts when it is a standalone word."""
+        assert redact_secrets(line) == line
+
+    @pytest.mark.parametrize("line", [
+        "x_api_key=REALSECRET0000",
+        "client_secret=REALSECRET0000",
+        "refresh_token=REALSECRET0000",
+    ])
+    def test_still_masks_prefixed_credential_names(self, line):
+        # The narrowing must not create a hole: names that are credentials
+        # regardless of prefix stay covered.
+        assert "REALSECRET0000" not in redact_secrets(line)
+
     def test_leaves_clean_text_untouched(self):
         clean = "Unable to load vertex credentials from environment. Got=/app/credentials.json"
         assert redact_secrets(clean) == clean
