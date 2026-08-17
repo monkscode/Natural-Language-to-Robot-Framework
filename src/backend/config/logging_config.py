@@ -57,7 +57,12 @@ def _install_secret_redaction() -> None:
 # through. Over the five days Loki held, uvicorn's access channel carried
 # 6,408 lines against a healthcheck rate of 1,440 a day, so that channel is
 # health polls and little else. They crowd out the lines that carry something.
-_HEALTH_CHECK_PATHS = frozenset({"/health"})
+#
+# One path, not a set: /health is the only endpoint anything polls. FastAPI's
+# /api/health is never called on a timer, and the browser service is Flask, so
+# this filter does not reach it. A set would be anticipating a second path that
+# does not exist.
+_HEALTH_CHECK_PATH = "/health"
 
 # uvicorn logs an access line as
 #   '%s - "%s %s HTTP/%s" %d' % (client_addr, method, path, http_version, status)
@@ -89,7 +94,7 @@ class HealthCheckAccessFilter(logging.Filter):
         if not isinstance(path, str):
             return True
         # Compared whole, not by prefix — /healthz belongs to somebody else.
-        return path.split("?", 1)[0] not in _HEALTH_CHECK_PATHS
+        return path.split("?", 1)[0] != _HEALTH_CHECK_PATH
 
 
 def _install_health_check_filter() -> None:
