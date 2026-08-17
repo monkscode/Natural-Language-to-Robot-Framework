@@ -37,14 +37,21 @@ Describe what you want to test, and Mark 1's AI agents generate a working
 
 ## 🚀 Quick Start (Docker)
 
-You only need **two** things:
+You need **three** things — all free, and none of them Python or Node:
 
 | Requirement | Get it |
 |---|---|
 | 🐳 **Docker Desktop** (running) | [Download](https://www.docker.com/products/docker-desktop/) — Linux: [Engine](https://docs.docker.com/engine/install/) + [Compose](https://docs.docker.com/compose/install/) |
+| ☁️ **gcloud CLI** | [Install](https://cloud.google.com/sdk/docs/install) — used once, in step 2, to mint your key. The setup script waits for you if it isn't installed yet. |
 | 🔑 **Google Vertex AI service account key** (`credentials.json`) | Created in step 2 below — full walkthrough in the [Vertex AI Setup Guide](docs/VERTEX_AI_SETUP_GUIDE.md) |
 
 No Python. No Node.js. No manual dependency installs.
+
+> 🪟 **On Windows, run the commands in this guide from Git Bash**, not PowerShell or
+> CMD. The setup script is a bash script, and `cp` is not a Windows command. Git Bash
+> ships with [Git for Windows](https://gitforwindows.org/). WSL works too.
+
+⏱️ **Budget ~15 minutes end to end**, most of it image downloads that run unattended.
 
 ### 1. Clone the repo
 
@@ -136,11 +143,19 @@ Everything else has sensible defaults. The database, internal service URLs, and 
 ### 4. Start everything
 
 ```bash
-docker compose pull      # first time only — downloads the images (~2–5 min)
+docker compose pull                                   # the services (~2–5 min)
+docker pull monkscode/nlrf:test-runner-develop        # the test runner (~1.9 GB)
 docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
 ```
 
 The extra `-f docker-compose.vertex.yml` mounts your `credentials.json` into the containers and tells the app where to find it (see [§6 of the setup guide](docs/VERTEX_AI_SETUP_GUIDE.md#6-using-the-json-key-in-docker)) — include it whenever you start the app.
+
+> 📦 **Why the second `docker pull`?** Your tests execute in a throwaway `test-runner`
+> container that the app launches on demand, so it is deliberately not a Compose
+> service and `docker compose pull` does not fetch it. Pulling it now means your first
+> test run starts immediately. Skip it and the app downloads it during your first run
+> instead — that still works, it just makes the first run take several minutes longer.
+> Keep the tag suffix the same as the four in your root `.env`.
 
 Check that the services are healthy:
 
@@ -163,8 +178,16 @@ Then:
    ```text
    Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
-2. Click **Generate & Run** and watch the agents work. ✨
-3. View the generated `.robot` code, live progress, and the HTML report right in the UI.
+2. Click **Generate Test** and watch the agents work — planning, finding the real
+   elements on the live page, then writing the code. Takes ~20–30 seconds. ✨
+3. The generated `.robot` code appears on the right, and it's editable. Click
+   **Run Test** to execute it in a clean container.
+4. When it finishes, open **View Report** or **Detailed Log** for the full
+   step-by-step HTML report.
+
+> **Generating and running are two separate clicks.** That's deliberate — you get to
+> read (and edit) the generated code before anything executes. Already have a `.robot`
+> file? Paste it straight into the code panel and click **Run Test**; no description needed.
 
 > **Pro tip:** Be specific about elements — "first product name" or "search button in the header" beats vague phrasing. Another query to try: `Go to Wikipedia and search for Agentic AI`.
 
@@ -193,28 +216,31 @@ Want the deep dive? See the [Architecture Documentation](docs/ARCHITECTURE.md).
 Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
 ```
 
-**Generated test (Browser Library):**
+**Generated test (Browser Library)** — a real, unedited run:
 ```robot
 *** Settings ***
-Library    Browser
+Library    Browser    timeout=30s
 Library    BuiltIn
+Library    Collections
 
 *** Variables ***
 ${browser}    chromium
 ${headless}    True
-${url}    https://github.com/monkscode
-${pinned_project_name_locator}    id=892238219
+${pinned_project_name_locator}    id=880667900
 
 *** Test Cases ***
-Generated Test
-    [Documentation]    Auto-generated test case
+Generated Test Case
     New Browser    ${browser}    headless=${headless}
     New Context    viewport={'width': 1920, 'height': 1080}
-    New Page    ${url}
+    New Page    https://github.com/monkscode
     ${pinned_project_name}=    Get Text    ${pinned_project_name_locator}
-    Log    Retrieved Pinned project name: ${pinned_project_name}
     Close Browser
 ```
+
+The retrieved value is recorded in the run's `log.html` — Robot Framework logs every
+variable assignment, so the report for this test shows
+`${pinned_project_name} = ML-practice` under the `Get Text` step. Exact locators and
+variable names vary per run, because they are discovered on the live page.
 
 ---
 
