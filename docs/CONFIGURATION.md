@@ -175,12 +175,20 @@ Example Test
 
 ## Logging Settings
 
-### LOG_LEVEL
+### LOG_LEVEL — NOT WIRED UP
 
-Application logging verbosity.
+**Setting this has no effect.** `setup_logging()` in
+`src/backend/config/logging_config.py` takes the level as a function argument
+defaulting to `"INFO"`, and `src/backend/main.py:20` calls it with no arguments.
+No code reads a `LOG_LEVEL` environment variable. To change the level you must
+pass it at the call site.
+
+`LOG_FORMAT=console` *is* read (`logging_config.py:170`) and does work.
+
+The values below describe the intended levels, not a working switch.
 
 ```env
-LOG_LEVEL=INFO
+LOG_LEVEL=INFO   # inert
 ```
 
 **Options:**
