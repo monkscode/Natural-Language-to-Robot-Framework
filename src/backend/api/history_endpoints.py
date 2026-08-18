@@ -57,6 +57,7 @@ def list_history(
     offset: int = 0,
     status: Optional[Literal["generated", "running", "passed", "failed", "error"]] = None,
     q: Optional[str] = None,
+    group: Optional[str] = None,
     user: dict | None = Depends(require_user),
 ):
     """Role-scoped run history (own runs for users, all runs for admins).
@@ -64,10 +65,21 @@ def list_history(
     status narrows rows, total and pagination to one run status — the History
     tabs page within their own filter instead of the full list. q is a
     server-side substring search (description / owner email / run id) so it
-    spans the whole result set rather than just the loaded page."""
+    spans the whole result set rather than just the loaded page. group narrows
+    to one personal run group (or "ungrouped"), combining with both."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     q = q.strip() if q else None
+
+    # group: a run_groups id (uuid) or the literal "ungrouped". Groups are
+    # personal, so the filter needs no extra authorization: rows are already
+    # scoped below, and filtering your view by someone else's uuid just
+    # yields rows you could see anyway that happen to sit in that group.
+    if group and group != "ungrouped":
+        try:
+            group = str(uuid.UUID(group))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid group id")
 
     admin = is_validated_admin(user)
     # Platform-admin and dev escape hatch (user is None) see all orgs.
@@ -86,7 +98,7 @@ def list_history(
 
     runs, total = get_run_registry().list_runs(
         user_id=scope_user_id, org_id=scope_org_id,
-        limit=limit, offset=offset, status=status, q=q,
+        limit=limit, offset=offset, status=status, q=q, group=group,
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES

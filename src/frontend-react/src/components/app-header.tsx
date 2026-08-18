@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils'
 
 const PAGE_LABELS: Record<string, string> = {
   '/generate':  'Generate',
-  '/history':   'History',
+  '/history':   'Test Runs',
   '/metrics':   'Metrics',
   '/learning':  'Learning',
   '/settings':  'Settings',

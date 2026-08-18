@@ -6,6 +6,7 @@ import { RequireAuth } from '@/auth/guards'
 import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar'
 import { AppSidebar } from '@/components/app-sidebar'
 import { AppHeader } from '@/components/app-header'
+import { RunGroupsProvider } from '@/components/history/RunGroupsContext'
 import GeneratePage from '@/pages/GeneratePage'
 import HistoryPage from '@/pages/HistoryPage'
 import MetricsPage from '@/pages/MetricsPage'
@@ -80,22 +81,28 @@ function KeepAlivePages() {
   )
 }
 
-/** Full app layout: sidebar + topbar + keep-alive page content */
+/** Full app layout: sidebar + topbar + keep-alive page content.
+ *
+ * RunGroupsProvider sits above BOTH the sidebar and the pages: the sidebar's
+ * group quick-access and the Test Runs page filter the same runs, so they read
+ * and write one shared filter instead of two copies that could disagree. */
 function AppLayout() {
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <AppHeader />
-        {/* Page content — SidebarInset provides the responsive padding offset.
-            KeepAlivePages renders the actual pages; the Outlet only carries
-            the index / catch-all redirects (page routes are element={null}). */}
-        <div className="flex flex-1 flex-col p-6 pt-4 overflow-auto">
-          <KeepAlivePages />
-          <Outlet />
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+    <RunGroupsProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <AppHeader />
+          {/* Page content — SidebarInset provides the responsive padding offset.
+              KeepAlivePages renders the actual pages; the Outlet only carries
+              the index / catch-all redirects (page routes are element={null}). */}
+          <div className="flex flex-1 flex-col p-6 pt-4 overflow-auto">
+            <KeepAlivePages />
+            <Outlet />
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    </RunGroupsProvider>
   )
 }
 

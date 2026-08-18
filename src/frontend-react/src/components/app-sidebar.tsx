@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   Sidebar,
@@ -8,8 +8,12 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarRail,
 } from '@/components/ui/sidebar'
 import {
@@ -30,11 +34,14 @@ import {
   LogOut,
   MonitorSmartphone,
   Loader2,
+  ChevronDown,
   ChevronsUpDown,
+  Folder,
   ShieldCheck,
   Users,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
+import { useRunGroups } from '@/components/history/RunGroupsContext'
 
 /* ── Logo mark ── */
 const LogoMark = () => (
@@ -53,11 +60,13 @@ interface NavItem {
   icon: typeof Zap
   admin: boolean
   orgAdmin?: boolean
+  /** Renders the expandable run-group quick-access list under this item. */
+  groups?: boolean
 }
 
 const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
-  { title: 'History', url: '/history', icon: History, admin: false },
+  { title: 'Test Runs', url: '/history', icon: History, admin: false, groups: true },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
   { title: 'Learning', url: '/learning', icon: Brain, admin: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
@@ -168,6 +177,101 @@ function NavUser() {
   )
 }
 
+/* ── Test Runs + its run-group quick access ──
+ *
+ * The row keeps its normal behaviour: the label navigates to the page. The
+ * chevron beside it is a separate control that expands the user's groups, so
+ * jumping straight to one group's runs takes a single click from anywhere in
+ * the app.
+ *
+ * The list is read-only on purpose — creating, renaming and deleting groups
+ * all live on the page itself. A nav sidebar answers "where do I go", and
+ * mixing management controls into it would give those actions two homes.
+ *
+ * The active group comes from RunGroupsContext, the same value the page's chip
+ * row writes, so picking a group here or there always agrees. */
+function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) {
+  const navigate = useNavigate()
+  const { groups, groupFilter, setGroupFilter } = useRunGroups()
+  const [open, setOpen] = useState(false)
+
+  // Reveal the active group the way a file tree opens to the selected file:
+  // when a group is chosen on the PAGE, the sidebar expands to show where you
+  // are. Keyed on the filter alone so a background refresh of the group list
+  // never re-opens a list the user deliberately collapsed.
+  useEffect(() => {
+    if (groupFilter && groupFilter !== 'ungrouped') setOpen(true)
+  }, [groupFilter])
+
+  const subId = 'sidebar-run-groups'
+
+  const pick = (groupId: string) => {
+    setGroupFilter(groupId)
+    // Already on the page? Only the filter changes — no navigation, so the
+    // page keeps its scroll position and open drawer.
+    if (pathname !== item.url) navigate(item.url)
+  }
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
+        <Link to={item.url}>
+          <item.icon />
+          <span>{item.title}</span>
+        </Link>
+      </SidebarMenuButton>
+
+      {/* The chevron shows even with no groups: a user who has never made one
+          would otherwise get no hint anywhere in the nav that groups exist,
+          and they are exactly who needs to find the feature. */}
+      <SidebarMenuAction
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-controls={subId}
+        aria-label={open ? 'Hide groups' : 'Show groups'}
+        title={open ? 'Hide groups' : 'Show groups'}
+      >
+        <ChevronDown
+          className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </SidebarMenuAction>
+
+      {open && (
+        <SidebarMenuSub id={subId} className="max-h-[40vh] overflow-y-auto">
+          {groups.length === 0 ? (
+            // Empty states point somewhere. Naming where groups come from
+            // turns this click into how the feature gets discovered — and it
+            // stays a signpost, not a second place to create them.
+            <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
+              No groups yet — create one on Test Runs.
+            </li>
+          ) : groups.map(g => (
+            <SidebarMenuSubItem key={g.group_id}>
+              <SidebarMenuSubButton
+                asChild
+                size="sm"
+                isActive={groupFilter === g.group_id}
+              >
+                <button
+                  type="button"
+                  onClick={() => pick(g.group_id)}
+                  title={`Show only ${g.name}`}
+                >
+                  <Folder />
+                  <span className="truncate">{g.name}</span>
+                  <span className="ml-auto shrink-0 text-xs tabular-nums text-sidebar-foreground/60">
+                    {g.run_count}
+                  </span>
+                </button>
+              </SidebarMenuSubButton>
+            </SidebarMenuSubItem>
+          ))}
+        </SidebarMenuSub>
+      )}
+    </SidebarMenuItem>
+  )
+}
+
 /* ── Renders one nav group, hiding admin-only items from regular users ── */
 function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
   label: string
@@ -183,14 +287,18 @@ function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
       <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {visible.map(item => (
-          <SidebarMenuItem key={item.title}>
-            <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
-              <Link to={item.url}>
-                <item.icon />
-                <span>{item.title}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          item.groups ? (
+            <GroupsNavItem key={item.title} item={item} pathname={pathname} />
+          ) : (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
+                <Link to={item.url}>
+                  <item.icon />
+                  <span>{item.title}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )
         ))}
       </SidebarMenu>
     </SidebarGroup>
