@@ -62,8 +62,9 @@ coverage/
 # would be untracked but NOT ignored, and `git add -A` would sweep it in.
 .superpowers/
 
-# Superseded working docs, moved out of the way 2026-08-18. Readable on
-# request; never authoritative. See docs/_archive/README.md.
+# Local-only attic for superseded working docs (added 2026-08-18). Never
+# committed, so this path is empty on a fresh clone; it exists so the owner's
+# machine keeps old plans readable without them reaching git or the image.
 docs/_archive/
 # Owner rule: plans and specs live on disk only, never committed. Enforced here
 # so `git add -A` cannot sweep them in. docs/superpowers/acceptance/ is

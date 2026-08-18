@@ -41,7 +41,7 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 ### Configuration
 - [Environment Variables](CONFIGURATION.md#environment-variables)
 - [AI Model Setup](CONFIGURATION.md#core-settings)
-- [Robot Framework Library Selection](CONFIGURATION.md#robot_library) - **Browser vs Selenium**
+- [Robot Framework Library Selection](CONFIGURATION.md#robot_library) - **Browser only; `selenium` fails at startup**
 - [Docker Configuration](CONFIGURATION.md#docker-settings)
 - [Security Best Practices](CONFIGURATION.md#security-best-practices)
 
