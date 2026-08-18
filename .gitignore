@@ -56,7 +56,14 @@ src/backend/requirements.txt
 node_modules/
 coverage/
 
-docs/tasks/
+# SDD session ledgers. Were protected only by .superpowers/sdd/.gitignore ('*'),
+# which moved into the archive on 2026-08-18 — without this rule a fresh SDD run
+# would be untracked but NOT ignored, and `git add -A` would sweep it in.
+.superpowers/
+
+# Superseded working docs, moved out of the way 2026-08-18. Readable on
+# request; never authoritative. See docs/_archive/README.md.
+docs/_archive/
 # Owner rule: plans and specs live on disk only, never committed. Enforced here
 # so `git add -A` cannot sweep them in. docs/superpowers/acceptance/ is
 # deliberately NOT ignored — it is tracked.
@@ -67,11 +74,9 @@ docs/superpowers/specs/
 # so this covers direct children only and leaves acceptance/ tracked.
 docs/superpowers/*.md
 .agents/workflows/development-workflow.md
-tasks/*
 logs/crewai.log.txt
 CLAUDE.md
 credentials.json
-FuturePlans/*
 
 tests/test_clients/
 clients/integrity/*

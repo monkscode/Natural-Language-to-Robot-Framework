@@ -13,7 +13,8 @@ combining user query intent with generated code structure to catch
 structural logic failures (e.g., missing FOR loop) that regex can't detect.
 
 Design doc reference: Section 7 (Component 2)
-Failure taxonomy: docs/tasks/shared/FAILURE_TAXONOMY.md
+Failure taxonomy: docs/_archive/2026-08-18/docs/tasks/shared/FAILURE_TAXONOMY.md
+                  (archived; historical reference only)
 Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor.
 """
 

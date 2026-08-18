@@ -15,7 +15,6 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 
 ### Advanced Topics
 - **[Architecture](ARCHITECTURE.md)** - How Mark 1 works under the hood
-- **[Roadmap](ROADMAP.md)** - Future features and development plans
 
 ### Contributing
 - **[Contributing Guide](../CONTRIBUTING.md)** - Help improve Mark 1
@@ -35,8 +34,7 @@ Welcome to the Mark 1 documentation! Find everything you need to get started and
 
 **Want to Contribute?**
 1. Read [Contributing Guide](../CONTRIBUTING.md)
-2. Check the [Roadmap](ROADMAP.md) for planned features
-3. Join [GitHub Discussions](https://github.com/monkscode/Natural-Language-to-Robot-Framework/discussions)
+2. Join [GitHub Discussions](https://github.com/monkscode/Natural-Language-to-Robot-Framework/discussions)
 
 ## 📚 Documentation by Topic
 
