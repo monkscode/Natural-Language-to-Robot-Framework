@@ -55,6 +55,7 @@ tools/browser_service/*
 src/backend/requirements.txt
 node_modules/
 coverage/
+.coverage
 
 # SDD session ledgers. Were protected only by .superpowers/sdd/.gitignore ('*'),
 # which moved into the archive on 2026-08-18 — without this rule a fresh SDD run
