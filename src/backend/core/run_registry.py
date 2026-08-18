@@ -25,6 +25,7 @@ Depends on: core/config.py (DATABASE_URL).
 """
 
 import logging
+import uuid
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -63,7 +64,25 @@ _SCHEMA_DDL = (
     " ON test_runs (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_created"
     " ON test_runs (created_at DESC)",
+    # --- personal run groups (History page folders) ---
+    """
+    CREATE TABLE IF NOT EXISTS run_groups (
+        group_id   TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_user_name"
+    " ON run_groups (user_id, lower(name))",
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS group_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_test_runs_group ON test_runs (group_id)",
 )
+
+
+class DuplicateGroupName(Exception):
+    """The user already has a group with this name (case-insensitive)."""
 
 
 class RunRegistry:
@@ -158,6 +177,120 @@ class RunRegistry:
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
 
+    # ------------------------------------------------------------------
+    # Personal run groups (History page folders). User-facing CRUD: these
+    # methods PROPAGATE storage errors (the swallow-everything discipline
+    # above exists to protect the generation pipeline, not this UI path).
+    # ------------------------------------------------------------------
+
+    def list_groups(self, user_id: str) -> List[Dict[str, Any]]:
+        """The user's groups, name-sorted, each with its member-run count."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT g.group_id, g.name, g.created_at, g.updated_at, "
+                "       COUNT(t.run_id) AS run_count "
+                "FROM run_groups g "
+                "LEFT JOIN test_runs t ON t.group_id = g.group_id "
+                "WHERE g.user_id = %s "
+                "GROUP BY g.group_id ORDER BY lower(g.name)",
+                (user_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            r = dict(r)
+            r["created_at"] = r["created_at"].isoformat()
+            r["updated_at"] = r["updated_at"].isoformat()
+            out.append(r)
+        return out
+
+    def create_group(self, user_id: str, name: str) -> Dict[str, Any]:
+        """Create a group; raises DuplicateGroupName on a per-user,
+        case-insensitive name collision."""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "INSERT INTO run_groups (group_id, user_id, name) "
+                    "VALUES (%s, %s, %s) "
+                    "RETURNING group_id, name, created_at, updated_at",
+                    (str(uuid.uuid4()), user_id, name),
+                ).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateGroupName(name)
+        row = dict(row)
+        row["run_count"] = 0
+        row["created_at"] = row["created_at"].isoformat()
+        row["updated_at"] = row["updated_at"].isoformat()
+        return row
+
+    def rename_group(self, user_id: str, group_id: str, name: str) -> bool:
+        """False when the group doesn't exist or isn't the caller's; raises
+        DuplicateGroupName when the new name collides with another group."""
+        try:
+            with self._pool.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE run_groups SET name = %s, updated_at = now() "
+                    "WHERE group_id = %s AND user_id = %s",
+                    (name, group_id, user_id),
+                )
+                return cur.rowcount == 1
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateGroupName(name)
+
+    def delete_group(self, user_id: str, group_id: str) -> bool:
+        """Delete a group and return its member runs to Ungrouped — one
+        transaction, so a failure leaves both tables untouched. Runs are
+        NEVER deleted. False when the group doesn't exist / isn't the
+        caller's."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM run_groups WHERE group_id = %s AND user_id = %s",
+                (group_id, user_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            conn.execute(
+                "UPDATE test_runs SET group_id = NULL WHERE group_id = %s",
+                (group_id,),
+            )
+            return True
+
+    def count_ungrouped(self, user_id: str) -> int:
+        """How many of the user's runs are in no group — the Ungrouped chip's
+        live count on the History page."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM test_runs "
+                "WHERE user_id = %s AND group_id IS NULL",
+                (user_id,),
+            ).fetchone()
+        return row["n"]
+
+    def assign_runs(
+        self, user_id: str, run_ids: List[str], group_id: Optional[str]
+    ) -> bool:
+        """Atomically set group_id on the caller's runs (None = ungroup).
+        All-or-nothing: unless the target group (when non-null) AND every
+        run id belong to user_id, nothing is written and False is returned —
+        an org-admin can SEE members' runs in history but can never file
+        someone else's run into a group."""
+        with self._pool.connection() as conn:
+            if group_id is not None:
+                owned = conn.execute(
+                    "SELECT 1 FROM run_groups WHERE group_id = %s AND user_id = %s",
+                    (group_id, user_id),
+                ).fetchone()
+                if not owned:
+                    return False
+            cur = conn.execute(
+                "UPDATE test_runs SET group_id = %s "
+                "WHERE run_id = ANY(%s) AND user_id = %s",
+                (group_id, run_ids, user_id),
+            )
+            if cur.rowcount != len(set(run_ids)):
+                conn.rollback()
+                return False
+            return True
+
     def list_runs(
         self,
         user_id: Optional[str] = None,
@@ -166,6 +299,7 @@ class RunRegistry:
         offset: int = 0,
         status: Optional[str] = None,
         q: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Most-recent-first run rows + total count. user_id=None lists all
         users' runs (admin scope); otherwise only that user's rows. status
@@ -173,37 +307,49 @@ class RunRegistry:
         tabs paginate and count within their own filter. q is a case-insensitive
         substring match over the description, owner email and run id — applied
         server-side so it spans ALL of a user's runs, not just the loaded page,
-        and so rows/total/pagination stay consistent with the active search."""
+        and so rows/total/pagination stay consistent with the active search.
+        group narrows to one personal group (a run_groups id) or, with the
+        literal "ungrouped", to rows with no group; rows carry group_id and
+        group_name (LEFT JOIN) so the History table renders folder tags
+        without extra requests."""
         clauses: list = []
         params: list = []
         if user_id is not None:
-            clauses.append("user_id = %s")
+            clauses.append("t.user_id = %s")
             params.append(user_id)
         if org_id is not None:
-            clauses.append("org_id = %s")
+            clauses.append("t.org_id = %s")
             params.append(org_id)
         if status is not None:
-            clauses.append("status = %s")
+            clauses.append("t.status = %s")
             params.append(status)
+        if group == "ungrouped":
+            clauses.append("t.group_id IS NULL")
+        elif group is not None:
+            clauses.append("t.group_id = %s")
+            params.append(group)
         if q:
             # Escape LIKE wildcards so a typed % / _ matches literally (default
             # ESCAPE is backslash); the search box is substring, not glob.
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             clauses.append(
-                "(user_query ILIKE %s OR user_email ILIKE %s OR run_id ILIKE %s)"
+                "(t.user_query ILIKE %s OR t.user_email ILIKE %s OR t.run_id ILIKE %s)"
             )
             params.extend([like, like, like])
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         try:
             with self._pool.connection() as conn:
                 total = conn.execute(
-                    f"SELECT COUNT(*) AS n FROM test_runs{where}", params
+                    f"SELECT COUNT(*) AS n FROM test_runs t{where}", params
                 ).fetchone()["n"]
                 rows = conn.execute(
-                    f"SELECT run_id, user_id, user_email, user_query, rerun_of, "
-                    f"       status, created_at, updated_at "
-                    f"FROM test_runs{where} "
-                    f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    f"SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
+                    f"       t.rerun_of, t.status, t.created_at, t.updated_at, "
+                    f"       t.group_id, g.name AS group_name "
+                    f"FROM test_runs t "
+                    f"LEFT JOIN run_groups g ON g.group_id = t.group_id"
+                    f"{where} "
+                    f"ORDER BY t.created_at DESC LIMIT %s OFFSET %s",
                     params + [limit, offset],
                 ).fetchall()
             out = []
@@ -269,9 +415,13 @@ class RunRegistry:
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT run_id, user_id, user_email, user_query, robot_code, "
-                    "       rerun_of, status, org_id, created_at, updated_at "
-                    "FROM test_runs WHERE run_id = %s",
+                    "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
+                    "       t.robot_code, t.rerun_of, t.status, t.org_id, "
+                    "       t.created_at, t.updated_at, "
+                    "       t.group_id, g.name AS group_name "
+                    "FROM test_runs t "
+                    "LEFT JOIN run_groups g ON g.group_id = t.group_id "
+                    "WHERE t.run_id = %s",
                     (run_id,),
                 ).fetchone()
             if not row:

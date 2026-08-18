@@ -126,6 +126,10 @@ app.include_router(api_router)
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
 
+# Personal run groups — the History page's folder feature.
+from src.backend.api.groups_endpoints import router as groups_router
+app.include_router(groups_router, prefix="/api")
+
 # Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")

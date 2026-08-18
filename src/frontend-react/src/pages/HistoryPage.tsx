@@ -11,7 +11,7 @@
  * already recorded the query→code evidence). "Regenerate" prefills Generate
  * instead, for when the site changed and the stored locators went stale.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -22,11 +22,15 @@ import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
 import {
-  Check, ChevronRight, Copy, Download, Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
+  Check, ChevronRight, Copy, Download, Folder, FolderInput, ListChecks,
+  Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
+import { GroupChipsRow } from '@/components/history/GroupChipsRow'
+import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
+import { useRunGroups } from '@/components/history/RunGroupsContext'
 
 type RunStatus = 'generated' | 'running' | 'passed' | 'failed' | 'error'
 
@@ -38,6 +42,8 @@ interface Run {
   // Original run this row was re-run from (root-flattened server-side).
   // Feedback on a re-run is applied to that original run's learning record.
   rerun_of?: string | null
+  group_id?: string | null
+  group_name?: string | null
   created_at: string
   updated_at: string
   has_report: boolean
@@ -109,12 +115,27 @@ export default function HistoryPage() {
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
 
+  // Select mode drives the bulk "Move N runs to…" flow (checkbox column +
+  // toolbar). The group filter itself is NOT local state — it lives in
+  // RunGroupsContext because the sidebar's quick-access list sets the same
+  // value, and two copies would drift apart.
+  const [selectMode, setSelectMode] = useState(false)
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [moveError, setMoveError] = useState('')
+
   // Re-run bookkeeping, keyed by the SOURCE run id: which reruns are in
   // flight (disables their Play buttons) and the latest live status line
   // (shown in the drawer).
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [rerunNote, setRerunNote] = useState<Record<string, string>>({})
   const [copied, setCopied] = useState<string | null>(null)
+
+  // Shared with the sidebar's group quick-access: whichever surface the user
+  // picks a group from, both render the same active group.
+  const {
+    groups, ungroupedCount, createGroup, renameGroup, deleteGroup, assignRuns,
+    groupFilter, setGroupFilter,
+  } = useRunGroups()
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"
@@ -123,16 +144,25 @@ export default function HistoryPage() {
   const queryString = useCallback((offset: number) => {
     const statusParam = filter === 'all' ? '' : `&status=${filter}`
     const qParam = debouncedSearch ? `&q=${encodeURIComponent(debouncedSearch)}` : ''
-    return `/api/history?limit=${PAGE}&offset=${offset}${statusParam}${qParam}`
-  }, [filter, debouncedSearch])
+    const groupParam = groupFilter ? `&group=${encodeURIComponent(groupFilter)}` : ''
+    return `/api/history?limit=${PAGE}&offset=${offset}${statusParam}${qParam}${groupParam}`
+  }, [filter, debouncedSearch, groupFilter])
+
+  // Every list fetch takes a ticket; only the newest one may write to state.
+  // Switching groups quickly (sidebar → chip → sidebar) fires overlapping
+  // requests, and without this the SLOWER response can land last and repaint
+  // the table with the previous group's runs.
+  const listSeq = useRef(0)
 
   // silent: refresh the rows in place without the "Loading runs…" placeholder
   // (background refetches while the table is already populated).
   const loadRuns = useCallback(async (offset: number, append: boolean, silent = false) => {
+    const seq = ++listSeq.current
     if (!append && !silent) setLoading(true)
     setError('')
     try {
       const page = await api<HistoryResponse>(queryString(offset))
+      if (seq !== listSeq.current) return  // superseded — a newer filter won
       setScope(page.scope)
       setTotal(page.total)
       setRuns(prev => {
@@ -142,9 +172,11 @@ export default function HistoryPage() {
         return [...prev, ...page.runs.filter(r => !seen.has(r.run_id))]
       })
     } catch (e) {
+      if (seq !== listSeq.current) return
       setError(e instanceof Error ? e.message : 'Failed to load history')
     } finally {
-      setLoading(false)
+      // A superseded request must not clear the spinner the newer one raised.
+      if (seq === listSeq.current) setLoading(false)
     }
   }, [queryString])
 
@@ -152,8 +184,10 @@ export default function HistoryPage() {
   // zero, merge fresh rows over the loaded set (updating statuses, surfacing
   // the new run at the top) and keep any older pages the user had loaded.
   const refreshLoaded = useCallback(async () => {
+    const seq = ++listSeq.current
     try {
       const page = await api<HistoryResponse>(queryString(0))
+      if (seq !== listSeq.current) return  // superseded — a newer filter won
       setScope(page.scope)
       setTotal(page.total)
       setRuns(prev => {
@@ -164,6 +198,54 @@ export default function HistoryPage() {
     } catch { /* a transient refresh failure leaves the existing rows in place */ }
   }, [queryString])
 
+  // Deleting the active group falls back to All groups; renames/deletes can
+  // change row tags, so refresh the loaded rows in place afterwards.
+  const handleRenameGroup = useCallback(async (groupId: string, name: string) => {
+    await renameGroup(groupId, name)
+    void refreshLoaded()
+  }, [renameGroup, refreshLoaded])
+
+  const handleDeleteGroup = useCallback(async (groupId: string) => {
+    await deleteGroup(groupId)
+    if (groupFilter === groupId) {
+      // The filter reset re-fetches via the queryString effect — an extra
+      // refreshLoaded here would race it with the stale deleted-group query.
+      setGroupFilter(null)
+    } else {
+      void refreshLoaded()
+    }
+  }, [deleteGroup, groupFilter, setGroupFilter, refreshLoaded])
+
+  // fromBulk: the toolbar's multi-select move — only that path exits select
+  // mode, and only on success. A failed move keeps the selection so the user
+  // can retry; the error shows above the table.
+  const moveRuns = useCallback(async (runIds: string[], groupId: string | null, fromBulk = false) => {
+    setMoveError('')
+    try {
+      await assignRuns(runIds, groupId)
+      if (fromBulk) {
+        setCheckedIds(new Set())
+        setSelectMode(false)
+      }
+      // Under an active group filter a moved run must LEAVE the view —
+      // refreshLoaded's keep-tail merge would leave phantom rows, so do a
+      // silent page-zero reload instead.
+      if (groupFilter) void loadRuns(0, false, true)
+      else void refreshLoaded()
+    } catch (e) {
+      setMoveError(e instanceof Error ? e.message : 'Failed to move runs')
+    }
+  }, [assignRuns, groupFilter, loadRuns, refreshLoaded])
+
+  const toggleChecked = useCallback((runId: string) => {
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
+  }, [])
+
   // Debounce the search box into the server query (and reset to page zero).
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300)
@@ -172,6 +254,17 @@ export default function HistoryPage() {
 
   // Initial load + refetch from page zero whenever the tab or search changes.
   useEffect(() => { void loadRuns(0, false) }, [loadRuns])
+
+  // Any filter change replaces the visible rows, so a selection made against
+  // the PREVIOUS list is no longer something the user can see or reason about
+  // — keeping it would let a bulk move act on rows that scrolled out of
+  // existence when they switched groups from the sidebar. Select mode itself
+  // stays on; only the now-invisible picks are dropped, along with a move
+  // error that belonged to the old view.
+  useEffect(() => {
+    setCheckedIds(new Set())
+    setMoveError('')
+  }, [groupFilter, filter, debouncedSearch])
 
   const detailPath = selected ? `/api/history/${selected}` : null
   const { data: detail, error: detailError } = useFetch<RunDetail>(detailPath)
@@ -182,6 +275,21 @@ export default function HistoryPage() {
 
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
+
+  // Header select-all works over the VISIBLE (loaded) rows only, so stray ids
+  // checked under a previous filter neither satisfy "all selected" nor get
+  // swept along by the header toggle.
+  const allVisibleSelected = visible.length > 0 && visible.every(r => checkedIds.has(r.run_id))
+  const someVisibleSelected = visible.some(r => checkedIds.has(r.run_id))
+
+  const toggleAllVisible = useCallback(() => {
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (visible.every(r => next.has(r.run_id))) visible.forEach(r => next.delete(r.run_id))
+      else visible.forEach(r => next.add(r.run_id))
+      return next
+    })
+  }, [visible])
 
   const runAgain = useCallback(async (sourceId: string) => {
     setSelected(sourceId) // feedback lives in the drawer
@@ -231,7 +339,7 @@ export default function HistoryPage() {
     <div className="mx-auto max-w-6xl">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Test History</h1>
+          <h1 className="text-xl font-bold tracking-tight">Test Runs</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {isAdminScope
               ? 'All users’ test runs (admin view) — click any run to view its script and details'
@@ -244,34 +352,85 @@ export default function HistoryPage() {
       </div>
 
       <Card>
-        <CardHeader className="gap-3 space-y-0 pb-3 px-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {FILTERS.map(f => (
-              <Button
-                key={f}
-                size="sm"
-                variant={filter === f ? 'default' : 'outline'}
-                className="h-7 w-24 text-xs capitalize"
-                onClick={() => setFilter(f)}
-              >
-                {f === 'all' ? 'All Runs' : f}
-              </Button>
-            ))}
+        <CardHeader className="gap-3 space-y-0 pb-3 px-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {FILTERS.map(f => (
+                <Button
+                  key={f}
+                  size="sm"
+                  variant={filter === f ? 'default' : 'outline'}
+                  className="h-7 w-24 text-xs capitalize"
+                  onClick={() => setFilter(f)}
+                >
+                  {f === 'all' ? 'All Runs' : f}
+                </Button>
+              ))}
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder={isAdminScope ? 'Search description, user or id…' : 'Search description or id…'}
+                  className="h-7 w-56 pl-8 text-xs"
+                />
+              </div>
+              <span className="whitespace-nowrap text-xs text-muted-foreground">
+                {visible.length} of {total} run{total === 1 ? '' : 's'}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder={isAdminScope ? 'Search description, user or id…' : 'Search description or id…'}
-                className="h-7 w-56 pl-8 text-xs"
+          {/* Group chips row (design option C) + the bulk-move toolbar. The
+              toolbar is pinned top-right: only the CHIPS wrap onto new lines
+              (min-w-0 flex-1), so Select/Move never drift down as groups grow. */}
+          <div className="flex items-start justify-between gap-3 border-t pt-2.5">
+            <div className="min-w-0 flex-1">
+              <GroupChipsRow
+                groups={groups}
+                ungroupedCount={ungroupedCount}
+                active={groupFilter}
+                onSelect={setGroupFilter}
+                onCreate={async name => { await createGroup(name) }}
+                onRename={handleRenameGroup}
+                onDelete={handleDeleteGroup}
               />
             </div>
-            <span className="whitespace-nowrap text-xs text-muted-foreground">
-              {visible.length} of {total} run{total === 1 ? '' : 's'}
-            </span>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {selectMode ? (
+                <>
+                  <MoveToGroupMenu
+                    groups={groups}
+                    showRemove
+                    onMove={gid => { if (checkedIds.size) void moveRuns([...checkedIds], gid, true) }}
+                    onCreateGroup={createGroup}
+                    trigger={
+                      <Button size="sm" className="h-7 text-xs gap-1.5" disabled={checkedIds.size === 0}>
+                        <FolderInput className="h-3 w-3" />
+                        Move {checkedIds.size || ''} to…
+                      </Button>
+                    }
+                  />
+                  <Button
+                    size="sm" variant="outline" className="h-7 text-xs"
+                    onClick={() => { setSelectMode(false); setCheckedIds(new Set()) }}
+                  >
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+                  title="Select multiple runs to move them into a group"
+                  onClick={() => setSelectMode(true)}
+                >
+                  <ListChecks className="h-3 w-3" /> Select
+                </Button>
+              )}
+            </div>
           </div>
+          {moveError && <p className="text-xs text-destructive">{moveError}</p>}
         </CardHeader>
 
         <CardContent className="p-0">
@@ -281,7 +440,7 @@ export default function HistoryPage() {
               collapsing the card. Column geometry is constant (table-fixed),
               so switching filters only changes the values. */}
           <div className="min-h-[420px]">
-          {loading && (
+          {loading && visible.length === 0 && (
             <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">Loading runs…</p>
           )}
           {!loading && error && (
@@ -291,20 +450,41 @@ export default function HistoryPage() {
             <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
               {debouncedSearch
                 ? 'No runs match your search.'
-                : filter === 'all'
-                  ? 'No test runs yet — generate your first test from the Generate page.'
-                  : `No ${filter} runs yet.`}
+                : groupFilter === 'ungrouped'
+                  ? 'No ungrouped runs — everything is filed.'
+                  : groupFilter
+                    ? 'No runs in this group yet — move runs here with the folder button on any row.'
+                    : filter === 'all'
+                      ? 'No test runs yet — generate your first test from the Generate page.'
+                      : `No ${filter} runs yet.`}
             </p>
           )}
 
-          {!loading && !error && visible.length > 0 && (
-            <>
+          {/* Filter/search changes keep the PREVIOUS rows on screen and dim
+              them while the refetch is in flight, then swap in place — no
+              unmount, no "Loading runs…" flash between filters. The full
+              placeholder only ever shows on the very first load. */}
+          {!error && visible.length > 0 && (
+            <div className={`transition-opacity duration-200 ${loading ? 'pointer-events-none opacity-50' : 'opacity-100'}`}>
               {/* table-fixed: column widths are set here once and never
                   recomputed from row content, so switching status filters
                   keeps the exact same grid — only the values change. */}
               <table className="w-full table-fixed text-sm">
                 <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_hsl(var(--border))]">
                   <tr className="bg-muted/40">
+                    {selectMode && (
+                      <th className="w-10 py-2.5 pl-4">
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle"
+                          title="Select all loaded runs"
+                          aria-label="Select all loaded runs"
+                          checked={allVisibleSelected}
+                          ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+                          onChange={toggleAllVisible}
+                        />
+                      </th>
+                    )}
                     <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
                     <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
                     {isAdminScope && (
@@ -321,8 +501,18 @@ export default function HistoryPage() {
                     <tr
                       key={row.run_id}
                       className="group cursor-pointer border-b last:border-0 hover:bg-muted/30 transition-colors"
-                      onClick={() => setSelected(row.run_id)}
+                      onClick={() => (selectMode ? toggleChecked(row.run_id) : setSelected(row.run_id))}
                     >
+                      {selectMode && (
+                        <td className="py-3 pl-4" onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                            checked={checkedIds.has(row.run_id)}
+                            onChange={() => toggleChecked(row.run_id)}
+                          />
+                        </td>
+                      )}
                       <td className="py-3 px-4">{STATUS_BADGE[row.status] ?? row.status}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
@@ -344,6 +534,15 @@ export default function HistoryPage() {
                           <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
                             {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
                           </span>
+                          {!groupFilter && row.group_name && (
+                            <span
+                              className="hidden shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline-flex"
+                              title={`In group ${row.group_name}`}
+                            >
+                              <Folder className="h-3 w-3" />
+                              {row.group_name}
+                            </span>
+                          )}
                         </div>
                       </td>
                       {isAdminScope && (
@@ -378,6 +577,21 @@ export default function HistoryPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex gap-1 justify-end">
+                          <MoveToGroupMenu
+                            groups={groups}
+                            currentGroupId={row.group_id}
+                            onMove={gid => void moveRuns([row.run_id], gid)}
+                            onCreateGroup={createGroup}
+                            trigger={
+                              <Button
+                                variant="ghost" size="icon" className="h-7 w-7"
+                                title="Move to group…"
+                                onClick={e => e.stopPropagation()}
+                              >
+                                <FolderInput className="h-3.5 w-3.5" />
+                              </Button>
+                            }
+                          />
                           <Button
                             variant="ghost"
                             size="icon"
@@ -422,7 +636,7 @@ export default function HistoryPage() {
                   </Button>
                 </div>
               )}
-            </>
+            </div>
           )}
           </div>
         </CardContent>
@@ -511,6 +725,20 @@ export default function HistoryPage() {
               >
                 <RotateCw className="h-3.5 w-3.5" /> Regenerate
               </Button>
+            )}
+            {d && (
+              <MoveToGroupMenu
+                groups={groups}
+                currentGroupId={d.group_id}
+                onMove={gid => void moveRuns([d.run_id], gid)}
+                onCreateGroup={createGroup}
+                trigger={
+                  <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+                    <FolderInput className="h-3.5 w-3.5" />
+                    {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
+                  </Button>
+                }
+              />
             )}
           </div>
 
