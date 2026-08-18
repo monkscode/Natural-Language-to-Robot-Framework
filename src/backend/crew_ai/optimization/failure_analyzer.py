@@ -1,8 +1,8 @@
 """
 Failure Analyzer — 3-layer hybrid error classifier for Robot Framework output.xml.
 
-Parses Robot Framework's output.xml and classifies every failure into
-the taxonomy (A1-E4). Three classification layers:
+Parses Robot Framework's output.xml and classifies failures into the
+taxonomy. Three classification layers:
 
   Layer 1: Seed regex patterns (~85% coverage, instant, ~0.1ms)
   Layer 2: Learned error mappings from SQLite (Phase 2 placeholder)
@@ -13,8 +13,17 @@ combining user query intent with generated code structure to catch
 structural logic failures (e.g., missing FOR loop) that regex can't detect.
 
 Design doc reference: Section 7 (Component 2)
-Failure taxonomy: A1-E4, defined in the learning-system task docs (archived,
-                  never shipped with the repo).
+Failure taxonomy: the full taxonomy defines 28 codes (A1-A8, B1-B6, C1-C6,
+                  D1-D4, E1-E4) in the learning-system task docs, which are
+                  archived and never shipped with the repo. Layer 1 implements
+                  15 of them:
+
+                      A1 A2 A5 A7  B1 B3 B4 B6  C1 C2 C3  D1 D3 D4  E1
+
+                  The other 13 are not a gap in Layer 1 - they were always
+                  scoped to Layers 2 and 3, both still placeholders above. Do
+                  not add classifiers for them speculatively; failure-mode work
+                  here is gated on measured failure data.
 Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor.
 """
 
