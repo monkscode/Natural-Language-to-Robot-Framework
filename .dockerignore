@@ -76,9 +76,7 @@ credentials.json
 
 # Docs (not needed in image)
 docs/
-tasks/
 tests/
-FuturePlans/
 pytest.ini
 *.md
 !README.md
