@@ -15,6 +15,7 @@ nothing complains.
 Referenced by: nothing — pytest entry point.
 Depends on: observability/alloy/config.alloy, observability/loki/loki-config.yml
 """
+import json
 import re
 from pathlib import Path
 
@@ -22,6 +23,14 @@ import yaml
 
 ALLOY_CONFIG = Path("observability/alloy/config.alloy")
 LOKI_CONFIG = Path("observability/loki/loki-config.yml")
+COMPOSE = Path("docker-compose.yml")
+DASHBOARDS = Path("observability/grafana/dashboards")
+
+# The application services whose logs must reach Loki. runner-exec joined them
+# once it configured logging and bound a workflow_id; before that it was
+# dropped at discovery, which is why a failed image pull at boot left no trace
+# anywhere an operator would look.
+COLLECTED_SERVICES = {"fastapi", "browser-service", "runner-exec"}
 
 # The stages, in the only order that works. json first so a real record wins;
 # regex second so uvicorn's line-start prefix is read only when json found
@@ -77,6 +86,113 @@ def _stage(name: str) -> str:
     spaces, and this has to hold either way.
     """
     return _block(re.escape(name), _process_block(), closing=r"[ \t]+")
+
+
+def _kept_services() -> set[str]:
+    """The service names the relabel `keep` rule admits.
+
+    Matched on the rule that carries `action = "keep"` rather than on the
+    first `regex =` in the block — the container-name rule above it has one
+    too, and reading that one instead would assert nothing about collection.
+    """
+    keep = re.search(r'rule\s*\{[^{}]*action\s*=\s*"keep"[^{}]*\}', _alloy(), re.S)
+    assert keep, "the relabel block has no keep rule; every container is collected"
+    pattern = re.search(r'regex\s*=\s*"([^"]+)"', keep.group(0))
+    assert pattern, "the keep rule has no regex"
+    return set(pattern.group(1).split("|"))
+
+
+def test_every_application_service_is_collected():
+    """A service missing here is invisible in Grafana and looks healthy.
+
+    Nothing reports the omission: Alloy drops the target at discovery, all
+    components stay green, and `docker logs` still shows uvicorn's own output,
+    so the service reads as logging normally. Verified live against the stack
+    before runner-exec was added — /loki/api/v1/label/service/values returned
+    exactly ["browser-service","fastapi"].
+    """
+    kept = _kept_services()
+
+    missing = COLLECTED_SERVICES - kept
+    assert not missing, (
+        f"{sorted(missing)} are dropped at discovery and never reach Loki")
+
+
+def test_every_collected_service_caps_its_docker_log():
+    """Collection and a size cap have to arrive together.
+
+    The cap is on the Docker side, so the file grows whether or not Alloy
+    reads it — but while a service logs nothing, an absent cap is invisible.
+    runner-exec was in exactly that state: the only application service with
+    no `logging:` block, harmless only because it had no logging configured
+    to produce output.
+    """
+    services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+    for name in sorted(COLLECTED_SERVICES):
+        assert name in services, f"{name} is collected by Alloy but absent from compose"
+        options = (services[name].get("logging") or {}).get("options") or {}
+        assert options.get("max-size"), (
+            f"{name} sets no max-size, so its json-file log falls back to the "
+            f"daemon default and grows without bound")
+        assert options.get("max-file"), (
+            f"{name} sets no max-file, so nothing bounds the number of "
+            f"rotated files kept")
+
+
+def _dashboard_service_selectors() -> list[tuple[str, str, set[str]]]:
+    """Every Loki target that pins a service list, as (file, panel, services).
+
+    Walks nested row panels too. No dashboard nests today, but a row is the
+    normal way one grows and a guard that silently stops seeing panels is
+    worse than no guard.
+    """
+    found: list[tuple[str, str, set[str]]] = []
+
+    def walk(panels, filename):
+        for panel in panels:
+            if "panels" in panel:
+                walk(panel["panels"], filename)
+            for target in panel.get("targets") or []:
+                for match in re.finditer(r'service=~"([^"]+)"', target.get("expr", "")):
+                    found.append(
+                        (filename, panel.get("title", "?"), set(match.group(1).split("|"))))
+
+    for path in sorted(DASHBOARDS.glob("*.json")):
+        walk(json.loads(path.read_text(encoding="utf-8")).get("panels", []), path.name)
+    return found
+
+
+def test_dashboards_query_every_service_that_alloy_collects():
+    """Collecting a service and querying it are two edits, and only one fails loudly.
+
+    When runner-exec was added to the keep rule its lines reached Loki
+    immediately, but all three Loki panels still pinned
+    `service=~"fastapi|browser-service"` — including "Log lines from every
+    service in the run", whose entire purpose is to show one run end to end.
+    Every dashboard rendered, every query succeeded, and the executor's lines
+    (the container outcome, and the errors when it fails) were simply absent.
+
+    If a future panel deliberately wants a subset, this test is the right
+    place to record why — an exemption with a reason, not a silent drift.
+    """
+    selectors = _dashboard_service_selectors()
+    assert selectors, (
+        "no Loki panel pins a service list; this guard is watching nothing — "
+        "either the dashboards moved to a different selector shape or the "
+        "walk above stopped finding panels")
+
+    kept = _kept_services()
+    for filename, title, listed in selectors:
+        missing = kept - listed
+        assert not missing, (
+            f"{filename} panel {title!r} queries {sorted(listed)} but Alloy "
+            f"collects {sorted(kept)}; {sorted(missing)} reach Loki and are "
+            f"filtered back out here")
+        unknown = listed - kept
+        assert not unknown, (
+            f"{filename} panel {title!r} queries {sorted(unknown)}, which Alloy "
+            f"does not collect — the panel silently returns nothing for those")
 
 
 def test_docker_source_forwards_only_through_the_level_stage():

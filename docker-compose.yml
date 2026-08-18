@@ -82,6 +82,19 @@ services:
     env_file:
       - ./src/backend/.env
     restart: unless-stopped
+    # Absent, this service ran on the daemon default, which caps nothing —
+    # invisible only for as long as it had no logging configured to produce
+    # output. Deliberately WITHOUT the `labels: "service=..."` option its
+    # siblings carry: that option copies a container label onto the log line
+    # only if one with that key already exists, and none does, so it is inert
+    # here as it is there (measured — see the header of
+    # observability/alloy/config.alloy). Alloy keys on the
+    # com.docker.compose.service label Compose injects by itself.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4998/health"]
       interval: 30s
