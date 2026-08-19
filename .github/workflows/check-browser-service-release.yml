@@ -201,6 +201,10 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}" \
             push origin "$BRANCH"
 
+          # shellcheck disable=SC2016  # the printf FORMATS below are literal on
+          # purpose: the backticks and $ in them are markdown for the PR body,
+          # not shell. Scoped here rather than ignored globally so SC2016 still
+          # fires on a genuine "expected this to expand" mistake elsewhere.
           # Body written to a file rather than an inline heredoc: an indented
           # heredoc inside a YAML block scalar keeps its leading spaces and its
           # terminator stops matching, which silently mangles the PR.
