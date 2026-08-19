@@ -113,7 +113,6 @@ jobs:
         if: steps.decide.outputs.act == 'true'
         env:
           BRANCH: ${{ steps.decide.outputs.branch }}
-          CODE_SUMMARY: ${{ steps.code.outputs.summary }}
         run: |
           set -euo pipefail
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
@@ -167,6 +166,7 @@ jobs:
           PINNED: ${{ steps.pin.outputs.pinned }}
           LATEST: ${{ steps.pypi.outputs.latest }}
           BRANCH: ${{ steps.decide.outputs.branch }}
+          CODE_SUMMARY: ${{ steps.code.outputs.summary }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"

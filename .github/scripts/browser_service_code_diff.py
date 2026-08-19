@@ -36,19 +36,23 @@ def _wheel_members(version: str) -> dict[str, str] | None:
         meta = json.loads(urllib.request.urlopen(url, timeout=TIMEOUT).read())
         wheel = next(f for f in meta["urls"] if f["filename"].endswith(".whl"))
         blob = urllib.request.urlopen(wheel["url"], timeout=TIMEOUT).read()
+        # Parsing belongs INSIDE the try. A truncated body raises BadZipFile,
+        # which outside it propagated and killed the script — so the step failed
+        # and no bump PR was opened, the exact opposite of the fail-open this
+        # function documents. Verified: half a real wheel raises "File is not a
+        # zip file".
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            # dist-info is excluded on purpose: it carries the version string
+            # itself, so including it would make every release look like a
+            # change, which is the whole bug.
+            return {
+                name[len(PREFIX):]: hashlib.sha256(zf.read(name)).hexdigest()
+                for name in zf.namelist()
+                if name.startswith(PREFIX) and not name.endswith("/")
+            }
     except Exception as e:  # noqa: BLE001 — any failure means "cannot compare"
         print(f"could not read {PACKAGE} {version}: {e}", file=sys.stderr)
         return None
-
-    zf = zipfile.ZipFile(io.BytesIO(blob))
-    # dist-info is excluded on purpose: it carries the version string itself, so
-    # including it would make every release look like a change, which is the
-    # whole bug.
-    return {
-        name[len(PREFIX):]: hashlib.sha256(zf.read(name)).hexdigest()
-        for name in zf.namelist()
-        if name.startswith(PREFIX) and not name.endswith("/")
-    }
 
 
 def compare(old: dict[str, str], new: dict[str, str]) -> list[str]:
