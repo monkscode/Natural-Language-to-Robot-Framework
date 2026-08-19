@@ -42,10 +42,86 @@ env:
   REGISTRY: docker.io
   IMAGE_NAME: monkscode/nlrf
 
+# One build per ref at a time. The branch tags (`-develop`, `-latest`) are what
+# users pull, and two runs in flight can finish out of order, leaving the tag
+# pointing at the older commit with nothing to show that happened. Superseded
+# runs are cancelled: only the tip is worth publishing.
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Nothing may be built, and above all nothing may be PUSHED, until the suite
+  # that judges this commit has passed. build-images.yml and sonarqube.yml are
+  # both fired by the same push and were completely independent, so a red suite
+  # still overwrote `-develop` — the tag the README tells every user to pull —
+  # with no signal that anything was wrong.
+  #
+  # This deliberately re-runs a suite sonarqube.yml also runs. The alternatives
+  # were worse: `workflow_run` gating only fires from the DEFAULT branch, which
+  # is the same trap that leaves check-browser-service-release.yml inert on
+  # develop, and sharing one run needs the coverage artifact plumbed between
+  # workflows. A few duplicated CI minutes buy a gate that is obvious from this
+  # file alone. Kept honest by tests/test_build_manifests.py.
+  test:
+    name: Test suite (publish gate)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # Same stack the suite needs locally: optimization, api, trace and auth
+    # tests run against live Postgres on isolated schemas. Credentials match the
+    # DATABASE_URL default in src/backend/core/config.py.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nlrf
+          POSTGRES_PASSWORD: nlrf
+          POSTGRES_DB: nlrf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nlrf -d nlrf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system pytest
+          uv pip compile pyproject.toml             --python-platform linux             --python-version 3.12             --output-file /tmp/requirements-ci.txt --quiet
+          uv pip install --system -r /tmp/requirements-ci.txt
+
+      # all-MiniLM-L6-v2 is a ~80 MB ONNX download on first use.
+      - name: Cache fastembed model
+        uses: actions/cache@v4
+        with:
+          path: data/fastembed_cache
+          key: fastembed-all-MiniLM-L6-v2
+
+      - name: Run the suite
+        run: pytest tests/ --ignore=tests/test_integration -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src/backend
+          # App startup refuses the placeholder secret; tests that boot the app
+          # need a real-looking one.
+          JWT_SECRET_KEY: ci-only-jwt-secret-not-used-outside-this-workflow
+
   build-base-browser:
     name: Build Base Browser Image
     runs-on: ubuntu-latest
+    needs: [test]
     outputs:
       base_image_tag: ${{ steps.base_tag.outputs.base_image_tag }}
       image_size: ${{ steps.image_size.outputs.image_size }}
@@ -121,6 +197,7 @@ jobs:
   build-fastapi:
     name: Build FastAPI Image
     runs-on: ubuntu-latest
+    needs: [test]
     outputs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
@@ -160,6 +237,11 @@ jobs:
           context: .
           file: ./Dockerfile.fastapi
           push: ${{ github.event_name != 'pull_request' }}
+          # Stamped into the image as an OCI revision label (and, for the
+          # backend, an env var /health reports). Branch tags move, so this is
+          # the only thing that identifies the code inside a pulled image.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:fastapi-buildcache
@@ -181,6 +263,7 @@ jobs:
   build-frontend:
     name: Build Frontend Image
     runs-on: ubuntu-latest
+    needs: [test]
     outputs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
@@ -220,6 +303,11 @@ jobs:
           context: .
           file: ./Dockerfile.frontend
           push: ${{ github.event_name != 'pull_request' }}
+          # Stamped into the image as an OCI revision label (and, for the
+          # backend, an env var /health reports). Branch tags move, so this is
+          # the only thing that identifies the code inside a pulled image.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:frontend-buildcache
@@ -241,7 +329,7 @@ jobs:
   build-browser-service:
     name: Build Browser Service Image
     runs-on: ubuntu-latest
-    needs: [build-base-browser]
+    needs: [test, build-base-browser]
     outputs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
@@ -281,8 +369,12 @@ jobs:
           context: .
           file: ./Dockerfile.browser-service
           push: ${{ github.event_name != 'pull_request' }}
+          # Stamped into the image as an OCI revision label (and, for the
+          # backend, an env var /health reports). Branch tags move, so this is
+          # the only thing that identifies the code inside a pulled image.
           build-args: |
             BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:browser-service-buildcache
@@ -304,7 +396,7 @@ jobs:
   build-test-runner:
     name: Build Test Runner Image
     runs-on: ubuntu-latest
-    needs: [build-base-browser]
+    needs: [test, build-base-browser]
     outputs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
@@ -344,8 +436,12 @@ jobs:
           context: .
           file: ./Dockerfile.test-runner
           push: ${{ github.event_name != 'pull_request' }}
+          # Stamped into the image as an OCI revision label (and, for the
+          # backend, an env var /health reports). Branch tags move, so this is
+          # the only thing that identifies the code inside a pulled image.
           build-args: |
             BASE_IMAGE=${{ needs.build-base-browser.outputs.base_image_tag }}
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-runner-buildcache
@@ -367,7 +463,7 @@ jobs:
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [build-base-browser, build-fastapi, build-frontend, build-browser-service, build-test-runner]
+    needs: [test, build-base-browser, build-fastapi, build-frontend, build-browser-service, build-test-runner]
     if: always()
 
     steps:
@@ -386,7 +482,10 @@ jobs:
           echo "### Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           
-          if [ "${{ needs.build-base-browser.result }}" = "success" ] && [ "${{ needs.build-fastapi.result }}" = "success" ] && [ "${{ needs.build-browser-service.result }}" = "success" ] && [ "${{ needs.build-test-runner.result }}" = "success" ]; then
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "🚫 **Status**: publish gate failed — the test suite did not pass, so no image was built or pushed." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Test suite: ${{ needs.test.result }}" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ needs.build-base-browser.result }}" = "success" ] && [ "${{ needs.build-fastapi.result }}" = "success" ] && [ "${{ needs.build-browser-service.result }}" = "success" ] && [ "${{ needs.build-test-runner.result }}" = "success" ]; then
             echo "✅ **Status**: All images built successfully" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "❌ **Status**: Some builds failed" >> "$GITHUB_STEP_SUMMARY"

@@ -90,3 +90,56 @@ def test_robot_toolchain_pin_matches_runner_libdoc_stage_and_committed_libdocs(p
         f"{committed}. Regenerate the libdocs from the pinned version: "
         f"tools/generate_libdocs.py, run inside the test-runner image."
     )
+
+
+# ---------------------------------------------------------------------------
+# The publish gate.
+#
+# build-images.yml and sonarqube.yml are both triggered by a push to develop,
+# and nothing connected them: the images that overwrite `-develop` — the tag the
+# README tells every user to pull — were published whether or not the suite that
+# runs alongside them passed. The two workflows simply raced. This holds the
+# gate in place, because a `needs:` line is exactly the kind of thing that gets
+# dropped while making an unrelated job faster.
+# ---------------------------------------------------------------------------
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-images.yml"
+
+# Every job that produces an image. base-browser is included: it is not pushed
+# under a tag users pull, but browser-service and test-runner are built FROM it.
+IMAGE_JOBS = [
+    "build-base-browser",
+    "build-fastapi",
+    "build-frontend",
+    "build-browser-service",
+    "build-test-runner",
+]
+
+GATE_JOB = "test"
+
+
+def _build_images_workflow() -> dict:
+    import yaml
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_the_publish_gate_job_exists_and_runs_the_suite():
+    wf = _build_images_workflow()
+    assert GATE_JOB in wf["jobs"], (
+        f"build-images.yml has no '{GATE_JOB}' job — nothing stops a red suite "
+        "from publishing images")
+    steps = wf["jobs"][GATE_JOB].get("steps", [])
+    run_text = "\n".join(s.get("run", "") for s in steps)
+    assert "pytest" in run_text, f"the '{GATE_JOB}' job does not run pytest"
+
+
+@pytest.mark.parametrize("job", IMAGE_JOBS)
+def test_every_image_build_waits_for_the_suite(job):
+    wf = _build_images_workflow()
+    assert job in wf["jobs"], f"build-images.yml has no '{job}' job"
+    needs = wf["jobs"][job].get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert GATE_JOB in needs, (
+        f"'{job}' does not depend on '{GATE_JOB}' — it can publish an image "
+        "built from code the suite rejected")

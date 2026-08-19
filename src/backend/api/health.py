@@ -8,10 +8,12 @@ Referenced by:
     src/backend/main.py          — registers routes on the production app
     tests/test_api/test_api_endpoints.py — mounts same handlers in test fixture
 Depends on:
+    src/backend/core/build_info  — the commit this image was built from
     src/backend/core/config      — settings singleton
     src/backend/services/workflow_service — get_active_workflow_count()
 """
 
+from src.backend.core.build_info import build_info
 from src.backend.core.config import settings
 from src.backend.services.workflow_service import get_active_workflow_count
 
@@ -37,6 +39,7 @@ async def health_check():
         "max_workflows": max_wf,
         "available_slots": max(0, max_wf - active),
         "pins": _pins(),
+        "build": build_info(),
     }
 
 
@@ -51,4 +54,5 @@ async def api_health_check():
         "max_workflows": max_wf,
         "available_slots": max(0, max_wf - active),
         "pins": _pins(),
+        "build": build_info(),
     }

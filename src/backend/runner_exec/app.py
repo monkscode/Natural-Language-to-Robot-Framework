@@ -10,7 +10,7 @@ Run as: uvicorn src.backend.runner_exec.app:app --host 0.0.0.0 --port 4998
 
 Referenced by: docker-compose.yml (runner-exec), run.sh, RunnerExecClient.
 Depends on: services/docker_service.py, services/dryrun_service.py,
-runner_exec/validation.py.
+runner_exec/validation.py, core/build_info.py.
 """
 import logging
 import os
@@ -25,6 +25,7 @@ from src.backend.config.logging_config import (
     clear_workflow_context,
     setup_logging,
 )
+from src.backend.core.build_info import build_info
 from src.backend.runner_exec.validation import safe_run_id, safe_test_filename
 from src.backend.services.docker_service import (
     IMAGE_PROVISION_LOCK,
@@ -131,15 +132,18 @@ def _validated(value: str, validator) -> str:
 
 @app.get("/health")
 def health() -> dict:
+    # build is reported on both branches: knowing which build is unreachable is
+    # more useful than knowing only that something is. This runs in its own
+    # container and can be a different image from the API's.
     try:
         get_docker_client()  # pings the socket
-        return {"status": "ok"}
+        return {"status": "ok", "build": build_info()}
     except Exception as e:  # noqa: BLE001 — health must not raise
         # Log the underlying error for ops, but do NOT echo the raw exception
         # text back in the response — it can carry internal paths/stack detail
         # (CWE-209). The caller only needs the up/down signal.
         logger.warning("[RUNNER-EXEC] docker health check failed: %s", e)
-        return {"status": "unavailable"}
+        return {"status": "unavailable", "build": build_info()}
 
 
 @app.post("/ensure-image")
