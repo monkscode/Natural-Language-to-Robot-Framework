@@ -96,9 +96,8 @@ cp .env.example .env                              # root: Docker image tags
 cp src/backend/.env.example src/backend/.env      # backend: Vertex AI + settings
 ```
 
-In the **root `.env`**, point all four image tags at `-develop`. The file ships with
-`-local` defaults, which are **not** published to Docker Hub — only `frontend` can be
-built locally, so leaving them as-is makes `docker compose pull` fail:
+The **root `.env`** needs no edits — it already points all four image tags at the
+published `-develop` builds:
 
 ```env
 FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-develop
@@ -107,8 +106,8 @@ TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
 FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-develop
 ```
 
-All four must carry the **same** suffix — a mixed set is the usual cause of odd boot
-and login errors after an update.
+If you do change them, change all four to the **same** suffix — a mixed set is the
+usual cause of odd boot and login errors after an update.
 
 In **`src/backend/.env`**, set the Vertex AI project and location, and add your own
 email as an admin:
@@ -117,7 +116,7 @@ email as an admin:
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-project-id
 VERTEXAI_LOCATION=us-central1
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.5-flash
 ADMIN_EMAILS=you@example.com
 ```
 
