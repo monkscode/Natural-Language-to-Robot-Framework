@@ -24,6 +24,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # Declared once because it is used three times — the checkout ref, the branch
+  # the bump is cut from, and the PR base. Split across three literals they can
+  # drift, and the failure is silent: a PR that merges the wrong tree.
+  TARGET_BRANCH: develop
+
 concurrency:
   group: check-browser-service-release
   cancel-in-progress: false
@@ -36,7 +42,18 @@ jobs:
       contents: write        # push the bump branch
       pull-requests: write   # open the PR
     steps:
+      # A scheduled run checks out the DEFAULT branch, which is main. Everything
+      # downstream — the pin this reads, the branch the bump is cut from, the PR
+      # base — has to be the same tree, or a main-based branch gets proposed
+      # into develop and drags every difference between them along with it.
+      #
+      # persist-credentials: false keeps the token out of .git/config; the push
+      # below carries it explicitly instead. Reading refs still works without it
+      # because this repository is public.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          persist-credentials: false
 
       - name: Read the pinned version
         id: pin
@@ -155,7 +172,17 @@ jobs:
 
           git add Dockerfile.browser-service
           git commit -m "Bump browser-service to ${LATEST} so users get the published fixes"
-          git push origin "$BRANCH"
+
+          # The token is not in .git/config (persist-credentials: false), so it
+          # is supplied for this one command via -c, the same header mechanism
+          # actions/checkout uses. Not embedded in the remote URL: a URL with
+          # userinfo in it gets echoed back by git on a push failure and copied
+          # into .git/config by some commands, and this job runs `pip install`
+          # after checkout — a compromised wheel reading .git/config is the
+          # reason the uv install above is pinned and wheel-only.
+          AUTH_B64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}" \
+            push origin "$BRANCH"
 
           # Body written to a file rather than an inline heredoc: an indented
           # heredoc inside a YAML block scalar keeps its leading spaces and its
@@ -168,9 +195,10 @@ jobs:
             printf 'Opened by `.github/workflows/check-browser-service-release.yml`.\n'
           } > /tmp/pr-body.md
 
-          # --base develop: feature branches target develop in this repo.
+          # Same branch that was checked out and cut from, so the PR contains
+          # the bump and nothing else.
           gh pr create \
-            --base develop \
+            --base "$TARGET_BRANCH" \
             --head "$BRANCH" \
             --title "Bump browser-service to ${LATEST}" \
             --body-file /tmp/pr-body.md
