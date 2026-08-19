@@ -20,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { BuildBadge } from '@/components/build-badge'
 import {
   Zap,
   History,
@@ -226,6 +227,7 @@ export function AppSidebar() {
       {/* User footer */}
       <SidebarFooter>
         <NavUser />
+        <BuildBadge />
       </SidebarFooter>
 
       <SidebarRail />

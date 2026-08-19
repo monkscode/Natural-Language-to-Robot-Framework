@@ -36,4 +36,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     test -d /opt/playwright-browsers && \
     chmod -R 755 /opt/playwright-browsers
 
+
+# --- Build identity -------------------------------------------------------
+# Last layer on purpose: it changes on every commit, so anything above it stays
+# cached. `-develop` and `-latest` are moving tags, so the tag a container was
+# pulled under does not identify the code inside it; this does.
+#   docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' IMAGE
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=$GIT_SHA
+
 CMD ["robot", "--version"]

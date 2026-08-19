@@ -54,15 +54,29 @@ GEMINI_API_KEY=your-actual-api-key-here
 Which model to use (bare name — the provider prefix is added automatically based on `MODEL_PROVIDER`).
 
 ```env
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.5-flash
 ```
 
-**Available Models:**
-- `gemini-2.5-flash` - Fast, accurate (recommended)
-- `gemini-2.0-flash` - Faster, slightly less capable
-- `gemini-1.5-pro` - More powerful, slower
+**Default:** `gemini-3.5-flash`
 
-**Recommendation:** Use `gemini-2.5-flash` for best speed/accuracy balance.
+**Available Models:**
+- `gemini-3.5-flash` - the default, and the only one with benchmark evidence
+- `gemini-2.5-flash` - cheaper, fewer thinking tokens; never benched here
+- `gemini-2.0-flash` - faster, slightly less capable
+- `gemini-1.5-pro` - more powerful, slower
+
+**Recommendation:** keep `gemini-3.5-flash`. Every baseline in `bench/baselines/`
+was measured on it, so the pass rate, cost per run and timings this project
+publishes describe that model and no other. The alternatives work; they simply
+have no numbers behind them.
+
+It is not the cheap option, and the gap is worth knowing before you change it.
+Per LiteLLM's own price map, `gemini-3.5-flash` on Vertex costs **$1.50 per
+million input tokens and $9.00 per million output**, against `gemini-2.5-flash`
+at **$0.30 and $2.50** — 5x input, 3.6x output — before counting the extra
+thinking tokens 3.5 generates by default. Switching to `2.5-flash` is a
+legitimate way to cut cost; you are trading away the only configuration with
+measured reliability behind it.
 
 ### LOCAL_MODEL
 
@@ -108,12 +122,16 @@ APP_PORT=5000
 URL for the BrowserUse AI service.
 
 ```env
-BROWSER_USE_SERVICE_URL=http://localhost:4999
+BROWSER_USE_SERVICE_URL=http://127.0.0.1:4999
 ```
 
-**Default:** http://localhost:4999
+**Default:** `http://127.0.0.1:4999` (`core/config.py`)
 
-**Change if:** Running service on different host/port.
+Use `127.0.0.1`, not `localhost`. On Windows `localhost` resolves to `::1` first
+and this service binds IPv4 only, so every call stalls ~2s before falling back.
+Docker Compose overrides this to the `browser-service` service name.
+
+**Change if:** Running the service on a different host/port.
 
 ### BROWSER_USE_TIMEOUT
 
@@ -197,15 +215,18 @@ LOG_LEVEL=INFO   # inert
 - `WARNING` - Only warnings and errors
 - `ERROR` - Only errors
 
-### LOG_DIR
+### LOG_DIR — NOT WIRED UP
 
-Directory for application logs.
+**Setting this has no effect.** No code reads a `LOG_DIR` environment variable —
+`setup_logging()` takes the directory as a function argument and defaults to
+`"logs"`. Inert in exactly the same way as `LOG_LEVEL` above.
+
+(`BROWSER_USE_LOG_DIR` is a different variable and *is* read, by the browser
+service — see `tools/browser_service/__init__.py`.)
 
 ```env
-LOG_DIR=logs
+LOG_DIR=logs   # inert
 ```
-
-**Default:** `logs/` in project root
 
 ## Docker Settings
 
@@ -235,7 +256,17 @@ Whether to pull the runner image before falling back to building it locally.
 PREFER_REMOTE_DOCKER_IMAGE=true
 ```
 
-**Default:** `true` — a local build takes far longer than a pull.
+**Default when the variable is absent: `false`** (`services/docker_service.py`,
+`os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false')`).
+
+**Set it explicitly to `true`.** Omitted, the fallback is `false`, which builds
+the runner image from source on your first **Run Test** — minutes of CPU instead
+of a ~0.5 GB pull — and also disables the startup warm-up below. The shipped
+`src/backend/.env.example` sets it; only a hand-trimmed `.env` loses it.
+
+The `false` fallback is deliberate: with no `TEST_RUNNER_IMAGE_TAG` configured
+either, a `true` fallback would pull `monkscode/nlrf:test-runner-latest` — the
+main-branch build, which is not the one this tree is developed against.
 
 ### REMOTE_DOCKER_IMAGE
 
@@ -426,7 +457,7 @@ GOOGLE_REDIRECT_URI=http://localhost:5000/auth/google/callback
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-gcp-project-id
 VERTEXAI_LOCATION=us-central1
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.5-flash
 
 # Access — set BEFORE the first start
 ADMIN_EMAILS=you@company.com
@@ -451,7 +482,7 @@ runs in production.
 ```env
 MODEL_PROVIDER=gemini
 GEMINI_API_KEY=your-ai-studio-key   # https://aistudio.google.com/apikey
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.5-flash
 ADMIN_EMAILS=you@company.com
 ```
 

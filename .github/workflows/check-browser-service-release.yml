@@ -11,7 +11,13 @@ name: Check browser-service releases
 # `pytest -m "not integration"` only, so the chromium lane that exercises the
 # locator paths against a real DOM never gates a release. A human should look at
 # what changed before it reaches users.
-
+#
+# And it compares CODE, not version strings. The auto-publish bumps a patch for
+# every merge on that side, including docs-only ones: 1.0.36's wheel is
+# byte-identical to 1.0.35's across all 36 modules. Opening a PR for that trains
+# whoever reviews these to merge them unread, and the one that finally moves
+# browser-use would go through unexamined. A metadata-only release is logged and
+# skipped; the next real change carries the pin past it.
 on:
   schedule:
     # 06:00 UTC daily. Scheduled workflows only run from the DEFAULT branch, so
@@ -116,8 +122,18 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check the new pin set still resolves
+      - name: Compare the packaged code, not the version string
+        id: code
         if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false'
+        env:
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          LATEST: ${{ steps.pypi.outputs.latest }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/browser_service_code_diff.py "$PINNED" "$LATEST"
+
+      - name: Check the new pin set still resolves
+        if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false' && steps.code.outputs.code_changed == 'true'
         env:
           LATEST: ${{ steps.pypi.outputs.latest }}
         run: |
@@ -144,12 +160,13 @@ jobs:
           echo "Resolved browser-use: $(grep -iE '^browser-use==' /tmp/resolved.txt || echo 'not present')"
 
       - name: Open the bump PR
-        if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false'
+        if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false' && steps.code.outputs.code_changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PINNED: ${{ steps.pin.outputs.pinned }}
           LATEST: ${{ steps.pypi.outputs.latest }}
           BRANCH: ${{ steps.decide.outputs.branch }}
+          CODE_SUMMARY: ${{ steps.code.outputs.summary }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
@@ -184,6 +201,10 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}" \
             push origin "$BRANCH"
 
+          # shellcheck disable=SC2016  # the printf FORMATS below are literal on
+          # purpose: the backticks and $ in them are markdown for the PR body,
+          # not shell. Scoped here rather than ignored globally so SC2016 still
+          # fires on a genuine "expected this to expand" mistake elsewhere.
           # Body written to a file rather than an inline heredoc: an indented
           # heredoc inside a YAML block scalar keeps its leading spaces and its
           # terminator stops matching, which silently mangles the PR.
@@ -191,6 +212,8 @@ jobs:
             printf '`browser-service` on PyPI is at **%s**; `Dockerfile.browser-service` pins **%s**.\n\n' "$LATEST" "$PINNED"
             printf 'This pin is what the published browser-service image actually runs — `tools/browser_service/` is gitignored, so a CI build has no vendored copy. Until this merges, the newer releases reach nobody.\n\n'
             printf 'The pin set was resolved for linux/py3.12 in this run before the PR was opened, so the versions are known to be satisfiable together. Check the run log for the resolved `browser-use` version: if it moved, that is an engine change and needs a bench before merging.\n\n'
+            printf '### What moved\n\n'
+            printf '%s\n\n' "$CODE_SUMMARY"
             printf '**CI will not start on its own.** This branch was pushed with `GITHUB_TOKEN`, which cannot trigger other workflows. Close and reopen this PR to run `build-images.yml`.\n\n'
             printf 'Opened by `.github/workflows/check-browser-service-release.yml`.\n'
           } > /tmp/pr-body.md
