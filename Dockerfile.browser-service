@@ -18,9 +18,18 @@ WORKDIR /app
 # same commit produce different images: merging any PR into the browser-service
 # repo auto-publishes a patch bump to PyPI, and browser-service is what drags in
 # browser-use — so an unpinned line here silently overrides the browser-use
-# version Phase 2 chose. Pins are the set measured inside
-# monkscode/nlrf:browser-service-latest on 2026-08-03, i.e. what production is
-# already running; this freezes that set, it does not change it.
+# version Phase 2 chose. The pins were the set measured inside
+# monkscode/nlrf:browser-service-latest on 2026-08-03, i.e. what production was
+# already running.
+#
+# browser-service is the one pin that is EXPECTED to move, and moving it is the
+# only way a browser-service fix reaches users: tools/browser_service/ is
+# gitignored, so a CI build has no vendored copy and this pin IS the code the
+# published image runs (a local build shadows it and does not — verified
+# 2026-08-19 on both images). Bumped 1.0.32 -> 1.0.35 on 2026-08-19; PyPI
+# declares byte-identical runtime dependencies for both, so that moved
+# browser-service's own code and nothing else. After merging a browser-service
+# PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
 # Two mutable surfaces remain, deliberately, and this is NOT a fully reproducible
 # image:
@@ -51,7 +60,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.32 && \
+    browser-service==1.0.35 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 

@@ -1,0 +1,204 @@
+name: Check browser-service releases
+
+# The browser-service pin in Dockerfile.browser-service is the ONLY thing that
+# delivers a browser-service fix to users. tools/browser_service/ is gitignored,
+# so a CI checkout has no vendored copy and the published image runs whatever
+# this pin installs. Merging a browser-service PR auto-publishes to PyPI, but
+# nothing here noticed — the pin sat at 1.0.32 for three releases while 1.0.33's
+# locator fix stayed unavailable for two weeks. This job notices.
+#
+# It opens a PR; it never merges one. browser-service's own release gate runs
+# `pytest -m "not integration"` only, so the chromium lane that exercises the
+# locator paths against a real DOM never gates a release. A human should look at
+# what changed before it reaches users.
+
+on:
+  schedule:
+    # 06:00 UTC daily. Scheduled workflows only run from the DEFAULT branch, so
+    # this file has to reach `main` before it ever fires — living on `develop`
+    # alone is inert.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+# Least privilege at the top; the one job that writes elevates for itself.
+permissions:
+  contents: read
+
+env:
+  # Declared once because it is used three times — the checkout ref, the branch
+  # the bump is cut from, and the PR base. Split across three literals they can
+  # drift, and the failure is silent: a PR that merges the wrong tree.
+  TARGET_BRANCH: develop
+
+concurrency:
+  group: check-browser-service-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Compare pin against PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write   # open the PR
+    steps:
+      # A scheduled run checks out the DEFAULT branch, which is main. Everything
+      # downstream — the pin this reads, the branch the bump is cut from, the PR
+      # base — has to be the same tree, or a main-based branch gets proposed
+      # into develop and drags every difference between them along with it.
+      #
+      # persist-credentials: false keeps the token out of .git/config; the push
+      # below carries it explicitly instead. Reading refs still works without it
+      # because this repository is public.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          persist-credentials: false
+
+      - name: Read the pinned version
+        id: pin
+        run: |
+          set -euo pipefail
+          PINNED="$(grep -oE 'browser-service==[0-9]+(\.[0-9]+)*' Dockerfile.browser-service | head -1 | cut -d= -f3)"
+          if [ -z "$PINNED" ]; then
+            echo "::error::No browser-service==<version> line found in Dockerfile.browser-service"
+            exit 1
+          fi
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "Pinned: $PINNED"
+
+      - name: Read the latest release from PyPI
+        id: pypi
+        run: |
+          set -euo pipefail
+          # --proto '=https' so a redirect cannot downgrade the transport; the
+          # value below decides what version ends up in a production image.
+          LATEST="$(curl -fsSL --proto '=https' --max-time 30 https://pypi.org/pypi/browser-service/json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')"
+
+          # PyPI is external input and this value reaches a branch name, a file
+          # edit and a PR body. Reject anything that is not a plain release
+          # version before it is used anywhere — the same discipline the
+          # browser-service publish workflow applies to its own version input.
+          if [[ ! "$LATEST" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Refusing to act on '${LATEST}' — not a plain release version"
+            exit 1
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Latest on PyPI: $LATEST"
+
+      - name: Decide whether there is anything to do
+        id: decide
+        env:
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          LATEST: ${{ steps.pypi.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "Pin is current at $PINNED — nothing to do."
+            echo "act=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "act=true" >> "$GITHUB_OUTPUT"
+            echo "branch=chore/browser-service-${LATEST}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if the branch already exists
+        id: exists
+        if: steps.decide.outputs.act == 'true'
+        env:
+          BRANCH: ${{ steps.decide.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists — a PR is open, or was closed deliberately."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the new pin set still resolves
+        if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false'
+        env:
+          LATEST: ${{ steps.pypi.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # The realistic failure mode is an unsatisfiable pin set — a new
+          # browser-service release moving browser-use, or a transitive conflict
+          # with the flask/playwright/structlog pins beside it. That resolves in
+          # seconds; a full image build takes minutes and is what the PR's own
+          # CI is for.
+          #
+          # uv is pinned and wheel-only: this step runs with contents: write, so
+          # an unpinned install would execute whatever that project shipped today
+          # in a job that can push branches.
+          python3 -m pip install --quiet --only-binary=:all: uv==0.9.7
+          {
+            grep -oE '^\s+[a-zA-Z0-9_.-]+==[0-9][^ \\]*' Dockerfile.browser-service \
+              | tr -d ' ' | grep -v '^browser-service=='
+            echo "browser-service==${LATEST}"
+          } > /tmp/pins.txt
+          echo "Resolving:"; cat /tmp/pins.txt
+          uv pip compile /tmp/pins.txt \
+            --python-version 3.12 --python-platform linux \
+            --no-header -o /tmp/resolved.txt
+          echo "Resolved browser-use: $(grep -iE '^browser-use==' /tmp/resolved.txt || echo 'not present')"
+
+      - name: Open the bump PR
+        if: steps.decide.outputs.act == 'true' && steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          LATEST: ${{ steps.pypi.outputs.latest }}
+          BRANCH: ${{ steps.decide.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          # Both values are validated above, so this is a literal replacement of
+          # one exact string. It fails loudly rather than guessing if that line
+          # ever moves or changes shape.
+          python3 -c '
+          import pathlib, sys
+          old, new = sys.argv[1], sys.argv[2]
+          p = pathlib.Path("Dockerfile.browser-service")
+          text = p.read_text(encoding="utf-8")
+          needle = "browser-service==" + old
+          if needle not in text:
+              sys.exit(needle + " not found - refusing to guess")
+          p.write_text(text.replace(needle, "browser-service==" + new), encoding="utf-8")
+          ' "$PINNED" "$LATEST"
+
+          git add Dockerfile.browser-service
+          git commit -m "Bump browser-service to ${LATEST} so users get the published fixes"
+
+          # The token is not in .git/config (persist-credentials: false), so it
+          # is supplied for this one command via -c, the same header mechanism
+          # actions/checkout uses. Not embedded in the remote URL: a URL with
+          # userinfo in it gets echoed back by git on a push failure and copied
+          # into .git/config by some commands, and this job runs `pip install`
+          # after checkout — a compromised wheel reading .git/config is the
+          # reason the uv install above is pinned and wheel-only.
+          AUTH_B64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}" \
+            push origin "$BRANCH"
+
+          # Body written to a file rather than an inline heredoc: an indented
+          # heredoc inside a YAML block scalar keeps its leading spaces and its
+          # terminator stops matching, which silently mangles the PR.
+          {
+            printf '`browser-service` on PyPI is at **%s**; `Dockerfile.browser-service` pins **%s**.\n\n' "$LATEST" "$PINNED"
+            printf 'This pin is what the published browser-service image actually runs — `tools/browser_service/` is gitignored, so a CI build has no vendored copy. Until this merges, the newer releases reach nobody.\n\n'
+            printf 'The pin set was resolved for linux/py3.12 in this run before the PR was opened, so the versions are known to be satisfiable together. Check the run log for the resolved `browser-use` version: if it moved, that is an engine change and needs a bench before merging.\n\n'
+            printf '**CI will not start on its own.** This branch was pushed with `GITHUB_TOKEN`, which cannot trigger other workflows. Close and reopen this PR to run `build-images.yml`.\n\n'
+            printf 'Opened by `.github/workflows/check-browser-service-release.yml`.\n'
+          } > /tmp/pr-body.md
+
+          # Same branch that was checked out and cut from, so the PR contains
+          # the bump and nothing else.
+          gh pr create \
+            --base "$TARGET_BRANCH" \
+            --head "$BRANCH" \
+            --title "Bump browser-service to ${LATEST}" \
+            --body-file /tmp/pr-body.md
