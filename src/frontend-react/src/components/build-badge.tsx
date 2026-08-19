@@ -12,7 +12,6 @@
  */
 
 import { useEffect, useState } from 'react'
-import { api } from '@/lib/api'
 
 interface HealthBuild {
   build?: { commit?: string }
@@ -24,10 +23,15 @@ export function BuildBadge() {
 
   useEffect(() => {
     let alive = true
-    // Failure is silent on purpose: this is a diagnostic label, and an error
-    // toast for it would be noise on a page that is working fine.
-    api<HealthBuild>('/api/health')
-      .then((h) => { if (alive) setCommit(h.build?.commit ?? null) })
+    // Plain fetch, deliberately not lib/api: that wrapper clears the token and
+    // redirects to /login on a 401. /api/health carries no auth guard today, but
+    // a diagnostic label must never be able to sign anyone out if that changes.
+    //
+    // Failure is silent on purpose: an error toast for a version string would be
+    // noise on a page that is working fine.
+    fetch('/api/health', { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? (r.json() as Promise<HealthBuild>) : null))
+      .then((h) => { if (alive) setCommit(h?.build?.commit ?? null) })
       .catch(() => { /* leave it unrendered */ })
     return () => { alive = false }
   }, [])

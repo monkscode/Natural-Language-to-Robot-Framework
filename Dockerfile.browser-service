@@ -85,9 +85,10 @@ USER appuser
 #   docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' IMAGE
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=$GIT_SHA
-# Read by src/backend/core/build_info.py and reported on /health, so a user can
-# name their build without inspecting the image.
-ENV NLRF_BUILD_SHA=$GIT_SHA
+# Label only, no env var: this image runs the Flask browser service, and its
+# /health route belongs to the installed browser-service package, not to us.
+# Nothing here would read the variable. `docker inspect` is the answer for this
+# image, as it already is for the browser-service version it installs.
 
 # Expose browser service port
 EXPOSE 4999

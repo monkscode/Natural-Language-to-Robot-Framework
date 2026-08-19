@@ -44,11 +44,17 @@ env:
 
 # One build per ref at a time. The branch tags (`-develop`, `-latest`) are what
 # users pull, and two runs in flight can finish out of order, leaving the tag
-# pointing at the older commit with nothing to show that happened. Superseded
-# runs are cancelled: only the tip is worth publishing.
+# pointing at the older commit with nothing to show that happened.
+#
+# A push run is NEVER cancelled. It pushes five images one job at a time, so
+# killing it mid-run can leave `-develop` on a different commit per service —
+# the mixed set .env.example calls the usual cause of odd boot and login errors.
+# Serialising instead means the older run finishes consistently and the newer
+# one then overwrites it, also consistently. A pull_request run pushes nothing,
+# so cancelling a superseded one costs nothing.
 concurrency:
   group: build-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Nothing may be built, and above all nothing may be PUSHED, until the suite

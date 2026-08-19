@@ -70,6 +70,14 @@ was measured on it, so the pass rate, cost per run and timings this project
 publishes describe that model and no other. The alternatives work; they simply
 have no numbers behind them.
 
+It is not the cheap option, and the gap is worth knowing before you change it.
+Per LiteLLM's own price map, `gemini-3.5-flash` on Vertex costs **$1.50 per
+million input tokens and $9.00 per million output**, against `gemini-2.5-flash`
+at **$0.30 and $2.50** — 5x input, 3.6x output — before counting the extra
+thinking tokens 3.5 generates by default. Switching to `2.5-flash` is a
+legitimate way to cut cost; you are trading away the only configuration with
+measured reliability behind it.
+
 ### LOCAL_MODEL
 
 Which Ollama model to use (for local mode).
