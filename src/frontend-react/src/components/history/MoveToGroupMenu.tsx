@@ -1,8 +1,10 @@
 /**
  * "Move to group…" dropdown — the single filing control used by the History
  * row actions, the detail drawer, and the bulk-select toolbar. Lists the
- * user's groups (check-marks the run's current one), offers Remove from
- * group, and can create-and-move in one gesture via the New group… item.
+ * groups the caller can see (check-marks the run's current one), offers
+ * Remove from group, and can create-and-move in one gesture via the New
+ * group… item. A lock marks the private groups, which may share a name with
+ * a shared one.
  */
 import { useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
@@ -15,7 +17,8 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Check, Folder, FolderMinus, Plus } from 'lucide-react'
-import type { RunGroup } from './useGroups'
+import type { GroupVisibility, RunGroup } from './useGroups'
+import { PrivateLock, VisibilityField } from './GroupVisibility'
 
 interface Props {
   groups: RunGroup[]
@@ -25,7 +28,7 @@ interface Props {
       single currentGroupId but the selection may contain grouped runs. */
   showRemove?: boolean
   onMove: (groupId: string | null) => void
-  onCreateGroup: (name: string) => Promise<RunGroup>
+  onCreateGroup: (name: string, visibility: GroupVisibility) => Promise<RunGroup>
   /** The button that opens the menu (wrapped with asChild). */
   trigger: ReactNode
 }
@@ -33,6 +36,7 @@ interface Props {
 export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, onCreateGroup, trigger }: Props) {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
+  const [visibility, setVisibility] = useState<GroupVisibility>('org')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -40,7 +44,7 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
     setBusy(true)
     setError('')
     try {
-      const g = await onCreateGroup(name.trim())
+      const g = await onCreateGroup(name.trim(), visibility)
       setCreating(false)
       onMove(g.group_id)
     } catch (e) {
@@ -64,6 +68,9 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
             >
               <Folder className="h-3.5 w-3.5" />
               <span className="flex-1 truncate">{g.name}</span>
+              {g.visibility === 'private' && (
+                <PrivateLock name={g.name} className="h-3.5 w-3.5" />
+              )}
               {currentGroupId === g.group_id && <Check className="h-3.5 w-3.5" />}
             </DropdownMenuItem>
           ))}
@@ -78,7 +85,9 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="gap-2 text-xs"
-            onClick={() => { setName(''); setError(''); setBusy(false); setCreating(true) }}
+            onClick={() => {
+              setName(''); setVisibility('org'); setError(''); setBusy(false); setCreating(true)
+            }}
           >
             <Plus className="h-3.5 w-3.5" /> New group…
           </DropdownMenuItem>
@@ -101,6 +110,12 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
               maxLength={60}
               onChange={e => setName(e.target.value)}
               placeholder="e.g. Checkout flows"
+            />
+            <VisibilityField
+              id="move-menu-visibility"
+              value={visibility}
+              onChange={setVisibility}
+              disabled={busy}
             />
             {error && <p className="text-xs text-destructive">{error}</p>}
             <DialogFooter className="mt-2">

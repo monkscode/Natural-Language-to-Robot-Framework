@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
+import { PrivateLock } from '@/components/history/GroupVisibility'
 
 /* ── Logo mark ── */
 const LogoMark = () => (
@@ -192,7 +193,9 @@ function NavUser() {
  * row writes, so picking a group here or there always agrees. */
 function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) {
   const navigate = useNavigate()
-  const { groups, groupFilter, setGroupFilter } = useRunGroups()
+  const {
+    groups, error: groupsError, loaded: groupsLoaded, groupFilter, setGroupFilter,
+  } = useRunGroups()
   const [open, setOpen] = useState(false)
 
   // Reveal the active group the way a file tree opens to the selected file:
@@ -224,10 +227,12 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
       {/* The chevron shows even with no groups: a user who has never made one
           would otherwise get no hint anywhere in the nav that groups exist,
           and they are exactly who needs to find the feature. */}
+      {/* No aria-controls: the sub-list is only in the DOM while open, and
+          naming an absent id is worse than naming none. aria-expanded on the
+          toggle is a complete disclosure pattern on its own. */}
       <SidebarMenuAction
         onClick={() => setOpen(o => !o)}
         aria-expanded={open}
-        aria-controls={subId}
         aria-label={open ? 'Hide groups' : 'Show groups'}
         title={open ? 'Hide groups' : 'Show groups'}
       >
@@ -238,14 +243,29 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
 
       {open && (
         <SidebarMenuSub id={subId} className="max-h-[40vh] overflow-y-auto">
-          {groups.length === 0 ? (
+          {/* A failed /api/groups leaves the list empty, and "No groups yet"
+              would then be a lie that sends the user off to create one. Say
+              what actually happened, and keep any rows a previous successful
+              load left behind. */}
+          {groupsError && (
+            <li className="px-2 py-1.5 text-xs leading-snug text-destructive" role="alert">
+              Couldn’t load groups — {groupsError}
+            </li>
+          )}
+          {!groupsError && !groupsLoaded && (
+            <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
+              Loading groups…
+            </li>
+          )}
+          {!groupsError && groupsLoaded && groups.length === 0 && (
             // Empty states point somewhere. Naming where groups come from
             // turns this click into how the feature gets discovered — and it
             // stays a signpost, not a second place to create them.
             <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
               No groups yet — create one on Test Runs.
             </li>
-          ) : groups.map(g => (
+          )}
+          {groups.map(g => (
             <SidebarMenuSubItem key={g.group_id}>
               <SidebarMenuSubButton
                 asChild
@@ -259,6 +279,7 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
                 >
                   <Folder />
                   <span className="truncate">{g.name}</span>
+                  {g.visibility === 'private' && <PrivateLock name={g.name} />}
                   <span className="ml-auto shrink-0 text-xs tabular-nums text-sidebar-foreground/60">
                     {g.run_count}
                   </span>

@@ -29,8 +29,11 @@ import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
+import { PrivateLock } from '@/components/history/GroupVisibility'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
+import type { GroupChanges, RunGroup } from '@/components/history/useGroups'
+import { useAuth } from '@/auth/AuthContext'
 
 type RunStatus = 'generated' | 'running' | 'passed' | 'failed' | 'error'
 
@@ -133,9 +136,28 @@ export default function HistoryPage() {
   // Shared with the sidebar's group quick-access: whichever surface the user
   // picks a group from, both render the same active group.
   const {
-    groups, ungroupedCount, createGroup, renameGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, createGroup, updateGroup, deleteGroup, assignRuns,
     groupFilter, setGroupFilter,
   } = useRunGroups()
+
+  // Who is looking. Without an identity every group mutation answers 403, so
+  // the controls that could only produce one are not offered at all — the LIST
+  // still loads, because GET /api/groups answers 200 with an empty list.
+  const { user } = useAuth()
+
+  // Mirrors the server's rule: the creator, or a team org-admin on a SHARED
+  // group. A hint only — the server 404s any folder the caller may not mutate.
+  const canManage = useCallback((g: RunGroup) => (
+    !!user && (g.created_by === user.id || (user.is_org_admin === true && g.visibility === 'org'))
+  ), [user])
+
+  // /api/history rows carry only group_id and group_name, so a row tag's lock
+  // is derived from the groups list rather than a second request. The two sets
+  // agree by construction — the history join and the groups list apply the
+  // same org+visibility test.
+  const isPrivateGroup = useCallback((groupId: string | null | undefined) => (
+    !!groupId && groups.some(g => g.group_id === groupId && g.visibility === 'private')
+  ), [groups])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"
@@ -183,7 +205,10 @@ export default function HistoryPage() {
   // Refresh after a re-run WITHOUT collapsing pagination: re-fetch only page
   // zero, merge fresh rows over the loaded set (updating statuses, surfacing
   // the new run at the top) and keep any older pages the user had loaded.
-  const refreshLoaded = useCallback(async () => {
+  // dropIds: rows that must NOT survive in the tail — a run moved out of the
+  // group currently being filtered is absent from the fresh page and would
+  // otherwise linger as a phantom on any older page the user had loaded.
+  const refreshLoaded = useCallback(async (dropIds?: Set<string>) => {
     const seq = ++listSeq.current
     try {
       const page = await api<HistoryResponse>(queryString(0))
@@ -192,18 +217,24 @@ export default function HistoryPage() {
       setTotal(page.total)
       setRuns(prev => {
         const freshIds = new Set(page.runs.map(r => r.run_id))
-        const tail = prev.filter(r => !freshIds.has(r.run_id))
+        const tail = prev.filter(r => !freshIds.has(r.run_id) && !dropIds?.has(r.run_id))
         return [...page.runs, ...tail]
       })
-    } catch { /* a transient refresh failure leaves the existing rows in place */ }
+    } catch { /* a transient refresh failure leaves the existing rows in place */ } finally {
+      // Both loaders share ONE ticket, so whoever holds the newest one clears
+      // the flag. Without this a refreshLoaded that overtakes an in-flight
+      // loadRuns leaves `loading` true forever: loadRuns sees its ticket is
+      // stale and skips the clear, and nothing else ever runs.
+      if (seq === listSeq.current) setLoading(false)
+    }
   }, [queryString])
 
   // Deleting the active group falls back to All groups; renames/deletes can
   // change row tags, so refresh the loaded rows in place afterwards.
-  const handleRenameGroup = useCallback(async (groupId: string, name: string) => {
-    await renameGroup(groupId, name)
+  const handleUpdateGroup = useCallback(async (groupId: string, changes: GroupChanges) => {
+    await updateGroup(groupId, changes)
     void refreshLoaded()
-  }, [renameGroup, refreshLoaded])
+  }, [updateGroup, refreshLoaded])
 
   const handleDeleteGroup = useCallback(async (groupId: string) => {
     await deleteGroup(groupId)
@@ -216,6 +247,16 @@ export default function HistoryPage() {
     }
   }, [deleteGroup, groupFilter, setGroupFilter, refreshLoaded])
 
+  // Declared above moveRuns because a successful move has to refetch it: the
+  // drawer caches the run's group label and check-mark, and without a reload
+  // it keeps showing the folder the run just left.
+  const detailPath = selected ? `/api/history/${selected}` : null
+  const { data: detail, error: detailError, reload: reloadDetail } = useFetch<RunDetail>(detailPath)
+  // useFetch keeps stale data during a refetch, so a just-clicked row would
+  // briefly render the PREVIOUS run's code/query. Only trust detail once it
+  // matches the open row.
+  const d = detail && detail.run_id === selected ? detail : null
+
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
   // can retry; the error shows above the table.
@@ -227,15 +268,19 @@ export default function HistoryPage() {
         setCheckedIds(new Set())
         setSelectMode(false)
       }
-      // Under an active group filter a moved run must LEAVE the view —
-      // refreshLoaded's keep-tail merge would leave phantom rows, so do a
-      // silent page-zero reload instead.
-      if (groupFilter) void loadRuns(0, false, true)
+      // The drawer holds its own copy of the run; refetch it so its folder
+      // label and check-mark stop describing where the run used to be.
+      if (selected && runIds.includes(selected)) void reloadDetail()
+      // Under an active group filter a moved run must LEAVE the view. Dropping
+      // just those ids from the merge tail does that WITHOUT resetting to page
+      // zero, so a user who had loaded 150 rows still has 150. With no filter
+      // the run stays visible, and dropping it would make an older row vanish.
+      if (groupFilter) void refreshLoaded(new Set(runIds))
       else void refreshLoaded()
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : 'Failed to move runs')
     }
-  }, [assignRuns, groupFilter, loadRuns, refreshLoaded])
+  }, [assignRuns, groupFilter, refreshLoaded, reloadDetail, selected])
 
   const toggleChecked = useCallback((runId: string) => {
     setCheckedIds(prev => {
@@ -265,13 +310,6 @@ export default function HistoryPage() {
     setCheckedIds(new Set())
     setMoveError('')
   }, [groupFilter, filter, debouncedSearch])
-
-  const detailPath = selected ? `/api/history/${selected}` : null
-  const { data: detail, error: detailError } = useFetch<RunDetail>(detailPath)
-  // useFetch keeps stale data during a refetch, so a just-clicked row would
-  // briefly render the PREVIOUS run's code/query. Only trust detail once it
-  // matches the open row.
-  const d = detail && detail.run_id === selected ? detail : null
 
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
@@ -392,13 +430,17 @@ export default function HistoryPage() {
                 ungroupedCount={ungroupedCount}
                 active={groupFilter}
                 onSelect={setGroupFilter}
-                onCreate={async name => { await createGroup(name) }}
-                onRename={handleRenameGroup}
+                onCreate={async (name, visibility) => { await createGroup(name, visibility) }}
+                onUpdate={handleUpdateGroup}
                 onDelete={handleDeleteGroup}
+                canManage={canManage}
+                canCreate={!!user}
               />
             </div>
+            {/* Everything in here is a mutation, and every one of them answers
+                403 without an identity — so they are not offered at all. */}
             <div className="flex shrink-0 items-center gap-1.5">
-              {selectMode ? (
+              {user && (selectMode ? (
                 <>
                   <MoveToGroupMenu
                     groups={groups}
@@ -427,7 +469,7 @@ export default function HistoryPage() {
                 >
                   <ListChecks className="h-3 w-3" /> Select
                 </Button>
-              )}
+              ))}
             </div>
           </div>
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
@@ -541,6 +583,9 @@ export default function HistoryPage() {
                             >
                               <Folder className="h-3 w-3" />
                               {row.group_name}
+                              {isPrivateGroup(row.group_id) && (
+                                <PrivateLock name={row.group_name} className="h-2.5 w-2.5" />
+                              )}
                             </span>
                           )}
                         </div>
@@ -577,21 +622,23 @@ export default function HistoryPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex gap-1 justify-end">
-                          <MoveToGroupMenu
-                            groups={groups}
-                            currentGroupId={row.group_id}
-                            onMove={gid => void moveRuns([row.run_id], gid)}
-                            onCreateGroup={createGroup}
-                            trigger={
-                              <Button
-                                variant="ghost" size="icon" className="h-7 w-7"
-                                title="Move to group…"
-                                onClick={e => e.stopPropagation()}
-                              >
-                                <FolderInput className="h-3.5 w-3.5" />
-                              </Button>
-                            }
-                          />
+                          {user && (
+                            <MoveToGroupMenu
+                              groups={groups}
+                              currentGroupId={row.group_id}
+                              onMove={gid => void moveRuns([row.run_id], gid)}
+                              onCreateGroup={createGroup}
+                              trigger={
+                                <Button
+                                  variant="ghost" size="icon" className="h-7 w-7"
+                                  title="Move to group…"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  <FolderInput className="h-3.5 w-3.5" />
+                                </Button>
+                              }
+                            />
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -726,7 +773,7 @@ export default function HistoryPage() {
                 <RotateCw className="h-3.5 w-3.5" /> Regenerate
               </Button>
             )}
-            {d && (
+            {d && user && (
               <MoveToGroupMenu
                 groups={groups}
                 currentGroupId={d.group_id}
@@ -736,11 +783,18 @@ export default function HistoryPage() {
                   <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
                     <FolderInput className="h-3.5 w-3.5" />
                     {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
+                    {d.group_name && isPrivateGroup(d.group_id) && (
+                      <PrivateLock name={d.group_name} />
+                    )}
                   </Button>
                 }
               />
             )}
           </div>
+
+          {/* The card header's copy of this sits BEHIND the drawer overlay, so
+              a move that failed from in here would otherwise be silent. */}
+          {moveError && <p className="text-xs text-destructive">{moveError}</p>}
 
           <Separator />
 

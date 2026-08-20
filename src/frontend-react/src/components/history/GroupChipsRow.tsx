@@ -4,13 +4,17 @@
  * Deliberately fixed-width: the row never grows with the number of groups.
  * It carries at most three controls — Ungrouped, the groups control, and
  * "＋ New" — so creating twenty groups cannot push the page's toolbar down.
+ * That matters more now that groups are org-shared and the list gets longer.
  *
  * The groups control is the whole taxonomy behind one button: it reads
  * "All Groups" while no group is filtered, and becomes the selected group's
  * own chip (with an ✕ to clear) once one is. Clicking it either way opens the
  * browse dialog, which lists every group with its run count and is also where
- * rename/delete live — so group management has one obvious home instead of
+ * edit/delete live — so group management has one obvious home instead of
  * icons that only appear beside an active chip.
+ *
+ * Management affordances are offered only where the caller may actually use
+ * them (canManage / canCreate); the server refuses the rest regardless.
  */
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -19,7 +23,8 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Folder, FolderOpen, Pencil, Plus, Trash2, X } from 'lucide-react'
-import type { RunGroup } from './useGroups'
+import type { GroupChanges, GroupVisibility, RunGroup } from './useGroups'
+import { PrivateLock, VisibilityField } from './GroupVisibility'
 // The filter type lives with the shared state it describes — the sidebar's
 // quick-access list writes the same value this row does.
 import type { GroupFilter } from './RunGroupsContext'
@@ -29,32 +34,41 @@ interface Props {
   ungroupedCount: number
   active: GroupFilter
   onSelect: (value: GroupFilter) => void
-  onCreate: (name: string) => Promise<unknown>
-  onRename: (groupId: string, name: string) => Promise<unknown>
+  onCreate: (name: string, visibility: GroupVisibility) => Promise<unknown>
+  onUpdate: (groupId: string, changes: GroupChanges) => Promise<unknown>
   onDelete: (groupId: string) => Promise<unknown>
+  /** May this caller rename/delete/flip this group? (creator, or org-admin on
+   *  a shared group). A hint only — the server 404s either way. */
+  canManage: (group: RunGroup) => boolean
+  /** False without an identity: the server refuses every mutation with 403,
+   *  so offering the control would only produce a dead end. */
+  canCreate: boolean
 }
 
 /** One overlay at a time. `from: 'browse'` returns there after a successful
- *  rename/delete, so managing several groups doesn't mean reopening the list. */
+ *  edit/delete, so managing several groups doesn't mean reopening the list. */
 type Overlay =
   | { kind: 'browse' }
   | { kind: 'create' }
-  | { kind: 'rename'; group: RunGroup; from?: 'browse' }
+  | { kind: 'edit'; group: RunGroup; from?: 'browse' }
   | { kind: 'delete'; group: RunGroup; from?: 'browse' }
   | null
 
 export function GroupChipsRow({
-  groups, ungroupedCount, active, onSelect, onCreate, onRename, onDelete,
+  groups, ungroupedCount, active, onSelect,
+  onCreate, onUpdate, onDelete, canManage, canCreate,
 }: Props) {
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [name, setName] = useState('')
+  const [visibility, setVisibility] = useState<GroupVisibility>('org')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const activeGroup = groups.find(g => g.group_id === active) ?? null
 
-  const open = (next: Overlay, initialName = '') => {
+  const open = (next: Overlay, initialName = '', initialVisibility: GroupVisibility = 'org') => {
     setName(initialName)
+    setVisibility(initialVisibility)
     setError('')
     setBusy(false)
     setOverlay(next)
@@ -64,10 +78,18 @@ export function GroupChipsRow({
   const dismiss = () => {
     setBusy(false)
     setOverlay(prev =>
-      prev && (prev.kind === 'rename' || prev.kind === 'delete') && prev.from === 'browse'
+      prev && (prev.kind === 'edit' || prev.kind === 'delete') && prev.from === 'browse'
         ? { kind: 'browse' }
         : null,
     )
+  }
+
+  /** Only what actually changed — an empty PATCH body is a 400. */
+  const pendingChanges = (group: RunGroup): GroupChanges => {
+    const changes: GroupChanges = {}
+    if (name.trim() && name.trim() !== group.name) changes.name = name.trim()
+    if (visibility !== group.visibility) changes.visibility = visibility
+    return changes
   }
 
   const submit = async () => {
@@ -75,11 +97,16 @@ export function GroupChipsRow({
     setBusy(true)
     setError('')
     try {
-      if (overlay.kind === 'create') await onCreate(name.trim())
-      else if (overlay.kind === 'rename') await onRename(overlay.group.group_id, name.trim())
-      else if (overlay.kind === 'delete') await onDelete(overlay.group.group_id)
+      if (overlay.kind === 'create') await onCreate(name.trim(), visibility)
+      else if (overlay.kind === 'edit') {
+        const changes = pendingChanges(overlay.group)
+        if (Object.keys(changes).length) await onUpdate(overlay.group.group_id, changes)
+      } else if (overlay.kind === 'delete') await onDelete(overlay.group.group_id)
       dismiss()
     } catch (e) {
+      // Server refusals are actionable: a shared group still holding other
+      // members' runs cannot go private, and that 409 names the count. Show
+      // the server's own words and leave the dialog open so the user can act.
       setError(e instanceof Error ? e.message : 'Something went wrong')
       setBusy(false)
     }
@@ -90,7 +117,10 @@ export function GroupChipsRow({
     setOverlay(null)
   }
 
-  const nameDialogOpen = overlay?.kind === 'create' || overlay?.kind === 'rename'
+  const nameDialogOpen = overlay?.kind === 'create' || overlay?.kind === 'edit'
+  const submitDisabled = busy || !name.trim() || (
+    overlay?.kind === 'edit' && Object.keys(pendingChanges(overlay.group)).length === 0
+  )
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -119,6 +149,7 @@ export function GroupChipsRow({
             >
               <Folder className="h-3 w-3" />
               {activeGroup.name}
+              {activeGroup.visibility === 'private' && <PrivateLock name={activeGroup.name} />}
               <span className="text-muted-foreground">· {activeGroup.run_count}</span>
             </Button>
             <Button
@@ -137,39 +168,48 @@ export function GroupChipsRow({
             size="sm"
             variant="ghost"
             className="h-7 gap-1.5 rounded-full text-xs text-muted-foreground"
-            title="Browse and manage your groups"
+            title="Browse and manage groups"
             onClick={() => open({ kind: 'browse' })}
           >
             <FolderOpen className="h-3 w-3" />
             All Groups
-            <span className="text-muted-foreground">· {groups.length}</span>
+            {/* Labelled on purpose: the chips either side of this one count
+                RUNS, so a bare "· 3" here would read as three runs. */}
+            <span className="text-muted-foreground">
+              · {groups.length} folder{groups.length === 1 ? '' : 's'}
+            </span>
           </Button>
         )
       )}
 
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-7 gap-1 rounded-full border-dashed text-xs text-muted-foreground"
-        onClick={() => open({ kind: 'create' })}
-      >
-        <Plus className="h-3 w-3" /> New
-      </Button>
+      {canCreate && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1 rounded-full border-dashed text-xs text-muted-foreground"
+          onClick={() => open({ kind: 'create' })}
+        >
+          <Plus className="h-3 w-3" /> New
+        </Button>
+      )}
 
-      {/* Browse: pick a group to filter, or rename/delete it in place. */}
+      {/* Browse: pick a group to filter, or edit/delete the ones you manage. */}
       <Dialog open={overlay?.kind === 'browse'} onOpenChange={o => { if (!o) setOverlay(null) }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>All Groups</DialogTitle>
             <DialogDescription>
-              Pick a group to filter the runs, or rename and delete them here.
+              Pick a group to filter the runs. A lock marks a private group —
+              only you can see that one.
             </DialogDescription>
           </DialogHeader>
 
           <div className="-mx-1 max-h-[320px] overflow-y-auto">
             {groups.length === 0 ? (
               <p className="px-1 py-6 text-center text-xs text-muted-foreground">
-                No groups yet — close this and use ＋ New to create one.
+                {canCreate
+                  ? 'No groups yet — close this and use ＋ New to create one.'
+                  : 'No groups yet.'}
               </p>
             ) : groups.map(g => (
               <div
@@ -186,24 +226,31 @@ export function GroupChipsRow({
                 >
                   <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span className="truncate">{g.name}</span>
+                  {g.visibility === 'private' && (
+                    <PrivateLock name={g.name} className="h-3.5 w-3.5 text-muted-foreground" />
+                  )}
                   <span className="shrink-0 text-xs text-muted-foreground">
                     · {g.run_count} run{g.run_count === 1 ? '' : 's'}
                   </span>
                 </button>
-                <Button
-                  variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                  title="Rename group" aria-label={`Rename ${g.name}`}
-                  onClick={() => open({ kind: 'rename', group: g, from: 'browse' }, g.name)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                  title="Delete group (runs are kept)" aria-label={`Delete ${g.name}`}
-                  onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                {canManage(g) && (
+                  <>
+                    <Button
+                      variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                      title="Edit group (name and who can see it)" aria-label={`Edit ${g.name}`}
+                      onClick={() => open({ kind: 'edit', group: g, from: 'browse' }, g.name, g.visibility)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                      title="Delete group (runs are kept)" aria-label={`Delete ${g.name}`}
+                      onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -222,13 +269,15 @@ export function GroupChipsRow({
         </DialogContent>
       </Dialog>
 
-      {/* Create / Rename share one name form. */}
+      {/* Create / Edit share one form: a name plus who can see it. PATCH takes
+          both in one call, so flipping visibility needs no second dialog. */}
       <Dialog open={nameDialogOpen} onOpenChange={o => { if (!o) dismiss() }}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>{overlay?.kind === 'rename' ? 'Rename group' : 'New group'}</DialogTitle>
+            <DialogTitle>{overlay?.kind === 'edit' ? 'Edit group' : 'New group'}</DialogTitle>
             <DialogDescription>
-              Groups are personal folders for your runs — only you see them.
+              Groups are folders for test runs. A shared group is visible to
+              everyone in your organization; a private one only to you.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={e => { e.preventDefault(); void submit() }} className="flex flex-col gap-2">
@@ -239,11 +288,17 @@ export function GroupChipsRow({
               onChange={e => setName(e.target.value)}
               placeholder="e.g. Checkout flows"
             />
+            <VisibilityField
+              id="group-chips-visibility"
+              value={visibility}
+              onChange={setVisibility}
+              disabled={busy}
+            />
             {error && <p className="text-xs text-destructive">{error}</p>}
             <DialogFooter className="mt-2">
               <Button type="button" size="sm" variant="outline" onClick={dismiss}>Cancel</Button>
-              <Button type="submit" size="sm" disabled={busy || !name.trim()}>
-                {overlay?.kind === 'rename' ? 'Rename' : 'Create'}
+              <Button type="submit" size="sm" disabled={submitDisabled}>
+                {overlay?.kind === 'edit' ? 'Save' : 'Create'}
               </Button>
             </DialogFooter>
           </form>

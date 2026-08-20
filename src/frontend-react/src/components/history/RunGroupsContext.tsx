@@ -23,7 +23,7 @@
 import {
   createContext, useContext, useEffect, useMemo, useState, type ReactNode,
 } from 'react'
-import { useGroups, type RunGroup } from './useGroups'
+import { useGroups, type GroupChanges, type GroupVisibility, type RunGroup } from './useGroups'
 
 /** null = no group filter; 'ungrouped' = runs in no group; otherwise a group_id. */
 export type GroupFilter = string | null
@@ -34,8 +34,8 @@ interface RunGroupsValue {
   error: string
   loaded: boolean
   refresh: () => Promise<void>
-  createGroup: (name: string) => Promise<RunGroup>
-  renameGroup: (groupId: string, name: string) => Promise<void>
+  createGroup: (name: string, visibility?: GroupVisibility) => Promise<RunGroup>
+  updateGroup: (groupId: string, changes: GroupChanges) => Promise<void>
   deleteGroup: (groupId: string) => Promise<void>
   assignRuns: (runIds: string[], groupId: string | null) => Promise<void>
   groupFilter: GroupFilter
@@ -47,7 +47,7 @@ const RunGroupsContext = createContext<RunGroupsValue | null>(null)
 export function RunGroupsProvider({ children }: { children: ReactNode }) {
   const {
     groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    refresh, createGroup, updateGroup, deleteGroup, assignRuns,
   } = useGroups()
   const [groupFilter, setGroupFilter] = useState<GroupFilter>(null)
 
@@ -62,11 +62,11 @@ export function RunGroupsProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<RunGroupsValue>(() => ({
     groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    refresh, createGroup, updateGroup, deleteGroup, assignRuns,
     groupFilter, setGroupFilter,
   }), [
     groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    refresh, createGroup, updateGroup, deleteGroup, assignRuns,
     groupFilter,
   ])
 
