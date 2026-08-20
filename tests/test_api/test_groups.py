@@ -633,6 +633,68 @@ def test_anonymous_caller(client):
                       json={"run_ids": [str(uuid.uuid4())], "group_id": None}).status_code == 401
 
 
+def _orgless_token(client) -> str:
+    """An ACTIVE user whose token carries NO org — the shape a login mints
+    when org provisioning failed, and it stays valid for its full life."""
+    from src.backend.auth.jwt_utils import create_access_token, decode_token
+
+    claims = decode_token(_register(client, f"no-org-{uuid.uuid4().hex[:8]}@e.com"))
+    return create_access_token({
+        "id": claims["user_id"], "email": claims["email"], "role": "user",
+        "display_name": "", "org_id": None, "org_role": None,
+        "token_version": claims["token_version"], "status": "active",
+    })
+
+
+def test_orgless_caller_sees_no_folders(client):
+    """org_id=None means UNSCOPED at the registry — every org's folders,
+    private ones included. That branch belongs to the platform admin alone;
+    a token that merely lacks an org must never reach it."""
+    other = _register(client, f"oo-{uuid.uuid4().hex[:8]}@e.com")
+    client.post("/api/groups", json={"name": "Someone elses"}, headers=_auth(other))
+
+    body = client.get("/api/groups", headers=_auth(_orgless_token(client))).json()
+    assert body == {"groups": [], "ungrouped_count": 0}
+
+
+def test_orgless_caller_cannot_mutate_folders(client):
+    """...and the same caller gets a coherent 403 on every mutation, not a
+    NotNullViolation 500 on create and a 404 on the rest."""
+    other = _register(client, f"om-{uuid.uuid4().hex[:8]}@e.com")
+    gid = client.post("/api/groups", json={"name": "Not yours"},
+                      headers=_auth(other)).json()["group_id"]
+    tok = _orgless_token(client)
+
+    r = client.post("/api/groups", json={"name": "X"}, headers=_auth(tok))
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == "Your account is not in an organization yet"
+    assert client.patch(f"/api/groups/{gid}", json={"name": "Hax"},
+                        headers=_auth(tok)).status_code == 403
+    assert client.delete(f"/api/groups/{gid}", headers=_auth(tok)).status_code == 403
+    assert client.put("/api/groups/assignments",
+                      json={"run_ids": [str(uuid.uuid4())], "group_id": gid},
+                      headers=_auth(tok)).status_code == 403
+    # The other org's folder is untouched.
+    assert [g["name"] for g in
+            client.get("/api/groups", headers=_auth(other)).json()["groups"]] == ["Not yours"]
+
+
+def test_platform_admin_sees_every_orgs_folders(client):
+    """The unfiltered branch is the platform admin's, and theirs only."""
+    from src.backend.auth.jwt_utils import create_access_token
+
+    owner = _register(client, f"pa-{uuid.uuid4().hex[:8]}@e.com")
+    gid = client.post("/api/groups", json={"name": f"Owned {uuid.uuid4().hex[:6]}"},
+                      headers=_auth(owner)).json()["group_id"]
+    admin_tok = create_access_token({
+        "id": str(uuid.uuid4()), "email": "admin@test.local", "role": "admin",
+        "display_name": "", "org_id": None, "org_role": None, "status": "active",
+    })
+
+    seen = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
+    assert gid in [g["group_id"] for g in seen]
+
+
 # ---------------------------------------------------------------------------
 # Integration: /api/history group filtering + group fields on rows
 # ---------------------------------------------------------------------------
