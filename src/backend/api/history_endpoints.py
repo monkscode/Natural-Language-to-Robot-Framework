@@ -99,6 +99,10 @@ def list_history(
     runs, total = get_run_registry().list_runs(
         user_id=scope_user_id, org_id=scope_org_id,
         limit=limit, offset=offset, status=status, q=q, group=group,
+        # The caller's IDENTITY, not the scoping user_id: an org_admin's
+        # scope_user_id is None while their identity is not, and folder
+        # visibility turns on which private folders are theirs.
+        caller_user_id=None if user is None else user["user_id"],
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
@@ -126,8 +130,16 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid run id")
 
-    run = get_run_registry().get_run(run_id)
     admin = is_validated_admin(user)
+    # Same folder scope as the list: a platform admin (or the token-less dev
+    # caller) is unscoped, everyone else sees their own org's folders and
+    # their own private ones. caller_user_id is the identity, never the
+    # scoping user_id.
+    run = get_run_registry().get_run(
+        run_id,
+        org_id=None if (admin or user is None) else user.get("org_id"),
+        caller_user_id=None if user is None else user["user_id"],
+    )
     allowed = run is not None and caller_can_read(
         user, run.get("user_id"), run.get("org_id"), is_platform_admin=admin
     )

@@ -308,6 +308,219 @@ class TestGroupAuthorityMatrix:
             self.ORG, self.ADMIN, True, gid, visibility="org") is True
 
 
+class TestReadPathVisibility:
+    """The read half: the visibility-filtered LEFT JOIN.
+
+    Every folder question is answered by ONE join —
+        LEFT JOIN run_groups g ON g.group_id = t.group_id
+                              AND g.org_id = <caller org>
+                              AND (g.visibility = 'org' OR g.created_by = <me>)
+    so a row's folder tag is g.name, its folder id is g.group_id (never
+    t.group_id), and "Ungrouped" means "in no folder I can see" rather than
+    "t.group_id IS NULL". A caller with no org scope (platform admin, or
+    token-less with AUTH_ENFORCED off) gets the join UNFILTERED: binding a
+    NULL org would evaluate the condition to NULL for every row and collapse
+    the whole page into Ungrouped.
+
+    The identity trap: an org_admin's FILTER user_id is None (they see the
+    whole org) while their identity is not, so the private-folder half of the
+    predicate is always caller_user_id, never the scoping user_id."""
+
+    ORG = "org-acme"
+    ADMIN = "u-admin"
+    MEMBER = "u-member"
+
+    @pytest.fixture(scope="class")
+    def reg(self):
+        import psycopg
+        from src.backend.core.config import settings
+        from src.backend.core.run_registry import RunRegistry
+
+        schema = "run_groups_read_test"
+        admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+        admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        admin.execute(f"CREATE SCHEMA {schema}")
+        sep = "&" if "?" in settings.DATABASE_URL else "?"
+        dsn = settings.DATABASE_URL + f"{sep}options=-c%20search_path%3D{schema},public"
+        r = RunRegistry(dsn=dsn)
+        yield r
+        r.close()
+        admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        admin.close()
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, reg):
+        import psycopg
+        from src.backend.core.config import settings
+        admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+        admin.execute("TRUNCATE run_groups_read_test.test_runs")
+        admin.execute("TRUNCATE run_groups_read_test.run_groups")
+        admin.close()
+
+    @staticmethod
+    def _seed(reg, run_id, user_id, org_id, status="passed"):
+        reg.record_start(
+            run_id,
+            {"user_id": user_id, "org_id": org_id, "email": f"{user_id}@e.com"},
+            "q", status,
+        )
+
+    # 10 ------------------------------------------------------------------
+    def test_run_in_an_invisible_private_folder_reads_as_ungrouped(self, reg):
+        """Both halves, or the run disappears from every view: the org_admin
+        must see NO folder tag on it AND must find it under Ungrouped."""
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, self.ORG)
+        gid = reg.create_group(
+            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+
+        # The org_admin's scope: whole org (filter user_id None), identity ADMIN.
+        rows, total = reg.list_runs(
+            user_id=None, org_id=self.ORG, caller_user_id=self.ADMIN)
+        assert total == 1
+        assert rows[0]["group_id"] is None and rows[0]["group_name"] is None
+        seen = reg.get_run(rid, org_id=self.ORG, caller_user_id=self.ADMIN)
+        assert seen["group_id"] is None and seen["group_name"] is None
+
+        ung, ung_total = reg.list_runs(
+            user_id=None, org_id=self.ORG, group="ungrouped",
+            caller_user_id=self.ADMIN)
+        assert ung_total == 1 and ung[0]["run_id"] == rid
+
+        # The creator still sees it filed, and NOT under their Ungrouped.
+        mine, _ = reg.list_runs(
+            user_id=self.MEMBER, org_id=self.ORG, caller_user_id=self.MEMBER)
+        assert mine[0]["group_id"] == gid and mine[0]["group_name"] == "Mine"
+        assert reg.list_runs(
+            user_id=self.MEMBER, org_id=self.ORG, group="ungrouped",
+            caller_user_id=self.MEMBER)[1] == 0
+
+    # 11 ------------------------------------------------------------------
+    def test_org_folder_name_shows_to_every_member(self, reg):
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, self.ORG)
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+
+        for me, scope_user in ((self.MEMBER, self.MEMBER), (self.ADMIN, None)):
+            rows, total = reg.list_runs(
+                user_id=scope_user, org_id=self.ORG, caller_user_id=me)
+            assert total == 1
+            assert rows[0]["group_id"] == gid and rows[0]["group_name"] == "Team"
+            run = reg.get_run(rid, org_id=self.ORG, caller_user_id=me)
+            assert run["group_id"] == gid and run["group_name"] == "Team"
+
+    # 12 ------------------------------------------------------------------
+    def test_count_ungrouped_agrees_with_the_ungrouped_filter(self, reg):
+        """The chip must agree with the table for all three scope shapes."""
+        # A solo user is org_admin of their own personal org (fact 2), so
+        # their scope is (org=personal, user=None).
+        solo = [str(uuid.uuid4()) for _ in range(3)]
+        for r in solo:
+            self._seed(reg, r, "u-solo", "org-solo")
+        solo_gid = reg.create_group(
+            "org-solo", "u-solo", "Solo", visibility="private")["group_id"]
+        assert reg.assign_runs("org-solo", "u-solo", True, solo[:1], solo_gid) is True
+
+        # The team: the admin's run in an org folder, two member runs of which
+        # one sits in the member's OWN private folder (invisible to the admin).
+        a1, m1, m2 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, a1, self.ADMIN, self.ORG)
+        self._seed(reg, m1, self.MEMBER, self.ORG)
+        self._seed(reg, m2, self.MEMBER, self.ORG)
+        team_gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        priv_gid = reg.create_group(
+            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1], team_gid) is True
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [m1], priv_gid) is True
+
+        cases = [
+            ((None, "org-solo", "u-solo"), 2),           # solo: 3 runs, 1 filed
+            ((self.MEMBER, self.ORG, self.MEMBER), 1),   # member: m1 filed, m2 not
+            ((None, self.ORG, self.ADMIN), 2),           # admin: m1's folder invisible
+        ]
+        for (scope_user, scope_org, me), expected in cases:
+            _, total = reg.list_runs(
+                user_id=scope_user, org_id=scope_org, group="ungrouped",
+                caller_user_id=me)
+            assert total == expected, (scope_user, scope_org, me)
+            assert reg.count_ungrouped(scope_user, scope_org, me) == total
+
+    # 13 ------------------------------------------------------------------
+    def test_folder_run_count_agrees_with_the_folder_filter(self, reg):
+        a1, m1 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, a1, self.ADMIN, self.ORG)
+        self._seed(reg, m1, self.MEMBER, self.ORG)
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1, m1], gid) is True
+
+        # The member sees only their own run in it...
+        listed = reg.list_groups(self.ORG, self.MEMBER, scope_user_id=self.MEMBER)
+        _, total = reg.list_runs(
+            user_id=self.MEMBER, org_id=self.ORG, group=gid,
+            caller_user_id=self.MEMBER)
+        assert [g["run_count"] for g in listed] == [total] == [1]
+
+        # ...the org_admin sees both.
+        listed = reg.list_groups(self.ORG, self.ADMIN, scope_user_id=None)
+        _, total = reg.list_runs(
+            user_id=None, org_id=self.ORG, group=gid, caller_user_id=self.ADMIN)
+        assert [g["run_count"] for g in listed] == [total] == [2]
+
+    # 14 ------------------------------------------------------------------
+    def test_filtering_by_an_invisible_folder_returns_nothing(self, reg):
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, self.ORG)
+        gid = reg.create_group(
+            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+
+        rows, total = reg.list_runs(
+            user_id=None, org_id=self.ORG, group=gid, caller_user_id=self.ADMIN)
+        assert rows == [] and total == 0
+
+    # 15 ------------------------------------------------------------------
+    def test_unscoped_caller_still_sees_every_folder(self, reg):
+        """org_id=None is the platform admin / token-less branch: no
+        visibility filter at all. Bind None into the join instead and every
+        folder vanishes and the page collapses into Ungrouped."""
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, self.ORG)
+        gid = reg.create_group(
+            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+
+        rows, total = reg.list_runs(user_id=None, org_id=None, caller_user_id=None)
+        assert total == 1
+        assert rows[0]["group_id"] == gid and rows[0]["group_name"] == "Mine"
+
+        assert reg.list_runs(user_id=None, org_id=None, group="ungrouped",
+                             caller_user_id=None)[1] == 0
+        assert reg.count_ungrouped(None, None, None) == 0
+        assert reg.list_runs(user_id=None, org_id=None, group=gid,
+                             caller_user_id=None)[1] == 1
+        run = reg.get_run(rid)
+        assert run["group_id"] == gid and run["group_name"] == "Mine"
+
+    def test_join_parameters_bind_before_the_where_clause(self, reg):
+        """The join now carries its OWN placeholders, and they appear in the
+        SQL text BEFORE the WHERE clause's. psycopg binds %s strictly by
+        position, so mis-ordering them filters on the wrong values SILENTLY
+        rather than raising. Every filter at once is what catches it."""
+        mine, other = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, mine, self.MEMBER, self.ORG, status="failed")
+        self._seed(reg, other, self.ADMIN, self.ORG, status="failed")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [mine, other], gid) is True
+
+        rows, total = reg.list_runs(
+            user_id=self.MEMBER, org_id=self.ORG, status="failed", q="q",
+            group=gid, caller_user_id=self.MEMBER, limit=10, offset=0)
+        assert total == 1
+        assert rows[0]["run_id"] == mine and rows[0]["group_name"] == "Team"
+
+
 class TestGroupAssignmentAndFilter:
     """assign_runs atomicity + the group filter / group_name join in
     list_runs and get_run. Reuses TestGroupRegistryCrud's isolated-schema
@@ -562,6 +775,67 @@ def test_org_admin_can_file_a_members_run(client):
     assert r.status_code == 200, r.text
     detail = client.get(f"/api/history/{rid}", headers=_auth(tok_b)).json()
     assert detail["group_id"] == gid and detail["group_name"] == "Admin filed"
+
+
+def test_drawer_hides_a_folder_the_caller_cannot_see(client):
+    """PRESERVE item 5's negative: a run inside a folder the caller cannot see
+    reports null for BOTH group fields — never the folder's name, and never a
+    dangling id.
+
+    visibility is not on the wire yet (T3), so the private folder is created
+    through the registry; the endpoint reads the very same rows."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+
+    tok_a, tok_b, org_id = _team_of_two(client)
+    uid_b = decode_token(tok_b)["user_id"]
+    rid = _seed_run_for(client, tok_b)
+    reg = get_run_registry()
+    name = f"Bs secret {uuid.uuid4().hex[:6]}"
+    gid = reg.create_group(org_id, uid_b, name, visibility="private")["group_id"]
+    assert reg.assign_runs(org_id, uid_b, False, [rid], gid) is True
+
+    # The creator sees it filed...
+    mine = client.get(f"/api/history/{rid}", headers=_auth(tok_b)).json()
+    assert mine["group_id"] == gid and mine["group_name"] == name
+    # ...their org_admin sees the run itself, but no folder at all.
+    theirs = client.get(f"/api/history/{rid}", headers=_auth(tok_a)).json()
+    assert theirs["run_id"] == rid
+    assert theirs["group_id"] is None and theirs["group_name"] is None
+    # ...and it is under the admin's Ungrouped rather than nowhere.
+    page = client.get("/api/history?group=ungrouped", headers=_auth(tok_a)).json()
+    assert rid in [r["run_id"] for r in page["runs"]]
+
+
+def test_ungrouped_chip_agrees_with_the_history_table(client):
+    """The chip and the table must come from the SAME scope. An org_admin's
+    History spans the whole org, so their Ungrouped count has to as well —
+    a per-user count would show 1 beside a table listing 2."""
+    tok_a, tok_b, _org_id = _team_of_two(client)
+    filed = _seed_run_for(client, tok_a)
+    _seed_run_for(client, tok_a)   # the admin's own, left out
+    _seed_run_for(client, tok_b)   # the member's, left out
+    gid = client.post("/api/groups", json={"name": f"F{uuid.uuid4().hex[:6]}"},
+                      headers=_auth(tok_a)).json()["group_id"]
+    assert client.put("/api/groups/assignments",
+                      json={"run_ids": [filed], "group_id": gid},
+                      headers=_auth(tok_a)).status_code == 200
+
+    for tok in (tok_a, tok_b):
+        body = client.get("/api/groups", headers=_auth(tok)).json()
+        table = client.get("/api/history?group=ungrouped",
+                           headers=_auth(tok)).json()["total"]
+        assert body["ungrouped_count"] == table
+        folder = next(g for g in body["groups"] if g["group_id"] == gid)
+        in_folder = client.get(f"/api/history?group={gid}",
+                               headers=_auth(tok)).json()["total"]
+        assert folder["run_count"] == in_folder
+
+    # The two scopes really do differ, so the agreement above is not trivial.
+    assert client.get("/api/groups",
+                      headers=_auth(tok_a)).json()["ungrouped_count"] == 2
+    assert client.get("/api/groups",
+                      headers=_auth(tok_b)).json()["ungrouped_count"] == 1
 
 
 def test_member_cannot_mutate_an_org_folder_they_did_not_create(client):

@@ -99,15 +99,28 @@ def list_groups(user: dict | None = Depends(require_user)):
     if user is None:
         return {"groups": [], "ungrouped_count": 0}
     reg = get_run_registry()
+    me = user["user_id"]
+    # The run scope MUST be the one /api/history computes for this same
+    # caller, or the chip counts a different set of runs than the table lists
+    # (an org_admin's History spans the org; a per-user count showed 1 beside
+    # a table of 2). Branch order is load-bearing: admin, then org, then
+    # empty — reversing the first two hands an org-less token the unscoped
+    # every-org folder view.
     if is_validated_admin(user):
-        groups = reg.list_groups(None, user["user_id"])
+        scope_org_id = scope_user_id = None
+        groups = reg.list_groups(None, me, scope_user_id=None)
     elif user.get("org_id"):
-        groups = reg.list_groups(user["org_id"], user["user_id"])
+        scope_org_id = user["org_id"]
+        scope_user_id = None if user.get("org_role") == "org_admin" else me
+        groups = reg.list_groups(scope_org_id, me, scope_user_id=scope_user_id)
     else:
+        # No org, so no folder can be theirs; the count still matches what
+        # /api/history shows them, which is their own runs.
+        scope_org_id, scope_user_id = None, me
         groups = []
     return {
         "groups": groups,
-        "ungrouped_count": reg.count_ungrouped(user["user_id"]),
+        "ungrouped_count": reg.count_ungrouped(scope_user_id, scope_org_id, me),
     }
 
 

@@ -290,7 +290,10 @@ class RunRegistry:
     # ------------------------------------------------------------------
 
     def list_groups(
-        self, org_id: Optional[str], user_id: Optional[str]
+        self,
+        org_id: Optional[str],
+        user_id: Optional[str],
+        scope_user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Folders visible to the caller, name-sorted, each with its
         member-run count: the caller's org's 'org' folders plus their own
@@ -299,22 +302,37 @@ class RunRegistry:
         runs, so no visibility filter applies; filtering on a NULL org would
         evaluate to NULL for every row and hide the lot.
 
-        NOTE (read path, next task): run_count is still the folder's TOTAL
-        run count, not the count within the caller's own scope."""
-        where, params = "", []
+        user_id is the caller's IDENTITY (which private folders are theirs);
+        scope_user_id is the run-list scope run_count is counted within —
+        None means the whole org, exactly as list_runs(user_id=None) does for
+        an org_admin. The two differ for an org_admin, whose filter user_id
+        is None while their identity is not, and run_count MUST use the same
+        predicates list_runs uses or the chip disagrees with the table.
+
+        The run scope goes in the JOIN condition, not the WHERE clause: in
+        the WHERE it would turn the LEFT JOIN into an inner one and drop
+        every folder that holds none of the caller's runs."""
+        join, join_params = "", []
+        if scope_user_id is not None:
+            join += " AND t.user_id = %s"
+            join_params.append(scope_user_id)
+        if org_id is not None:
+            join += " AND t.org_id = %s"
+            join_params.append(org_id)
+        where, where_params = "", []
         if org_id is not None:
             where = ("WHERE g.org_id = %s "
                      "  AND (g.visibility = 'org' OR g.created_by = %s) ")
-            params = [org_id, user_id]
+            where_params = [org_id, user_id]
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT g.group_id, g.name, g.created_at, g.updated_at, "
                 "       COUNT(t.run_id) AS run_count "
                 "FROM run_groups g "
-                "LEFT JOIN test_runs t ON t.group_id = g.group_id "
+                f"LEFT JOIN test_runs t ON t.group_id = g.group_id{join} "
                 f"{where}"
                 "GROUP BY g.group_id ORDER BY lower(g.name)",
-                params,
+                join_params + where_params,
             ).fetchall()
         out = []
         for r in rows:
@@ -485,14 +503,34 @@ class RunRegistry:
             )
             return True
 
-    def count_ungrouped(self, user_id: str) -> int:
-        """How many of the user's runs are in no group — the Ungrouped chip's
-        live count on the History page."""
+    def count_ungrouped(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        caller_user_id: Optional[str] = None,
+    ) -> int:
+        """The Ungrouped chip's live count on the History page.
+
+        Takes the caller's whole (user_id, org_id) scope and the same
+        visibility join list_runs uses, so the chip always equals the total
+        of list_runs(group="ungrouped") for that caller. A bare per-user
+        count disagreed with the table for an org_admin, whose History spans
+        the org. "Ungrouped" is g.group_id IS NULL — in no folder the caller
+        can SEE — not t.group_id IS NULL, or a run inside someone else's
+        private folder would belong to no filter at all and vanish."""
+        join, params = self._group_join(org_id, caller_user_id)
+        clauses = ["g.group_id IS NULL"]
+        if user_id is not None:
+            clauses.append("t.user_id = %s")
+            params = params + [user_id]
+        if org_id is not None:
+            clauses.append("t.org_id = %s")
+            params = params + [org_id]
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM test_runs "
-                "WHERE user_id = %s AND group_id IS NULL",
-                (user_id,),
+                f"SELECT COUNT(*) AS n FROM test_runs t {join} "
+                f"WHERE {' AND '.join(clauses)}",
+                params,
             ).fetchone()
         return row["n"]
 
@@ -545,6 +583,37 @@ class RunRegistry:
                 return False
             return True
 
+    @staticmethod
+    def _group_join(
+        org_id: Optional[str], caller_user_id: Optional[str]
+    ) -> Tuple[str, list]:
+        """(SQL, params) for the ONE visibility-filtered LEFT JOIN every read
+        derives its folder answers from: a row's folder tag is g.name, its
+        folder id is g.group_id, and "in no folder I can see" is
+        g.group_id IS NULL.
+
+        Two forms, and both matter. org_id None is the unscoped caller — a
+        platform admin, or token-less with AUTH_ENFORCED off — who already
+        sees every org's runs, so the join carries no filter: binding their
+        NULL org would make g.org_id = NULL evaluate to NULL for every row,
+        hide every folder name and collapse the whole page into Ungrouped.
+        Otherwise the caller's org plus their own identity, which is
+        caller_user_id and never the scoping user_id — an org_admin's filter
+        user_id is None while their identity is not, and a None there would
+        silently hide their own private folders.
+
+        The returned params bind BEFORE any WHERE-clause params, because
+        these placeholders sit earlier in the SQL text and psycopg binds %s
+        strictly by position."""
+        if org_id is None:
+            return "LEFT JOIN run_groups g ON g.group_id = t.group_id", []
+        return (
+            "LEFT JOIN run_groups g ON g.group_id = t.group_id"
+            " AND g.org_id = %s"
+            " AND (g.visibility = 'org' OR g.created_by = %s)",
+            [org_id, caller_user_id],
+        )
+
     def list_runs(
         self,
         user_id: Optional[str] = None,
@@ -554,6 +623,7 @@ class RunRegistry:
         status: Optional[str] = None,
         q: Optional[str] = None,
         group: Optional[str] = None,
+        caller_user_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Most-recent-first run rows + total count. user_id=None lists all
         users' runs (admin scope); otherwise only that user's rows. status
@@ -562,10 +632,12 @@ class RunRegistry:
         substring match over the description, owner email and run id — applied
         server-side so it spans ALL of a user's runs, not just the loaded page,
         and so rows/total/pagination stay consistent with the active search.
-        group narrows to one personal group (a run_groups id) or, with the
-        literal "ungrouped", to rows with no group; rows carry group_id and
-        group_name (LEFT JOIN) so the History table renders folder tags
-        without extra requests."""
+        group narrows to one folder (a run_groups id) or, with the literal
+        "ungrouped", to rows in no folder the caller can SEE; rows carry
+        group_id and group_name from _group_join so the History table renders
+        folder tags without extra requests. caller_user_id is the caller's own
+        identity for that join — see _group_join for why it is not user_id."""
+        join, join_params = self._group_join(org_id, caller_user_id)
         clauses: list = []
         params: list = []
         if user_id is not None:
@@ -578,9 +650,9 @@ class RunRegistry:
             clauses.append("t.status = %s")
             params.append(status)
         if group == "ungrouped":
-            clauses.append("t.group_id IS NULL")
+            clauses.append("g.group_id IS NULL")
         elif group is not None:
-            clauses.append("t.group_id = %s")
+            clauses.append("g.group_id = %s")
             params.append(group)
         if q:
             # Escape LIKE wildcards so a typed % / _ matches literally (default
@@ -591,17 +663,22 @@ class RunRegistry:
             )
             params.extend([like, like, like])
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        # Join params FIRST: their placeholders come earlier in the SQL text
+        # than the WHERE clause's, and psycopg binds %s strictly by position —
+        # get this backwards and the query filters on the wrong values without
+        # raising. The COUNT carries the same join, so it takes them too.
+        params = join_params + params
         try:
             with self._pool.connection() as conn:
                 total = conn.execute(
-                    f"SELECT COUNT(*) AS n FROM test_runs t{where}", params
+                    f"SELECT COUNT(*) AS n FROM test_runs t {join}{where}", params
                 ).fetchone()["n"]
                 rows = conn.execute(
                     f"SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     f"       t.rerun_of, t.status, t.created_at, t.updated_at, "
-                    f"       t.group_id, g.name AS group_name "
+                    f"       g.group_id, g.name AS group_name "
                     f"FROM test_runs t "
-                    f"LEFT JOIN run_groups g ON g.group_id = t.group_id"
+                    f"{join}"
                     f"{where} "
                     f"ORDER BY t.created_at DESC LIMIT %s OFFSET %s",
                     params + [limit, offset],
@@ -669,20 +746,34 @@ class RunRegistry:
             logger.error(f"[RUN_REGISTRY] backfill_org_ids failed: {e}")
             return 0
 
-    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_run(
+        self,
+        run_id: str,
+        org_id: Optional[str] = None,
+        caller_user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Full row for one run (including robot_code), or None if unknown
-        or on storage error (callers treat both as 'not found')."""
+        or on storage error (callers treat both as 'not found').
+
+        org_id/caller_user_id are the CALLER's scope, not the row's, and feed
+        _group_join: a run sitting in a folder this caller cannot see reports
+        NULL for both group_id and group_name, so the drawer never shows a
+        private folder's name nor a folder id the caller cannot resolve. They
+        default to the unscoped form, which is what the rerun and feedback
+        paths in api/endpoints.py want — they read robot_code and ownership,
+        never the group fields."""
+        join, params = self._group_join(org_id, caller_user_id)
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     "       t.robot_code, t.rerun_of, t.status, t.org_id, "
                     "       t.created_at, t.updated_at, "
-                    "       t.group_id, g.name AS group_name "
+                    "       g.group_id, g.name AS group_name "
                     "FROM test_runs t "
-                    "LEFT JOIN run_groups g ON g.group_id = t.group_id "
+                    f"{join} "
                     "WHERE t.run_id = %s",
-                    (run_id,),
+                    params + [run_id],
                 ).fetchone()
             if not row:
                 return None
