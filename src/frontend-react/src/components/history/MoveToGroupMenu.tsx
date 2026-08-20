@@ -6,7 +6,7 @@
  * group… item. A lock marks the private groups, which may share a name with
  * a shared one.
  */
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -39,6 +39,18 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
   const [visibility, setVisibility] = useState<GroupVisibility>('org')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+
+  /** The dialog is controlled and renders no <DialogTrigger>, so Radix has
+   *  nothing to hand focus back to on close and it falls to <body> — which,
+   *  opened from the run drawer, strands the user outside a modal that is
+   *  still open. Return focus to the button that opened the menu. */
+  const returnFocusToTrigger = (event: Event) => {
+    const opener = triggerRef.current
+    if (!opener || !document.body.contains(opener)) return
+    event.preventDefault()
+    opener.focus()
+  }
 
   const createAndMove = async () => {
     setBusy(true)
@@ -57,8 +69,16 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuTrigger asChild ref={triggerRef}>{trigger}</DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-52"
+          // The menu is portalled to <body>, but React synthetic events bubble
+          // the REACT tree — so an item's click reaches the History row's
+          // onClick and opens that run's drawer behind the menu. One handler
+          // here covers every item; the trigger already guards itself.
+          onClick={e => e.stopPropagation()}
+        >
           <DropdownMenuLabel className="text-xs">Move to group</DropdownMenuLabel>
           {groups.map(g => (
             <DropdownMenuItem
@@ -95,7 +115,7 @@ export function MoveToGroupMenu({ groups, currentGroupId, showRemove, onMove, on
       </DropdownMenu>
 
       <Dialog open={creating} onOpenChange={o => { if (!o) { setCreating(false); setBusy(false) } }}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" onCloseAutoFocus={returnFocusToTrigger}>
           <DialogHeader>
             <DialogTitle>New group</DialogTitle>
             <DialogDescription>The selected runs move into it right away.</DialogDescription>

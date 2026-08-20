@@ -16,7 +16,7 @@
  * Management affordances are offered only where the caller may actually use
  * them (canManage / canCreate); the server refuses the rest regardless.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -54,6 +54,12 @@ type Overlay =
   | { kind: 'delete'; group: RunGroup; from?: 'browse' }
   | null
 
+/** A private and a shared group may legitimately carry the SAME name, and the
+ *  lock beside it is the only thing separating them — so an action's
+ *  accessible name has to carry what the lock carries visually. */
+const actionLabel = (verb: string, group: RunGroup) =>
+  `${verb} ${group.name}${group.visibility === 'private' ? ' (private)' : ''}`
+
 export function GroupChipsRow({
   groups, ungroupedCount, active, onSelect,
   onCreate, onUpdate, onDelete, canManage, canCreate,
@@ -63,10 +69,16 @@ export function GroupChipsRow({
   const [visibility, setVisibility] = useState<GroupVisibility>('org')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
 
   const activeGroup = groups.find(g => g.group_id === active) ?? null
 
   const open = (next: Overlay, initialName = '', initialVisibility: GroupVisibility = 'org') => {
+    // These dialogs are controlled and render no <DialogTrigger>, so Radix has
+    // nothing to restore focus to on close and it drops to <body>. Remember the
+    // control that opened the chain — only at its START, so browse → edit keeps
+    // the original opener rather than an Edit button that is about to unmount.
+    if (!overlay) returnFocusRef.current = document.activeElement as HTMLElement | null
     setName(initialName)
     setVisibility(initialVisibility)
     setError('')
@@ -82,6 +94,18 @@ export function GroupChipsRow({
         ? { kind: 'browse' }
         : null,
     )
+  }
+
+  /** Hand focus back to whatever opened the chain, but only once the chain has
+   *  actually ENDED. An intermediate transition (browse → edit, or edit →
+   *  Cancel → browse) must leave focus to the overlay taking over. */
+  const restoreFocus = (event: Event) => {
+    if (overlay) return
+    const opener = returnFocusRef.current
+    returnFocusRef.current = null
+    if (!opener || !document.body.contains(opener)) return
+    event.preventDefault()
+    opener.focus()
   }
 
   /** Only what actually changed — an empty PATCH body is a 400. */
@@ -195,7 +219,7 @@ export function GroupChipsRow({
 
       {/* Browse: pick a group to filter, or edit/delete the ones you manage. */}
       <Dialog open={overlay?.kind === 'browse'} onOpenChange={o => { if (!o) setOverlay(null) }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
             <DialogTitle>All Groups</DialogTitle>
             <DialogDescription>
@@ -237,14 +261,14 @@ export function GroupChipsRow({
                   <>
                     <Button
                       variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                      title="Edit group (name and who can see it)" aria-label={`Edit ${g.name}`}
+                      title="Edit group (name and who can see it)" aria-label={actionLabel('Edit', g)}
                       onClick={() => open({ kind: 'edit', group: g, from: 'browse' }, g.name, g.visibility)}
                     >
                       <Pencil className="h-3.5 w-3.5" />
                     </Button>
                     <Button
                       variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                      title="Delete group (runs are kept)" aria-label={`Delete ${g.name}`}
+                      title="Delete group (runs are kept)" aria-label={actionLabel('Delete', g)}
                       onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -272,7 +296,7 @@ export function GroupChipsRow({
       {/* Create / Edit share one form: a name plus who can see it. PATCH takes
           both in one call, so flipping visibility needs no second dialog. */}
       <Dialog open={nameDialogOpen} onOpenChange={o => { if (!o) dismiss() }}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
             <DialogTitle>{overlay?.kind === 'edit' ? 'Edit group' : 'New group'}</DialogTitle>
             <DialogDescription>
@@ -308,7 +332,7 @@ export function GroupChipsRow({
 
       {/* Delete confirmation — runs survive, they just return to Ungrouped. */}
       <Dialog open={overlay?.kind === 'delete'} onOpenChange={o => { if (!o) dismiss() }}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
             <DialogTitle>
               Delete “{overlay?.kind === 'delete' ? overlay.group.name : ''}”?
