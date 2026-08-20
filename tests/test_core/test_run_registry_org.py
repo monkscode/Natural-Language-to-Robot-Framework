@@ -3,6 +3,7 @@
 import uuid
 from unittest.mock import patch
 
+import psycopg
 import pytest
 
 from src.backend.auth import db as auth_db
@@ -128,14 +129,45 @@ def test_record_start_leaves_org_id_null_without_membership(registry):
 
 
 def test_record_start_survives_non_uuid_user_id(registry):
-    """org_members.user_id is uuid; test_runs.user_id is text. A non-UUID
-    user_id must not poison the INSERT's transaction -- org_id stays NULL
-    AND the row is still written (guards the transaction-poisoning failure
-    mode: the org lookup must run on its own connection/savepoint)."""
+    """A non-UUID user_id is rejected by shape in _lookup_org_id's UUID
+    pre-check, before it ever reaches the pool -- org_id stays NULL AND the
+    row is still written. This guards the pre-check itself, not the
+    separate-connection isolation (see
+    test_record_start_survives_lookup_failure_at_db_level below for that)."""
     rid = _run_id()
     registry.record_start(
         rid, {"user_id": "not-a-uuid", "email": "x@e.com"}, "do a thing", "generated",
     )
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_record_start_survives_lookup_failure_at_db_level(registry):
+    """A user_id that IS a valid UUID, but whose org_members lookup fails at
+    the DB level (here: the pool cannot hand out a connection) -- org_id
+    stays NULL AND the row is still written. This is the case the UUID
+    pre-check does NOT intercept, and it is what actually proves the lookup
+    runs on its own connection: the failure is injected at the boundary
+    _lookup_org_id borrows from (_pool.connection()), not inside
+    _lookup_org_id itself, so a failure that shared the INSERT's connection/
+    transaction would poison it and the row would never be written at all
+    -- the transaction-poisoning mode this task exists to guard against."""
+    real_connection = registry._pool.connection
+    calls = {"n": 0}
+
+    def flaky_connection(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise psycopg.OperationalError("simulated connection failure")
+        return real_connection(*args, **kwargs)
+
+    rid = _run_id()
+    user_id = str(uuid.uuid4())  # valid UUID; no org_members row needed
+    with patch.object(registry._pool, "connection", side_effect=flaky_connection):
+        registry.record_start(
+            rid, {"user_id": user_id, "email": "x@e.com"}, "do a thing", "generated",
+        )
     row = registry.get_run(rid)
     assert row is not None
     assert row["org_id"] is None
