@@ -906,10 +906,17 @@ def test_anonymous_caller(client):
     Mutations are 403, not 401: the SPA treats EVERY 401 as "session
     expired", clears the token and hard-redirects to /login, so a 401 here
     logged the whole app out on a click (F11)."""
+    # Seed through a real token first: auth_isolated_schema is package-scoped
+    # with no per-test truncation, so run alone this test would compare 0 to 0
+    # and the defect it exists to pin (a hardcoded 0 beside a full table)
+    # would go undetected.
+    _seed_run_for(client, _register(client, f"an-{uuid.uuid4().hex[:8]}@e.com"))
+
     body = client.get("/api/groups").json()
     assert body["groups"] == []
-    assert body["ungrouped_count"] == client.get(
-        "/api/history?group=ungrouped").json()["total"]
+    table = client.get("/api/history?group=ungrouped").json()["total"]
+    assert table > 0
+    assert body["ungrouped_count"] == table
 
     r = client.post("/api/groups", json={"name": "X"})
     assert r.status_code == 403
@@ -1074,6 +1081,27 @@ def test_invalid_visibility_is_400_with_a_string_detail(client):
     assert isinstance(r.json()["detail"], str)
 
 
+def test_non_string_visibility_is_400_with_a_string_detail(client):
+    """The same 422 rendering failure, reached by TYPE rather than by value:
+    a nullable dialog state binding straight to the field sends null, and a
+    pydantic `str` annotation would answer with a list detail. Validation is
+    manual, so any JSON value has to reach _clean_visibility."""
+    tok = _register(client, f"nv-{uuid.uuid4().hex[:8]}@e.com")
+    for junk in (123, None, True, ["private"], {"v": "private"}):
+        r = client.post("/api/groups", json={"name": "Nope", "visibility": junk},
+                        headers=_auth(tok))
+        assert r.status_code == 400, (junk, r.text)
+        assert isinstance(r.json()["detail"], str), junk
+
+    gid = client.post("/api/groups", json={"name": "Patch me"},
+                      headers=_auth(tok)).json()["group_id"]
+    for junk in (123, True, ["private"]):
+        r = client.patch(f"/api/groups/{gid}", json={"visibility": junk},
+                         headers=_auth(tok))
+        assert r.status_code == 400, (junk, r.text)
+        assert isinstance(r.json()["detail"], str), junk
+
+
 def test_patch_flips_private_to_org(client):
     """Widening is always allowed, and the list reflects it immediately."""
     tok = _register(client, f"fp-{uuid.uuid4().hex[:8]}@e.com")
@@ -1191,4 +1219,8 @@ def test_empty_group_param_returns_the_full_total(client):
     unfiltered = client.get("/api/history", headers=_auth(tok)).json()["total"]
     assert unfiltered == 2
     assert client.get("/api/history?group=",
+                      headers=_auth(tok)).json()["total"] == unfiltered
+    # Whitespace-only is the same defect one input class in: strip() leaves ""
+    # behind, and "" is not None, so it still reaches SQL as group_id = ''.
+    assert client.get("/api/history?group=%20%20",
                       headers=_auth(tok)).json()["total"] == unfiltered

@@ -24,7 +24,7 @@ Depends on: core/run_registry.py, api/history_scope.py, auth/jwt_utils.py.
 
 import logging
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -51,12 +51,15 @@ _RUN_IDS_MAX = 500
 
 class GroupIn(BaseModel):
     name: str
-    visibility: str = "org"
+    # Deliberately untyped: _clean_visibility validates, and a `str`
+    # annotation would answer a null or a number with pydantic's 422, whose
+    # detail is a list of objects where the SPA renders a string.
+    visibility: Any = "org"
 
 
 class GroupPatchIn(BaseModel):
     name: str | None = None
-    visibility: str | None = None
+    visibility: Any = None
 
 
 class AssignmentsIn(BaseModel):
@@ -98,9 +101,11 @@ def _clean_name(raw: str) -> str:
     return name
 
 
-def _clean_visibility(raw: str) -> str:
+def _clean_visibility(raw: Any) -> str:
     """Validated by hand, not by a pydantic Literal: the SPA renders `detail`
-    as a string, and FastAPI's 422 detail is a list of objects."""
+    as a string, and FastAPI's 422 detail is a list of objects. Takes ANY
+    JSON value for the same reason — a wrong TYPE has to reach this 400 too,
+    not just a wrong string."""
     if raw not in _VISIBILITIES:
         raise HTTPException(
             400, f"Visibility must be one of: {', '.join(_VISIBILITIES)}")

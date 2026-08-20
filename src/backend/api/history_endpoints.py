@@ -18,7 +18,8 @@ ownership rows, so a user cannot open another user's log.html by URL.
 
 Referenced by: main.py (router registration), api/endpoints.py
 (resolve_robot_code for history reruns), frontend HistoryPage.
-Depends on: core/run_registry.py, auth/jwt_utils.py, core/artifact_store.py
+Depends on: core/run_registry.py, api/history_scope.py (the shared run scope,
+shared with /api/groups), auth/jwt_utils.py, core/artifact_store.py
 (get_artifact_store).
 """
 
@@ -71,10 +72,13 @@ def list_history(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     q = q.strip() if q else None
-    # An empty ?group= is the SPA clearing the chip. Without this it stayed
-    # "", skipped the uuid check below (falsy) and reached the registry as a
-    # literal group_id = '' filter, matching 0 rows instead of all of them.
-    group = group.strip() if group else None
+    # An empty (or whitespace-only) ?group= is the SPA clearing the chip.
+    # Without the trailing `or None` it stayed "", skipped the uuid check
+    # below (falsy) and reached the registry as a literal group_id = ''
+    # filter, matching 0 rows instead of all of them. The q line above is
+    # safe with a bare strip() only because q is consumed under `if q:`;
+    # group is tested with `is not None`, so "" is a live filter value.
+    group = (group or "").strip() or None
 
     # group: a run_groups id (uuid) or the literal "ungrouped". The filter
     # needs no extra authorization of its own: rows are already scoped below
