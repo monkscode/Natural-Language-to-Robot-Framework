@@ -65,16 +65,128 @@ def test_list_runs_preserves_unattributed_error_rows(registry):
 def test_backfill_maps_existing_rows_to_owner_org(registry):
     users, orgs = UserRepository(), OrgRepository()
     user = users.create_user(f"bf-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
-    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
     rid = _run_id()
-    # Simulate a pre-tenancy row: user attributed, org_id NULL.
+    # Simulate a pre-tenancy row: user attributed, org_id NULL. The org is
+    # provisioned AFTER record_start so record_start's own org_members
+    # fallback (Part B) has no membership to find yet and genuinely leaves
+    # org_id NULL -- the state backfill_org_ids exists to repair.
     registry.record_start(
         rid, {"user_id": str(user["id"]), "email": user["email"]}, "legacy", "passed"
     )
     assert registry.get_run(rid)["org_id"] is None
 
+    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
     updated = registry.backfill_org_ids()
     assert updated >= 1
     assert registry.get_run(rid)["org_id"] == org_id
     # Idempotent: a second pass changes nothing.
     assert registry.backfill_org_ids() == 0
+
+
+def test_record_start_derives_org_id_for_org_member(registry):
+    """record_start with org_id=None resolves it via org_members when the
+    user's single membership is org_role='org_member' -- the case the old
+    org_admin-only predicate silently dropped (Part B). This is the test
+    that fails against the previous design."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"rr-owner-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    member = users.create_user(f"rr-member-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team RR Member", str(owner["id"]))
+    orgs.add_member(team_org_id, str(member["id"]), "org_member")
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(member["id"]), "email": member["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_record_start_derives_org_id_for_org_admin(registry):
+    """Same fallback, org_role='org_admin' -- must keep working."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"rr-admin-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team RR Admin", str(owner["id"]))
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(owner["id"]), "email": owner["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_record_start_leaves_org_id_null_without_membership(registry):
+    """A user_id with no org_members row at all -- org_id stays NULL, nothing raises."""
+    users = UserRepository()
+    user = users.create_user(f"rr-none-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(user["id"]), "email": user["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] is None
+
+
+def test_record_start_survives_non_uuid_user_id(registry):
+    """org_members.user_id is uuid; test_runs.user_id is text. A non-UUID
+    user_id must not poison the INSERT's transaction -- org_id stays NULL
+    AND the row is still written (guards the transaction-poisoning failure
+    mode: the org lookup must run on its own connection/savepoint)."""
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": "not-a-uuid", "email": "x@e.com"}, "do a thing", "generated",
+    )
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_record_start_uses_supplied_org_id_verbatim(registry):
+    """A token-supplied org_id is used as-is, even when it disagrees with the
+    user's real org_members row -- proving the fallback never overrides an
+    explicit value."""
+    users, orgs = UserRepository(), OrgRepository()
+    user = users.create_user(f"rr-verbatim-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    real_org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
+    supplied_org_id = str(uuid.uuid4())
+    assert supplied_org_id != real_org_id
+
+    rid = _run_id()
+    registry.record_start(
+        rid,
+        {"user_id": str(user["id"]), "email": user["email"], "org_id": supplied_org_id},
+        "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] == supplied_org_id
+
+
+def test_record_start_with_no_user_leaves_org_id_null(registry):
+    """user=None (unattributed / auth-off run) -- unchanged behaviour, nothing raises."""
+    rid = _run_id()
+    registry.record_start(rid, None, None, "error")
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_backfill_attributes_org_member_rows_too(registry):
+    """backfill_org_ids must attribute an org_member's rows, not only an
+    org_admin's -- the identical predicate defect Part B's lookup fixes at
+    write time, fixed here at backfill time too."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"bf-owner-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    member = users.create_user(f"bf-member-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+
+    rid = _run_id()
+    # Pre-tenancy row for a user who is not yet a member of anything, so
+    # record_start's own fallback finds nothing and org_id stays NULL.
+    registry.record_start(
+        rid, {"user_id": str(member["id"]), "email": member["email"]}, "legacy", "passed",
+    )
+    assert registry.get_run(rid)["org_id"] is None
+
+    team_org_id = orgs.create_team_org("Team BF Member", str(owner["id"]))
+    orgs.add_member(team_org_id, str(member["id"]), "org_member")
+
+    updated = registry.backfill_org_ids()
+    assert updated >= 1
+    assert registry.get_run(rid)["org_id"] == team_org_id

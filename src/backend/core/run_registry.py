@@ -112,6 +112,30 @@ class RunRegistry:
             if _run_registry is self:
                 _run_registry = None
 
+    def _lookup_org_id(self, user_id: str) -> Optional[str]:
+        """Resolve org_id for user_id from org_members. No org_role filter —
+        a team org_member has exactly one membership too (the single-active-
+        org invariant), and filtering on org_role='org_admin' silently drops
+        every team member's runs.
+
+        Runs on its own pool connection, isolated from record_start's INSERT:
+        org_members.user_id is uuid while test_runs.user_id is text, so a
+        non-UUID user_id raises InvalidTextRepresentation here — caught
+        locally so it can never poison the INSERT's transaction (which would
+        otherwise fail the row write entirely, worse than the NULL org_id
+        being fixed)."""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT org_id FROM org_members WHERE user_id = %s",
+                    (user_id,),
+                ).fetchone()
+            return str(row["org_id"]) if row else None
+        except Exception as e:
+            logger.warning(
+                "[RUN_REGISTRY] org_id lookup failed for user %s: %s", user_id, e)
+            return None
+
     def record_start(
         self,
         run_id: str,
@@ -131,8 +155,18 @@ class RunRegistry:
         by the caller) — the run whose learning record user feedback should
         update, since re-run executions skip learning. error_message follows the
         same newest-non-NULL-wins rule as robot_code: a run that fails, is
-        retried and succeeds keeps the reason it failed the first time."""
+        retried and succeeds keeps the reason it failed the first time.
+
+        org_id is used verbatim when the caller supplies one; when it is
+        absent and a user_id is present, _lookup_org_id derives it before the
+        INSERT runs — insurance against a login-time failure that mints an
+        org-less token (see _lookup_org_id for why this must not share the
+        INSERT's connection)."""
         try:
+            user_id = (user or {}).get("user_id")
+            org_id = (user or {}).get("org_id")
+            if org_id is None and user_id:
+                org_id = self._lookup_org_id(user_id)
             with self._pool.connection() as conn:
                 conn.execute(
                     """
@@ -152,13 +186,13 @@ class RunRegistry:
                     """,
                     (
                         run_id,
-                        (user or {}).get("user_id"),
+                        user_id,
                         (user or {}).get("email"),
                         user_query,
                         robot_code,
                         rerun_of,
                         status,
-                        (user or {}).get("org_id"),
+                        org_id,
                         error_message,
                     ),
                 )
@@ -384,21 +418,22 @@ class RunRegistry:
             return (None, None)
 
     def backfill_org_ids(self) -> int:
-        """Set org_id on rows that have a user_id but no org_id, from that user's
-        org_admin personal-org membership. Idempotent; returns rows updated.
+        """Set org_id on rows that have a user_id but no org_id, from that
+        user's org_members row. Idempotent; returns rows updated.
 
-        Assumes the Phase-1a invariant of exactly one org_admin membership per
-        user (the personal org), so the join resolves to a single org. When
-        many-to-many org membership lands, this must target the user's personal
-        org explicitly (organizations.kind = 'personal') instead of any
-        org_admin row to stay deterministic."""
+        No org_role filter — a team org_member has exactly one membership too
+        (the single-active-org invariant), and filtering on org_role=
+        'org_admin' silently drops every team member's rows (measured: the
+        predicate returned [] for a real org_member on the dev DB). Assumes
+        the single-active-org invariant, so the join resolves to one org per
+        user."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(
                     "UPDATE test_runs t SET org_id = m.org_id "
                     "FROM org_members m "
                     "WHERE t.org_id IS NULL AND t.user_id IS NOT NULL "
-                    "  AND m.user_id::text = t.user_id AND m.org_role = 'org_admin'"
+                    "  AND m.user_id::text = t.user_id"
                 )
                 n = cur.rowcount
                 conn.commit()

@@ -43,9 +43,17 @@ def _auth_headers() -> dict:
     for a made-up identity is rejected with 401. Upsert a dedicated active
     user row via the same DATABASE_URL the backend uses, then mint the token
     from that row's actual id/token_version — equivalent to a real login.
+
+    Mirrors auth/endpoints.py's _token_payload: provision the user's org
+    (idempotent no-op once provisioned) and carry org_id/org_role into the
+    token, instead of hand-minting through the one production mint site
+    without them. The old version of this helper skipped that step and was
+    the sole source of every NULL-org_id row on test_runs (T1 Part A).
     """
     import psycopg
     from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.auth.provisioning import provision_on_approval
     from src.backend.core.config import settings
 
     with psycopg.connect(settings.DATABASE_URL, autocommit=True) as conn:
@@ -59,9 +67,14 @@ def _auth_headers() -> dict:
             """,
             (LIVE_TEST_EMAIL,),
         ).fetchone()
+    user_id = str(row[0])
+    provision_on_approval(user_id)
+    orgs = OrgRepository().get_orgs_for_user(user_id)
+    primary = orgs[0] if orgs else {}
     token = create_access_token(
         {"id": row[0], "email": row[1], "role": row[2],
-         "display_name": row[3], "token_version": row[4]}
+         "display_name": row[3], "token_version": row[4],
+         "org_id": primary.get("org_id"), "org_role": primary.get("org_role")}
     )
     return {"Authorization": f"Bearer {token}"}
 
