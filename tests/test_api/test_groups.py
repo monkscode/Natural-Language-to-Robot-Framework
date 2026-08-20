@@ -699,7 +699,7 @@ def test_groups_crud_roundtrip(client):
 
     r = client.post("/api/groups", json={"name": "checkout"}, headers=_auth(tok))
     assert r.status_code == 409
-    assert r.json()["detail"] == 'You already have a group named "checkout"'
+    assert r.json()["detail"] == 'A group named "checkout" already exists'
 
     r = client.patch(f"/api/groups/{gid}", json={"name": "Payments"}, headers=_auth(tok))
     assert r.status_code == 200 and r.json()["name"] == "Payments"
@@ -718,7 +718,7 @@ def test_rename_onto_existing_name_is_409(client):
 
     r = client.patch(f"/api/groups/{gid}", json={"name": "alpha"}, headers=_auth(tok))
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == 'You already have a group named "alpha"'
+    assert r.json()["detail"] == 'A group named "alpha" already exists'
     listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
     assert sorted(g["name"] for g in listed) == ["Alpha", "Beta"]
 
@@ -782,8 +782,9 @@ def test_drawer_hides_a_folder_the_caller_cannot_see(client):
     reports null for BOTH group fields — never the folder's name, and never a
     dangling id.
 
-    visibility is not on the wire yet (T3), so the private folder is created
-    through the registry; the endpoint reads the very same rows."""
+    The private folder is created through the registry rather than the
+    endpoint, so this stays a read-path test; the endpoint reads the very
+    same rows."""
     from src.backend.auth.jwt_utils import decode_token
     from src.backend.core.run_registry import get_run_registry
 
@@ -898,13 +899,26 @@ def test_assignments_validation(client):
 
 def test_anonymous_caller(client):
     """AUTH_ENFORCED is off in this suite (autouse fixture), so token-less
-    require_user yields None: reads are empty, mutations are 401."""
-    assert client.get("/api/groups").json() == {"groups": [], "ungrouped_count": 0}
+    require_user yields None. No identity owns a folder, so the list stays
+    empty — but /api/history hands that same caller every run, so the
+    Ungrouped chip has to be the real unscoped count, not a hardcoded 0.
+
+    Mutations are 403, not 401: the SPA treats EVERY 401 as "session
+    expired", clears the token and hard-redirects to /login, so a 401 here
+    logged the whole app out on a click (F11)."""
+    body = client.get("/api/groups").json()
+    assert body["groups"] == []
+    assert body["ungrouped_count"] == client.get(
+        "/api/history?group=ungrouped").json()["total"]
+
     r = client.post("/api/groups", json={"name": "X"})
-    assert r.status_code == 401
+    assert r.status_code == 403
     assert r.json()["detail"] == "Sign-in required for groups"
+    assert client.patch(f"/api/groups/{uuid.uuid4()}",
+                        json={"name": "X"}).status_code == 403
+    assert client.delete(f"/api/groups/{uuid.uuid4()}").status_code == 403
     assert client.put("/api/groups/assignments",
-                      json={"run_ids": [str(uuid.uuid4())], "group_id": None}).status_code == 401
+                      json={"run_ids": [str(uuid.uuid4())], "group_id": None}).status_code == 403
 
 
 def _orgless_token(client) -> str:
@@ -1013,3 +1027,168 @@ def test_history_invalid_group_param_is_400(client):
     tok = _register(client, f"hb-{uuid.uuid4().hex[:8]}@e.com")
     r = client.get("/api/history?group=not-a-uuid", headers=_auth(tok))
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Integration: T3 — visibility on the wire, empty ?group=, token-less mutations
+# ---------------------------------------------------------------------------
+
+def test_create_private_folder_carries_visibility_and_created_by(client):
+    """visibility and created_by are what the chip row draws the lock icon
+    from and what it decides whether to offer rename/delete from, so both
+    POST's echo and GET's list have to carry them."""
+    from src.backend.auth.jwt_utils import decode_token
+
+    tok = _register(client, f"pv-{uuid.uuid4().hex[:8]}@e.com")
+    uid = decode_token(tok)["user_id"]
+
+    r = client.post("/api/groups",
+                    json={"name": "Secret", "visibility": "private"},
+                    headers=_auth(tok))
+    assert r.status_code == 201, r.text
+    assert r.json()["visibility"] == "private"
+    assert r.json()["created_by"] == uid
+
+    listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
+    folder = next(g for g in listed if g["group_id"] == r.json()["group_id"])
+    assert folder["visibility"] == "private" and folder["created_by"] == uid
+
+
+def test_create_defaults_to_org_visibility(client):
+    """Sharing is the default: a folder created without a visibility is the
+    org's, matching the re-key's whole point."""
+    tok = _register(client, f"dv-{uuid.uuid4().hex[:8]}@e.com")
+    r = client.post("/api/groups", json={"name": "Shared"}, headers=_auth(tok))
+    assert r.status_code == 201, r.text
+    assert r.json()["visibility"] == "org"
+
+
+def test_invalid_visibility_is_400_with_a_string_detail(client):
+    """A hand-rolled 400, not a pydantic Literal's 422: the SPA renders
+    detail as a string, and a 422's list-of-objects detail renders as
+    garbage in the dialog."""
+    tok = _register(client, f"bv-{uuid.uuid4().hex[:8]}@e.com")
+    r = client.post("/api/groups", json={"name": "Nope", "visibility": "team"},
+                    headers=_auth(tok))
+    assert r.status_code == 400, r.text
+    assert isinstance(r.json()["detail"], str)
+
+
+def test_patch_flips_private_to_org(client):
+    """Widening is always allowed, and the list reflects it immediately."""
+    tok = _register(client, f"fp-{uuid.uuid4().hex[:8]}@e.com")
+    gid = client.post("/api/groups",
+                      json={"name": "Widen me", "visibility": "private"},
+                      headers=_auth(tok)).json()["group_id"]
+
+    r = client.patch(f"/api/groups/{gid}", json={"visibility": "org"},
+                     headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"group_id": gid, "visibility": "org"}
+
+    listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
+    assert next(g for g in listed if g["group_id"] == gid)["visibility"] == "org"
+
+
+def test_flip_to_private_is_409_while_a_members_run_is_inside(client):
+    """Narrowing would silently hide another member's own run from them, so
+    it is refused — and the refusal is a COUNT, never who owns the runs."""
+    from src.backend.auth.jwt_utils import decode_token
+
+    tok_a, tok_b, _org_id = _team_of_two(client)
+    gid = client.post("/api/groups", json={"name": f"Shared {uuid.uuid4().hex[:6]}"},
+                      headers=_auth(tok_a)).json()["group_id"]
+    rid = _seed_run_for(client, tok_b)
+    assert client.put("/api/groups/assignments",
+                      json={"run_ids": [rid], "group_id": gid},
+                      headers=_auth(tok_b)).status_code == 200
+
+    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
+                     headers=_auth(tok_a))
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "1 run by another member" in detail
+    claims_b = decode_token(tok_b)
+    assert claims_b["email"] not in detail and claims_b["user_id"] not in detail
+
+    # Refused means unchanged — B still sees the folder.
+    listed = client.get("/api/groups", headers=_auth(tok_b)).json()["groups"]
+    assert next(g for g in listed if g["group_id"] == gid)["visibility"] == "org"
+
+
+def test_patch_with_an_empty_body_is_400(client):
+    """Neither name nor visibility is nothing to do — a 400, not the
+    registry's ValueError surfacing as a 500."""
+    tok = _register(client, f"eb-{uuid.uuid4().hex[:8]}@e.com")
+    gid = client.post("/api/groups", json={"name": "Untouched"},
+                      headers=_auth(tok)).json()["group_id"]
+
+    r = client.patch(f"/api/groups/{gid}", json={}, headers=_auth(tok))
+    assert r.status_code == 400, r.text
+    assert isinstance(r.json()["detail"], str)
+
+
+def test_flip_that_collides_with_an_existing_private_name_is_409(client):
+    """The two partial indexes let a private "X" and an org "X" coexist, so
+    the flip is where that name collision finally lands."""
+    tok = _register(client, f"cc-{uuid.uuid4().hex[:8]}@e.com")
+    name = f"Dup {uuid.uuid4().hex[:6]}"
+    assert client.post("/api/groups", json={"name": name, "visibility": "private"},
+                       headers=_auth(tok)).status_code == 201
+    gid = client.post("/api/groups", json={"name": name, "visibility": "org"},
+                      headers=_auth(tok)).json()["group_id"]
+
+    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
+                     headers=_auth(tok))
+    assert r.status_code == 409, r.text
+    assert isinstance(r.json()["detail"], str)
+
+
+def test_org_admin_created_folder_records_their_real_user_id(client):
+    """The identity trap: an org_admin's run-FILTER user_id is None while
+    their identity is not. Wire created_by from the filter and every folder
+    an org_admin makes is owned by NULL."""
+    from src.backend.auth.jwt_utils import decode_token
+
+    tok_a, _tok_b, _org_id = _team_of_two(client)
+    uid_a = decode_token(tok_a)["user_id"]
+
+    r = client.post("/api/groups",
+                    json={"name": f"Admin made {uuid.uuid4().hex[:6]}"},
+                    headers=_auth(tok_a))
+    assert r.status_code == 201, r.text
+    assert r.json()["created_by"] == uid_a
+
+    listed = client.get("/api/groups", headers=_auth(tok_a)).json()["groups"]
+    folder = next(g for g in listed if g["group_id"] == r.json()["group_id"])
+    assert folder["created_by"] == uid_a
+
+
+def test_assignments_reject_more_than_500_run_ids(client):
+    """A cap on the batch — one UPDATE with an unbounded ANY(%s) array is
+    the one request that can pin the pool."""
+    tok = _register(client, f"cap-{uuid.uuid4().hex[:8]}@e.com")
+    r = client.put("/api/groups/assignments",
+                   json={"run_ids": [str(uuid.uuid4()) for _ in range(501)],
+                         "group_id": None},
+                   headers=_auth(tok))
+    assert r.status_code == 400, r.text
+
+
+def test_empty_group_param_returns_the_full_total(client):
+    """F6: an empty ?group= is falsy, so it skipped the uuid validation and
+    reached the registry as '' — SQL read that as group_id = '' and matched
+    0 rows of N instead of all of them."""
+    tok = _register(client, f"eg-{uuid.uuid4().hex[:8]}@e.com")
+    grouped = _seed_run_for(client, tok)
+    _seed_run_for(client, tok)
+    gid = client.post("/api/groups", json={"name": "Some folder"},
+                      headers=_auth(tok)).json()["group_id"]
+    assert client.put("/api/groups/assignments",
+                      json={"run_ids": [grouped], "group_id": gid},
+                      headers=_auth(tok)).status_code == 200
+
+    unfiltered = client.get("/api/history", headers=_auth(tok)).json()["total"]
+    assert unfiltered == 2
+    assert client.get("/api/history?group=",
+                      headers=_auth(tok)).json()["total"] == unfiltered

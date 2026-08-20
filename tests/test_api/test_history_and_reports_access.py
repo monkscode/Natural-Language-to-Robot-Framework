@@ -229,7 +229,7 @@ class TestHistoryEndpoint:
 
     def test_admin_sees_all_runs_with_user_column(self, seeded):
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(seeded, _ADMIN)
             try:
@@ -245,7 +245,7 @@ class TestHistoryEndpoint:
         # Token says admin, but the users table no longer agrees (demoted or
         # deactivated): scope degrades to the user's own rows.
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=False
+            "src.backend.api.history_scope.is_validated_admin", return_value=False
         ):
             client = _client(seeded, {**_ADMIN, "user_id": "u2"})
             try:
@@ -753,7 +753,7 @@ class TestRunDetailEndpoint:
 
     def test_admin_sees_any_run_with_identity(self, detail_seeded):
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(detail_seeded, _ADMIN)
             try:
@@ -772,7 +772,7 @@ class TestRunDetailEndpoint:
         assert user_resp.status_code == 404
 
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(detail_seeded, _ADMIN)
             try:

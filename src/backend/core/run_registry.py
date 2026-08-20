@@ -326,7 +326,8 @@ class RunRegistry:
             where_params = [org_id, user_id]
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT g.group_id, g.name, g.created_at, g.updated_at, "
+                "SELECT g.group_id, g.name, g.visibility, g.created_by, "
+                "       g.created_at, g.updated_at, "
                 "       COUNT(t.run_id) AS run_count "
                 "FROM run_groups g "
                 f"LEFT JOIN test_runs t ON t.group_id = g.group_id{join} "
@@ -407,7 +408,8 @@ class RunRegistry:
                     "INSERT INTO run_groups "
                     "    (group_id, org_id, created_by, name, visibility) "
                     "VALUES (%s, %s, %s, %s, %s) "
-                    "RETURNING group_id, name, created_at, updated_at",
+                    "RETURNING group_id, name, visibility, created_by, "
+                    "          created_at, updated_at",
                     (str(uuid.uuid4()), org_id, user_id, name, visibility),
                 ).fetchone()
         except psycopg.errors.UniqueViolation:

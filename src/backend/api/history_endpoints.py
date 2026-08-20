@@ -28,7 +28,8 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.backend.auth.jwt_utils import is_validated_admin, require_user
+from src.backend.api.history_scope import history_scope
+from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_read
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
@@ -66,54 +67,44 @@ def list_history(
     tabs page within their own filter instead of the full list. q is a
     server-side substring search (description / owner email / run id) so it
     spans the whole result set rather than just the loaded page. group narrows
-    to one personal run group (or "ungrouped"), combining with both."""
+    to one run folder (or "ungrouped"), combining with both."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     q = q.strip() if q else None
+    # An empty ?group= is the SPA clearing the chip. Without this it stayed
+    # "", skipped the uuid check below (falsy) and reached the registry as a
+    # literal group_id = '' filter, matching 0 rows instead of all of them.
+    group = group.strip() if group else None
 
-    # group: a run_groups id (uuid) or the literal "ungrouped". Groups are
-    # personal, so the filter needs no extra authorization: rows are already
-    # scoped below, and filtering your view by someone else's uuid just
-    # yields rows you could see anyway that happen to sit in that group.
+    # group: a run_groups id (uuid) or the literal "ungrouped". The filter
+    # needs no extra authorization of its own: rows are already scoped below
+    # and joined through the folder-visibility predicate, so filtering by a
+    # folder the caller cannot see simply yields nothing.
     if group and group != "ungrouped":
         try:
             group = str(uuid.UUID(group))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid group id")
 
-    admin = is_validated_admin(user)
-    # Platform-admin and dev escape hatch (user is None) see all orgs.
-    # Org-admin sees their whole org (no user_id narrowing within it).
-    # Org-member sees only their own rows within their org.
-    if admin or user is None:
-        scope_org_id = None
-        scope_user_id = None
-    else:
-        scope_org_id = user.get("org_id")
-        # Only widen to whole-org scope for an org_admin with a concrete org.
-        # An org_admin claim without org_id must NOT fall through to
-        # (org_id=None, user_id=None), which list_runs reads as all-org scope.
-        is_org_admin = bool(scope_org_id) and user.get("org_role") == "org_admin"
-        scope_user_id = None if is_org_admin else user["user_id"]
-
+    scope = history_scope(user)
     runs, total = get_run_registry().list_runs(
-        user_id=scope_user_id, org_id=scope_org_id,
+        user_id=scope.user_id, org_id=scope.org_id,
         limit=limit, offset=offset, status=status, q=q, group=group,
         # The caller's IDENTITY, not the scoping user_id: an org_admin's
-        # scope_user_id is None while their identity is not, and folder
+        # scope user_id is None while their identity is not, and folder
         # visibility turns on which private folders are theirs.
-        caller_user_id=None if user is None else user["user_id"],
+        caller_user_id=scope.caller_user_id,
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
-        if not admin:
+        if not scope.is_admin:
             # A user's own rows don't need identity columns echoed back.
             r.pop("user_id", None)
             r.pop("user_email", None)
     return {
         "runs": runs,
         "total": total,
-        "scope": "all" if scope_user_id is None else "own",
+        "scope": "all" if scope.user_id is None else "own",
     }
 
 
@@ -130,25 +121,26 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid run id")
 
-    admin = is_validated_admin(user)
-    # Same folder scope as the list: a platform admin (or the token-less dev
-    # caller) is unscoped, everyone else sees their own org's folders and
-    # their own private ones. caller_user_id is the identity, never the
-    # scoping user_id.
+    # Same folder scope as the list, from the same helper: a platform admin
+    # (or the token-less dev caller) is unscoped, everyone else sees their own
+    # org's folders and their own private ones. caller_user_id is the
+    # identity, never the scoping user_id.
+    scope = history_scope(user)
     run = get_run_registry().get_run(
         run_id,
-        org_id=None if (admin or user is None) else user.get("org_id"),
-        caller_user_id=None if user is None else user["user_id"],
+        org_id=scope.org_id,
+        caller_user_id=scope.caller_user_id,
     )
     allowed = run is not None and caller_can_read(
-        user, run.get("user_id"), run.get("org_id"), is_platform_admin=admin
+        user, run.get("user_id"), run.get("org_id"),
+        is_platform_admin=scope.is_admin,
     )
     if run is None or not allowed:
         raise HTTPException(status_code=404, detail="Run not found")
 
     run["robot_code"] = resolve_robot_code(run)
     run["has_report"] = run["status"] in _REPORT_STATUSES
-    if not admin:
+    if not scope.is_admin:
         run.pop("user_id", None)
         run.pop("user_email", None)
     return run
