@@ -96,6 +96,27 @@ _SCHEMA_DDL = (
     " ON run_groups (created_by, lower(name)) WHERE visibility = 'private'",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS group_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_group ON test_runs (group_id)",
+    # ON DELETE SET NULL is what returns a deleted folder's runs to
+    # Ungrouped, and it is what stops assign_runs writing a group_id that a
+    # concurrent delete_group has just removed. ADD CONSTRAINT is NOT
+    # idempotent, and this tuple runs on every construction, so it needs the
+    # guard. conrelid is load-bearing: the suite runs on isolated schemas
+    # whose search_path ends in public, and a conname-only guard would find
+    # public's constraint and skip the ALTER, leaving every test schema
+    # without it. 'test_runs'::regclass resolves through search_path, so the
+    # guard is per-schema.
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND contype = 'f' AND conname = 'fk_test_runs_group') THEN
+        ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
+          FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$
+    """,
 )
 
 
@@ -484,12 +505,11 @@ class RunRegistry:
         is_org_admin: bool,
         group_id: str,
     ) -> bool:
-        """Delete a folder and return its member runs to Ungrouped — one
-        transaction, so a failure leaves both tables untouched. Runs are
-        NEVER deleted. The UPDATE is explicit and stays explicit until the
-        foreign key that makes it redundant exists (T4): without it, deleting
-        a folder orphans every run in it. False when the folder doesn't exist
-        or the caller may not mutate it."""
+        """Delete a folder and return its member runs to Ungrouped. Runs are
+        NEVER deleted: fk_test_runs_group is ON DELETE SET NULL, so Postgres
+        ungroups the members as part of the DELETE — no second statement,
+        and no window in which a run points at a folder that is gone. False
+        when the folder doesn't exist or the caller may not mutate it."""
         with self._pool.connection() as conn:
             if self._mutable_group(
                     conn, org_id, user_id, is_org_admin, group_id) is None:
@@ -499,10 +519,6 @@ class RunRegistry:
             )
             if cur.rowcount != 1:
                 return False
-            conn.execute(
-                "UPDATE test_runs SET group_id = NULL WHERE group_id = %s",
-                (group_id,),
-            )
             return True
 
     def count_ungrouped(
@@ -575,11 +591,18 @@ class RunRegistry:
             else:
                 allowed = "user_id = %s"
                 params.append(user_id)
-            cur = conn.execute(
-                f"UPDATE test_runs SET group_id = %s "
-                f"WHERE run_id = ANY(%s) AND {allowed}",
-                params,
-            )
+            try:
+                cur = conn.execute(
+                    f"UPDATE test_runs SET group_id = %s "
+                    f"WHERE run_id = ANY(%s) AND {allowed}",
+                    params,
+                )
+            except psycopg.errors.ForeignKeyViolation:
+                # Lost the race: delete_group removed the folder between the
+                # visibility check and this write. Fail closed like any other
+                # unusable folder — the endpoint turns False into a 404.
+                conn.rollback()
+                return False
             if cur.rowcount != len(set(run_ids)):
                 conn.rollback()
                 return False

@@ -70,9 +70,18 @@ class TestGroupRegistryCrud:
         import psycopg
         from src.backend.core.config import settings
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
-        admin.execute("TRUNCATE run_groups_test.test_runs")
-        admin.execute("TRUNCATE run_groups_test.run_groups")
+        # ONE statement, not two: test_runs' foreign key makes
+        # run_groups untruncatable on its own.
+        admin.execute("TRUNCATE run_groups_test.test_runs, run_groups_test.run_groups")
         admin.close()
+
+    def test_registry_construction_is_idempotent(self, reg):
+        """_SCHEMA_DDL runs on EVERY RunRegistry() construction, not once at
+        startup, so any statement in it that is not self-guarding makes the
+        app unbootable the second time it starts against the same schema."""
+        from src.backend.core.run_registry import RunRegistry
+        second = RunRegistry(dsn=reg.dsn)
+        second.close()
 
     def test_create_and_list_groups(self, reg):
         g = reg.create_group(ORG_A, "u1", "Checkout")
@@ -173,8 +182,9 @@ class TestGroupAuthorityMatrix:
         import psycopg
         from src.backend.core.config import settings
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
-        admin.execute("TRUNCATE run_groups_authz_test.test_runs")
-        admin.execute("TRUNCATE run_groups_authz_test.run_groups")
+        # ONE statement, not two: test_runs' foreign key makes
+        # run_groups untruncatable on its own.
+        admin.execute("TRUNCATE run_groups_authz_test.test_runs, run_groups_authz_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -353,8 +363,9 @@ class TestReadPathVisibility:
         import psycopg
         from src.backend.core.config import settings
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
-        admin.execute("TRUNCATE run_groups_read_test.test_runs")
-        admin.execute("TRUNCATE run_groups_read_test.run_groups")
+        # ONE statement, not two: test_runs' foreign key makes
+        # run_groups untruncatable on its own.
+        admin.execute("TRUNCATE run_groups_read_test.test_runs, run_groups_read_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -551,8 +562,9 @@ class TestGroupAssignmentAndFilter:
         import psycopg
         from src.backend.core.config import settings
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
-        admin.execute("TRUNCATE run_groups_assign_test.test_runs")
-        admin.execute("TRUNCATE run_groups_assign_test.run_groups")
+        # ONE statement, not two: test_runs' foreign key makes
+        # run_groups untruncatable on its own.
+        admin.execute("TRUNCATE run_groups_assign_test.test_runs, run_groups_assign_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -626,6 +638,60 @@ class TestGroupAssignmentAndFilter:
         assert reg.delete_group(ORG_A, "u1", False, gid) is True
         run = reg.get_run(r1)
         assert run is not None and run["group_id"] is None  # run survived, ungrouped
+
+    def test_race_with_delete_cannot_orphan_a_run(self, reg):
+        """Replay the assign/delete race on two connections at READ
+        COMMITTED: T1's authority check passes, T2 deletes the folder and
+        commits, T1 then writes the run into it. Whatever T1's write does,
+        no test_runs row may be left pointing at a folder that is gone."""
+        import psycopg
+        r1 = str(uuid.uuid4())
+        self._seed(reg, r1, "u1")
+        gid = reg.create_group(ORG_A, "u1", "Racy")["group_id"]
+
+        t1 = psycopg.connect(reg.dsn)
+        t2 = psycopg.connect(reg.dsn, autocommit=True)
+        try:
+            # T1 sees the folder, and has not written yet.
+            assert t1.execute(
+                "SELECT 1 FROM run_groups WHERE group_id = %s", (gid,)
+            ).fetchone() is not None
+            # T2 deletes it and commits.
+            t2.execute("DELETE FROM run_groups WHERE group_id = %s", (gid,))
+            # T1 files the run into the folder it saw a moment ago.
+            try:
+                t1.execute(
+                    "UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                    (gid, r1),
+                )
+                t1.commit()
+            except psycopg.errors.ForeignKeyViolation:
+                t1.rollback()
+            dangling = t2.execute(
+                "SELECT COUNT(*) FROM test_runs t WHERE t.group_id IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM run_groups g"
+                " WHERE g.group_id = t.group_id)"
+            ).fetchone()[0]
+        finally:
+            t1.close()
+            t2.close()
+        assert dangling == 0
+
+    def test_assign_runs_returns_false_when_the_folder_vanishes(self, reg):
+        """assign_runs loses the race: the folder clears the authority check,
+        then is gone by the time the UPDATE runs. It must fail closed —
+        False (which the endpoint turns into a 404), no exception, nothing
+        written — and leave the pooled connection usable."""
+        from unittest.mock import patch
+        r1 = str(uuid.uuid4())
+        self._seed(reg, r1, "u1")
+        ghost = str(uuid.uuid4())
+        vanished = {"group_id": ghost, "visibility": "org", "created_by": "u1"}
+
+        with patch.object(reg, "_visible_group", return_value=vanished):
+            assert reg.assign_runs(ORG_A, "u1", False, [r1], ghost) is False
+
+        assert reg.get_run(r1)["group_id"] is None
 
     def test_get_run_carries_group_name(self, reg):
         r1 = str(uuid.uuid4())
