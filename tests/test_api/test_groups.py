@@ -651,6 +651,7 @@ class TestGroupAssignmentAndFilter:
 
         t1 = psycopg.connect(reg.dsn)
         t2 = psycopg.connect(reg.dsn, autocommit=True)
+        refused = False
         try:
             # T1 sees the folder, and has not written yet.
             assert t1.execute(
@@ -658,23 +659,35 @@ class TestGroupAssignmentAndFilter:
             ).fetchone() is not None
             # T2 deletes it and commits.
             t2.execute("DELETE FROM run_groups WHERE group_id = %s", (gid,))
-            # T1 files the run into the folder it saw a moment ago.
+            # T1 files the run into the folder it saw a moment ago. Without
+            # the constraint this UPDATE matches exactly one row and commits
+            # the dead id, so the row count is what makes the test bite: a
+            # seed that stopped writing r1 would match zero rows and the
+            # dangling count would be 0 for the wrong reason.
+            matched = None
             try:
-                t1.execute(
+                matched = t1.execute(
                     "UPDATE test_runs SET group_id = %s WHERE run_id = %s",
                     (gid, r1),
-                )
+                ).rowcount
                 t1.commit()
             except psycopg.errors.ForeignKeyViolation:
+                refused = True
                 t1.rollback()
             dangling = t2.execute(
                 "SELECT COUNT(*) FROM test_runs t WHERE t.group_id IS NOT NULL"
                 " AND NOT EXISTS (SELECT 1 FROM run_groups g"
                 " WHERE g.group_id = t.group_id)"
             ).fetchone()[0]
+            # The run is still there, and still targetable by that WHERE.
+            targetable = t2.execute(
+                "SELECT COUNT(*) FROM test_runs WHERE run_id = %s", (r1,)
+            ).fetchone()[0]
         finally:
             t1.close()
             t2.close()
+        assert targetable == 1, "the seeded run vanished — the race was never run"
+        assert refused, f"the losing UPDATE was allowed (it matched {matched} rows)"
         assert dangling == 0
 
     def test_assign_runs_returns_false_when_the_folder_vanishes(self, reg):
@@ -691,7 +704,13 @@ class TestGroupAssignmentAndFilter:
         with patch.object(reg, "_visible_group", return_value=vanished):
             assert reg.assign_runs(ORG_A, "u1", False, [r1], ghost) is False
 
-        assert reg.get_run(r1)["group_id"] is None
+        run = reg.get_run(r1)
+        # get_run swallows its own exceptions and returns None, so check the
+        # row came back before subscripting: a connection poisoned by the
+        # caught violation shows up here as a legible assertion, not a
+        # TypeError on NoneType.
+        assert run is not None, "the pooled connection did not survive the rollback"
+        assert run["group_id"] is None
 
     def test_get_run_carries_group_name(self, reg):
         r1 = str(uuid.uuid4())
