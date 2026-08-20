@@ -112,22 +112,37 @@ class RunRegistry:
             if _run_registry is self:
                 _run_registry = None
 
-    def _lookup_org_id(self, user_id: str) -> Optional[str]:
+    def _lookup_org_id(self, user_id: str) -> str | None:
         """Resolve org_id for user_id from org_members. No org_role filter —
         a team org_member has exactly one membership too (the single-active-
         org invariant), and filtering on org_role='org_admin' silently drops
-        every team member's runs.
+        every team member's runs. ORDER BY created_at LIMIT 1 so a schema
+        that permits more than one row per user (org_members' PK is
+        (org_id, user_id), not user_id alone — only application code enforces
+        single membership) resolves the same way production's
+        get_orgs_for_user()/_token_payload does (oldest first, [0]).
 
-        Runs on its own pool connection, isolated from record_start's INSERT:
         org_members.user_id is uuid while test_runs.user_id is text, so a
-        non-UUID user_id raises InvalidTextRepresentation here — caught
-        locally so it can never poison the INSERT's transaction (which would
-        otherwise fail the row write entirely, worse than the NULL org_id
-        being fixed)."""
+        non-UUID user_id would raise InvalidTextRepresentation if it reached
+        the query — checked up front instead, so that expected synthetic
+        traffic (dev fixtures, AUTH_ENFORCED=false runs) short-circuits
+        without a doomed round trip, and the WARNING below stays reserved for
+        genuinely unexpected lookup failures (pool exhausted, org_members
+        missing from the search path, DB unreachable) rather than being
+        drowned out by routine non-UUID ids. The query itself still runs on
+        its own pool connection, isolated from record_start's INSERT, so any
+        surprise failure here can never poison the INSERT's transaction
+        (which would otherwise fail the row write entirely — worse than the
+        NULL org_id being fixed)."""
+        try:
+            uuid.UUID(user_id)
+        except ValueError:
+            return None
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT org_id FROM org_members WHERE user_id = %s",
+                    "SELECT org_id FROM org_members WHERE user_id = %s "
+                    "ORDER BY created_at LIMIT 1",
                     (user_id,),
                 ).fetchone()
             return str(row["org_id"]) if row else None
@@ -426,7 +441,12 @@ class RunRegistry:
         'org_admin' silently drops every team member's rows (measured: the
         predicate returned [] for a real org_member on the dev DB). Assumes
         the single-active-org invariant, so the join resolves to one org per
-        user."""
+        user — more exposed than before, now that dropping the role filter
+        means ANY org_members row for that user satisfies the join. When
+        many-to-many org membership lands, this must target the user's
+        actual active org explicitly (e.g. a dedicated lookup ordered like
+        get_orgs_for_user, not a bare join) instead of trusting org_members
+        to return exactly one row, to stay deterministic."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(

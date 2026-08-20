@@ -1,6 +1,7 @@
 """test_runs gains org_id: written at record_start, exposed on read, backfilled."""
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 
@@ -143,7 +144,7 @@ def test_record_start_survives_non_uuid_user_id(registry):
 def test_record_start_uses_supplied_org_id_verbatim(registry):
     """A token-supplied org_id is used as-is, even when it disagrees with the
     user's real org_members row -- proving the fallback never overrides an
-    explicit value."""
+    explicit value, AND never runs the lookup at all (no extra query)."""
     users, orgs = UserRepository(), OrgRepository()
     user = users.create_user(f"rr-verbatim-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
     real_org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
@@ -151,11 +152,13 @@ def test_record_start_uses_supplied_org_id_verbatim(registry):
     assert supplied_org_id != real_org_id
 
     rid = _run_id()
-    registry.record_start(
-        rid,
-        {"user_id": str(user["id"]), "email": user["email"], "org_id": supplied_org_id},
-        "do a thing", "generated",
-    )
+    with patch.object(registry, "_lookup_org_id") as mock_lookup:
+        registry.record_start(
+            rid,
+            {"user_id": str(user["id"]), "email": user["email"], "org_id": supplied_org_id},
+            "do a thing", "generated",
+        )
+        mock_lookup.assert_not_called()
     assert registry.get_run(rid)["org_id"] == supplied_org_id
 
 
