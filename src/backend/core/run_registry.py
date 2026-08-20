@@ -64,25 +64,62 @@ _SCHEMA_DDL = (
     " ON test_runs (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_created"
     " ON test_runs (created_at DESC)",
-    # --- personal run groups (History page folders) ---
+    # --- run groups (History page folders) ---
+    # Keyed to the ORG, with a per-folder visibility flag. No DROP may ever
+    # appear here: this tuple runs on EVERY RunRegistry() construction (see
+    # __init__), so a DROP would delete every folder on each process start
+    # and each test fixture, and would fail outright once T4's foreign key
+    # references the table. The pre-release per-user table (0 rows, never
+    # shipped) is dropped by hand instead — CREATE TABLE IF NOT EXISTS would
+    # otherwise silently keep the old column set.
     """
     CREATE TABLE IF NOT EXISTS run_groups (
         group_id   TEXT PRIMARY KEY,
-        user_id    TEXT NOT NULL,
+        org_id     TEXT NOT NULL,
+        created_by TEXT NOT NULL,
         name       TEXT NOT NULL,
+        visibility TEXT NOT NULL DEFAULT 'org'
+                   CHECK (visibility IN ('private','org')),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_user_name"
-    " ON run_groups (user_id, lower(name))",
+    # Two PARTIAL unique indexes, not one. A single (org_id, lower(name))
+    # index would let a member's private folder block the org from creating
+    # a folder of that name, and the 409 would reveal that a private folder
+    # by that name exists — an existence leak in the one feature whose whole
+    # point is privacy. Cost: a private "Checkout" and an org "Checkout" can
+    # coexist in one list, so the UI marks private folders (T5).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_org_name"
+    " ON run_groups (org_id, lower(name)) WHERE visibility = 'org'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_private_name"
+    " ON run_groups (created_by, lower(name)) WHERE visibility = 'private'",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS group_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_group ON test_runs (group_id)",
 )
 
 
+_VISIBILITIES = ("org", "private")
+
+
 class DuplicateGroupName(Exception):
-    """The user already has a group with this name (case-insensitive)."""
+    """A group with this name already exists in the scope that owns the name
+    (case-insensitive): the org for an 'org' folder, the creator for a
+    'private' one."""
+
+
+class GroupVisibilityConflict(Exception):
+    """'org' -> 'private' refused: the folder still holds runs owned by other
+    members, who would lose sight of their own runs the moment it turns
+    private. Carries the COUNT only — never the owners, which would leak who
+    else works in the folder."""
+
+    def __init__(self, count: int):
+        self.count = count
+        super().__init__(
+            "1 run by another member is in this folder" if count == 1
+            else f"{count} runs by other members are in this folder"
+        )
 
 
 class RunRegistry:
@@ -227,22 +264,57 @@ class RunRegistry:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
 
     # ------------------------------------------------------------------
-    # Personal run groups (History page folders). User-facing CRUD: these
-    # methods PROPAGATE storage errors (the swallow-everything discipline
-    # above exists to protect the generation pipeline, not this UI path).
+    # Run groups (History page folders). Keyed to the ORG, each folder
+    # carrying a visibility: 'org' (everyone in the org sees it) or
+    # 'private' (only its creator). User-facing CRUD: these methods
+    # PROPAGATE storage errors (the swallow-everything discipline above
+    # exists to protect the generation pipeline, not this UI path) —
+    # DuplicateGroupName, GroupVisibilityConflict and every 409/404 depend
+    # on the exception escaping.
+    #
+    # Authority:
+    #   create                    anyone in the org
+    #   rename / flip / delete    the creator, or an org_admin on an 'org'
+    #                             folder — never on a private one, which
+    #                             they cannot see and whose existence
+    #                             acting on it would leak
+    #   file a run                the folder must be visible to the caller
+    #                             AND the run must be the caller's own, or
+    #                             the caller is org_admin and the run is in
+    #                             their org; a PRIVATE folder additionally
+    #                             takes only its creator's runs, so a run
+    #                             can never land where its owner cannot see
+    #                             it
+    # A caller who may not act gets False (the endpoints render that as 404,
+    # never 403), so no refusal reveals that a folder exists.
     # ------------------------------------------------------------------
 
-    def list_groups(self, user_id: str) -> List[Dict[str, Any]]:
-        """The user's groups, name-sorted, each with its member-run count."""
+    def list_groups(
+        self, org_id: Optional[str], user_id: Optional[str]
+    ) -> List[Dict[str, Any]]:
+        """Folders visible to the caller, name-sorted, each with its
+        member-run count: the caller's org's 'org' folders plus their own
+        private ones. org_id None is the unscoped caller (platform admin, or
+        token-less with AUTH_ENFORCED off) — they already see every org's
+        runs, so no visibility filter applies; filtering on a NULL org would
+        evaluate to NULL for every row and hide the lot.
+
+        NOTE (read path, next task): run_count is still the folder's TOTAL
+        run count, not the count within the caller's own scope."""
+        where, params = "", []
+        if org_id is not None:
+            where = ("WHERE g.org_id = %s "
+                     "  AND (g.visibility = 'org' OR g.created_by = %s) ")
+            params = [org_id, user_id]
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT g.group_id, g.name, g.created_at, g.updated_at, "
                 "       COUNT(t.run_id) AS run_count "
                 "FROM run_groups g "
                 "LEFT JOIN test_runs t ON t.group_id = g.group_id "
-                "WHERE g.user_id = %s "
+                f"{where}"
                 "GROUP BY g.group_id ORDER BY lower(g.name)",
-                (user_id,),
+                params,
             ).fetchall()
         out = []
         for r in rows:
@@ -252,16 +324,73 @@ class RunRegistry:
             out.append(r)
         return out
 
-    def create_group(self, user_id: str, name: str) -> Dict[str, Any]:
-        """Create a group; raises DuplicateGroupName on a per-user,
-        case-insensitive name collision."""
+    def _mutable_group(
+        self,
+        conn,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        group_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The folder row when this caller may MUTATE it, else None (callers
+        turn None into a 404, never a 403). Mutating is stricter than seeing:
+        the creator always may, an org_admin only on an 'org' folder inside a
+        concrete org — never on a private one, which _visible_group has
+        already hidden from them."""
+        row = self._visible_group(conn, org_id, user_id, group_id)
+        if row is None:
+            return None
+        if row["created_by"] == user_id:
+            return row
+        if is_org_admin and org_id is not None and row["visibility"] == "org":
+            return row
+        return None
+
+    def _visible_group(
+        self,
+        conn,
+        org_id: Optional[str],
+        user_id: str,
+        group_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The folder row when this caller can SEE it, else None: it is in
+        their org and is either an 'org' folder or their own private one.
+        Seeing a folder is what lets a caller file runs into it — mutating
+        it is a stricter test (_mutable_group)."""
+        row = conn.execute(
+            "SELECT group_id, org_id, created_by, name, visibility "
+            "FROM run_groups WHERE group_id = %s",
+            (group_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if org_id is not None and row["org_id"] != org_id:
+            return None
+        if row["visibility"] != "org" and row["created_by"] != user_id:
+            return None
+        return row
+
+    def create_group(
+        self,
+        org_id: str,
+        user_id: str,
+        name: str,
+        visibility: str = "org",
+    ) -> Dict[str, Any]:
+        """Create a folder in the caller's org — anyone in the org may.
+        Raises DuplicateGroupName on a case-insensitive name collision in
+        whichever scope owns the name: the org for an 'org' folder, the
+        creator for a 'private' one."""
+        if visibility not in _VISIBILITIES:
+            raise ValueError(f"invalid visibility: {visibility!r}")
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "INSERT INTO run_groups (group_id, user_id, name) "
-                    "VALUES (%s, %s, %s) "
+                    "INSERT INTO run_groups "
+                    "    (group_id, org_id, created_by, name, visibility) "
+                    "VALUES (%s, %s, %s, %s, %s) "
                     "RETURNING group_id, name, created_at, updated_at",
-                    (str(uuid.uuid4()), user_id, name),
+                    (str(uuid.uuid4()), org_id, user_id, name, visibility),
                 ).fetchone()
         except psycopg.errors.UniqueViolation:
             raise DuplicateGroupName(name)
@@ -271,29 +400,82 @@ class RunRegistry:
         row["updated_at"] = row["updated_at"].isoformat()
         return row
 
-    def rename_group(self, user_id: str, group_id: str, name: str) -> bool:
-        """False when the group doesn't exist or isn't the caller's; raises
-        DuplicateGroupName when the new name collides with another group."""
+    def rename_group(
+        self,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        group_id: str,
+        name: Optional[str] = None,
+        visibility: Optional[str] = None,
+    ) -> bool:
+        """Rename a folder and/or change its visibility (at least one).
+
+        False when the folder doesn't exist or the caller may not mutate it.
+        Raises DuplicateGroupName when the new name collides — rename needs
+        its OWN guard, create's does not cover it. Raises
+        GroupVisibilityConflict on 'org' -> 'private' while the folder still
+        holds runs owned by anyone other than its creator: those members
+        would silently lose sight of their own runs, and a refusal they can
+        act on beats quiet data movement behind a settings toggle.
+        'private' -> 'org' only widens visibility and is always allowed."""
+        if name is None and visibility is None:
+            raise ValueError("rename_group needs a name or a visibility")
+        if visibility is not None and visibility not in _VISIBILITIES:
+            raise ValueError(f"invalid visibility: {visibility!r}")
+        collision_name = name
         try:
             with self._pool.connection() as conn:
+                row = self._mutable_group(
+                    conn, org_id, user_id, is_org_admin, group_id)
+                if row is None:
+                    return False
+                if collision_name is None:
+                    collision_name = row["name"]
+                if visibility == "private" and row["visibility"] == "org":
+                    others = conn.execute(
+                        "SELECT COUNT(*) AS n FROM test_runs "
+                        "WHERE group_id = %s AND user_id IS DISTINCT FROM %s",
+                        (group_id, row["created_by"]),
+                    ).fetchone()["n"]
+                    if others:
+                        raise GroupVisibilityConflict(others)
+                sets, params = [], []
+                if name is not None:
+                    sets.append("name = %s")
+                    params.append(name)
+                if visibility is not None:
+                    sets.append("visibility = %s")
+                    params.append(visibility)
+                params.append(group_id)
                 cur = conn.execute(
-                    "UPDATE run_groups SET name = %s, updated_at = now() "
-                    "WHERE group_id = %s AND user_id = %s",
-                    (name, group_id, user_id),
+                    f"UPDATE run_groups SET {', '.join(sets)}, updated_at = now() "
+                    "WHERE group_id = %s",
+                    params,
                 )
                 return cur.rowcount == 1
         except psycopg.errors.UniqueViolation:
-            raise DuplicateGroupName(name)
+            raise DuplicateGroupName(collision_name)
 
-    def delete_group(self, user_id: str, group_id: str) -> bool:
-        """Delete a group and return its member runs to Ungrouped — one
+    def delete_group(
+        self,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        group_id: str,
+    ) -> bool:
+        """Delete a folder and return its member runs to Ungrouped — one
         transaction, so a failure leaves both tables untouched. Runs are
-        NEVER deleted. False when the group doesn't exist / isn't the
-        caller's."""
+        NEVER deleted. The UPDATE is explicit and stays explicit until the
+        foreign key that makes it redundant exists (T4): without it, deleting
+        a folder orphans every run in it. False when the folder doesn't exist
+        or the caller may not mutate it."""
         with self._pool.connection() as conn:
+            if self._mutable_group(
+                    conn, org_id, user_id, is_org_admin, group_id) is None:
+                return False
             cur = conn.execute(
-                "DELETE FROM run_groups WHERE group_id = %s AND user_id = %s",
-                (group_id, user_id),
+                "DELETE FROM run_groups WHERE group_id = %s", (group_id,)
             )
             if cur.rowcount != 1:
                 return False
@@ -315,25 +497,48 @@ class RunRegistry:
         return row["n"]
 
     def assign_runs(
-        self, user_id: str, run_ids: List[str], group_id: Optional[str]
+        self,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        run_ids: List[str],
+        group_id: Optional[str],
     ) -> bool:
-        """Atomically set group_id on the caller's runs (None = ungroup).
-        All-or-nothing: unless the target group (when non-null) AND every
-        run id belong to user_id, nothing is written and False is returned —
-        an org-admin can SEE members' runs in history but can never file
-        someone else's run into a group."""
+        """Atomically file runs into a folder (group_id None = ungroup).
+
+        The folder must be visible to the caller, and every run must be one
+        the caller may file: their own, or — for an org_admin — any run in
+        their org. A PRIVATE folder takes only its creator's runs, so a run
+        can never land in a folder its own owner cannot see; that also makes
+        an org_admin unable to sweep a member's run into their own private
+        folder.
+
+        All-or-nothing: filing is now a per-row authority decision, which is
+        exactly when partial writes appear, so a batch containing one run the
+        caller may not file writes NOTHING and returns False — the caller's
+        own runs stay ungrouped too."""
         with self._pool.connection() as conn:
+            owner_only = None  # set => only this user's runs may be filed
             if group_id is not None:
-                owned = conn.execute(
-                    "SELECT 1 FROM run_groups WHERE group_id = %s AND user_id = %s",
-                    (group_id, user_id),
-                ).fetchone()
-                if not owned:
+                g = self._visible_group(conn, org_id, user_id, group_id)
+                if g is None:
                     return False
+                if g["visibility"] != "org":
+                    owner_only = g["created_by"]
+            params: list = [group_id, list(run_ids)]
+            if owner_only is not None:
+                allowed = "user_id = %s"
+                params.append(owner_only)
+            elif is_org_admin and org_id is not None:
+                allowed = "(user_id = %s OR org_id = %s)"
+                params.extend([user_id, org_id])
+            else:
+                allowed = "user_id = %s"
+                params.append(user_id)
             cur = conn.execute(
-                "UPDATE test_runs SET group_id = %s "
-                "WHERE run_id = ANY(%s) AND user_id = %s",
-                (group_id, run_ids, user_id),
+                f"UPDATE test_runs SET group_id = %s "
+                f"WHERE run_id = ANY(%s) AND {allowed}",
+                params,
             )
             if cur.rowcount != len(set(run_ids)):
                 conn.rollback()

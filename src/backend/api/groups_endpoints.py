@@ -47,6 +47,15 @@ def _require_identity(user: dict | None) -> str:
     return user["user_id"]
 
 
+def _scope(user: dict) -> tuple[str | None, bool]:
+    """(org_id, is_org_admin) for the registry's authority checks — the same
+    test history_endpoints.list_history applies. The caller's own identity
+    stays user["user_id"]: an org_admin's FILTER user_id is None there, but
+    their identity never is, and folder ownership is decided on identity."""
+    org_id = user.get("org_id")
+    return org_id, bool(org_id) and user.get("org_role") == "org_admin"
+
+
 def _clean_name(raw: str) -> str:
     name = raw.strip()
     if not name or len(name) > _NAME_MAX:
@@ -69,7 +78,7 @@ def list_groups(user: dict | None = Depends(require_user)):
         return {"groups": [], "ungrouped_count": 0}
     reg = get_run_registry()
     return {
-        "groups": reg.list_groups(user["user_id"]),
+        "groups": reg.list_groups(user.get("org_id"), user["user_id"]),
         "ungrouped_count": reg.count_ungrouped(user["user_id"]),
     }
 
@@ -79,7 +88,7 @@ def create_group(body: GroupIn, user: dict | None = Depends(require_user)):
     user_id = _require_identity(user)
     name = _clean_name(body.name)
     try:
-        return get_run_registry().create_group(user_id, name)
+        return get_run_registry().create_group(user.get("org_id"), user_id, name)
     except DuplicateGroupName:
         raise HTTPException(409, f'You already have a group named "{name}"')
 
@@ -89,10 +98,12 @@ def rename_group(
     group_id: str, body: GroupIn, user: dict | None = Depends(require_user)
 ):
     user_id = _require_identity(user)
+    org_id, is_org_admin = _scope(user)
     group_id = _valid_uuid(group_id, "group id")
     name = _clean_name(body.name)
     try:
-        renamed = get_run_registry().rename_group(user_id, group_id, name)
+        renamed = get_run_registry().rename_group(
+            org_id, user_id, is_org_admin, group_id, name=name)
     except DuplicateGroupName:
         raise HTTPException(409, f'You already have a group named "{name}"')
     if not renamed:
@@ -104,8 +115,9 @@ def rename_group(
 def delete_group(group_id: str, user: dict | None = Depends(require_user)):
     """Delete a group; its runs return to Ungrouped (runs are never deleted)."""
     user_id = _require_identity(user)
+    org_id, is_org_admin = _scope(user)
     group_id = _valid_uuid(group_id, "group id")
-    if not get_run_registry().delete_group(user_id, group_id):
+    if not get_run_registry().delete_group(org_id, user_id, is_org_admin, group_id):
         raise HTTPException(404, "Group not found")
 
 
@@ -114,10 +126,12 @@ def assign_runs(body: AssignmentsIn, user: dict | None = Depends(require_user)):
     """Move runs into a group (group_id null = remove from group). Atomic:
     any run or group that isn't the caller's rejects the whole request."""
     user_id = _require_identity(user)
+    org_id, is_org_admin = _scope(user)
     if not body.run_ids:
         raise HTTPException(400, "run_ids must not be empty")
     run_ids = [_valid_uuid(r, "run id") for r in body.run_ids]
     group_id = _valid_uuid(body.group_id, "group id") if body.group_id else None
-    if not get_run_registry().assign_runs(user_id, run_ids, group_id):
+    if not get_run_registry().assign_runs(
+            org_id, user_id, is_org_admin, run_ids, group_id):
         raise HTTPException(404, "Group or run not found")
     return {"assigned": len(run_ids), "group_id": group_id}
