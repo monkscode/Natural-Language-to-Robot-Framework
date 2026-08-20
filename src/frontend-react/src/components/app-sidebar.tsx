@@ -248,7 +248,7 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
               what actually happened, and keep any rows a previous successful
               load left behind. */}
           {groupsError && (
-            <li className="px-2 py-1.5 text-xs leading-snug text-destructive" role="alert">
+            <li className="px-2 py-1.5 text-xs leading-snug text-destructive">
               Couldn’t load groups — {groupsError}
             </li>
           )}

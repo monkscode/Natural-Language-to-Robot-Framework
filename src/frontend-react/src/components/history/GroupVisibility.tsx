@@ -19,9 +19,12 @@ export function PrivateLock({ name, className = 'h-3 w-3' }: {
   name?: string
   className?: string
 }) {
+  // Deliberately not "only you": a platform admin's group list is unscoped,
+  // so they can see a private group they did not create. The sentence has to
+  // hold for every reader.
   const label = name
-    ? `${name} is private — only you can see it`
-    : 'Private folder — only you can see it'
+    ? `${name} is private — visible only to whoever created it`
+    : 'Private group — visible only to whoever created it'
   return (
     <span role="img" aria-label={label} title={label} className="inline-flex shrink-0">
       <Lock aria-hidden="true" className={className} />
@@ -56,7 +59,7 @@ export function VisibilityField({ id, value, onChange, disabled }: {
           onChange={() => onChange('org')}
         />
         <Users aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />
-        <span>Everyone in my organization</span>
+        <span>Shared — everyone in the organization</span>
       </label>
       <label htmlFor={`${id}-private`} className="flex items-center gap-2 text-xs">
         <input
@@ -69,7 +72,7 @@ export function VisibilityField({ id, value, onChange, disabled }: {
           onChange={() => onChange('private')}
         />
         <Lock aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />
-        <span>Only me</span>
+        <span>Private — only whoever created it</span>
       </label>
     </fieldset>
   )

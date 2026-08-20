@@ -271,11 +271,20 @@ export default function HistoryPage() {
       // The drawer holds its own copy of the run; refetch it so its folder
       // label and check-mark stop describing where the run used to be.
       if (selected && runIds.includes(selected)) void reloadDetail()
-      // Under an active group filter a moved run must LEAVE the view. Dropping
-      // just those ids from the merge tail does that WITHOUT resetting to page
-      // zero, so a user who had loaded 150 rows still has 150. With no filter
-      // the run stays visible, and dropping it would make an older row vanish.
-      if (groupFilter) void refreshLoaded(new Set(runIds))
+      // Under an active group filter a moved run must LEAVE the view, and
+      // dropping just those ids from the merge tail does that WITHOUT resetting
+      // to page zero — a user who had loaded 150 rows still has 150.
+      //
+      // But only when the run actually left: filing a row into the group being
+      // filtered is a no-op the user can still see, and evicting it would
+      // delete a legitimate row while `total` held ("149 of 150"). Note that
+      // 'ungrouped' is a pseudo-filter rather than a group_id, so "still in
+      // view" there means the new group is null — comparing groupId against
+      // the filter STRING would evict exactly the row Remove-from-group was
+      // supposed to keep. With no filter at all the run stays visible either
+      // way, and dropping it would make an older row vanish.
+      const staysInView = groupFilter === 'ungrouped' ? groupId === null : groupId === groupFilter
+      if (groupFilter && !staysInView) void refreshLoaded(new Set(runIds))
       else void refreshLoaded()
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : 'Failed to move runs')

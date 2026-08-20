@@ -176,7 +176,7 @@ export function GroupChipsRow({
             {/* Labelled on purpose: the chips either side of this one count
                 RUNS, so a bare "· 3" here would read as three runs. */}
             <span className="text-muted-foreground">
-              · {groups.length} folder{groups.length === 1 ? '' : 's'}
+              · {groups.length} group{groups.length === 1 ? '' : 's'}
             </span>
           </Button>
         )
@@ -199,8 +199,8 @@ export function GroupChipsRow({
           <DialogHeader>
             <DialogTitle>All Groups</DialogTitle>
             <DialogDescription>
-              Pick a group to filter the runs. A lock marks a private group —
-              only you can see that one.
+              Pick a group to filter the runs. A lock marks a private group,
+              visible only to whoever created it.
             </DialogDescription>
           </DialogHeader>
 
@@ -276,8 +276,9 @@ export function GroupChipsRow({
           <DialogHeader>
             <DialogTitle>{overlay?.kind === 'edit' ? 'Edit group' : 'New group'}</DialogTitle>
             <DialogDescription>
-              Groups are folders for test runs. A shared group is visible to
-              everyone in your organization; a private one only to you.
+              Groups keep test runs together. A shared group is visible to
+              everyone in the organization; a private one only to whoever
+              created it.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={e => { e.preventDefault(); void submit() }} className="flex flex-col gap-2">
