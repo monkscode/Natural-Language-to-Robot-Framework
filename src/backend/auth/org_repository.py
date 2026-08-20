@@ -10,6 +10,7 @@ Depends on: auth/db.py (pool).
 """
 
 import logging
+import uuid
 
 import psycopg
 
@@ -17,6 +18,24 @@ from src.backend.auth.db import get_pool
 from src.backend.config.logging_config import sanitize_for_log
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_uuid(value: str) -> str:
+    """Best-effort canonical (lowercase, hyphenated) form of a UUID string.
+
+    org_members/organizations use UUID-typed columns, which Postgres
+    compares case/format-insensitively, so a raw path or body param (any
+    case, with or without hyphens) matches them fine. run_groups.org_id and
+    run_groups.created_by are TEXT holding exactly str(uuid.uuid4())'s
+    canonical form, so a non-canonical caller id would TEXT-mismatch every
+    row there. Returns value unchanged when it is not a UUID at all — the
+    caller (_release_private_groups) must never be able to fail an org move
+    over an id shape; degrading to "flip nothing" (today's behaviour) is the
+    correct outcome for a genuinely malformed id, not an exception."""
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError, TypeError):
+        return value
 
 
 class OrgRepository:
@@ -191,7 +210,15 @@ class OrgRepository:
         (search_path=auth_test only, no ,public fallback) — hard-coding
         public.run_groups would make the flip invisible to them there and a
         silent write to public in the real app.
+
+        user_id/org_id are normalized to canonical UUID form on entry:
+        callers (remove_member's raw path params, add_member's raw body
+        field) do not normalize them, and while org_members/organizations
+        match a non-canonical id fine (UUID-typed columns), run_groups is
+        TEXT and would silently match nothing.
         """
+        user_id = _canonical_uuid(user_id)
+        org_id = _canonical_uuid(org_id)
         try:
             with conn.transaction():
                 has_table = conn.execute(
@@ -254,9 +281,12 @@ class OrgRepository:
                     (renamed, group_id),
                 )
         except Exception as exc:  # noqa: BLE001 — must never abort the org move
+            # exc is sanitized too: a UniqueViolation here stringifies with
+            # "DETAIL: Key (org_id, lower(name))=(..., <folder name>) already
+            # exists", and the folder name is user-controlled (CWE-117).
             logger.warning(
                 "[AUTH] folder %s left private after a name collision on org move: %s",
-                sanitize_for_log(group_id), exc)
+                sanitize_for_log(group_id), sanitize_for_log(exc))
 
     def _email_for(self, user_id: str) -> str | None:
         """The user's email (used as their personal-org name), or None if absent."""

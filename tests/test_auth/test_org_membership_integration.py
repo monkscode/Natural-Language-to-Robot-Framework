@@ -491,13 +491,63 @@ def test_remove_member_flips_movers_private_folder_to_org():
             conn.commit()
 
 
+def test_remove_member_flip_survives_non_canonical_uuid_casing():
+    """Round-1 finding: remove_member's org_id/user_id arrive as raw path
+    params (auth/admin_access_endpoints.py), never normalized.
+    org_members/organizations are UUID-typed columns, so an uppercase or
+    unhyphenated id still matches them fine — but run_groups.org_id and
+    run_groups.created_by are TEXT holding str(uuid.uuid4())'s canonical
+    lowercase-hyphenated form, so a non-canonical caller id TEXT-mismatches
+    every row and the flip silently no-ops. _release_private_groups must
+    normalize both keys before querying."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"ncu-a-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"ncu-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        org_id = orgs.create_team_org("Acme", str(admin["id"]))
+        orgs.add_member(org_id, str(mover["id"]), "org_member")
+        group = reg.create_group(org_id, str(mover["id"]), "checkout", visibility="private")
+
+        # Same ids, non-canonical casing — exactly what a raw path param
+        # can carry. organizations/org_members are UUID columns and match
+        # regardless; run_groups is TEXT and would not, absent the fix.
+        noncanonical_org = org_id.upper()
+        noncanonical_user = str(mover["id"]).upper()
+        assert orgs.remove_member(noncanonical_org, noncanonical_user) is True
+
+        flipped = _flipped_group(reg, org_id, str(admin["id"]), group["group_id"])
+        assert flipped is not None, (
+            "non-canonical id casing must not silently drop the private-folder flip"
+        )
+        assert flipped["visibility"] == "org"
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, mover_email],))
+            conn.commit()
+
+
 def test_org_move_collision_renames_and_the_move_still_succeeds():
     """Required test 6: the mover's private "checkout" collides (case-
     insensitively) with an existing org "Checkout" folder the moment it
     flips to 'org' visibility — the two partial unique indexes let a
     private and an org folder share a name only until this moment. The
     move must still succeed, and the flipped folder must still be
-    reachable under its deterministic renamed name."""
+    reachable under its deterministic renamed name.
+
+    Also carries the mover's second, non-colliding private folder
+    ("orders") to pin that one folder's collision cannot strand another:
+    each flip runs in its own savepoint, so "orders" must flip cleanly
+    under its ORIGINAL name in the same move that renamed "checkout". A
+    refactor to a single bulk UPDATE would abort the whole statement on
+    the first collision and strand "orders" too — this is what catches
+    that regression."""
     users, orgs = UserRepository(), OrgRepository()
     reg = get_run_registry()
     admin_email = f"col-a-{uuid.uuid4().hex[:8]}@x.com"
@@ -514,6 +564,7 @@ def test_org_move_collision_renames_and_the_move_still_succeeds():
 
         reg.create_group(old_org, str(admin["id"]), "Checkout", visibility="org")
         group = reg.create_group(old_org, str(mover["id"]), "checkout", visibility="private")
+        orders_group = reg.create_group(old_org, str(mover["id"]), "orders", visibility="private")
 
         # Must not raise — an org move must never fail because of a folder name.
         orgs.reassign_user_org(str(mover["id"]), old_org, new_org)
@@ -522,6 +573,13 @@ def test_org_move_collision_renames_and_the_move_still_succeeds():
         assert flipped is not None, "the folder must still be reachable under some name"
         assert flipped["visibility"] == "org"
         assert flipped["name"] == f"checkout ({group['group_id'][:8]})"
+
+        orders_flipped = _flipped_group(reg, old_org, str(admin["id"]), orders_group["group_id"])
+        assert orders_flipped is not None, (
+            "a folder with no collision must not be stranded by a SIBLING folder's collision"
+        )
+        assert orders_flipped["visibility"] == "org"
+        assert orders_flipped["name"] == "orders"  # no collision, no rename
 
         # The pre-existing org folder is untouched.
         groups = reg.list_groups(old_org, str(admin["id"]), scope_user_id=None)
@@ -537,12 +595,20 @@ def test_org_move_collision_renames_and_the_move_still_succeeds():
             conn.commit()
 
 
-def test_org_move_succeeds_when_run_groups_table_absent():
+def test_org_move_succeeds_when_run_groups_table_absent(caplog):
     """Required test 7: RunRegistry is lazy and main.py never constructs it
     at startup, so an org move can legitimately precede run_groups existing.
     Built on a throwaway schema where a RunRegistry is deliberately never
     constructed — never on auth_test (other tests in this package need its
-    run_groups table) and never on public."""
+    run_groups table) and never on public.
+
+    Round-1 finding: a bare assertion that the move succeeds does NOT test
+    the to_regclass guard — _release_private_groups' blanket except also
+    catches UndefinedTable, logs a warning and returns, so the outer move
+    still commits either way. What must actually be pinned is that the
+    GUARD's clean-skip path was taken, not the exception path: assert no
+    warning was logged by org_repository during the move. Deleting the
+    to_regclass guard must turn this RED."""
     import psycopg
     from psycopg.rows import dict_row
     from psycopg_pool import ConnectionPool
@@ -583,10 +649,20 @@ def test_org_move_succeeds_when_run_groups_table_absent():
         old_org = orgs.create_team_org("Old Co", str(admin["id"]))
         orgs.add_member(old_org, str(mover["id"]), "org_member")
 
-        new_org = orgs.create_team_org("New Co", str(mover["id"]))  # triggers the flip attempt
+        # The flip attempt happens inside this call (old_org is vacated) —
+        # scope the log capture tightly so only ITS logging counts.
+        with caplog.at_level("WARNING", logger="src.backend.auth.org_repository"):
+            new_org = orgs.create_team_org("New Co", str(mover["id"]))
 
         memberships = orgs.get_orgs_for_user(str(mover["id"]))
         assert len(memberships) == 1 and memberships[0]["org_id"] == new_org
+
+        org_repo_warnings = [r.getMessage() for r in caplog.records
+                             if r.name == "src.backend.auth.org_repository"]
+        assert org_repo_warnings == [], (
+            "the to_regclass guard must take the clean-skip path (no logged "
+            f"exception), but org_repository logged: {org_repo_warnings}"
+        )
     finally:
         auth_db._pool = saved_pool
         if pool is not None:
