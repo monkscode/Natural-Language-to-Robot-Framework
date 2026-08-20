@@ -14,6 +14,7 @@ from src.backend.services.workflow_service import stream_generate_and_run, strea
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.runner_exec.client import RunnerExecUnavailable
 from src.backend.api.history_endpoints import resolve_robot_code
+from src.backend.api.history_scope import history_scope
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
@@ -69,6 +70,11 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     generation. The source's query still lands on the new history row via
     history_query so the run is recognizable in the list.
 
+    The new run stays in the folder the source run sits in until the user
+    moves it, inherited from the IMMEDIATE source row — never from rerun_of,
+    which is root-flattened below and would send a re-run of a since-moved
+    re-run back to the ORIGINAL run's folder.
+
     Access mirrors the detail endpoint: owner or validated admin; unknown ids
     and other users' runs both 404.
     """
@@ -77,10 +83,19 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid rerun_of: must be a UUID")
 
-    source = get_run_registry().get_run(source_run_id)
-    admin = is_validated_admin(user)
+    # Read through the caller's OWN scope: the new run inherits the source's
+    # folder, and an unscoped read would hand back a folder this caller cannot
+    # see — an org_admin re-running a member's run would file it into that
+    # member's private folder. history_scope is the single scope computation
+    # (never re-derive it here) and carries the re-validated platform-admin
+    # flag, so the ownership gate below costs no extra DB round-trip.
+    scope = history_scope(user)
+    source = get_run_registry().get_run(
+        source_run_id, org_id=scope.org_id, caller_user_id=scope.caller_user_id
+    )
     allowed = source is not None and caller_can_read(
-        user, source.get("user_id"), source.get("org_id"), is_platform_admin=admin
+        user, source.get("user_id"), source.get("org_id"),
+        is_platform_admin=scope.is_admin
     )
     if source is None or not allowed:
         # 404, not 403 — don't leak run existence across orgs.
@@ -102,7 +117,8 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     return StreamingResponse(
         stream_execute_only(robot_code, user=user,
                             history_query=source.get("user_query"),
-                            rerun_of=learning_anchor),
+                            rerun_of=learning_anchor,
+                            group_id=source.get("group_id")),
         media_type=SSE_MEDIA_TYPE,
     )
 

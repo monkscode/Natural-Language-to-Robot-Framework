@@ -209,6 +209,38 @@ class RunRegistry:
                 "[RUN_REGISTRY] org_id lookup failed for user %s: %s", user_id, e)
             return None
 
+    def _inheritable_group_id(
+        self, group_id: str, org_id: Optional[str]
+    ) -> Optional[str]:
+        """group_id when that folder belongs to org_id, else None.
+
+        A re-run inherits the folder of the run it was cloned from, and a
+        platform admin reads that source row through the UNFILTERED group
+        join (see _group_join), so the id can name a folder in a different
+        org from the one being written on the new row. Only record_start
+        knows that org — _lookup_org_id can supply it when the token did
+        not — which is why the comparison lives here and not at the endpoint.
+        An org-less row (AUTH_ENFORCED off) matches no folder at all:
+        run_groups.org_id is NOT NULL, so there is nothing for it to equal,
+        and filing an unowned run into someone's folder is the worse answer.
+
+        Runs on its OWN pool connection and swallows its own errors, exactly
+        like _lookup_org_id: this decides a folder tag, and nothing about a
+        folder tag may cost the history row it decorates."""
+        if org_id is None:
+            return None
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM run_groups WHERE group_id = %s AND org_id = %s",
+                    (group_id, org_id),
+                ).fetchone()
+            return group_id if row else None
+        except Exception as e:
+            logger.warning(
+                "[RUN_REGISTRY] group org check failed for %s: %s", group_id, e)
+            return None
+
     def record_start(
         self,
         run_id: str,
@@ -218,6 +250,7 @@ class RunRegistry:
         robot_code: Optional[str] = None,
         rerun_of: Optional[str] = None,
         error_message: Optional[str] = None,
+        group_id: Optional[str] = None,
     ) -> None:
         """Upsert a run row. Ownership/query/lineage are write-once (COALESCE
         keeps the first non-NULL value); status and updated_at always advance.
@@ -234,18 +267,23 @@ class RunRegistry:
         absent and a user_id is present, _lookup_org_id derives it before the
         INSERT runs — insurance against a login-time failure that mints an
         org-less token (see _lookup_org_id for why this must not share the
-        INSERT's connection)."""
+        INSERT's connection).
+
+        group_id files the new run into a folder. Only the History "Run
+        again" path sets it, inheriting the folder of the run it cloned; it
+        is write-once like ownership, so a later record_start cannot drag a
+        run the user moved mid-flight back to the source folder."""
         try:
             user_id = (user or {}).get("user_id")
             org_id = (user or {}).get("org_id")
             if org_id is None and user_id:
                 org_id = self._lookup_org_id(user_id)
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
+            if group_id is not None:
+                group_id = self._inheritable_group_id(group_id, org_id)
+            sql = """
                     INSERT INTO test_runs
-                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET
                         status     = EXCLUDED.status,
                         updated_at = now(),
@@ -255,20 +293,42 @@ class RunRegistry:
                         robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
                         rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
                         org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
-                        error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message)
-                    """,
-                    (
-                        run_id,
-                        user_id,
-                        (user or {}).get("email"),
-                        user_query,
-                        robot_code,
-                        rerun_of,
-                        status,
-                        org_id,
-                        error_message,
-                    ),
+                        error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message),
+                        group_id   = COALESCE(test_runs.group_id, EXCLUDED.group_id)
+                    """
+
+            def _params(gid: Optional[str]) -> tuple:
+                return (
+                    run_id,
+                    user_id,
+                    (user or {}).get("email"),
+                    user_query,
+                    robot_code,
+                    rerun_of,
+                    status,
+                    org_id,
+                    error_message,
+                    gid,
                 )
+
+            with self._pool.connection() as conn:
+                try:
+                    conn.execute(sql, _params(group_id))
+                except psycopg.errors.ForeignKeyViolation:
+                    # delete_group removed the folder between the check above
+                    # and this INSERT. fk_test_runs_group turns that into a
+                    # violation the outer except would swallow, leaving NO
+                    # history row at all — strictly worse than a missing
+                    # folder tag. Retry ungrouped, reusing the org_id already
+                    # derived above rather than looking it up again.
+                    # rollback() first: the pool's context manager COMMITs on
+                    # exit, and the aborted transaction would take the retry
+                    # down with it (same reason assign_runs rolls back).
+                    conn.rollback()
+                    logger.warning(
+                        "[RUN_REGISTRY] folder %s vanished mid-write; "
+                        "recording run %s ungrouped", group_id, run_id)
+                    conn.execute(sql, _params(None))
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] record_start failed for {run_id}: {e}")
 
@@ -784,9 +844,11 @@ class RunRegistry:
         _group_join: a run sitting in a folder this caller cannot see reports
         NULL for both group_id and group_name, so the drawer never shows a
         private folder's name nor a folder id the caller cannot resolve. They
-        default to the unscoped form, which is what the rerun and feedback
-        paths in api/endpoints.py want — they read robot_code and ownership,
-        never the group fields."""
+        default to the unscoped form, which is what the feedback path in
+        api/endpoints.py wants — it reads ownership and lineage, never the
+        group fields. The rerun path DOES pass a scope: a re-run inherits its
+        source run's folder, so reading that folder unscoped would file the
+        new run somewhere its own owner cannot see it."""
         join, params = self._group_join(org_id, caller_user_id)
         try:
             with self._pool.connection() as conn:

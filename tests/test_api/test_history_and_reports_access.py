@@ -842,17 +842,21 @@ def _rerun_client(registry, user, validated_admin=False):
     captured = {}
 
     async def fake_stream(robot_code, user_query=None, workflow_id=None,
-                          user=None, history_query=None, rerun_of=None):
+                          user=None, history_query=None, rerun_of=None,
+                          group_id=None):
         captured.update(
             robot_code=robot_code, user_query=user_query,
             workflow_id=workflow_id, user=user, history_query=history_query,
-            rerun_of=rerun_of,
+            rerun_of=rerun_of, group_id=group_id,
         )
         yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
 
     patchers = [
         patch("src.backend.api.endpoints.get_run_registry", return_value=registry),
-        patch("src.backend.api.endpoints.is_validated_admin", return_value=validated_admin),
+        # The rerun path takes its admin flag off history_scope now, so the
+        # patch belongs where history_scope reads it.
+        patch("src.backend.api.history_scope.is_validated_admin",
+              return_value=validated_admin),
         patch("src.backend.api.endpoints.stream_execute_only", fake_stream),
     ]
     for p in patchers:
