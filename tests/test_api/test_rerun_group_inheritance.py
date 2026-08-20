@@ -47,6 +47,10 @@ _ORG_ADMIN = {"user_id": "u-orgadmin", "email": "orgadmin@test.local",
 # A platform admin whose own org is B — the cross-org case.
 _PLATFORM = {"user_id": "u-platform", "email": "platform@test.local",
              "org_id": _ORG_B, "org_role": "org_member"}
+# A platform admin inside org A — the ordinary shape for this product, and the
+# one an org-only guard lets through.
+_PLATFORM_SAME_ORG = {"user_id": "u-platform-a", "email": "platforma@test.local",
+                      "org_id": _ORG_A, "org_role": "org_member"}
 
 _CODE = "*** Settings ***\n*** Test Cases ***\nDummy\n    Log    hi\n"
 
@@ -288,3 +292,25 @@ class TestRerunServiceWritesTheFolder:
         new_run_id = self._execute(reg, _PLATFORM, gid)
         assert stored_group_id(new_run_id) is None
         assert reg.get_run(new_run_id)["user_query"] == "search for shoes"
+
+    def test_same_org_platform_admin_cannot_land_in_a_members_private_folder(
+            self, reg, stored_group_id):
+        """The hole an org-only guard leaves. A platform admin reads every
+        org's folders unfiltered, so a member's PRIVATE folder id reaches the
+        write; sharing that member's org makes the org check pass. The run
+        being written belongs to the ADMIN, so filing it there would put a run
+        in a folder its own owner cannot see."""
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Member Private",
+                               "private")["group_id"]
+        new_run_id = self._execute(reg, _PLATFORM_SAME_ORG, gid)
+        assert stored_group_id(new_run_id) is None
+        assert reg.get_run(new_run_id)["user_query"] == "search for shoes"
+
+    def test_own_private_folder_survives_the_visibility_guard(self, reg, stored_group_id):
+        """Same predicate, other branch: the folder's creator re-running their
+        own run keeps it. Without this, dropping every private folder would
+        pass the test above."""
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "My Drafts",
+                               "private")["group_id"]
+        new_run_id = self._execute(reg, _MEMBER, gid)
+        assert stored_group_id(new_run_id) == gid

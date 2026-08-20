@@ -209,20 +209,31 @@ class RunRegistry:
                 "[RUN_REGISTRY] org_id lookup failed for user %s: %s", user_id, e)
             return None
 
-    def _inheritable_group_id(
-        self, group_id: str, org_id: Optional[str]
+    def _fileable_group_id(
+        self, group_id: str, org_id: Optional[str], user_id: Optional[str]
     ) -> Optional[str]:
-        """group_id when that folder belongs to org_id, else None.
+        """group_id when a run owned by user_id in org_id may be FILED into
+        that folder, else None — the same predicate assign_runs enforces
+        (folder in the org, and a private folder takes only its creator's
+        runs), applied at the write instead of at the read.
 
-        A re-run inherits the folder of the run it was cloned from, and a
-        platform admin reads that source row through the UNFILTERED group
-        join (see _group_join), so the id can name a folder in a different
-        org from the one being written on the new row. Only record_start
-        knows that org — _lookup_org_id can supply it when the token did
-        not — which is why the comparison lives here and not at the endpoint.
-        An org-less row (AUTH_ENFORCED off) matches no folder at all:
-        run_groups.org_id is NOT NULL, so there is nothing for it to equal,
-        and filing an unowned run into someone's folder is the worse answer.
+        It has to be the whole predicate, and it has to be keyed on the NEW
+        ROW'S OWNER rather than on whoever read the source. A re-run inherits
+        the folder of the run it was cloned from, and a validated platform
+        admin reads that source row through the UNFILTERED group join (see
+        _group_join, and history_scope, which hands them org_id None), so the
+        id arriving here can name ANY org's folder and any user's private one.
+        An org-only check catches the cross-org half and misses the rest: a
+        platform admin inside the member's own org would file their own new
+        run into that member's private folder — a run sitting where its owner
+        cannot see it, which is exactly what this feature forbids.
+
+        Only record_start can make this decision, because only it knows the
+        org and owner actually written on the new row — _lookup_org_id can
+        supply the org when the token did not. An org-less row (AUTH_ENFORCED
+        off) matches no folder at all: run_groups.org_id is NOT NULL, so there
+        is nothing for it to equal, and filing an unowned run into someone's
+        folder is the worse answer.
 
         Runs on its OWN pool connection and swallows its own errors, exactly
         like _lookup_org_id: this decides a folder tag, and nothing about a
@@ -232,13 +243,15 @@ class RunRegistry:
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT 1 FROM run_groups WHERE group_id = %s AND org_id = %s",
-                    (group_id, org_id),
+                    "SELECT 1 FROM run_groups WHERE group_id = %s AND org_id = %s "
+                    "AND (visibility = 'org' OR created_by = %s)",
+                    (group_id, org_id, user_id),
                 ).fetchone()
             return group_id if row else None
         except Exception as e:
             logger.warning(
-                "[RUN_REGISTRY] group org check failed for %s: %s", group_id, e)
+                "[RUN_REGISTRY] group visibility check failed for %s: %s",
+                group_id, e)
             return None
 
     def record_start(
@@ -279,23 +292,23 @@ class RunRegistry:
             if org_id is None and user_id:
                 org_id = self._lookup_org_id(user_id)
             if group_id is not None:
-                group_id = self._inheritable_group_id(group_id, org_id)
+                group_id = self._fileable_group_id(group_id, org_id, user_id)
             sql = """
-                    INSERT INTO test_runs
-                        (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (run_id) DO UPDATE SET
-                        status     = EXCLUDED.status,
-                        updated_at = now(),
-                        user_id    = COALESCE(test_runs.user_id, EXCLUDED.user_id),
-                        user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
-                        user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
-                        robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
-                        rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
-                        org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
-                        error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message),
-                        group_id   = COALESCE(test_runs.group_id, EXCLUDED.group_id)
-                    """
+                INSERT INTO test_runs
+                    (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    status     = EXCLUDED.status,
+                    updated_at = now(),
+                    user_id    = COALESCE(test_runs.user_id, EXCLUDED.user_id),
+                    user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
+                    user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
+                    robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
+                    rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
+                    org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
+                    error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message),
+                    group_id   = COALESCE(test_runs.group_id, EXCLUDED.group_id)
+                """
 
             def _params(gid: Optional[str]) -> tuple:
                 return (

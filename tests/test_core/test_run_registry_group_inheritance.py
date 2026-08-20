@@ -97,6 +97,32 @@ def test_folder_from_another_org_is_dropped(reg, stored_group_id):
     assert stored_group_id(rid) is None
 
 
+def test_private_folder_of_another_user_in_the_same_org_is_dropped(reg, stored_group_id):
+    """The org half of the predicate is not enough.
+
+    history_scope hands a validated platform admin org_id None, so their re-run
+    reads the source row through the UNFILTERED group join and a member's
+    PRIVATE folder id reaches record_start. When that admin belongs to the SAME
+    org as the member — the ordinary shape here — an org-only check matches it,
+    and the new run, owned by the ADMIN, lands in a folder only the member can
+    see. That is the one arrangement this feature forbids outright."""
+    gid = reg.create_group(_ORG_A, "u-member", "Member Private",
+                           "private")["group_id"]
+    rid = _rid()
+    reg.record_start(rid, _USER, "q", "running", group_id=gid)
+    assert stored_group_id(rid) is None
+
+
+def test_own_private_folder_is_written(reg, stored_group_id):
+    """The other side of the same predicate: a private folder DOES take its
+    own creator's runs, so re-running out of one keeps it. Guards against
+    'fixing' the case above by refusing every private folder."""
+    gid = reg.create_group(_ORG_A, "u1", "My Drafts", "private")["group_id"]
+    rid = _rid()
+    reg.record_start(rid, _USER, "q", "running", group_id=gid)
+    assert stored_group_id(rid) == gid
+
+
 def test_folder_is_dropped_when_the_run_has_no_org(reg, stored_group_id):
     """AUTH_ENFORCED=false writes rows with no org at all. Every folder has a
     NOT NULL org_id, so there is no org such a row could match — inherit
@@ -128,16 +154,16 @@ def test_folder_deleted_mid_write_still_writes_the_run(reg, admin_conn, stored_g
     gid = reg.create_group(_ORG_A, "u1", "Doomed", "org")["group_id"]
     rid = _rid()
 
-    real_guard = RunRegistry._inheritable_group_id
+    real_guard = RunRegistry._fileable_group_id
 
-    def _delete_after_reading(self, group_id, org_id):
-        inherited = real_guard(self, group_id, org_id)
+    def _delete_after_reading(self, group_id, org_id, user_id):
+        inherited = real_guard(self, group_id, org_id, user_id)
         admin_conn.execute(
             f"DELETE FROM {_SCHEMA}.run_groups WHERE group_id = %s", (group_id,)
         )
         return inherited
 
-    with patch.object(RunRegistry, "_inheritable_group_id", _delete_after_reading):
+    with patch.object(RunRegistry, "_fileable_group_id", _delete_after_reading):
         reg.record_start(rid, _USER, "the run that must survive", "running",
                          group_id=gid)
 
@@ -154,10 +180,10 @@ def test_retry_reuses_the_org_id_already_derived(reg, admin_conn, stored_group_i
     gid = reg.create_group(_ORG_A, "u1", "Doomed", "org")["group_id"]
     rid = _rid()
     orgless_user = {"user_id": str(uuid.uuid4()), "email": "u@test.local"}
-    real_guard = RunRegistry._inheritable_group_id
+    real_guard = RunRegistry._fileable_group_id
 
-    def _delete_after_reading(self, group_id, org_id):
-        inherited = real_guard(self, group_id, org_id)
+    def _delete_after_reading(self, group_id, org_id, user_id):
+        inherited = real_guard(self, group_id, org_id, user_id)
         admin_conn.execute(
             f"DELETE FROM {_SCHEMA}.run_groups WHERE group_id = %s", (group_id,)
         )
@@ -165,7 +191,7 @@ def test_retry_reuses_the_org_id_already_derived(reg, admin_conn, stored_group_i
 
     with patch.object(RunRegistry, "_lookup_org_id",
                       return_value=_ORG_A) as lookup, \
-         patch.object(RunRegistry, "_inheritable_group_id", _delete_after_reading):
+         patch.object(RunRegistry, "_fileable_group_id", _delete_after_reading):
         reg.record_start(rid, orgless_user, "q", "running", group_id=gid)
 
     assert lookup.call_count == 1

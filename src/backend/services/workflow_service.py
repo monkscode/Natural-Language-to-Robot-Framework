@@ -1349,8 +1349,10 @@ async def stream_execute_only(
             route feedback to the run that owns the learning record.
         group_id: The folder of the run this one was cloned from — a re-run
             stays where its source was filed until the user moves it. Set only
-            by the rerun path, and only ever to a folder that caller can see;
-            record_start still drops it if it belongs to another org.
+            by the rerun path. record_start re-checks it against the org and
+            owner of the row it is about to write and drops it if that run may
+            not be filed there, so a folder a platform admin could see but the
+            new run's owner could not never reaches the row.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"

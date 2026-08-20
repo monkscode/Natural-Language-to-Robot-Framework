@@ -854,7 +854,10 @@ def _rerun_client(registry, user, validated_admin=False):
     patchers = [
         patch("src.backend.api.endpoints.get_run_registry", return_value=registry),
         # The rerun path takes its admin flag off history_scope now, so the
-        # patch belongs where history_scope reads it.
+        # patch belongs where history_scope reads it. _feedback_client above
+        # deliberately keeps the endpoints target: submit_feedback still calls
+        # is_validated_admin directly (it needs no scope), so the two clients
+        # patch two different symbols on purpose.
         patch("src.backend.api.history_scope.is_validated_admin",
               return_value=validated_admin),
         patch("src.backend.api.endpoints.stream_execute_only", fake_stream),
