@@ -3,6 +3,7 @@ import pytest
 from src.backend.auth.repository import UserRepository
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.db import get_pool
+from src.backend.core.run_registry import get_run_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
@@ -333,3 +334,262 @@ def test_set_org_owner_role_change_keeps_single_membership():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([owner_email, member_email],))
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# T4c Part B — org moves flip the departing user's PRIVATE folders in the
+# vacated org to 'org' visibility, so they do not strand out of every
+# remaining member's reach (F10). Covers all four org-move entry points:
+# create_team_org, add_member, reassign_user_org (required test 8) and
+# remove_member (Ruling 3 — bypasses _collapse_to_single, needs its own
+# call site).
+# ---------------------------------------------------------------------------
+
+def _flipped_group(reg, org_id, admin_id, group_id):
+    """The folder as the OLD-org admin sees it post-move, or None."""
+    groups = reg.list_groups(org_id, admin_id, scope_user_id=None)
+    return next((g for g in groups if g["group_id"] == group_id), None)
+
+
+def test_create_team_org_flips_movers_private_folder_to_org():
+    """Required test 5, create_team_org entry point: the owner's move into a
+    brand-new team org vacates their prior team membership; a private folder
+    they created there flips to 'org' visibility, and the old org's admin —
+    who could never see it while private — can rename and delete it."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"ctf-a-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"ctf-m-{uuid.uuid4().hex[:8]}@x.com"
+    old_org = new_org = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))  # admin stays behind
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout", visibility="private")
+
+        new_org = orgs.create_team_org("New Co", str(mover["id"]))  # vacates old_org
+
+        flipped = _flipped_group(reg, old_org, str(admin["id"]), group["group_id"])
+        assert flipped is not None, "flipped folder must be visible to the old org's admin"
+        assert flipped["visibility"] == "org"
+        assert flipped["name"] == "checkout"  # no collision here, no rename needed
+        assert reg.rename_group(old_org, str(admin["id"]), True, group["group_id"],
+                                name="renamed by admin") is True
+        assert reg.delete_group(old_org, str(admin["id"]), True, group["group_id"]) is True
+    finally:
+        with get_pool().connection() as conn:
+            for oid in (old_org, new_org):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, mover_email],))
+            conn.commit()
+
+
+def test_add_member_flips_movers_private_folder_to_org():
+    """Required test 5, add_member entry point."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"amf-a-{uuid.uuid4().hex[:8]}@x.com"
+    other_admin_email = f"amf-b-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"amf-m-{uuid.uuid4().hex[:8]}@x.com"
+    old_org = new_org = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        other_admin = users.create_user(other_admin_email, "password123", "Other")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))
+        new_org = orgs.create_team_org("New Co", str(other_admin["id"]))
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout", visibility="private")
+
+        orgs.add_member(new_org, str(mover["id"]), "org_member")  # vacates old_org
+
+        flipped = _flipped_group(reg, old_org, str(admin["id"]), group["group_id"])
+        assert flipped is not None
+        assert flipped["visibility"] == "org"
+        assert reg.rename_group(old_org, str(admin["id"]), True, group["group_id"],
+                                name="renamed by admin") is True
+        assert reg.delete_group(old_org, str(admin["id"]), True, group["group_id"]) is True
+    finally:
+        with get_pool().connection() as conn:
+            for oid in (old_org, new_org):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, other_admin_email, mover_email],))
+            conn.commit()
+
+
+def test_reassign_user_org_flips_movers_private_folder_to_org():
+    """Required test 5, reassign_user_org entry point."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"raf-a-{uuid.uuid4().hex[:8]}@x.com"
+    other_admin_email = f"raf-b-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"raf-m-{uuid.uuid4().hex[:8]}@x.com"
+    old_org = new_org = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        other_admin = users.create_user(other_admin_email, "password123", "Other")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))
+        new_org = orgs.create_team_org("New Co", str(other_admin["id"]))
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout", visibility="private")
+
+        orgs.reassign_user_org(str(mover["id"]), old_org, new_org)  # vacates old_org
+
+        flipped = _flipped_group(reg, old_org, str(admin["id"]), group["group_id"])
+        assert flipped is not None
+        assert flipped["visibility"] == "org"
+        assert reg.rename_group(old_org, str(admin["id"]), True, group["group_id"],
+                                name="renamed by admin") is True
+        assert reg.delete_group(old_org, str(admin["id"]), True, group["group_id"]) is True
+    finally:
+        with get_pool().connection() as conn:
+            for oid in (old_org, new_org):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, other_admin_email, mover_email],))
+            conn.commit()
+
+
+def test_remove_member_flips_movers_private_folder_to_org():
+    """Ruling 3: remove_member deletes a team membership directly, bypassing
+    _collapse_to_single entirely — it needs its own call to the same flip, or
+    a member removed via this path strands their private folder exactly like
+    F10 describes. Mirrors required test 5."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"rmf-a-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"rmf-m-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        org_id = orgs.create_team_org("Acme", str(admin["id"]))
+        orgs.add_member(org_id, str(mover["id"]), "org_member")
+        group = reg.create_group(org_id, str(mover["id"]), "checkout", visibility="private")
+
+        assert orgs.remove_member(org_id, str(mover["id"])) is True
+
+        flipped = _flipped_group(reg, org_id, str(admin["id"]), group["group_id"])
+        assert flipped is not None, "remove_member must release the departing member's private folders"
+        assert flipped["visibility"] == "org"
+        assert reg.rename_group(org_id, str(admin["id"]), True, group["group_id"],
+                                name="renamed by admin") is True
+        assert reg.delete_group(org_id, str(admin["id"]), True, group["group_id"]) is True
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, mover_email],))
+            conn.commit()
+
+
+def test_org_move_collision_renames_and_the_move_still_succeeds():
+    """Required test 6: the mover's private "checkout" collides (case-
+    insensitively) with an existing org "Checkout" folder the moment it
+    flips to 'org' visibility — the two partial unique indexes let a
+    private and an org folder share a name only until this moment. The
+    move must still succeed, and the flipped folder must still be
+    reachable under its deterministic renamed name."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"col-a-{uuid.uuid4().hex[:8]}@x.com"
+    other_admin_email = f"col-b-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"col-m-{uuid.uuid4().hex[:8]}@x.com"
+    old_org = new_org = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        other_admin = users.create_user(other_admin_email, "password123", "Other")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))
+        new_org = orgs.create_team_org("New Co", str(other_admin["id"]))
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+
+        reg.create_group(old_org, str(admin["id"]), "Checkout", visibility="org")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout", visibility="private")
+
+        # Must not raise — an org move must never fail because of a folder name.
+        orgs.reassign_user_org(str(mover["id"]), old_org, new_org)
+
+        flipped = _flipped_group(reg, old_org, str(admin["id"]), group["group_id"])
+        assert flipped is not None, "the folder must still be reachable under some name"
+        assert flipped["visibility"] == "org"
+        assert flipped["name"] == f"checkout ({group['group_id'][:8]})"
+
+        # The pre-existing org folder is untouched.
+        groups = reg.list_groups(old_org, str(admin["id"]), scope_user_id=None)
+        names = sorted(g["name"] for g in groups)
+        assert "Checkout" in names
+    finally:
+        with get_pool().connection() as conn:
+            for oid in (old_org, new_org):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, other_admin_email, mover_email],))
+            conn.commit()
+
+
+def test_org_move_succeeds_when_run_groups_table_absent():
+    """Required test 7: RunRegistry is lazy and main.py never constructs it
+    at startup, so an org move can legitimately precede run_groups existing.
+    Built on a throwaway schema where a RunRegistry is deliberately never
+    constructed — never on auth_test (other tests in this package need its
+    run_groups table) and never on public."""
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+    from src.backend.auth import db as auth_db
+    from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
+
+    schema = "org_move_fresh_test"
+    admin_conn = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+    admin_conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    admin_conn.execute(f"CREATE SCHEMA {schema}")
+    sep = "&" if "?" in settings.DATABASE_URL else "?"
+    dsn = settings.DATABASE_URL + f"{sep}options=-c%20search_path%3D{schema}"
+
+    saved_pool = auth_db._pool
+    pool = None
+    try:
+        pool = ConnectionPool(
+            conninfo=dsn, min_size=1, max_size=4,
+            kwargs={"row_factory": dict_row, "connect_timeout": PG_CONNECT_TIMEOUT_S},
+            open=True,
+        )
+        auth_db._pool = pool
+        auth_db.init_auth_db()
+        from src.backend.auth.org_db import init_org_db
+        init_org_db()
+        # No RunRegistry() is ever constructed against this schema/dsn — the
+        # fresh-database condition this test exists to reproduce.
+        exists = admin_conn.execute(
+            f"SELECT to_regclass('{schema}.run_groups')"
+        ).fetchone()
+        assert exists[0] is None, "test setup bug: run_groups must not exist yet"
+
+        users, orgs = UserRepository(), OrgRepository()
+        admin_email = f"fresh-a-{uuid.uuid4().hex[:8]}@x.com"
+        mover_email = f"fresh-m-{uuid.uuid4().hex[:8]}@x.com"
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+
+        new_org = orgs.create_team_org("New Co", str(mover["id"]))  # triggers the flip attempt
+
+        memberships = orgs.get_orgs_for_user(str(mover["id"]))
+        assert len(memberships) == 1 and memberships[0]["org_id"] == new_org
+    finally:
+        auth_db._pool = saved_pool
+        if pool is not None:
+            pool.close()
+        admin_conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        admin_conn.close()

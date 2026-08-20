@@ -29,14 +29,19 @@ def caller_can_read(
     Rules (first match wins):
     1. caller is None  -> allow (AUTH_ENFORCED off; permissive dev escape hatch).
     2. is_platform_admin -> allow (cross-org).
-    3. caller has no org_id claim (legacy token) -> allow iff owner_id == caller.user_id.
-    4. org-aware: org_id must equal the caller's org_id; within that org, allow iff
+    3. owner_id is not None and owner_id == caller.user_id -> allow, whatever
+       the org. An internal org move must not lock an author out of work
+       they wrote: a user moved from org A to org B keeps read access to the
+       runs they own in org A.
+    4. caller has no org_id claim (legacy token) -> allow iff owner_id == caller.user_id.
+    5. org-aware: org_id must equal the caller's org_id; within that org, allow iff
        caller is org_admin OR owner_id == caller.user_id.
 
     Unattributed resources (owner_id None) fail closed for every non-platform
-    caller — including a same-org org_admin. /reports exposes typed credentials,
-    so a row no user owns (legacy/unknown run) is readable only by a platform
-    admin (rule 2), never granted by the org-admin shortcut.
+    caller — including a same-org org_admin and rule 3 above (which requires
+    owner_id is not None). /reports exposes typed credentials, so a row no
+    user owns (legacy/unknown run) is readable only by a platform admin
+    (rule 2), never granted by the org-admin shortcut.
     """
     if caller is None:
         return True
@@ -45,6 +50,9 @@ def caller_can_read(
 
     caller_org = caller.get("org_id")
     caller_uid = caller.get("user_id")
+
+    if owner_id is not None and owner_id == caller_uid:
+        return True
 
     if caller_org is None:  # legacy token, coexistence fallback
         return owner_id is not None and owner_id == caller_uid
