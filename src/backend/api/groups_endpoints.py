@@ -124,9 +124,12 @@ def _valid_uuid(value: str, what: str) -> str:
 
 def _duplicate(exc: DuplicateGroupName) -> HTTPException:
     """409 for a name collision. The name is whichever scope the collision
-    landed in — the org's for an 'org' folder, the creator's for a private
-    one — so the copy cannot say "you already have", which is false for an
-    org folder another member created."""
+    landed in — the org's for an 'org' folder, the (org, creator) pair for a
+    private one — so the copy cannot say "you already have", which is false
+    for an org folder another member created. Private names being scoped to
+    the org as well as the creator is what stops a folder left behind in an
+    org the user departed from 409-ing a name they choose somewhere else,
+    naming a folder they can no longer see."""
     return HTTPException(409, f'A group named "{exc}" already exists')
 
 

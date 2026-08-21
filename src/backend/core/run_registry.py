@@ -65,13 +65,16 @@ _SCHEMA_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_test_runs_created"
     " ON test_runs (created_at DESC)",
     # --- run groups (History page folders) ---
-    # Keyed to the ORG, with a per-folder visibility flag. No DROP may ever
-    # appear here: this tuple runs on EVERY RunRegistry() construction (see
-    # __init__), so a DROP would delete every folder on each process start
-    # and each test fixture, and would fail outright once T4's foreign key
-    # references the table. The pre-release per-user table (0 rows, never
-    # shipped) is dropped by the guarded block below instead — CREATE TABLE
-    # IF NOT EXISTS would otherwise silently keep the old column set.
+    # Keyed to the ORG, with a per-folder visibility flag. No DROP of this
+    # TABLE may ever appear here: this tuple runs on EVERY RunRegistry()
+    # construction (see __init__), so one would delete every folder on each
+    # process start and each test fixture, and would fail outright once T4's
+    # foreign key references the table. There are exactly TWO exceptions,
+    # both below, and neither can destroy anything a user made: the
+    # pre-release per-user TABLE (0 rows, never shipped) is dropped by the
+    # guarded block below, because CREATE TABLE IF NOT EXISTS would otherwise
+    # silently keep the old column set; and the superseded per-user private
+    # INDEX is dropped by name, which carries no rows at all.
     #
     # ...and this is the ONE exception the comment above allows, because it
     # cannot delete anything anyone made. A database that ran PR #94's
@@ -149,8 +152,55 @@ _SCHEMA_DDL = (
     # coexist in one list, so the UI marks private folders (T5).
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_org_name"
     " ON run_groups (org_id, lower(name)) WHERE visibility = 'org'",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_private_name"
-    " ON run_groups (created_by, lower(name)) WHERE visibility = 'private'",
+    # The private one is keyed per (ORG, creator). Keyed on the creator
+    # alone, a private folder stranded in an org the user left blocked that
+    # name in every org they joined afterwards, and the 409 named a folder
+    # nobody could see — the entire reason org_repository grew a routine to
+    # flip a departing member's private folders to 'org', publishing names
+    # chosen in private and renaming them on collision. Org-scoping removes
+    # the cause. Both halves of the rationale above survive: still a separate
+    # partial index, so a private folder cannot block an org name and an
+    # org-name 409 cannot leak a private folder. Decision 2, 2026-08-21.
+    #
+    # CREATE precedes the DROP because _SCHEMA_DDL runs statement by
+    # statement on an AUTOCOMMIT connection: dropping first would commit a
+    # window with no private-name uniqueness at all. Holding both is legal in
+    # any state, because the new key is a strict RELAXATION — a pair
+    # colliding on (org_id, created_by, name) also collides on
+    # (created_by, name), which the old index already enforced.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_private_org_name"
+    " ON run_groups (org_id, created_by, lower(name))"
+    " WHERE visibility = 'private'",
+    # Exception two to the no-DROP rule, and the narrower one: an index
+    # carries no rows. Two things about its shape are load-bearing.
+    #
+    # Pinned to the schema owning run_groups, not a bare DROP INDEX: an
+    # unqualified index name resolves through search_path, so on a
+    # `<isolated>,public` connection — how six registry fixtures are
+    # configured — a bare DROP walks past the isolated schema and deletes
+    # public's index from under a live app. to_regclass resolves exactly as
+    # the CREATEs above just did.
+    #
+    # Existence is TESTED rather than left to IF EXISTS, whose "does not
+    # exist, skipping" notice carries SQLSTATE 00000 from inside a DO block —
+    # the code _log_schema_notice reads as one of ours and routes to WARNING.
+    # This statement re-runs on every construction, so IF EXISTS would log a
+    # WARNING at every process start forever, undoing b72f167. Both measured
+    # 2026-08-22.
+    """
+    DO $$
+    DECLARE ns text;
+    BEGIN
+        SELECT n.nspname INTO ns
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.oid = to_regclass('run_groups');
+        IF ns IS NOT NULL
+           AND to_regclass(
+                 format('%I.idx_run_groups_private_name', ns)) IS NOT NULL THEN
+            EXECUTE format('DROP INDEX %I.idx_run_groups_private_name', ns);
+        END IF;
+    END $$;
+    """,
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS group_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_group ON test_runs (group_id)",
     # ON DELETE SET NULL is what returns a deleted folder's runs to
@@ -658,7 +708,8 @@ class RunRegistry:
         """Create a folder in the caller's org — anyone in the org may.
         Raises DuplicateGroupName on a case-insensitive name collision in
         whichever scope owns the name: the org for an 'org' folder, the
-        creator for a 'private' one."""
+        (org, creator) pair for a 'private' one — so the same user may hold a
+        private folder of that name in a different org."""
         if visibility not in _VISIBILITIES:
             raise ValueError(f"invalid visibility: {visibility!r}")
         try:

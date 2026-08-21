@@ -10,32 +10,11 @@ Depends on: auth/db.py (pool).
 """
 
 import logging
-import uuid
-
-import psycopg
 
 from src.backend.auth.db import get_pool
 from src.backend.config.logging_config import sanitize_for_log
 
 logger = logging.getLogger(__name__)
-
-
-def _canonical_uuid(value: str) -> str:
-    """Best-effort canonical (lowercase, hyphenated) form of a UUID string.
-
-    org_members/organizations use UUID-typed columns, which Postgres
-    compares case/format-insensitively, so a raw path or body param (any
-    case, with or without hyphens) matches them fine. run_groups.org_id and
-    run_groups.created_by are TEXT holding exactly str(uuid.uuid4())'s
-    canonical form, so a non-canonical caller id would TEXT-mismatch every
-    row there. Returns value unchanged when it is not a UUID at all — the
-    caller (_release_private_groups) must never be able to fail an org move
-    over an id shape; degrading to "flip nothing" (today's behaviour) is the
-    correct outcome for a genuinely malformed id, not an exception."""
-    try:
-        return str(uuid.UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        return value
 
 
 class OrgRepository:
@@ -187,106 +166,7 @@ class OrgRepository:
             (user_id, keep_org_id),
         ).fetchall()
         for row in vacated:
-            org_id = str(row["org_id"])
-            self._release_private_groups(conn, user_id, org_id)
-            self._delete_personal_org_if_empty(conn, org_id)
-
-    def _release_private_groups(self, conn, user_id: str, org_id: str) -> None:
-        """F10: flip every PRIVATE run_groups folder user_id created in org_id
-        to 'org' visibility, so it does not strand out of every remaining
-        member's reach once user_id departs org_id. Called once per vacated
-        org from _collapse_to_single, and directly from remove_member (which
-        bypasses _collapse_to_single entirely).
-
-        Runs inside the caller's own transaction; never lets a failure here
-        abort that transaction — an org move must succeed regardless of the
-        state of anyone's folders. Guarded by to_regclass('run_groups')
-        (NULL when absent): RunRegistry is lazy and main.py never constructs
-        it at startup, so a fresh database can see an org move before the
-        table exists — a bare SELECT/UPDATE would raise UndefinedTable and,
-        without this guard, take the caller's whole transaction down with
-        it. The unqualified name resolves through the connection's
-        search_path, which matters for the isolated-schema test suites
-        (search_path=auth_test only, no ,public fallback) — hard-coding
-        public.run_groups would make the flip invisible to them there and a
-        silent write to public in the real app.
-
-        user_id/org_id are normalized to canonical UUID form on entry:
-        callers (remove_member's raw path params, add_member's raw body
-        field) do not normalize them, and while org_members/organizations
-        match a non-canonical id fine (UUID-typed columns), run_groups is
-        TEXT and would silently match nothing.
-        """
-        user_id = _canonical_uuid(user_id)
-        org_id = _canonical_uuid(org_id)
-        try:
-            with conn.transaction():
-                has_table = conn.execute(
-                    "SELECT to_regclass('run_groups') AS reg"
-                ).fetchone()["reg"]
-                if has_table is None:
-                    return
-                folders = conn.execute(
-                    "SELECT group_id, name FROM run_groups "
-                    "WHERE created_by = %s AND org_id = %s AND visibility = 'private'",
-                    (user_id, org_id),
-                ).fetchall()
-        except Exception as exc:  # noqa: BLE001 — must never abort the org move
-            logger.warning(
-                "[AUTH] private-folder lookup failed releasing user %s from org %s: %s",
-                sanitize_for_log(user_id), sanitize_for_log(org_id), exc)
-            return
-        for folder in folders:
-            self._flip_private_group(conn, str(folder["group_id"]), folder["name"])
-
-    def _flip_private_group(self, conn, group_id: str, name: str) -> None:
-        """Flip one folder to 'org' visibility. The two run_groups partial
-        unique indexes (org-scoped for 'org' folders, creator-scoped for
-        'private' ones — see run_registry.py) let a private folder share a
-        name with an existing org folder right up until this flip, so the
-        UPDATE can raise UniqueViolation. Retried once under a deterministic
-        renamed name derived from the folder's own group_id, which cannot
-        collide because group_id is the primary key. If that still fails,
-        the folder is left private and the collision logged — an org move
-        must never fail because of a folder name.
-
-        Per-folder, not one bulk UPDATE for every folder in the org: a
-        collision is a per-folder event, and a single bulk statement would
-        fail as a unit, stranding every one of the user's folders because
-        ONE of them collided. Each attempt is its own savepoint so one
-        folder's failure cannot undo another folder's already-applied flip
-        earlier in the same release.
-        """
-        try:
-            with conn.transaction():
-                conn.execute(
-                    "UPDATE run_groups SET visibility = 'org', updated_at = now() "
-                    "WHERE group_id = %s AND visibility = 'private'",
-                    (group_id,),
-                )
-            return
-        except psycopg.errors.UniqueViolation:
-            pass
-        except Exception as exc:  # noqa: BLE001 — must never abort the org move
-            logger.warning(
-                "[AUTH] folder %s failed to release from private on org move: %s",
-                sanitize_for_log(group_id), exc)
-            return
-        renamed = f"{name} ({group_id[:8]})"
-        try:
-            with conn.transaction():
-                conn.execute(
-                    "UPDATE run_groups SET visibility = 'org', name = %s, updated_at = now() "
-                    "WHERE group_id = %s AND visibility = 'private'",
-                    (renamed, group_id),
-                )
-        except Exception as exc:  # noqa: BLE001 — must never abort the org move
-            # exc is sanitized too: a UniqueViolation here stringifies with
-            # "DETAIL: Key (org_id, lower(name))=(..., <folder name>) already
-            # exists", and the folder name is user-controlled (CWE-117).
-            logger.warning(
-                "[AUTH] folder %s left private after a name collision on org move: %s",
-                sanitize_for_log(group_id), sanitize_for_log(exc))
+            self._delete_personal_org_if_empty(conn, str(row["org_id"]))
 
     def _email_for(self, user_id: str) -> str | None:
         """The user's email (used as their personal-org name), or None if absent."""
@@ -333,12 +213,6 @@ class OrgRepository:
                 "DELETE FROM org_members WHERE org_id = %s AND user_id = %s RETURNING user_id",
                 (org_id, user_id),
             ).fetchone()
-            if deleted:
-                # remove_member deletes the membership directly — it never
-                # goes through _collapse_to_single, so F10's flip needs its
-                # own call here or a member removed this way strands their
-                # private folders in the org they just left (Ruling 3).
-                self._release_private_groups(conn, user_id, org_id)
             remaining = conn.execute(
                 "SELECT 1 FROM org_members WHERE user_id = %s LIMIT 1", (user_id,)
             ).fetchone()
