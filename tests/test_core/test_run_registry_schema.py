@@ -83,6 +83,25 @@ def test_a_non_empty_pre_release_table_is_refused_not_dropped(scratch):
     assert admin.execute("SELECT count(*) FROM run_groups").fetchone()[0] == 1
 
 
+def test_dropping_the_pre_release_table_logs_a_warning(scratch, caplog):
+    """The DROP is the guarded block's only branch that changes the
+    database. Without a registered notice handler, psycopg discards its
+    RAISE NOTICE and the drop leaves no trace anywhere."""
+    from src.backend.core.run_registry import RunRegistry
+    schema, dsn, admin = scratch
+    admin.execute(f"SET search_path TO {schema}")
+    admin.execute(_OLD_SHAPE)
+
+    with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
+        reg = RunRegistry(dsn=dsn)
+    try:
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelname == "WARNING"]
+        assert any("run_groups" in m for m in warnings), warnings
+    finally:
+        reg.close()
+
+
 def test_current_shape_is_left_alone_and_construction_is_idempotent(scratch):
     """The common case: nothing to upgrade, twice in a row, no raise."""
     from src.backend.core.run_registry import RunRegistry

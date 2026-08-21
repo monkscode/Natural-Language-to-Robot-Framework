@@ -77,17 +77,23 @@ _SCHEMA_DDL = (
     # cannot delete anything anyone made. A database that ran PR #94's
     # pre-release branch still has the per-user run_groups
     # (group_id, name, user_id). CREATE TABLE IF NOT EXISTS is a no-op there,
-    # so the partial indexes below fail with UndefinedColumn,
-    # RunRegistry.__init__ raises, main.py's startup guard logs a WARNING, and
-    # every later /api/history, /api/groups and report-authorization request
-    # 500s with nothing naming the cause. The drop fires only when the table
-    # carries the old column set AND holds zero rows — the feature never
-    # shipped, so an old-shape table is always empty. A non-empty one raises
-    # instead, and a human decides. Keyed on the regclass, not on
-    # information_schema, so it can only ever see the table search_path
-    # actually resolves. The foreign key above cannot block this DROP: it
-    # arrived in 011bae5, five commits after 1fc4d7d re-keyed the table to
-    # the org, so no database can hold the old column set and the FK at once.
+    # so the partial indexes below fail with UndefinedColumn and
+    # RunRegistry.__init__ raises. Construction is lazy — get_run_registry()
+    # builds the singleton on first use, not at startup — so the raise
+    # surfaces in whichever request gets there first: /api/history,
+    # /api/groups or a report-authorization check. Nothing is cached on
+    # failure, so the next request retries construction and raises again
+    # too. The caller sees a bare 500; the traceback naming the cause
+    # reaches only the server log, never the response. The drop fires only
+    # when the table carries the old column set AND holds zero rows — the
+    # feature never shipped, so an old-shape table is always empty. A
+    # non-empty one raises instead, and a human decides. Keyed on the
+    # regclass, not on information_schema, so it can only ever see the
+    # table search_path actually resolves — with a multi-schema
+    # search_path, that can be a schema other than the first one listed.
+    # The foreign key below cannot block this DROP: it arrived in 011bae5,
+    # five commits after 1fc4d7d re-keyed the table to the org, so no
+    # database can hold the old column set and the FK at once.
     """
     DO $$
     DECLARE
@@ -199,6 +205,18 @@ class GroupVisibilityForbidden(Exception):
         super().__init__("Only the folder's creator can change its visibility")
 
 
+def _log_schema_notice(diag: psycopg.errors.Diagnostic) -> None:
+    """_SCHEMA_DDL's upgrade DO-blocks (e.g. the run_groups drop above) are
+    the only place this schema mutates itself outside a migration, and a
+    RAISE NOTICE is their only way to say so — psycopg discards notices with
+    no handler registered. Never let logging break construction."""
+    try:
+        logger.warning(
+            "[RUN_REGISTRY] schema notice: %s", diag.message_primary or "")
+    except Exception:
+        pass
+
+
 class RunRegistry:
     """Postgres-backed registry of test runs for history + report ownership."""
 
@@ -206,6 +224,7 @@ class RunRegistry:
         self.dsn = dsn or settings.DATABASE_URL
         setup = psycopg.connect(
             self.dsn, autocommit=True, connect_timeout=PG_CONNECT_TIMEOUT_S)
+        setup.add_notice_handler(_log_schema_notice)
         try:
             for ddl in _SCHEMA_DDL:
                 setup.execute(ddl)
