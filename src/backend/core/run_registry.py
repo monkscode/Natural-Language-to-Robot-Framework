@@ -469,10 +469,22 @@ class RunRegistry:
         """The folder row when this caller can SEE it, else None: it is in
         their org and is either an 'org' folder or their own private one.
         Seeing a folder is what lets a caller file runs into it — mutating
-        it is a stricter test (_mutable_group)."""
+        it is a stricter test (_mutable_group).
+
+        FOR UPDATE, because every caller of this method goes on to act on
+        what it read. rename_group's 'org' -> 'private' flip counts the
+        folder's foreign-owned runs and then writes; without the lock a
+        concurrent assign_runs reads 'org', files another member's run in,
+        and both commit — leaving a run inside a private folder its owner
+        cannot see. Reproduced 2026-08-21. The pool is not autocommit, so
+        the lock is held for the rest of the caller's `with` block.
+
+        No deadlock: every writer takes run_groups FIRST and test_runs
+        second (assign_runs updates the runs, delete_group lets the FK
+        cascade into them), so the lock order is the same on every path."""
         row = conn.execute(
             "SELECT group_id, org_id, created_by, name, visibility "
-            "FROM run_groups WHERE group_id = %s",
+            "FROM run_groups WHERE group_id = %s FOR UPDATE",
             (group_id,),
         ).fetchone()
         if row is None:

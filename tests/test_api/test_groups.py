@@ -690,6 +690,64 @@ class TestGroupAssignmentAndFilter:
         assert refused, f"the losing UPDATE was allowed (it matched {matched} rows)"
         assert dangling == 0
 
+    def test_flip_to_private_cannot_race_a_concurrent_assign(self, reg):
+        """The org->private flip and a concurrent file-a-run must serialize.
+
+        Reproduced 2026-08-21 before the row lock: rename_group counted 0
+        foreign-owned runs, another member's run was filed in by a second
+        transaction, both committed, and the result was a run inside a
+        private folder its own owner cannot see — the invariant three
+        separate paths exist to uphold. The read path hides the breach (the
+        run just reads as Ungrouped), so nothing surfaces it.
+
+        _visible_group now takes the folder row FOR UPDATE, so the filer
+        waits for the flip to commit, re-reads 'private', and refuses.
+        """
+        import threading
+        import psycopg
+
+        gid = reg.create_group(ORG_A, "u1", "Shared")["group_id"]
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, "u2")
+
+        flip = psycopg.connect(reg.dsn)
+        result: list = []
+        t = None
+        try:
+            # Stand in for rename_group's transaction: hold the folder row
+            # exactly as _visible_group now does, BEFORE counting foreign runs.
+            flip.execute(
+                "SELECT created_by FROM run_groups WHERE group_id = %s FOR UPDATE",
+                (gid,),
+            )
+            t = threading.Thread(
+                target=lambda: result.append(
+                    reg.assign_runs(ORG_A, "u2", False, [rid], gid)))
+            t.start()
+            t.join(timeout=2.0)
+            assert t.is_alive(), (
+                "assign_runs did not wait for the folder row lock — without it "
+                "the flip's foreign-run count is already stale when it commits")
+            flip.execute(
+                "UPDATE run_groups SET visibility = 'private' WHERE group_id = %s",
+                (gid,))
+            flip.commit()
+        finally:
+            flip.close()
+            if t is not None:
+                t.join(timeout=10.0)
+
+        assert result == [False], (
+            "the filer must re-read the committed 'private' folder and refuse "
+            f"u2's run, got {result}")
+        with reg._pool.connection() as conn:
+            breached = conn.execute(
+                "SELECT COUNT(*) AS n FROM test_runs t "
+                "JOIN run_groups g ON g.group_id = t.group_id "
+                "WHERE g.visibility = 'private' AND g.created_by <> t.user_id"
+            ).fetchone()["n"]
+        assert breached == 0
+
     def test_assign_runs_returns_false_when_the_folder_vanishes(self, reg):
         """assign_runs loses the race: the folder clears the authority check,
         then is gone by the time the UPDATE runs. It must fail closed —
