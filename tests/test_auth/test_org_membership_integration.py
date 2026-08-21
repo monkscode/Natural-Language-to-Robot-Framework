@@ -491,6 +491,53 @@ def test_remove_member_flips_movers_private_folder_to_org():
             conn.commit()
 
 
+def test_remove_member_flip_frees_the_private_name_for_the_next_org():
+    """The REASON the remove_member flip exists, pinned.
+
+    The private uniqueness index is (created_by, lower(name)) with NO org
+    scope, so a private folder stranded in an org the user has left occupies
+    that name for that user in EVERY org they ever join afterwards — and the
+    409 names a folder nobody on earth can see, which is exactly the
+    existence leak the split index was designed to prevent. Measured
+    2026-08-21. Delete the _release_private_groups call in remove_member and
+    this test fails; the flip's other test only proves the flip happened.
+    """
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"rmn-a-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"rmn-m-{uuid.uuid4().hex[:8]}@x.com"
+    team = None
+    mover = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        team = orgs.create_team_org("Leaver Co", str(admin["id"]))
+        orgs.add_member(team, str(mover["id"]), "org_member")
+        reg.create_group(team, str(mover["id"]), "checkout", visibility="private")
+
+        assert orgs.remove_member(team, str(mover["id"])) is True
+
+        # They now sit in a fresh personal org. The name must be free again.
+        new_orgs = orgs.get_orgs_for_user(str(mover["id"]))
+        assert len(new_orgs) == 1, new_orgs
+        reg.create_group(new_orgs[0]["org_id"], str(mover["id"]),
+                         "checkout", visibility="private")
+    finally:
+        with get_pool().connection() as conn:
+            if mover is not None:
+                conn.execute("DELETE FROM run_groups WHERE created_by = %s",
+                             (str(mover["id"]),))
+                conn.execute(
+                    "DELETE FROM organizations WHERE id IN "
+                    "(SELECT org_id FROM org_members WHERE user_id = %s)",
+                    (str(mover["id"]),))
+            if team:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (team,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, mover_email],))
+            conn.commit()
+
+
 def test_remove_member_flip_survives_non_canonical_uuid_casing():
     """Round-1 finding: remove_member's org_id/user_id arrive as raw path
     params (auth/admin_access_endpoints.py), never normalized.

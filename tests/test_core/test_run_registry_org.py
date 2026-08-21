@@ -81,8 +81,16 @@ def test_backfill_maps_existing_rows_to_owner_org(registry):
     updated = registry.backfill_org_ids()
     assert updated >= 1
     assert registry.get_run(rid)["org_id"] == org_id
-    # Idempotent: a second pass changes nothing.
-    assert registry.backfill_org_ids() == 0
+    # Idempotent: a second pass does not change THIS row. Asserting a global
+    # count of 0 instead would depend on no sibling in this shared schema
+    # having left an unattributed row behind:
+    # test_backfill_attributes_org_member_rows_too briefly creates that exact
+    # state, then backfills it itself, so it leaves nothing behind on a clean
+    # run -- but a global count is still needlessly fragile, since it would
+    # break if that sibling ever failed between creating and backfilling its
+    # row, or if a future test left the same shape unbackfilled.
+    registry.backfill_org_ids()
+    assert registry.get_run(rid)["org_id"] == org_id
 
 
 def test_record_start_derives_org_id_for_org_member(registry):
