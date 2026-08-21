@@ -143,6 +143,20 @@ class GroupVisibilityConflict(Exception):
         )
 
 
+class GroupVisibilityForbidden(Exception):
+    """Only a folder's creator may change its visibility.
+
+    An org_admin may rename an 'org' folder they did not create. Flipping it
+    to 'private' is different: created_by stays the member, so _visible_group
+    then hides the folder from the admin who just changed it and no API call
+    can undo the change. 403 rather than the feature's usual 404 because the
+    caller has already listed this folder — its existence is not the secret
+    the 404 rule protects."""
+
+    def __init__(self):
+        super().__init__("Only the folder's creator can change its visibility")
+
+
 class RunRegistry:
     """Postgres-backed registry of test runs for history + report ownership."""
 
@@ -544,7 +558,9 @@ class RunRegistry:
         holds runs owned by anyone other than its creator: those members
         would silently lose sight of their own runs, and a refusal they can
         act on beats quiet data movement behind a settings toggle.
-        'private' -> 'org' only widens visibility and is always allowed."""
+        'private' -> 'org' only widens visibility and is always allowed.
+        Raises GroupVisibilityForbidden when anyone but the creator tries to
+        change visibility — renaming stays open to an org_admin."""
         if name is None and visibility is None:
             raise ValueError("rename_group needs a name or a visibility")
         if visibility is not None and visibility not in _VISIBILITIES:
@@ -556,6 +572,8 @@ class RunRegistry:
                     conn, org_id, user_id, is_org_admin, group_id)
                 if row is None:
                     return False
+                if visibility is not None and row["created_by"] != user_id:
+                    raise GroupVisibilityForbidden()
                 if collision_name is None:
                     collision_name = row["name"]
                 if visibility == "private" and row["visibility"] == "org":

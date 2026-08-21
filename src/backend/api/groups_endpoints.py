@@ -34,6 +34,7 @@ from src.backend.auth.jwt_utils import require_user
 from src.backend.core.run_registry import (
     DuplicateGroupName,
     GroupVisibilityConflict,
+    GroupVisibilityForbidden,
     _VISIBILITIES,
     get_run_registry,
 )
@@ -214,6 +215,8 @@ def update_group(
         raise _duplicate(exc)
     except GroupVisibilityConflict as exc:
         raise HTTPException(409, str(exc))
+    except GroupVisibilityForbidden as exc:
+        raise HTTPException(403, str(exc))
     if not changed:
         raise HTTPException(404, "Group not found")
     out = {"group_id": group_id}

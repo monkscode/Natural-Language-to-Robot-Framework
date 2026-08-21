@@ -37,9 +37,13 @@ interface Props {
   onCreate: (name: string, visibility: GroupVisibility) => Promise<unknown>
   onUpdate: (groupId: string, changes: GroupChanges) => Promise<unknown>
   onDelete: (groupId: string) => Promise<unknown>
-  /** May this caller rename/delete/flip this group? (creator, or org-admin on
+  /** May this caller rename/delete this group? (creator, or org-admin on
    *  a shared group). A hint only — the server 404s either way. */
   canManage: (group: RunGroup) => boolean
+  /** May this caller change WHO CAN SEE this group? Narrower than canManage:
+   *  only the creator, never an org-admin acting on someone else's group — a
+   *  hint only, the server 403s either way. */
+  canChangeVisibility: (group: RunGroup) => boolean
   /** False without an identity: the server refuses every mutation with 403,
    *  so offering the control would only produce a dead end. */
   canCreate: boolean
@@ -62,7 +66,7 @@ const actionLabel = (verb: string, group: RunGroup) =>
 
 export function GroupChipsRow({
   groups, ungroupedCount, active, onSelect,
-  onCreate, onUpdate, onDelete, canManage, canCreate,
+  onCreate, onUpdate, onDelete, canManage, canChangeVisibility, canCreate,
 }: Props) {
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [name, setName] = useState('')
@@ -261,7 +265,8 @@ export function GroupChipsRow({
                   <>
                     <Button
                       variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                      title="Edit group (name and who can see it)" aria-label={actionLabel('Edit', g)}
+                      title={canChangeVisibility(g) ? 'Edit group (name and who can see it)' : 'Edit group (name)'}
+                      aria-label={actionLabel('Edit', g)}
                       onClick={() => open({ kind: 'edit', group: g, from: 'browse' }, g.name, g.visibility)}
                     >
                       <Pencil className="h-3.5 w-3.5" />
@@ -313,12 +318,14 @@ export function GroupChipsRow({
               onChange={e => setName(e.target.value)}
               placeholder="e.g. Checkout flows"
             />
-            <VisibilityField
-              id="group-chips-visibility"
-              value={visibility}
-              onChange={setVisibility}
-              disabled={busy}
-            />
+            {(overlay?.kind !== 'edit' || canChangeVisibility(overlay.group)) && (
+              <VisibilityField
+                id="group-chips-visibility"
+                value={visibility}
+                onChange={setVisibility}
+                disabled={busy}
+              />
+            )}
             {error && <p className="text-xs text-destructive">{error}</p>}
             <DialogFooter className="mt-2">
               <Button type="button" size="sm" variant="outline" onClick={dismiss}>Cancel</Button>

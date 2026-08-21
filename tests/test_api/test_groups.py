@@ -1370,6 +1370,40 @@ def test_flip_to_private_is_409_while_a_members_run_is_inside(client):
     assert next(g for g in listed if g["group_id"] == gid)["visibility"] == "org"
 
 
+def test_only_the_creator_can_change_visibility(client):
+    """An org_admin may RENAME a member's org folder but may not flip it.
+
+    created_by stays the member, so after a flip _visible_group refuses the
+    admin the folder they just changed — a one-way action with no way back
+    through the API. 403, not 404: they can already see the folder, so a
+    'not found' would be a lie about something on their screen.
+    """
+    tok_admin, tok_member, _org_id = _team_of_two(client)
+
+    gid = client.post(
+        "/api/groups", json={"name": "Members folder"},
+        headers=_auth(tok_member)).json()["group_id"]
+
+    # The admin may still rename it.
+    assert client.patch(f"/api/groups/{gid}", json={"name": "Renamed by admin"},
+                        headers=_auth(tok_admin)).status_code == 200
+
+    # But not flip it.
+    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
+                     headers=_auth(tok_admin))
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == "Only the folder's creator can change its visibility"
+
+    # Name and visibility both survive.
+    seen = [g for g in client.get("/api/groups", headers=_auth(tok_admin)).json()["groups"]
+            if g["group_id"] == gid][0]
+    assert seen["name"] == "Renamed by admin" and seen["visibility"] == "org"
+
+    # The creator still may.
+    assert client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
+                        headers=_auth(tok_member)).status_code == 200
+
+
 def test_patch_with_an_empty_body_is_400(client):
     """Neither name nor visibility is nothing to do — a 400, not the
     registry's ValueError surfacing as a 500."""

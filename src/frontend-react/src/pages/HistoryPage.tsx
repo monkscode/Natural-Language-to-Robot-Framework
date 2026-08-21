@@ -151,6 +151,13 @@ export default function HistoryPage() {
     !!user && (g.created_by === user.id || (user.is_org_admin === true && g.visibility === 'org'))
   ), [user])
 
+  // Narrower than canManage on purpose: an org-admin may RENAME a shared group
+  // they did not create, but only its creator may change who can see it —
+  // flipping it private would hide it from the admin permanently.
+  const canChangeVisibility = useCallback((g: RunGroup) => (
+    !!user && g.created_by === user.id
+  ), [user])
+
   // /api/history rows carry only group_id and group_name, so a row tag's lock
   // is derived from the groups list rather than a second request. The two sets
   // agree by construction — the history join and the groups list apply the
@@ -443,6 +450,7 @@ export default function HistoryPage() {
                 onUpdate={handleUpdateGroup}
                 onDelete={handleDeleteGroup}
                 canManage={canManage}
+                canChangeVisibility={canChangeVisibility}
                 canCreate={!!user}
               />
             </div>
