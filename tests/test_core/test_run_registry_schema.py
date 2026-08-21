@@ -40,6 +40,14 @@ def scratch():
         admin.close()
 
 
+def _registry_warnings(caplog) -> list[str]:
+    """WARNING+ records from the registry logger alone — the psycopg pool and
+    everything else logs into the same caplog handler."""
+    return [r.getMessage() for r in caplog.records
+            if r.name == "src.backend.core.run_registry"
+            and r.levelno >= 30]
+
+
 def _columns(admin, schema):
     return sorted(r[0] for r in admin.execute(
         "SELECT column_name FROM information_schema.columns "
@@ -114,6 +122,48 @@ def test_current_shape_is_left_alone_and_construction_is_idempotent(scratch):
         assert _columns(admin, schema) == before
     finally:
         r2.close()
+
+
+def test_routine_notices_are_quiet_so_an_upgrade_notice_is_not_buried(scratch, caplog):
+    """Both halves of the notice handler, in one place.
+
+    _SCHEMA_DDL runs on EVERY construction — every process start and every
+    test fixture — and Postgres raises a NOTICE for each IF NOT EXISTS no-op
+    it re-runs. Logging those at WARNING put 13 lines per start on the
+    dashboards and left the two notices the handler exists to surface as 2
+    lines in 15. Routine construction must be silent; the FK repair, which
+    MUTATES data and is permitted inside _SCHEMA_DDL only because it says so
+    (owner decision 6), must not be.
+    """
+    from src.backend.core.run_registry import RunRegistry
+    schema, dsn, admin = scratch
+    rid = str(uuid.uuid4())
+
+    reg = RunRegistry(dsn=dsn)          # provisions the schema
+    reg.record_start(rid, {"user_id": "u1", "org_id": "org-a",
+                           "email": "u1@e.com"}, "q", "passed")
+    reg.close()
+
+    # Half one: nothing to upgrade, so nothing to say.
+    with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
+        reg2 = RunRegistry(dsn=dsn)
+    reg2.close()
+    assert _registry_warnings(caplog) == []
+
+    # Half two: give it something to say, and it still says it.
+    admin.execute(f"SET search_path TO {schema}")
+    admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
+    admin.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                  (str(uuid.uuid4()), rid))
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
+        reg3 = RunRegistry(dsn=dsn)
+    try:
+        warnings = _registry_warnings(caplog)
+        assert len(warnings) == 1, warnings
+        assert "ungrouped 1 row(s)" in warnings[0]
+    finally:
+        reg3.close()
 
 
 def test_a_dangling_group_id_is_repaired_before_the_constraint_lands(scratch):

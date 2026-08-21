@@ -231,10 +231,26 @@ def _log_schema_notice(diag: psycopg.errors.Diagnostic) -> None:
     """_SCHEMA_DDL's upgrade DO-blocks (e.g. the run_groups drop above) are
     the only place this schema mutates itself outside a migration, and a
     RAISE NOTICE is their only way to say so — psycopg discards notices with
-    no handler registered. Never let logging break construction."""
+    no handler registered. Never let logging break construction.
+
+    Only OUR notices reach WARNING. Postgres raises one of its own for every
+    IF NOT EXISTS no-op it re-runs ('relation "test_runs" already exists,
+    skipping'), and _SCHEMA_DDL runs on EVERY construction — every process
+    start and every test fixture — so logging those at WARNING put 15 lines
+    per construction on the dashboards and left the two notices this handler
+    exists to surface as 2 lines in 17. The split is the SQLSTATE, not the
+    message text: a bare PL/pgSQL RAISE NOTICE carries 00000
+    (successful_completion), while the skips carry duplicate-object codes
+    (42P07 relation, 42701 column, 42710 constraint). Measured on this
+    Postgres 2026-08-21. The rest still reach DEBUG rather than being
+    dropped."""
     try:
-        logger.warning(
-            "[RUN_REGISTRY] schema notice: %s", diag.message_primary or "")
+        if (diag.sqlstate or "") == "00000":
+            logger.warning(
+                "[RUN_REGISTRY] schema notice: %s", diag.message_primary or "")
+        else:
+            logger.debug(
+                "[RUN_REGISTRY] schema notice: %s", diag.message_primary or "")
     except Exception:
         pass
 
