@@ -567,7 +567,7 @@ export default function HistoryPage() {
                           <input
                             type="checkbox"
                             className="h-3.5 w-3.5 cursor-pointer accent-primary"
-                            aria-label={`Select run ${row.user_query || row.run_id}`}
+                            aria-label={`Select run ${row.user_query || 'Pasted code run'}`}
                             checked={checkedIds.has(row.run_id)}
                             onChange={() => toggleChecked(row.run_id)}
                           />
