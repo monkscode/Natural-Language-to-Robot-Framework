@@ -20,7 +20,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import caller_can_read
+from src.backend.auth.ownership import caller_can_act
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -94,12 +94,22 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
         source_run_id, org_id=scope.folder_org_id,
         caller_user_id=scope.caller_user_id
     )
-    allowed = source is not None and caller_can_read(
+    # caller_can_ACT, not _read: a re-run executes a container against the
+    # org's environment using the credentials embedded in the stored script,
+    # so it must end when the membership does. The owner-across-orgs read rule
+    # would otherwise let anyone who ever authored a run here keep firing
+    # tests at the customer's systems after they were removed — nothing in a
+    # token distinguishes an offboarding from an internal move. The author
+    # keeps the READ of this run either way.
+    allowed = source is not None and caller_can_act(
         user, source.get("user_id"), source.get("org_id"),
         is_platform_admin=scope.is_admin
     )
     if source is None or not allowed:
-        # 404, not 403 — don't leak run existence across orgs.
+        # 404, not 403 — don't leak run existence across orgs. The read above
+        # is org-scoped, so "no such run" and "not an org you may act in"
+        # genuinely collapse here; both answer the same, which is what makes
+        # the 404 leak-free rather than merely vague.
         raise HTTPException(status_code=404, detail="Run not found")
 
     robot_code = resolve_robot_code(source)
@@ -242,10 +252,19 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # credits), so only the run's owner — or a validated admin — may submit
     # it. `user` is None only when AUTH_ENFORCED is off (local debugging).
     # Unattributed/unknown runs are admin-only (fail closed).
+    #
+    # caller_can_ACT, not _read: conflict detection fires with
+    # org_id=record.org_id — the RUN's org, never the caller's — so under the
+    # read predicate an ex-member kept shaping the hints injected into that
+    # org's future generations indefinitely. 403 rather than the re-run path's
+    # 404 because THIS lookup is unscoped: an unknown run arrives here as
+    # owner_id=None/org_id=None and is refused by the same line with the same
+    # status, so the two cases already answer identically and there is no
+    # existence to leak.
     admin = await asyncio.to_thread(is_validated_admin, user)
     owner_id = run_row.get("user_id") if run_row else None
     org_id = run_row.get("org_id") if run_row else None
-    if not caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+    if not caller_can_act(user, owner_id, org_id, is_platform_admin=admin):
         raise HTTPException(
             status_code=403,
             detail="You cannot submit feedback for this run",

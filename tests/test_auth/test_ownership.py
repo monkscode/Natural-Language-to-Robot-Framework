@@ -75,6 +75,68 @@ def test_unattributed_resource_denied_even_to_same_org_admin():
 
 
 # ---------------------------------------------------------------------------
+# caller_can_act — the same predicate WITHOUT the owner-across-orgs rule
+# ---------------------------------------------------------------------------
+
+
+def test_act_refuses_an_owner_who_left_the_org():
+    """An ex-member may re-READ work they wrote; they may not ACT on the org.
+
+    Rule 3 (owner_id == caller) exists so an internal org move does not lock an
+    author out of their own history. Nothing in a token distinguishes a move
+    from a removal, so the same rule handed a removed member two ongoing
+    powers they do not otherwise have: POST /api/feedback mutates the org's
+    learning store, and a re-run executes a container against the org's
+    environment. caller_can_act is caller_can_read without rule 3.
+    """
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_read(_OWNER_MOVED, "u-owner", "org-A", is_platform_admin=False) is True
+    assert caller_can_act(_OWNER_MOVED, "u-owner", "org-A", is_platform_admin=False) is False
+
+
+def test_act_still_allows_the_owner_inside_their_own_org():
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_act(_OWNER, "u-owner", "org-A", is_platform_admin=False) is True
+
+
+def test_act_still_allows_a_platform_admin_and_the_dev_escape_hatch():
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_act(_OTHER_ORG, "u-owner", "org-A", is_platform_admin=True) is True
+    assert caller_can_act(None, "u-owner", "org-A", is_platform_admin=False) is True
+
+
+def test_act_still_allows_a_same_org_admin():
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_act(_ADMIN_OF_A, "u-owner", "org-A", is_platform_admin=False) is True
+
+
+def test_act_keeps_the_legacy_coexistence_fallback():
+    """A token with no org claim still falls back to the bare owner check.
+
+    This is the one branch where caller_can_act still grants on identity
+    alone, so it is worth pinning what makes it safe: an ex-member cannot
+    reach it. remove_member bumps token_version
+    (admin_access_endpoints.py, remove_org_member), require_user re-validates
+    it on every request (jwt_utils._revalidate_active_user), and the forced
+    re-login self-heals a personal org before minting
+    (auth/endpoints.py, _token_payload) — so a removed member always arrives
+    with a concrete org_id and is refused on the org mismatch above. If a
+    future change drops that self-heal, this test is where to come back to.
+    """
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_act(_LEGACY, "u-owner", "org-A", is_platform_admin=False) is True
+    assert caller_can_act(_LEGACY, "u-someone-else", "org-A", is_platform_admin=False) is False
+
+
+def test_act_keeps_an_unattributed_row_platform_admin_only():
+    """Dropping rule 3 must not disturb the fail-closed guarantee."""
+    from src.backend.auth.ownership import caller_can_act
+    assert caller_can_act(_OWNER, None, "org-A", is_platform_admin=False) is False
+    assert caller_can_act(_ADMIN_OF_A, None, "org-A", is_platform_admin=False) is False
+    assert caller_can_act(_ADMIN_OF_A, None, "org-A", is_platform_admin=True) is True
+
+
+# ---------------------------------------------------------------------------
 # is_dashboard_viewer — dashboard gate (Task 9)
 # ---------------------------------------------------------------------------
 
