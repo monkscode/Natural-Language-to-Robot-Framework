@@ -377,15 +377,16 @@ class RunRegistry:
     # 'private' (only its creator). User-facing CRUD: these methods
     # PROPAGATE storage errors (the swallow-everything discipline above
     # exists to protect the generation pipeline, not this UI path) —
-    # DuplicateGroupName, GroupVisibilityConflict and every 409/404 depend
-    # on the exception escaping.
+    # DuplicateGroupName, GroupVisibilityConflict, GroupVisibilityForbidden
+    # and every 409/404/403 depend on the exception escaping.
     #
     # Authority:
     #   create                    anyone in the org
-    #   rename / flip / delete    the creator, or an org_admin on an 'org'
+    #   rename / delete           the creator, or an org_admin on an 'org'
     #                             folder — never on a private one, which
     #                             they cannot see and whose existence
     #                             acting on it would leak
+    #   flip visibility           the creator only — see GroupVisibilityForbidden
     #   file a run                the folder must be visible to the caller
     #                             AND the run must be the caller's own, or
     #                             the caller is org_admin and the run is in
@@ -394,7 +395,8 @@ class RunRegistry:
     #                             can never land where its owner cannot see
     #                             it
     # A caller who may not act gets False (the endpoints render that as 404,
-    # never 403), so no refusal reveals that a folder exists.
+    # never 403) — except the visibility flip, whose own refusal is 403 by
+    # design; see GroupVisibilityForbidden for why.
     # ------------------------------------------------------------------
 
     def list_groups(

@@ -4,11 +4,12 @@ Groups are ORG-scoped folders over test_runs rows (one group per run,
 test_runs.group_id) carrying a per-folder visibility flag: an 'org' folder is
 visible to everyone in the org, a 'private' folder only to its creator.
 Authority: anyone in the org creates; the creator — or an org_admin, on an
-'org' folder only — renames, flips visibility and deletes; a run may be filed
-only into a folder the caller can see, and never into a private folder whose
-owner does not own the run. Refusals are always 404 (False at the registry),
-never 403, so a private folder's existence cannot be probed. Mirrors the
-fixture patterns of test_history_org_scope.py.
+'org' folder only — renames and deletes; only the creator may change who can
+see it (GroupVisibilityForbidden, 403 — see run_registry.py for why). A run
+may be filed only into a folder the caller can see, and never into a private
+folder whose owner does not own the run. Refusals are otherwise 404 (False at
+the registry), never 403, so a private folder's existence cannot be probed.
+Mirrors the fixture patterns of test_history_org_scope.py.
 
 Referenced by: src/backend/core/run_registry.py,
                src/backend/api/groups_endpoints.py,

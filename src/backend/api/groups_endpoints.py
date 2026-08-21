@@ -3,10 +3,12 @@
 Folders are ORG-keyed (run_groups.org_id) with a per-folder visibility flag:
 an 'org' folder is visible to everyone in the org, a 'private' one only to
 its creator. Anyone in the org may create; the creator — or an org_admin, on
-an 'org' folder only — renames, flips visibility and deletes; a run may be
-filed only into a folder the caller can see, and never into a private folder
-whose owner does not own the run. Refusals are 404, never 403, so a private
-folder's existence cannot be probed by id.
+an 'org' folder only — renames and deletes; only the creator may change who
+can see it (GroupVisibilityForbidden, 403). A run may be filed only into a
+folder the caller can see, and never into a private folder
+whose owner does not own the run. A folder the caller cannot see is always a
+404, never 403, so its existence cannot be probed by id — the one exception
+is the visibility change above, refused with 403 on a folder already in view.
 
 The read scope comes from api/history_scope.py, the same helper /api/history
 uses, so the chip counts and the table always describe one set of runs.
@@ -196,7 +198,8 @@ def update_group(
     the list, so echoing the untouched fields would cost an extra read.
     'org' -> 'private' is refused with 409 while the folder still holds runs
     owned by other members, who would otherwise lose sight of their own runs;
-    that message carries a COUNT and never who owns them.
+    that message carries a COUNT and never who owns them. A visibility change
+    by anyone but the folder's creator is refused with 403 (GroupVisibilityForbidden).
     """
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)

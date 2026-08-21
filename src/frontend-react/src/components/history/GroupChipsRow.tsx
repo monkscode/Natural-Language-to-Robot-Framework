@@ -298,8 +298,10 @@ export function GroupChipsRow({
         </DialogContent>
       </Dialog>
 
-      {/* Create / Edit share one form: a name plus who can see it. PATCH takes
-          both in one call, so flipping visibility needs no second dialog. */}
+      {/* Create / Edit share one form: a name plus, on create or an edit by
+          the folder's creator, who can see it — canChangeVisibility below
+          hides that field on an admin's edit of someone else's folder. PATCH
+          takes both in one call, so flipping visibility needs no second dialog. */}
       <Dialog open={nameDialogOpen} onOpenChange={o => { if (!o) dismiss() }}>
         <DialogContent className="sm:max-w-sm" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
