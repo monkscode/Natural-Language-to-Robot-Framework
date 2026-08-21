@@ -162,10 +162,15 @@ def list_groups(user: dict | None = Depends(require_user)):
     # folders including other users' private ones — while every mutation binds
     # this same org and answered 404 for exactly those folders. A caller with
     # no org (including the token-less dev caller) owns no folders, so [].
+    # The RUN scope behind run_count is a SEPARATE argument, and for a
+    # platform admin a different value: their runs span every org, so binding
+    # their folder org there counted a narrower set than /api/history lists
+    # and their folder chip read 1 beside a table of 2.
     if scope.folder_org_id:
         groups = reg.list_groups(
-            scope.folder_org_id, scope.caller_user_id,
-            scope_user_id=scope.user_id)
+            scope.org_id, scope.caller_user_id,
+            scope_user_id=scope.user_id,
+            folder_org_id=scope.folder_org_id)
     else:
         groups = []
     return {

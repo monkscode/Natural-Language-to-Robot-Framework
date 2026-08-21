@@ -487,24 +487,39 @@ class RunRegistry:
         org_id: Optional[str],
         user_id: Optional[str],
         scope_user_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Folders visible to the caller, name-sorted, each with its
         member-run count: the caller's org's 'org' folders plus their own
-        private ones. org_id None is the unscoped caller (platform admin, or
-        token-less with AUTH_ENFORCED off) — they already see every org's
-        runs, so no visibility filter applies; filtering on a NULL org would
-        evaluate to NULL for every row and hide the lot.
+        private ones.
+
+        Four arguments, because each dimension carries a FILTER and an
+        IDENTITY, exactly as in list_runs and count_ungrouped:
+
+        org_id is the RUN scope — which runs run_count counts. None is the
+        unscoped caller (platform admin, or token-less with AUTH_ENFORCED
+        off), whose runs span every org, so no org narrows the count.
+        folder_org_id is the FOLDER scope — which folders are listed — and
+        for a platform admin it is NOT org_id: their runs span every org,
+        their folders are their own org's. It defaults to org_id, so a caller
+        that passes nothing is unchanged; None lists every org's folders and
+        belongs to the token-less path alone, since filtering on a NULL org
+        would evaluate to NULL for every row and hide the lot.
 
         user_id is the caller's IDENTITY (which private folders are theirs);
         scope_user_id is the run-list scope run_count is counted within —
         None means the whole org, exactly as list_runs(user_id=None) does for
-        an org_admin. The two differ for an org_admin, whose filter user_id
-        is None while their identity is not, and run_count MUST use the same
-        predicates list_runs uses or the chip disagrees with the table.
+        an org_admin. Both pairs really do differ for a real caller: an
+        org_admin's filter user_id is None while their identity is not, and a
+        platform admin's filter org_id is None while their folder org is not.
+        run_count MUST use the same predicates list_runs uses or the chip
+        disagrees with the table — one org_id doing both jobs here put a
+        platform admin's folder chip at 1 beside a table of 2.
 
         The run scope goes in the JOIN condition, not the WHERE clause: in
         the WHERE it would turn the LEFT JOIN into an inner one and drop
         every folder that holds none of the caller's runs."""
+        folder_org_id = folder_org_id or org_id
         join, join_params = "", []
         if scope_user_id is not None:
             join += " AND t.user_id = %s"
@@ -513,10 +528,10 @@ class RunRegistry:
             join += " AND t.org_id = %s"
             join_params.append(org_id)
         where, where_params = "", []
-        if org_id is not None:
+        if folder_org_id is not None:
             where = ("WHERE g.org_id = %s "
                      "  AND (g.visibility = 'org' OR g.created_by = %s) ")
-            where_params = [org_id, user_id]
+            where_params = [folder_org_id, user_id]
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT g.group_id, g.name, g.visibility, g.created_by, "

@@ -1217,6 +1217,61 @@ def test_platform_admin_chip_still_equals_the_table(client):
     assert chip == table
 
 
+def _forget_org_id(run_id: str) -> None:
+    """Make a run look like a row written before the org_id backfill: owned by
+    a user, but carrying no org. record_start cannot produce that shape for a
+    user who has a membership — it derives the org itself — so the column is
+    cleared directly."""
+    import psycopg
+    from src.backend.core.run_registry import get_run_registry
+
+    with psycopg.connect(get_run_registry().dsn, autocommit=True) as conn:
+        conn.execute("UPDATE test_runs SET org_id = NULL WHERE run_id = %s",
+                     (run_id,))
+
+
+def test_platform_admin_folder_chip_equals_its_filtered_table(client):
+    """The PER-FOLDER chip count and that folder's own table must describe one
+    set of runs, for a platform admin too — the Ungrouped pair above is only
+    half the chip row.
+
+    A platform admin has two different org scopes: their FOLDERS are their own
+    org's, their RUNS span every org. One org_id doing both jobs narrowed the
+    counted runs to their own org while /api/history narrowed nothing, so a run
+    with no org_id filed into their own folder was in the table and not in the
+    chip. assign_runs authorises a run by ownership, not by org, so an
+    org-less run of the caller's own reaches an org folder.
+    """
+    import jwt as _jwt
+    from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.core.config import settings
+
+    admin = _register(client, f"pafc-{uuid.uuid4().hex[:8]}@e.com")
+    attributed = _seed_run_for(client, admin, query="has an org")
+    legacy = _seed_run_for(client, admin, query="predates the org backfill")
+    _forget_org_id(legacy)
+    gid = client.post("/api/groups", json={"name": f"Mixed {uuid.uuid4().hex[:6]}"},
+                      headers=_auth(admin)).json()["group_id"]
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [attributed, legacy], "group_id": gid},
+        headers=_auth(admin)).status_code == 200
+
+    claims = _jwt.decode(admin, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+    admin_tok = create_access_token({
+        "id": claims["sub"], "email": claims["email"], "role": "admin",
+        "display_name": "", "org_id": claims["org_id"],
+        "org_role": claims["org_role"], "status": "active",
+        "token_version": claims.get("tv", 0),
+    })
+
+    chips = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
+    chip = [g for g in chips if g["group_id"] == gid][0]["run_count"]
+    page = client.get(f"/api/history?group={gid}", headers=_auth(admin_tok)).json()
+    assert {r["run_id"] for r in page["runs"]} == {attributed, legacy}
+    assert chip == page["total"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Integration: /api/history group filtering + group fields on rows
 # ---------------------------------------------------------------------------
