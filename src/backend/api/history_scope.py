@@ -37,13 +37,18 @@ class HistoryScope(NamedTuple):
     user_id / org_id are the FILTER (None = no narrowing on that dimension).
     caller_user_id is the caller's IDENTITY — never use the filter user_id
     where an identity is meant. is_admin is the re-validated platform-admin
-    flag the scope was derived from.
+    flag the scope was derived from. folder_org_id is the caller's REAL org,
+    which is a third thing again: a platform admin's runs span every org, but
+    their folders do not. Binding the filter org_id into the folder join gave
+    them every org's folder names, private ones included, while every
+    mutation binds this value and answered 404 for the same folders.
     """
 
     user_id: str | None
     org_id: str | None
     caller_user_id: str | None
     is_admin: bool
+    folder_org_id: str | None
 
 
 def history_scope(user: dict | None) -> HistoryScope:
@@ -52,14 +57,18 @@ def history_scope(user: dict | None) -> HistoryScope:
     Platform admin (re-validated) and the token-less dev caller are unscoped:
     every org, every user. An org_admin with a concrete org gets their whole
     org with no per-user narrowing. Everyone else gets their own rows within
-    their own org.
+    their own org. folder_org_id is always the caller's own org, whoever they
+    are — it is None only when there is no token at all, which is the
+    token-less dev path and keeps its historic unfiltered folder join.
     """
     admin = is_validated_admin(user)
     caller_user_id = None if user is None else user["user_id"]
+    folder_org_id = None if user is None else user.get("org_id")
     if admin or user is None:
-        return HistoryScope(None, None, caller_user_id, admin)
+        return HistoryScope(None, None, caller_user_id, admin, folder_org_id)
     org_id = user.get("org_id")
     is_org_admin = bool(org_id) and user.get("org_role") == "org_admin"
     return HistoryScope(
-        None if is_org_admin else user["user_id"], org_id, caller_user_id, admin
+        None if is_org_admin else user["user_id"], org_id, caller_user_id,
+        admin, folder_org_id,
     )

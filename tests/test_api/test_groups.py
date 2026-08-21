@@ -1118,7 +1118,11 @@ def test_orgless_caller_cannot_mutate_folders(client):
 
 
 def test_platform_admin_sees_every_orgs_folders(client):
-    """The unfiltered branch is the platform admin's, and theirs only."""
+    """INVERTED CONTRACT (2026-08-21): a platform admin does NOT see every
+    org's folders. Their runs span every org; their folders are their own
+    org's, so read and write finally agree. Kept under the old name so the
+    inversion is visible in the diff — see
+    test_platform_admin_folder_view_is_their_own_org for the full rule."""
     from src.backend.auth.jwt_utils import create_access_token
 
     owner = _register(client, f"pa-{uuid.uuid4().hex[:8]}@e.com")
@@ -1130,7 +1134,86 @@ def test_platform_admin_sees_every_orgs_folders(client):
     })
 
     seen = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
-    assert gid in [g["group_id"] for g in seen]
+    assert gid not in [g["group_id"] for g in seen]
+
+
+def test_platform_admin_folder_view_is_their_own_org(client):
+    """A platform admin's runs span every org; their FOLDERS do not.
+
+    Before this, /api/groups was unscoped for them, so every org's folder
+    names came back — other users' PRIVATE folder names included — while
+    every mutation binds their real org and answered 404. The SPA drew
+    Edit/Delete/Move on folders that could never work. Read and write now
+    agree: their own org's folders, and nobody else's.
+    """
+    import jwt as _jwt
+    from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.core.config import settings
+
+    owner = _register(client, f"paf-{uuid.uuid4().hex[:8]}@e.com")
+    foreign_org = client.post(
+        "/api/groups", json={"name": f"Foreign {uuid.uuid4().hex[:6]}"},
+        headers=_auth(owner)).json()
+    foreign_private = client.post(
+        "/api/groups",
+        json={"name": f"Secret {uuid.uuid4().hex[:6]}", "visibility": "private"},
+        headers=_auth(owner)).json()
+
+    admin = _register(client, f"pa2-{uuid.uuid4().hex[:8]}@e.com")
+    assert client.get("/api/groups", headers=_auth(admin)).json()["groups"] == []
+    own = client.post("/api/groups", json={"name": f"Mine {uuid.uuid4().hex[:6]}"},
+                      headers=_auth(admin)).json()
+
+    # Re-mint the same identity with role=admin, keeping their real org claim.
+    claims = _jwt.decode(admin, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+    admin_tok = create_access_token({
+        "id": claims["sub"], "email": claims["email"], "role": "admin",
+        "display_name": "", "org_id": claims["org_id"],
+        "org_role": claims["org_role"], "status": "active",
+        "token_version": claims.get("tv", 0),
+    })
+
+    seen = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
+    ids = [g["group_id"] for g in seen]
+    names = [g["name"] for g in seen]
+    assert own["group_id"] in ids, "their own org's folder must show"
+    assert foreign_org["group_id"] not in ids, "another org's folder must not"
+    assert foreign_private["name"] not in names, "a foreign PRIVATE name must not leak"
+
+
+def test_platform_admin_chip_still_equals_the_table(client):
+    """The Ungrouped chip and the Ungrouped filter must describe one set for
+    a platform admin too — a run filed in another org's folder is now 'in no
+    folder I can see', so it belongs under Ungrouped rather than vanishing."""
+    import jwt as _jwt
+    from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.core.config import settings
+
+    owner = _register(client, f"pac-{uuid.uuid4().hex[:8]}@e.com")
+    rid = _seed_run_for(client, owner, query="filed in another org")
+    gid = client.post("/api/groups", json={"name": f"Theirs {uuid.uuid4().hex[:6]}"},
+                      headers=_auth(owner)).json()["group_id"]
+    client.put("/api/groups/assignments",
+               json={"run_ids": [rid], "group_id": gid}, headers=_auth(owner))
+
+    admin = _register(client, f"pac2-{uuid.uuid4().hex[:8]}@e.com")
+    claims = _jwt.decode(admin, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+    admin_tok = create_access_token({
+        "id": claims["sub"], "email": claims["email"], "role": "admin",
+        "display_name": "", "org_id": claims["org_id"],
+        "org_role": claims["org_role"], "status": "active",
+        "token_version": claims.get("tv", 0),
+    })
+
+    row = [r for r in client.get("/api/history", headers=_auth(admin_tok)).json()["runs"]
+           if r["run_id"] == rid][0]
+    assert row["group_id"] is None and row["group_name"] is None, \
+        "another org's folder must not tag a row for a platform admin"
+
+    chip = client.get("/api/groups", headers=_auth(admin_tok)).json()["ungrouped_count"]
+    table = client.get("/api/history?group=ungrouped",
+                       headers=_auth(admin_tok)).json()["total"]
+    assert chip == table
 
 
 # ---------------------------------------------------------------------------

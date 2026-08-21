@@ -91,7 +91,8 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     # flag, so the ownership gate below costs no extra DB round-trip.
     scope = history_scope(user)
     source = get_run_registry().get_run(
-        source_run_id, org_id=scope.org_id, caller_user_id=scope.caller_user_id
+        source_run_id, org_id=scope.folder_org_id,
+        caller_user_id=scope.caller_user_id
     )
     allowed = source is not None and caller_can_read(
         user, source.get("user_id"), source.get("org_id"),

@@ -98,6 +98,9 @@ def list_history(
         # scope user_id is None while their identity is not, and folder
         # visibility turns on which private folders are theirs.
         caller_user_id=scope.caller_user_id,
+        # The FOLDER scope is the caller's own org even when their RUN scope
+        # is every org — see history_scope.folder_org_id.
+        folder_org_id=scope.folder_org_id,
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
@@ -132,7 +135,7 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     scope = history_scope(user)
     run = get_run_registry().get_run(
         run_id,
-        org_id=scope.org_id,
+        org_id=scope.folder_org_id,
         caller_user_id=scope.caller_user_id,
     )
     allowed = run is not None and caller_can_read(

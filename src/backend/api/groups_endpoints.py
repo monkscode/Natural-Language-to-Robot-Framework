@@ -132,16 +132,20 @@ def list_groups(user: dict | None = Depends(require_user)):
     """The folders the caller can see, with run counts (plus the Ungrouped
     count) — drives the History chip row.
 
-    Three answers. A validated PLATFORM admin passes org_id None, which the
-    registry reads as "no visibility filter": they already see every org's
-    runs, so hiding every folder name would just break the page. An org
-    member passes their own org and sees its 'org' folders plus their own
-    private ones. A caller with NO org — including the token-less dev
-    caller — gets an empty list: folders are org-keyed so they own none, and
-    passing their None straight through would hand them that platform-admin
-    view of every org's folders, other users' private ones included.
+    Two answers, on ONE rule: folders are scoped to the caller's own org,
+    whoever they are. A caller WITH an org sees its 'org' folders plus their
+    own private ones. A caller with NO org — including the token-less dev
+    caller — gets an empty list, because folders are org-keyed so they own
+    none, and passing their None straight through would hand them the
+    registry's "no visibility filter" view of every org's folders, other
+    users' private ones included.
 
-    Branch order is load-bearing: admin, THEN a concrete org, THEN empty.
+    A validated platform admin used to take a third, unfiltered branch here.
+    That was the leak: every org's folder names came back, other users'
+    private ones among them, while every mutation binds their real token org
+    (_require_org_scope) and answered 404 for exactly those folders — so the
+    SPA drew Edit/Delete/Move controls that could never work. Their RUN scope
+    still spans every org; only their FOLDER scope narrowed.
 
     The run scope behind the counts MUST be the one /api/history computes for
     this same caller, or the chip counts a different set of runs than the
@@ -150,17 +154,22 @@ def list_groups(user: dict | None = Depends(require_user)):
     """
     scope = history_scope(user)
     reg = get_run_registry()
-    if scope.is_admin:
-        groups = reg.list_groups(None, scope.caller_user_id, scope_user_id=None)
-    elif scope.org_id:
+    # ONE folder scope for everyone: the caller's own org. A platform admin
+    # used to take an unfiltered branch here, which handed them every org's
+    # folders including other users' private ones — while every mutation binds
+    # this same org and answered 404 for exactly those folders. A caller with
+    # no org (including the token-less dev caller) owns no folders, so [].
+    if scope.folder_org_id:
         groups = reg.list_groups(
-            scope.org_id, scope.caller_user_id, scope_user_id=scope.user_id)
+            scope.folder_org_id, scope.caller_user_id,
+            scope_user_id=scope.user_id)
     else:
         groups = []
     return {
         "groups": groups,
         "ungrouped_count": reg.count_ungrouped(
-            scope.user_id, scope.org_id, scope.caller_user_id),
+            scope.user_id, scope.org_id, scope.caller_user_id,
+            folder_org_id=scope.folder_org_id),
     }
 
 

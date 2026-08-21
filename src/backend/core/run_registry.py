@@ -611,6 +611,7 @@ class RunRegistry:
         user_id: Optional[str] = None,
         org_id: Optional[str] = None,
         caller_user_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
     ) -> int:
         """The Ungrouped chip's live count on the History page.
 
@@ -620,8 +621,17 @@ class RunRegistry:
         count disagreed with the table for an org_admin, whose History spans
         the org. "Ungrouped" is g.group_id IS NULL — in no folder the caller
         can SEE — not t.group_id IS NULL, or a run inside someone else's
-        private folder would belong to no filter at all and vanish."""
-        join, params = self._group_join(org_id, caller_user_id)
+        private folder would belong to no filter at all and vanish.
+
+        folder_org_id is the caller's OWN org and scopes the folder join
+        alone, which org_id cannot do here: a platform admin's org_id is
+        None because their runs span every org, and reusing that for the
+        join handed them every org's folders. It defaults to org_id, so a
+        caller that passes nothing is unchanged."""
+        # The FOLDER scope is the caller's own org, which is not the run
+        # filter: a platform admin's runs span every org while their folders
+        # do not. Defaults to org_id so every existing caller is unchanged.
+        join, params = self._group_join(folder_org_id or org_id, caller_user_id)
         clauses = ["g.group_id IS NULL"]
         if user_id is not None:
             clauses.append("t.user_id = %s")
@@ -734,6 +744,7 @@ class RunRegistry:
         q: Optional[str] = None,
         group: Optional[str] = None,
         caller_user_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Most-recent-first run rows + total count. user_id=None lists all
         users' runs (admin scope); otherwise only that user's rows. status
@@ -746,8 +757,13 @@ class RunRegistry:
         "ungrouped", to rows in no folder the caller can SEE; rows carry
         group_id and group_name from _group_join so the History table renders
         folder tags without extra requests. caller_user_id is the caller's own
-        identity for that join — see _group_join for why it is not user_id."""
-        join, join_params = self._group_join(org_id, caller_user_id)
+        identity for that join — see _group_join for why it is not user_id.
+        folder_org_id scopes that join to the caller's OWN org, which org_id
+        cannot do: org_id is the ROW filter, and a platform admin's is None
+        because their runs span every org — reusing it for the join tagged
+        their rows with other orgs' folder names. Defaults to org_id, so a
+        caller that passes nothing is unchanged."""
+        join, join_params = self._group_join(folder_org_id or org_id, caller_user_id)
         clauses: list = []
         params: list = []
         if user_id is not None:

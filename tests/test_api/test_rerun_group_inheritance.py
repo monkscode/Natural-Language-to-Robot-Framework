@@ -236,11 +236,13 @@ class TestRerunEndpointInheritsTheSourceFolder:
         assert resp.status_code == 200
         assert captured["group_id"] is None
 
-    def test_platform_admin_read_is_unscoped_so_the_org_guard_cannot_live_here(self, reg):
-        """A platform admin sees every org, so the endpoint hands on a folder
-        id from the SOURCE run's org. Only record_start knows the org actually
-        written on the new row, which is why the cross-org guard lives there
-        (see TestRerunServiceWritesTheFolder for the other half)."""
+    def test_platform_admin_read_no_longer_leaks_a_foreign_org_folder(self, reg):
+        """The endpoint now reads the source run's folder through the ADMIN's
+        OWN org (history_scope.folder_org_id), so a folder in another org
+        never reaches the write. record_start's cross-org guard survives as
+        defence in depth — see TestRerunServiceWritesTheFolder — but it is no
+        longer the only thing standing between an admin's re-run and another
+        org's folder."""
         gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout", "org")["group_id"]
         rid = _seed_run(reg, _MEMBER, _rid())
         _file_run(reg, _MEMBER, rid, gid)
@@ -248,7 +250,7 @@ class TestRerunEndpointInheritsTheSourceFolder:
         resp, captured = _rerun(reg, _PLATFORM, rid, validated_admin=True)
 
         assert resp.status_code == 200
-        assert captured["group_id"] == gid
+        assert captured["group_id"] is None
 
 
 # ---------------------------------------------------------------------------
