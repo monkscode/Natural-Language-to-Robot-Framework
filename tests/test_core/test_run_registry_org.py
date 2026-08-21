@@ -81,16 +81,28 @@ def test_backfill_maps_existing_rows_to_owner_org(registry):
     updated = registry.backfill_org_ids()
     assert updated >= 1
     assert registry.get_run(rid)["org_id"] == org_id
-    # Idempotent: a second pass does not change THIS row. Asserting a global
-    # count of 0 instead would depend on no sibling in this shared schema
-    # having left an unattributed row behind:
-    # test_backfill_attributes_org_member_rows_too briefly creates that exact
-    # state, then backfills it itself, so it leaves nothing behind on a clean
-    # run -- but a global count is still needlessly fragile, since it would
-    # break if that sibling ever failed between creating and backfilling its
-    # row, or if a future test left the same shape unbackfilled.
+    # Idempotent: a second pass leaves an already-attributed row alone.
+    #
+    # Re-reading the row after a bare second pass proves nothing -- the UPDATE
+    # is WHERE org_id IS NULL, so it cannot touch this row and the assertion
+    # would re-state the line above whatever the function did. Move the user
+    # into a DIFFERENT org first and the two behaviours finally have different
+    # observable outcomes: a pass that skips attributed rows leaves the
+    # personal org id below, a pass that re-writes them puts the team org id
+    # there instead. add_member enforces single-active-org, so the user has
+    # exactly one membership at each stage and the backfill's join to
+    # org_members stays deterministic.
+    #
+    # Scoped to our own row on purpose: asserting a global
+    # backfill_org_ids() == 0 pins the same property but depends on no sibling
+    # in this shared schema having left an unattributed row behind, which is
+    # the file-order dependency this replaced.
+    peer = users.create_user(f"bf-peer-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team BF Idempotency", str(peer["id"]))
+    orgs.add_member(team_org_id, str(user["id"]), "org_member")
+    assert team_org_id != org_id
     registry.backfill_org_ids()
-    assert registry.get_run(rid)["org_id"] == org_id
+    assert registry.get_run(rid)["org_id"] == org_id,         "a second pass must not re-write a row that already has an org"
 
 
 def test_record_start_derives_org_id_for_org_member(registry):
