@@ -114,3 +114,76 @@ def test_current_shape_is_left_alone_and_construction_is_idempotent(scratch):
         assert _columns(admin, schema) == before
     finally:
         r2.close()
+
+
+def test_a_dangling_group_id_is_repaired_before_the_constraint_lands(scratch):
+    """A database carrying a stale test_runs.group_id could not take the
+    foreign key: ADD CONSTRAINT raised, RunRegistry.__init__ raised,
+    main.py's startup guard logged a WARNING, and every later history,
+    groups and report request 500'd with nothing naming the cause.
+
+    The repair sits INSIDE the 'constraint does not exist yet' branch, so it
+    runs at most once per schema — after that the constraint makes dangling
+    rows impossible. Nothing is lost: such a run already reads as Ungrouped
+    through the visibility join, because its folder is gone.
+    """
+    from src.backend.core.run_registry import RunRegistry
+    schema, dsn, admin = scratch
+    rid = str(uuid.uuid4())
+
+    reg = RunRegistry(dsn=dsn)          # builds everything, including the FK
+    reg.record_start(rid, {"user_id": "u1", "org_id": "org-a",
+                           "email": "u1@e.com"}, "q", "passed")
+    reg.close()
+
+    admin.execute(f"SET search_path TO {schema}")
+    admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
+    admin.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                  (str(uuid.uuid4()), rid))
+    assert admin.execute(
+        "SELECT count(*) FROM test_runs WHERE group_id IS NOT NULL"
+    ).fetchone()[0] == 1, "the dangling row was never seeded — the test cannot bite"
+
+    reg2 = RunRegistry(dsn=dsn)         # must repair, not raise
+    try:
+        assert admin.execute(
+            "SELECT count(*) FROM test_runs WHERE run_id = %s", (rid,)
+        ).fetchone()[0] == 1, "the run row must survive the repair"
+        assert admin.execute(
+            "SELECT group_id FROM test_runs WHERE run_id = %s", (rid,)
+        ).fetchone()[0] is None
+        assert admin.execute(
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'fk_test_runs_group'"
+            " AND conrelid = 'test_runs'::regclass"
+        ).fetchone()[0] == 1
+    finally:
+        reg2.close()
+
+
+def test_the_repair_logs_a_warning_naming_the_row_count(scratch, caplog):
+    """The repair is a data mutation, permitted inside _SCHEMA_DDL only
+    because RAISE NOTICE keeps it from being silent (owner decision 6). If
+    the RAISE NOTICE line were deleted, the repair would still run — this
+    test is the only thing that would catch that."""
+    from src.backend.core.run_registry import RunRegistry
+    schema, dsn, admin = scratch
+    rid = str(uuid.uuid4())
+
+    reg = RunRegistry(dsn=dsn)
+    reg.record_start(rid, {"user_id": "u1", "org_id": "org-a",
+                           "email": "u1@e.com"}, "q", "passed")
+    reg.close()
+
+    admin.execute(f"SET search_path TO {schema}")
+    admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
+    admin.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                  (str(uuid.uuid4()), rid))
+
+    with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
+        reg2 = RunRegistry(dsn=dsn)
+    try:
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelname == "WARNING"]
+        assert any("test_runs" in m and "1" in m for m in warnings), warnings
+    finally:
+        reg2.close()

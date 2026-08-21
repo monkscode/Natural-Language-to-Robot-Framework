@@ -153,17 +153,36 @@ _SCHEMA_DDL = (
     # public's constraint and skip the ALTER, leaving every test schema
     # without it. 'test_runs'::regclass resolves through search_path, so the
     # guard is per-schema.
+    # The repair inside the branch is owner decision 6 (2026-08-21) — it runs
+    # once per schema, not on every construction, which is what T4's parked
+    # objection was about.
     """
     DO $$
+    DECLARE
+      n bigint;
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint
                      WHERE conrelid = 'test_runs'::regclass
                        AND contype = 'f' AND conname = 'fk_test_runs_group') THEN
+        -- Runs at most ONCE per schema: after the constraint lands, a
+        -- dangling group_id is impossible by construction. A run whose
+        -- folder is gone already reads as Ungrouped through the visibility
+        -- join, so nothing is lost here — but without it ADD CONSTRAINT
+        -- raises, __init__ raises, main.py logs a warning, and every later
+        -- history/groups/report request 500s with nothing naming the cause.
+        UPDATE test_runs SET group_id = NULL
+         WHERE group_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM run_groups g
+                           WHERE g.group_id = test_runs.group_id);
+        GET DIAGNOSTICS n = ROW_COUNT;
+        IF n > 0 THEN
+          RAISE NOTICE 'test_runs: ungrouped % row(s) pointing at a folder that no longer exists', n;
+        END IF;
         ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
           FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
           ON DELETE SET NULL;
       END IF;
-    END $$
+    END $$;
     """,
 )
 
