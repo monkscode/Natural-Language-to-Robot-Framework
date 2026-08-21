@@ -12,6 +12,21 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+# Tracing OFF for the whole test process, set before anything imports
+# src.backend so Settings reads it instead of .env's OBSERVABILITY_BACKEND.
+#
+# main.py calls init_observability() at IMPORT time, so the first test that
+# imports the app installs a global OTel provider for the rest of the run. With
+# the .env value (postgres) that provider's PostgresSpanExporter points at the
+# live DATABASE_URL, and every create_workflow_span() afterwards exports for
+# real — including from unit tests that only meant to exercise the context
+# manager. Measured on the gate suite: 6 rows per run into public.llm_traces,
+# against the standing rule that tests never write to the live database.
+#
+# Pinned here rather than in a fixture because the damage is done at import
+# time, which is before any fixture runs.
+os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
+
 
 @pytest.fixture(autouse=True)
 def _disable_auth_rate_limit():
