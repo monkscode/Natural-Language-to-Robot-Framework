@@ -55,10 +55,15 @@ export function RunGroupsProvider({ children }: { children: ReactNode }) {
   // session. Left alone it would show an empty table under a group chip that
   // no longer resolves to a name. Wait for the list to actually load (an empty
   // list mid-fetch is not proof of absence), then drop the dangling id.
+  // useGroups sets `loaded` in its finally, so a FAILED fetch flips it true
+  // while `groups` keeps its previous value. An empty list is therefore not
+  // proof of absence here, and clearing the filter on a transient
+  // /api/groups failure would drop the user's view — the sidebar already
+  // keeps its rows and surfaces the error instead.
   useEffect(() => {
-    if (!loaded || !groupFilter || groupFilter === 'ungrouped') return
+    if (error || !loaded || !groupFilter || groupFilter === 'ungrouped') return
     if (!groups.some(g => g.group_id === groupFilter)) setGroupFilter(null)
-  }, [loaded, groups, groupFilter])
+  }, [error, loaded, groups, groupFilter])
 
   const value = useMemo<RunGroupsValue>(() => ({
     groups, ungroupedCount, error, loaded,
