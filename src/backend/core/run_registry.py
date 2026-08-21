@@ -168,8 +168,11 @@ _SCHEMA_DDL = (
         -- dangling group_id is impossible by construction. A run whose
         -- folder is gone already reads as Ungrouped through the visibility
         -- join, so nothing is lost here — but without it ADD CONSTRAINT
-        -- raises, __init__ raises, main.py logs a warning, and every later
-        -- history/groups/report request 500s with nothing naming the cause.
+        -- raises, __init__ raises, and — since construction is lazy —
+        -- the raise surfaces in whichever request gets there first:
+        -- history, groups or a report-authorization check, as a bare
+        -- 500 whose cause reaches only the server log, never the
+        -- response.
         UPDATE test_runs SET group_id = NULL
          WHERE group_id IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM run_groups g

@@ -118,9 +118,10 @@ def test_current_shape_is_left_alone_and_construction_is_idempotent(scratch):
 
 def test_a_dangling_group_id_is_repaired_before_the_constraint_lands(scratch):
     """A database carrying a stale test_runs.group_id could not take the
-    foreign key: ADD CONSTRAINT raised, RunRegistry.__init__ raised,
-    main.py's startup guard logged a WARNING, and every later history,
-    groups and report request 500'd with nothing naming the cause.
+    foreign key: ADD CONSTRAINT raised, RunRegistry.__init__ raised, and —
+    since construction is lazy — the raise surfaced in whichever request
+    got there first: history, groups or a report-authorization check, as
+    a bare 500 with nothing naming the cause beyond the server log.
 
     The repair sits INSIDE the 'constraint does not exist yet' branch, so it
     runs at most once per schema — after that the constraint makes dangling
@@ -184,6 +185,8 @@ def test_the_repair_logs_a_warning_naming_the_row_count(scratch, caplog):
     try:
         warnings = [r.getMessage() for r in caplog.records
                     if r.levelname == "WARNING"]
-        assert any("test_runs" in m and "1" in m for m in warnings), warnings
+        expected = ("test_runs: ungrouped 1 row(s) pointing at a folder "
+                    "that no longer exists")
+        assert any(expected in m for m in warnings), warnings
     finally:
         reg2.close()
