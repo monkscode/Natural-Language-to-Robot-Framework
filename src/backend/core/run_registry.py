@@ -78,13 +78,22 @@ _SCHEMA_DDL = (
     # pre-release branch still has the per-user run_groups
     # (group_id, name, user_id). CREATE TABLE IF NOT EXISTS is a no-op there,
     # so the partial indexes below fail with UndefinedColumn and
-    # RunRegistry.__init__ raises. Construction is lazy — get_run_registry()
-    # builds the singleton on first use, not at startup — so the raise
-    # surfaces in whichever request gets there first: /api/history,
-    # /api/groups or a report-authorization check. Nothing is cached on
-    # failure, so the next request retries construction and raises again
-    # too. The caller sees a bare 500; the traceback naming the cause
-    # reaches only the server log, never the response. The drop fires only
+    # RunRegistry.__init__ raises. WHERE that raise lands depends on the
+    # database, and both paths are real. On one whose data_migrations table
+    # has no data_org_id_backfill row — every fresh deploy, every fresh CI
+    # database — startup itself constructs the registry: main.py's
+    # run_migration_once calls backfill_data_org_ids, which calls
+    # get_run_registry() (core/org_backfill.py). The raise is caught by that
+    # function's own per-table except, logged as "[ORG_BACKFILL] test_runs
+    # backfill failed", and swallowed — so the migration is still marked
+    # done and the process boots on a WARNING. On a database whose marker is
+    # already set — which one carrying this pre-release table is, having
+    # booted this app before — nothing constructs the registry at startup
+    # and the raise surfaces in whichever request gets there first:
+    # /api/history, /api/groups or a report-authorization check. Either way
+    # nothing is cached on failure, so the next request retries construction
+    # and raises again too. The caller sees a bare 500; the traceback naming
+    # the cause reaches only the server log, never the response. The drop fires only
     # when the table carries the old column set AND holds zero rows — the
     # feature never shipped, so an old-shape table is always empty. A
     # non-empty one raises instead, and a human decides. Keyed on the
@@ -168,11 +177,14 @@ _SCHEMA_DDL = (
         -- dangling group_id is impossible by construction. A run whose
         -- folder is gone already reads as Ungrouped through the visibility
         -- join, so nothing is lost here — but without it ADD CONSTRAINT
-        -- raises, __init__ raises, and — since construction is lazy —
-        -- the raise surfaces in whichever request gets there first:
-        -- history, groups or a report-authorization check, as a bare
-        -- 500 whose cause reaches only the server log, never the
-        -- response.
+        -- raises and __init__ raises. On a database that has not yet run
+        -- the org_id backfill migration, that happens during startup,
+        -- inside backfill_data_org_ids, which swallows it as a WARNING
+        -- and boots anyway; on one that has, nothing constructs the
+        -- registry at startup and the raise surfaces in whichever
+        -- request gets there first: history, groups or a
+        -- report-authorization check. Either way it is a bare 500 whose
+        -- cause reaches only the server log, never the response.
         UPDATE test_runs SET group_id = NULL
          WHERE group_id IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM run_groups g
@@ -609,9 +621,20 @@ class RunRegistry:
         cannot see. Reproduced 2026-08-21. The pool is not autocommit, so
         the lock is held for the rest of the caller's `with` block.
 
-        No deadlock: every writer takes run_groups FIRST and test_runs
-        second (assign_runs updates the runs, delete_group lets the FK
-        cascade into them), so the lock order is the same on every path."""
+        The lock ORDER is not uniform, so a narrow deadlock class exists.
+        rename_group, delete_group and assign_runs all take run_groups here
+        FIRST and test_runs second (assign_runs updates the runs,
+        delete_group lets the FK cascade into them). record_start is the
+        exception and goes the other way: it writes its test_runs row, and
+        the foreign key on group_id then takes a KEY SHARE lock on the
+        run_groups parent — verified 2026-08-21 by holding this FOR UPDATE
+        and watching a concurrent record_start(group_id=G) block until it
+        was released. Closing the cycle needs the same folder AND the same
+        run row concurrently, and a re-run normally writes its group_id on
+        its first insert, so the window is small — but record_start can be
+        the loser, and it swallows every exception (logging an ERROR), so
+        the failure would show as a run with no history row rather than as
+        a request that fails."""
         row = conn.execute(
             "SELECT group_id, org_id, created_by, name, visibility "
             "FROM run_groups WHERE group_id = %s FOR UPDATE",

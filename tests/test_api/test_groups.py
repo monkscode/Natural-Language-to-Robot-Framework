@@ -151,9 +151,10 @@ class TestGroupRegistryCrud:
 class TestGroupAuthorityMatrix:
     """The authority matrix of the org-keyed model, at the registry.
 
-    Visibility is not on the wire yet (T3), so a private folder cannot even
-    be created over HTTP — the matrix has to be asserted here. A refusal is
-    False, which the endpoints turn into 404 rather than 403."""
+    Asserted at the registry, which is where the matrix lives: a refusal is
+    False, which the endpoints turn into 404 rather than 403. Visibility is
+    on the wire too (T3) — the endpoint-level tests for it are further down
+    this file."""
 
     ORG = "org-acme"
     ADMIN = "u-admin"
@@ -1118,12 +1119,12 @@ def test_orgless_caller_cannot_mutate_folders(client):
             client.get("/api/groups", headers=_auth(other)).json()["groups"]] == ["Not yours"]
 
 
-def test_platform_admin_sees_every_orgs_folders(client):
+def test_platform_admin_does_not_see_another_orgs_folder(client):
     """INVERTED CONTRACT (2026-08-21): a platform admin does NOT see every
-    org's folders. Their runs span every org; their folders are their own
-    org's, so read and write finally agree. Kept under the old name so the
-    inversion is visible in the diff — see
-    test_platform_admin_folder_view_is_their_own_org for the full rule."""
+    org's folders, which is what this test asserted before that date. Their
+    runs span every org; their folders are their own org's, so read and write
+    finally agree — see test_platform_admin_folder_view_is_their_own_org for
+    the full rule."""
     from src.backend.auth.jwt_utils import create_access_token
 
     owner = _register(client, f"pa-{uuid.uuid4().hex[:8]}@e.com")

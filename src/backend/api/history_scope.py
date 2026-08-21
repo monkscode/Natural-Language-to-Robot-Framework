@@ -58,8 +58,11 @@ def history_scope(user: dict | None) -> HistoryScope:
     every org, every user. An org_admin with a concrete org gets their whole
     org with no per-user narrowing. Everyone else gets their own rows within
     their own org. folder_org_id is always the caller's own org, whoever they
-    are — it is None only when there is no token at all, which is the
-    token-less dev path and keeps its historic unfiltered folder join.
+    are. It is None when there is no token at all — the token-less dev path,
+    which keeps its historic unfiltered folder join — and equally for a token
+    that carries no org, which reaches that same unfiltered join. Login makes
+    the second case unreachable in practice: _token_payload provisions an org
+    for any ACTIVE user who lacks one before it mints a token.
     """
     admin = is_validated_admin(user)
     caller_user_id = None if user is None else user["user_id"]

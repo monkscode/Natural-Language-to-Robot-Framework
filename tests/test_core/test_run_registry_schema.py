@@ -168,10 +168,12 @@ def test_routine_notices_are_quiet_so_an_upgrade_notice_is_not_buried(scratch, c
 
 def test_a_dangling_group_id_is_repaired_before_the_constraint_lands(scratch):
     """A database carrying a stale test_runs.group_id could not take the
-    foreign key: ADD CONSTRAINT raised, RunRegistry.__init__ raised, and —
-    since construction is lazy — the raise surfaced in whichever request
-    got there first: history, groups or a report-authorization check, as
-    a bare 500 with nothing naming the cause beyond the server log.
+    foreign key: ADD CONSTRAINT raised and RunRegistry.__init__ raised. On a
+    database that has not yet run the org_id backfill migration that lands
+    during startup, swallowed as a WARNING by backfill_data_org_ids; on one
+    that has, it surfaced in whichever request got there first — history,
+    groups or a report-authorization check — as a bare 500 with nothing
+    naming the cause beyond the server log.
 
     The repair sits INSIDE the 'constraint does not exist yet' branch, so it
     runs at most once per schema — after that the constraint makes dangling
