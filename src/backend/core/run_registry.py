@@ -70,8 +70,50 @@ _SCHEMA_DDL = (
     # __init__), so a DROP would delete every folder on each process start
     # and each test fixture, and would fail outright once T4's foreign key
     # references the table. The pre-release per-user table (0 rows, never
-    # shipped) is dropped by hand instead — CREATE TABLE IF NOT EXISTS would
-    # otherwise silently keep the old column set.
+    # shipped) is dropped by the guarded block below instead — CREATE TABLE
+    # IF NOT EXISTS would otherwise silently keep the old column set.
+    #
+    # ...and this is the ONE exception the comment above allows, because it
+    # cannot delete anything anyone made. A database that ran PR #94's
+    # pre-release branch still has the per-user run_groups
+    # (group_id, name, user_id). CREATE TABLE IF NOT EXISTS is a no-op there,
+    # so the partial indexes below fail with UndefinedColumn,
+    # RunRegistry.__init__ raises, main.py's startup guard logs a WARNING, and
+    # every later /api/history, /api/groups and report-authorization request
+    # 500s with nothing naming the cause. The drop fires only when the table
+    # carries the old column set AND holds zero rows — the feature never
+    # shipped, so an old-shape table is always empty. A non-empty one raises
+    # instead, and a human decides. Keyed on the regclass, not on
+    # information_schema, so it can only ever see the table search_path
+    # actually resolves. The foreign key above cannot block this DROP: it
+    # arrived in 011bae5, five commits after 1fc4d7d re-keyed the table to
+    # the org, so no database can hold the old column set and the FK at once.
+    """
+    DO $$
+    DECLARE
+      t regclass := to_regclass('run_groups');
+      n bigint;
+    BEGIN
+      IF t IS NULL THEN RETURN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_attribute
+                     WHERE attrelid = t AND attname = 'user_id'
+                       AND NOT attisdropped) THEN
+        RETURN;   -- already the org-keyed shape
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_attribute
+                 WHERE attrelid = t AND attname = 'org_id'
+                   AND NOT attisdropped) THEN
+        RETURN;   -- neither shape we know; leave it alone
+      END IF;
+      EXECUTE format('SELECT count(*) FROM %s', t) INTO n;
+      IF n <> 0 THEN
+        RAISE EXCEPTION
+          'run_groups has the pre-release per-user shape and % row(s); refusing to drop it automatically', n;
+      END IF;
+      EXECUTE format('DROP TABLE %s', t);
+      RAISE NOTICE 'run_groups: dropped the empty pre-release per-user table';
+    END $$;
+    """,
     """
     CREATE TABLE IF NOT EXISTS run_groups (
         group_id   TEXT PRIMARY KEY,
