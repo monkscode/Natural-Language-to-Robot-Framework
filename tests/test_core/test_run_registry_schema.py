@@ -244,6 +244,87 @@ def test_the_repair_logs_a_warning_naming_the_row_count(scratch, caplog):
     finally:
         reg2.close()
 
+def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
+    """Two RunRegistry() constructions against the same fresh schema can both
+    pass the fk_test_runs_group IF NOT EXISTS guard before either's ALTER
+    commits — the guard is a TOCTOU, not a lock. Reproduced deterministically
+    rather than by hoping two threads collide: T1 takes the ACCESS EXCLUSIVE
+    lock the real ALTER needs and holds it open in an explicit transaction,
+    which forces T2's copy of the guarded DO block to block inside it; once
+    T2 is confirmed blocked (polled via pg_locks, not slept for), T1 adds the
+    constraint itself and commits, so T2's statement resumes straight into
+    duplicate_object. Before the fix that propagates out of T2's execute();
+    after it, the nested BEGIN/EXCEPTION swallows it and T2 returns clean."""
+    import threading
+    import time
+
+    from src.backend.core.run_registry import _SCHEMA_DDL, RunRegistry
+
+    schema, dsn, admin = scratch
+    reg = RunRegistry(dsn=dsn)          # builds everything, including the FK
+    reg.close()
+    admin.execute(f"SET search_path TO {schema}")
+    admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
+
+    fk_guard_ddl = _SCHEMA_DDL[-1]
+    assert "fk_test_runs_group" in fk_guard_ddl, (
+        "_SCHEMA_DDL's last statement changed — this test targets the wrong one")
+
+    t1 = psycopg.connect(dsn, autocommit=False)
+    t1.execute("BEGIN")
+    t1.execute("LOCK TABLE test_runs IN ACCESS EXCLUSIVE MODE")
+
+    t2 = psycopg.connect(dsn, autocommit=True)
+    t2_errors: list[Exception] = []
+
+    def run_t2() -> None:
+        try:
+            t2.execute(fk_guard_ddl)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            t2_errors.append(exc)
+
+    thread = threading.Thread(target=run_t2)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        blocked = False
+        while time.monotonic() < deadline:
+            row = admin.execute(
+                "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a"
+                " ON l.pid = a.pid"
+                " WHERE a.query LIKE %s AND NOT l.granted",
+                ("%fk_test_runs_group%",),
+            ).fetchone()
+            if row is not None:
+                blocked = True
+                break
+            time.sleep(0.05)
+        assert blocked, "t2 never blocked on t1's lock — the race was never set up"
+
+        # T1 performs the real ADD CONSTRAINT — it already holds the lock —
+        # and commits, which is what lets t2's blocked statement resume and
+        # discover the constraint already there.
+        t1.execute(
+            "ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group"
+            " FOREIGN KEY (group_id) REFERENCES run_groups(group_id)"
+            " ON DELETE SET NULL"
+        )
+        t1.execute("COMMIT")
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "t2 never woke up after t1 committed"
+    finally:
+        t1.close()
+        t2.close()
+
+    assert t2_errors == [], (
+        f"the losing construction's DO block raised instead of swallowing "
+        f"the race: {t2_errors!r}")
+    assert admin.execute(
+        "SELECT count(*) FROM pg_constraint WHERE conname = 'fk_test_runs_group'"
+        " AND conrelid = 'test_runs'::regclass"
+    ).fetchone()[0] == 1
+
+
 def _indexes(admin, schema):
     return {r[0] for r in admin.execute(
         "SELECT indexname FROM pg_indexes WHERE schemaname = %s "

@@ -193,6 +193,10 @@ def list_history(
     return {
         "runs": runs,
         "total": total,
+        # "all" means scope.user_id is None — no per-user narrowing — which
+        # an org_admin gets for their whole org, not just a platform admin.
+        # Only role='admin' (checked separately, via scope.is_admin) means
+        # "every run on the platform"; the client tells those two apart.
         "scope": "all" if scope.user_id is None else "own",
     }
 

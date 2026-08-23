@@ -266,9 +266,21 @@ _SCHEMA_DDL = (
         IF n > 0 THEN
           RAISE NOTICE 'test_runs: ungrouped % row(s) pointing at a folder that no longer exists', n;
         END IF;
-        ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
-          FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
-          ON DELETE SET NULL;
+        -- The IF NOT EXISTS above is a TOCTOU, not a lock: two processes
+        -- constructing RunRegistry() against the same fresh schema can both
+        -- pass it before either's ALTER commits, so the loser still reaches
+        -- ADD CONSTRAINT and raises duplicate_object. The sibling CREATE
+        -- TABLE/INDEX IF NOT EXISTS statements in this tuple don't need this
+        -- — the server treats those as a no-op itself — but ADD CONSTRAINT
+        -- has no such built-in idempotence, so the race has to be caught
+        -- here by hand.
+        BEGIN
+          ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
+            FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
+            ON DELETE SET NULL;
+        EXCEPTION WHEN duplicate_object THEN
+          NULL;  -- another process's construction won the race; the constraint is there either way
+        END;
       END IF;
     END $$;
     """,
