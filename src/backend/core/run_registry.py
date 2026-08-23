@@ -705,7 +705,9 @@ class RunRegistry:
         private, and without FOR UPDATE a concurrent assign_runs could slip a
         run in between the count and the write. With visibility gone there is
         no read-then-decide left to protect — every remaining race is closed
-        by the database itself. A concurrent delete makes assign_runs' UPDATE
+        by the database itself, except delete_group's own audit_run_ids
+        read, which is a snapshot the database does not protect (see its
+        docstring). A concurrent delete makes assign_runs' UPDATE
         raise ForeignKeyViolation (caught, answered 404) and makes
         rename_group's UPDATE match 0 rows (also 404).
 
@@ -827,10 +829,17 @@ class RunRegistry:
         the caller is not an org_admin — the endpoint renders all three as
         404 alike, so nothing about the folder leaks either way.
 
-        audit_run_ids, if given, is appended with every run id the folder
-        held, read BEFORE the DELETE: fk_test_runs_group's ON DELETE SET
-        NULL erases each member's group_id as part of that same statement,
-        so this is the last query able to see the membership at all.
+        audit_run_ids, if given, is appended with the run ids the
+        membership SELECT below sees, read BEFORE the DELETE:
+        fk_test_runs_group's ON DELETE SET NULL erases each member's
+        group_id as part of that same statement. That SELECT is a
+        snapshot under READ COMMITTED, not a lock: a run assigned to this
+        folder concurrently — after the snapshot but before the DELETE
+        proceeds — is ungrouped by that same DELETE without ever
+        appearing in this list (assign_runs' own ForeignKeyViolation
+        handling is the other side of the same race). The list is
+        therefore what this transaction's snapshot could see, not a
+        guarantee of the folder's full membership at delete time.
         Appended only once the DELETE actually removes a row, so it stays
         empty on every False return, the same guarantee rename_group's
         audit_old_name makes."""

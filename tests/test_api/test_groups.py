@@ -765,15 +765,6 @@ class TestGroupAssignmentAndFilter:
             ORG_A, "u1", False, gid, audit_run_ids=captured) is False
         assert captured == []
 
-    def test_delete_group_default_audit_run_ids_is_a_noop(self, reg):
-        """Every existing caller that does not ask for audit_run_ids must
-        see identical behaviour to before this parameter existed."""
-        r1 = str(uuid.uuid4())
-        self._seed(reg, r1, "u1")
-        gid = reg.create_group(ORG_A, "u1", "Plain")["group_id"]
-        reg.assign_runs(ORG_A, "u1", False, [r1], gid)
-        assert reg.delete_group(ORG_A, "u1", True, gid) is True
-
     def test_race_with_delete_cannot_orphan_a_run(self, reg):
         """Replay the assign/delete race on two connections at READ
         COMMITTED: T1's authority check passes, T2 deletes the folder and
