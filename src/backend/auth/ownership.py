@@ -1,9 +1,11 @@
 """The one shared org-scoped access predicate (spec §6).
 
-Every access decision on a single resource (reports, history, rerun, feedback)
-routes through caller_can_access. Org-level aggregate dashboards (traces,
-metrics, learning) use is_dashboard_viewer below instead — a different rule.
-Pure function: no DB, no request — the caller passes the decoded
+Access to a single RUN or its report (reports, history, rerun, feedback)
+routes through caller_can_access. Folder and filing authority is a separate
+decision, made in SQL by run_registry._mutable_group and assign_runs, not
+here. Org-level aggregate dashboards (traces, metrics, learning) use
+is_dashboard_viewer below instead — a different rule. Pure function: no DB,
+no request — the caller passes the decoded
 JWT dict, the resource's owner_id/org_id, and a pre-computed is_platform_admin
 flag (is_validated_admin does the DB re-validation at the call site).
 
