@@ -1430,3 +1430,97 @@ def test_empty_group_param_returns_the_full_total(client):
     # behind, and "" is not None, so it still reaches SQL as group_id = ''.
     assert client.get("/api/history?group=%20%20",
                       headers=_auth(tok)).json()["total"] == unfiltered
+
+
+def test_the_delete_flag_the_ui_reads_agrees_with_the_server(client):
+    """The auth payload must carry a flag that is True exactly where
+    DELETE /api/groups/{id} answers 204 — and it is not is_org_admin.
+
+    Two different meanings of "org admin" live in this codebase and the
+    personal org falls between them. is_org_admin is is_team_admin(), which
+    is `o.kind = 'team'` only; folder authority is the JWT's org_role, and
+    ensure_personal_org seats EVERY user as org_admin of their own personal
+    org. So a solo user deletes their own folders (204) while is_org_admin
+    is False for them, and the SPA — which gated its Delete control on
+    is_org_admin — drew nothing. Every new signup lived in that state.
+
+    The expectations here are not hard-coded against the flag: they are the
+    DELETE status codes this same run observed, so the flag is pinned to the
+    server's actual answer rather than to a second copy of the rule.
+    """
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.auth.org_repository import OrgRepository
+
+    email_a = f"fd-a-{uuid.uuid4().hex[:8]}@e.com"     # team org_admin
+    email_b = f"fd-b-{uuid.uuid4().hex[:8]}@e.com"     # plain team member
+    email_s = f"fd-s-{uuid.uuid4().hex[:8]}@e.com"     # solo, personal org
+    uid_a = decode_token(_register(client, email_a))["user_id"]
+    uid_b = decode_token(_register(client, email_b))["user_id"]
+    _register(client, email_s)
+    org_id = OrgRepository().create_team_org(f"Acme {uuid.uuid4().hex[:6]}", uid_a)
+    OrgRepository().add_member(org_id, uid_b)
+
+    # Log in AFTER the membership change — claims are minted at login.
+    payload, tok = {}, {}
+    for email in (email_a, email_b, email_s):
+        r = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+        assert r.status_code == 200, r.text
+        payload[email] = r.json()["user"]
+        tok[email] = r.json()["access_token"]
+
+    # What the server actually does. The member is refused BEFORE the admin
+    # deletes the folder, so both answers are about the same live folder.
+    team_gid = client.post("/api/groups", json={"name": f"T{uuid.uuid4().hex[:6]}"},
+                           headers=_auth(tok[email_a])).json()["group_id"]
+    solo_gid = client.post("/api/groups", json={"name": f"S{uuid.uuid4().hex[:6]}"},
+                           headers=_auth(tok[email_s])).json()["group_id"]
+    may_delete = {
+        email_b: client.delete(f"/api/groups/{team_gid}",
+                               headers=_auth(tok[email_b])).status_code == 204,
+        email_s: client.delete(f"/api/groups/{solo_gid}",
+                               headers=_auth(tok[email_s])).status_code == 204,
+        email_a: client.delete(f"/api/groups/{team_gid}",
+                               headers=_auth(tok[email_a])).status_code == 204,
+    }
+    assert may_delete == {email_a: True, email_b: False, email_s: True}
+
+    # The login payload and /auth/me must both report exactly that.
+    from_login = {e: payload[e].get("can_manage_org_folders") for e in may_delete}
+    assert from_login == may_delete
+    from_me = {
+        e: client.get("/auth/me", headers=_auth(tok[e])).json().get("can_manage_org_folders")
+        for e in may_delete
+    }
+    assert from_me == may_delete
+
+    # is_org_admin keeps its NARROWER team-org meaning: it gates the Team page
+    # and the Team nav item, and widening it would hand both to every solo
+    # signup. This is the guard against a future "simplification".
+    team_admin = {e: payload[e].get("is_org_admin") for e in may_delete}
+    assert team_admin == {email_a: True, email_b: False, email_s: False}
+    from_me_team = {
+        e: client.get("/auth/me", headers=_auth(tok[e])).json().get("is_org_admin")
+        for e in may_delete
+    }
+    assert from_me_team == team_admin
+
+
+def test_history_scope_all_is_not_a_platform_admin_signal(client):
+    """F13: /api/history answers scope='all' to any org_admin, personal org
+    included — it means "no per-user narrowing", not "every user on the
+    platform". A solo signup is org_admin of their own org, so they get it too.
+
+    The SPA printed "All users' test runs (admin view)" off that field alone,
+    which told an ordinary user they were looking at everyone's runs. The DATA
+    is right (their org is just them); only the label was wrong. Nothing about
+    the response changes — this pins the pair of facts the subtitle has to be
+    read from: scope says how wide the filter is, role says who the caller is.
+    """
+    tok = _register(client, f"f13-{uuid.uuid4().hex[:8]}@e.com")
+    _seed_run_for(client, tok)
+
+    body = client.get("/api/history", headers=_auth(tok)).json()
+    me = client.get("/auth/me", headers=_auth(tok)).json()
+    assert body["scope"] == "all"          # org-wide, and their org is themselves
+    assert me["role"] == "user"            # NOT a platform admin
+    assert me["is_org_admin"] is False     # NOT even a team org admin

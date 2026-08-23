@@ -114,6 +114,25 @@ def _user_public(row: dict) -> dict:
     }
 
 
+def _can_manage_org_folders(org_id: str | None, org_role: str | None) -> bool:
+    """Whether this caller may manage their org's folders: delete one, rename
+    one they did not create, and file anyone's run into one.
+
+    This is api/groups_endpoints._require_org_scope's rule, expressed once so
+    the SPA can draw exactly the controls the server will honour. It is NOT
+    is_org_admin: that one is is_team_admin(), `o.kind = 'team'` only, and it
+    gates the Team page and nav. ensure_personal_org seats every user as
+    org_admin of their OWN personal org, so a solo user is inside this rule
+    and outside that one — which is why the SPA drew no Delete control for
+    any solo signup until this flag existed.
+
+    The org_role claim cannot go stale behind the server: every membership
+    and role mutation in auth/admin_access_endpoints.py bumps token_version,
+    which revokes the token carrying the old claim.
+    """
+    return bool(org_id) and org_role == "org_admin"
+
+
 def _token_payload(row: dict) -> dict:
     user = _user_public(row)
     # is_org_admin drives the SPA's org-owner Team page/nav. It is a TEAM-org
@@ -133,6 +152,10 @@ def _token_payload(row: dict) -> dict:
         provision_on_approval(str(row["id"]))
         orgs = _org_repo.get_orgs_for_user(str(row["id"]))
     primary = orgs[0] if orgs else {}
+    # Derived from the SAME primary org whose claims are minted below, so the
+    # flag and the token it ships beside can never disagree.
+    user["can_manage_org_folders"] = _can_manage_org_folders(
+        primary.get("org_id"), primary.get("org_role"))
     token = create_access_token(
         {
             "id": user["id"],
@@ -225,6 +248,13 @@ async def me(user: dict = Depends(get_current_user)):
     # _user_public itself stays DB-free; only these callers pay the extra query.
     public = _user_public(row)
     public["is_org_admin"] = _org_repo.is_team_admin(str(row["id"]))
+    # Read from the TOKEN's claims, not from a fresh org query: those claims
+    # are what _require_org_scope enforces on, so mirroring them is the only
+    # way the drawn control and the honoured request agree by construction.
+    # A stale claim is impossible — the checks above already 401 a token whose
+    # token_version is behind, and every role change bumps it.
+    public["can_manage_org_folders"] = _can_manage_org_folders(
+        user.get("org_id"), user.get("org_role"))
     return public
 
 

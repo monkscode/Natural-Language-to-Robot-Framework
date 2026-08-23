@@ -799,7 +799,12 @@ class RunRegistry:
 
         No dead end for a solo user: ensure_personal_org seats them as
         org_admin of their own personal org, so they still delete their own
-        folders. Only a plain member inside a TEAM org is narrowed.
+        folders. Only a plain member inside a TEAM org is narrowed. The SPA
+        has to draw its Delete control on the SAME rule, which is the auth
+        payload's can_manage_org_folders — NOT is_org_admin, which means
+        is_team_admin() and so is False for every solo user. Gating the button
+        on is_org_admin made this paragraph false in the product: the API
+        answered 204 for a folder whose Delete control was never rendered.
 
         False when the folder doesn't exist, is outside the caller's org, or
         the caller is not an org_admin — the endpoint renders all three as

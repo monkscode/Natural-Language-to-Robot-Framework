@@ -148,7 +148,7 @@ export default function HistoryPage() {
   // Who is looking. Without an identity every group mutation answers 403, so
   // the controls that could only produce one are not offered at all — the LIST
   // still loads, because GET /api/groups answers 200 with an empty list.
-  const { user } = useAuth()
+  const { user, isAdmin } = useAuth()
 
   // Mirrors the server's rules, which differ per action. A hint only — the
   // server 404s any folder the caller may not mutate either way.
@@ -159,10 +159,15 @@ export default function HistoryPage() {
   // Narrower on purpose: deleting a folder returns every run inside it to
   // Ungrouped, which un-shares them from the whole org. That consequence is
   // the org's, so the authority is an org-admin's — not the folder creator's.
-  // A solo user is org-admin of their own personal org, so nothing they made
-  // becomes undeletable.
+  //
+  // can_manage_org_folders, NOT is_org_admin. The two are different questions:
+  // is_org_admin is is_team_admin(), team orgs only, and gates the Team page;
+  // folder authority is the org_role claim, which ensure_personal_org grants
+  // every user over their own personal org. Reading the wrong one drew no
+  // Delete control for any solo user while DELETE /api/groups/{id} answered
+  // 204 for them — i.e. for every new signup.
   const canDelete = useCallback((_g: RunGroup) => (
-    !!user && user.is_org_admin === true
+    !!user && user.can_manage_org_folders === true
   ), [user])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
@@ -349,6 +354,17 @@ export default function HistoryPage() {
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
 
+  // scope='all' means "no per-user narrowing", NOT "every user on the
+  // platform": the server returns it to any org_admin, and every solo signup
+  // is org_admin of their own personal org. Reading it as a platform-admin
+  // signal told ordinary users they were looking at everyone's runs. Only
+  // role='admin' answers that question, so the three cases are separate.
+  const subtitle = !isAdminScope
+    ? 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'
+    : isAdmin
+      ? 'All users’ test runs (admin view) — click any run to view its script and details'
+      : 'Every test run in your organization — click any run to view its script and re-run it as-is'
+
   // Who ran each test. A group is shared, so a member's table now contains
   // colleagues' runs, and a row with no author would leave the org unable to
   // say who wrote what — the accountability the whole shared model rests on.
@@ -434,9 +450,7 @@ export default function HistoryPage() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Test Runs</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {isAdminScope
-              ? 'All users’ test runs (admin view) — click any run to view its script and details'
-              : 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'}
+            {subtitle}
           </p>
         </div>
         <Button

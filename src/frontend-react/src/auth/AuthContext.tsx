@@ -19,6 +19,11 @@ export interface User {
   // True iff the user is org_admin of a TEAM org — the signal that unlocks the
   // org-owner Team page/nav. Personal-org admin (everyone) does NOT set this.
   is_org_admin?: boolean
+  // True iff the caller's active-org org_role is org_admin — the server's own
+  // folder-authority rule (delete a folder, rename one they did not create,
+  // file anyone's run). A solo user IS org_admin of their personal org, so
+  // this is true for them while is_org_admin is not. Never swap the two.
+  can_manage_org_folders?: boolean
 }
 
 interface AuthState {
