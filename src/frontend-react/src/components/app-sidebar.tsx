@@ -205,8 +205,6 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
     if (groupFilter && groupFilter !== 'ungrouped') setOpen(true)
   }, [groupFilter])
 
-  const subId = 'sidebar-run-groups'
-
   const pick = (groupId: string) => {
     setGroupFilter(groupId)
     // Already on the page? Only the filter changes — no navigation, so the
@@ -241,7 +239,7 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
       </SidebarMenuAction>
 
       {open && (
-        <SidebarMenuSub id={subId} className="max-h-[40vh] overflow-y-auto">
+        <SidebarMenuSub className="max-h-[40vh] overflow-y-auto">
           {/* A failed /api/groups leaves the list empty, and "No groups yet"
               would then be a lie that sends the user off to create one. Say
               what actually happened, and keep any rows a previous successful

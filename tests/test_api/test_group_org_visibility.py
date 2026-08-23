@@ -613,3 +613,30 @@ def test_an_unowned_run_stays_platform_admin_only_even_in_a_folder(client, share
         assert rid not in [r["run_id"] for r in rows], f"{who} listed it"
         assert client.get(f"/api/history/{rid}",
                           headers=_auth(tok)).status_code == 404, who
+
+
+# ---------------------------------------------------------------------------
+# org_id is read only to compute can_move (history_endpoints.py) and is not
+# part of the public run shape — the list row has always popped it before the
+# response goes out. run_detail must agree, and must pop it only AFTER
+# can_move is computed: popping earlier would silently zero out an
+# org_admin's can_move on a colleague's grouped run.
+# ---------------------------------------------------------------------------
+
+def test_history_list_and_detail_agree_on_org_id(client, shared):
+    bs_run = _seed_run_for(client, shared["tok_b"], "B's own test")
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [bs_run], "group_id": shared["gid"]},
+        headers=_auth(shared["tok_b"]),
+    ).status_code == 200
+
+    rows = client.get("/api/history", headers=_auth(shared["tok_a"])).json()["runs"]
+    row = next(r for r in rows if r["run_id"] == bs_run)
+    assert "org_id" not in row
+    assert row["can_move"] is True  # org_admin over a colleague's grouped run
+
+    detail = client.get(f"/api/history/{bs_run}",
+                        headers=_auth(shared["tok_a"])).json()
+    assert "org_id" not in detail
+    assert detail["can_move"] is True

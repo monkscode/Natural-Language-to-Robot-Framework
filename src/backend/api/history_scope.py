@@ -19,7 +19,7 @@ claim alone would hand a token carrying org_id null the (user_id=None,
 org_id=None) scope, which the registry reads as every user in every org.
 
 is_validated_admin re-reads the users table on every call, so the flag is
-    computed once here and carried on the result: all three call sites need the
+    computed once here and carried on the result: all four call sites need the
     scope and the flag together, and this keeps that at one DB round-trip.
 
 is_org_admin rides along for the same reason. It is NOT derivable from the
@@ -28,7 +28,8 @@ and /api/history needs it per row to answer "may this caller file this run",
 a narrower question than "may they see it" ever since a folder became what
 publishes a run.
 
-Referenced by: api/history_endpoints.py, api/groups_endpoints.py.
+Referenced by: api/history_endpoints.py, api/groups_endpoints.py,
+api/endpoints.py.
 Depends on: auth/jwt_utils.py (is_validated_admin).
 """
 

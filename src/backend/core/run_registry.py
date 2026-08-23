@@ -1115,7 +1115,7 @@ class RunRegistry:
                     f"FROM test_runs t "
                     f"{join}"
                     f"{where} "
-                    f"ORDER BY t.created_at DESC LIMIT %s OFFSET %s",
+                    f"ORDER BY t.created_at DESC, t.run_id LIMIT %s OFFSET %s",
                     params + [limit, offset],
                 ).fetchall()
             out = []

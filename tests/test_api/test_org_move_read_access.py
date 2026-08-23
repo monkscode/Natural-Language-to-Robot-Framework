@@ -105,10 +105,12 @@ def moved_run(client):
 
 
 # ---------------------------------------------------------------------------
-# Required test 1 — the moved owner keeps the READ (detail + report) on a run
-# they own in the org they just left, and LOSES the two actions. Covers all
-# four consumers: history_endpoints.py and jwt_utils.py on caller_can_read,
-# endpoints.py x2 on caller_can_act.
+# Required test 1 — the moved owner LOSES the READ (detail + report) AND the
+# two actions on a run they own in the org they just left. All four consumers
+# — history_endpoints.py and jwt_utils.py on the detail/report reads,
+# endpoints.py x2 on re-run/feedback — route through the single
+# caller_can_access predicate (auth/ownership.py); there is no read/act split
+# any more.
 # ---------------------------------------------------------------------------
 
 def test_moved_owner_cannot_read_own_old_org_run_detail(client, moved_run):
@@ -314,7 +316,7 @@ def test_unattributed_run_still_platform_admin_only(client):
 # ---------------------------------------------------------------------------
 # Required test 4 — the moved owner's old-org run does not appear in the new
 # org's history LIST. List scoping is a SQL org_id filter, not
-# caller_can_read, so the owner rule cannot widen it — this is the decision.
+# caller_can_access, so the owner rule cannot widen it — this is the decision.
 # ---------------------------------------------------------------------------
 
 def test_moved_owner_old_run_absent_from_new_org_history_list(client, moved_run):

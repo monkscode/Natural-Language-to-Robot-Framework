@@ -8,8 +8,10 @@
  * group takes it back to its author alone. The copy says so, because the
  * consequence is invisible otherwise.
  *
- * The menu is only rendered for rows the caller may actually file — see
- * can_move on the history row — so nothing here can produce a 404.
+ * The row and drawer instances are only rendered when can_move on the history
+ * row says so, but the bulk-select toolbar instance renders for any signed-in
+ * user regardless of can_move — a folder deleted out from under the selection
+ * 404s there, and the page already handles that path via setMoveError.
  */
 import { useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
