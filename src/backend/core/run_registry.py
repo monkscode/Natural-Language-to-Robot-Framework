@@ -289,11 +289,19 @@ _SCHEMA_DDL = (
 # predicate has to agree with auth/ownership.py exactly or the list would
 # offer rows whose drawer and report then answer 403.
 #
-# It sits alongside a `t.org_id = %s` clause at every call site, so "in a
-# folder" always means "in a folder of the org this row belongs to".
+# "In a folder" is g.group_id — the folder _group_join RESOLVED for this
+# caller — never the raw t.group_id column, and that is where the whole org
+# term of the second half lives. The join binds the caller's own org, so a
+# folder belonging to any other org resolves to NULL and publishes nothing
+# (ownership.py rule 3 wants the caller in the folder's org), and a caller
+# with an identity but no org resolves no folder at all, which collapses this
+# to the bare owner check rule 4 asks for. Reading t.group_id here carried no
+# org term whatsoever, and the `t.org_id = %s` clause the call sites add is
+# not a substitute: it is absent for exactly the org-less caller, and it
+# constrains the ROW's org rather than the FOLDER's.
 _VISIBLE_RUN_SQL = (
     "(t.user_id = %s"
-    " OR (t.group_id IS NOT NULL AND t.user_id IS NOT NULL))"
+    " OR (g.group_id IS NOT NULL AND t.user_id IS NOT NULL))"
 )
 
 # The same fail-closed rule for the ONE caller _VISIBLE_RUN_SQL does not
@@ -622,9 +630,17 @@ class RunRegistry:
 
         The run scope goes in the JOIN condition, not the WHERE clause: in
         the WHERE it would turn the LEFT JOIN into an inner one and drop
-        every folder that holds no runs."""
+        every folder that holds no runs.
+
+        A concrete run scope with NO folder scope is not a caller shape and
+        fails closed. groups_endpoints already refuses to call with it, but a
+        guard at one call site and a fail-closed default are not the same
+        protection: without this, that pair emitted no WHERE at all and
+        listed every org's folders."""
         if run_org_id is None:
             run_org_id = folder_org_id
+        elif folder_org_id is None:
+            return []
         join, join_params = "", []
         if run_org_id is not None:
             join = " AND t.org_id = %s"
@@ -814,26 +830,28 @@ class RunRegistry:
         total of list_runs(group="ungrouped") for that caller.
 
         Ungrouped is g.group_id IS NULL — in no folder the caller can see —
-        rather than t.group_id IS NULL. The two coincide today, because a run
-        and its folder are always in the same org (assign_runs enforces it,
-        and so does _fileable_group_id), so any run in the caller's org that
-        carries a group_id resolves through the join. Keeping the JOIN form
-        means a row that somehow pointed at a folder outside the org would
-        read as Ungrouped rather than disappearing from every filter.
+        and so is the published half of _VISIBLE_RUN_SQL, both off the same
+        join. That is what makes the two provably one set rather than two
+        that happen to agree. A row pointing at a folder outside the org is
+        in no folder this caller can see, so it is not published to them
+        either: it reads as Ungrouped for its OWNER, and is simply absent for
+        everyone else, instead of being visible org-wide while displaying as
+        Ungrouped.
 
         folder_org_id is the caller's OWN org and scopes the folder join
         alone, which org_id cannot do here: a platform admin's org_id is None
         because their runs span every org, and reusing that for the join
         handed them every org's folders. It defaults to org_id."""
-        join, params = self._group_join(folder_org_id or org_id)
+        join, params = self._group_join(
+            folder_org_id or org_id, identified=user_id is not None)
         clauses = ["g.group_id IS NULL"]
         if user_id is not None:
             # The shared-run predicate, written exactly as list_runs writes
             # it. Inside this count its second half is always false —
-            # g.group_id IS NULL and t.group_id IS NOT NULL cannot both hold
-            # for a run in the caller's org — so it collapses to "my own
-            # work", which is what Ungrouped means. Sharing one constant with
-            # list_runs is what keeps the chip and the table one set.
+            # g.group_id IS NULL and g.group_id IS NOT NULL cannot both hold
+            # — so it collapses to "my own work", which is what Ungrouped
+            # means. Sharing one constant with list_runs is what keeps the
+            # chip and the table one set.
             clauses.append(_VISIBLE_RUN_SQL)
             params = params + [user_id]
         elif not include_unowned:
@@ -913,25 +931,41 @@ class RunRegistry:
             return True
 
     @staticmethod
-    def _group_join(org_id: Optional[str]) -> Tuple[str, list]:
+    def _group_join(
+        org_id: Optional[str], *, identified: bool = False
+    ) -> Tuple[str, list]:
         """(SQL, params) for the ONE folder join every read derives its
         folder answers from: a row's folder tag is g.name, its folder id is
         g.group_id, and "in no folder I can see" is g.group_id IS NULL.
+        _VISIBLE_RUN_SQL reads "published to me" off this same alias, so this
+        is also the only place the published half of visibility is expressed.
 
-        Two forms, and both matter. org_id None is the unscoped caller — the
-        token-less dev path with AUTH_ENFORCED off — for whom the join
-        carries no filter: binding a NULL org would make g.org_id = NULL
-        evaluate to NULL for every row, hide every folder name and collapse
-        the whole page into Ungrouped. Otherwise the caller's own org.
+        Three forms. With an org it is that org's folders, which is the
+        ordinary caller. Without one the answer depends on whether there is a
+        CALLER at all, and that is what `identified` says:
+
+          * identified=False, org None — the token-less dev path with
+            AUTH_ENFORCED off, which ownership.py rule 1 exempts from
+            everything. No filter: binding a NULL org would make
+            g.org_id = NULL evaluate to NULL for every row, hide every folder
+            name and collapse the whole page into Ungrouped.
+          * identified=True, org None — a caller who has an identity but no
+            org (rule 4). They own no org, so no folder is theirs to resolve
+            and nothing is published to them; ON FALSE says exactly that,
+            leaving the visibility predicate as the bare owner check rule 4
+            requires and keeping foreign folder names out of their rows. The
+            unfiltered form would have handed them every org's folders.
 
         No per-user term any more. Every folder in an org is visible to every
         member of it, so the caller's identity does not enter this join —
-        which is why it takes one argument where it used to take two.
+        `identified` is about whether there is a caller, not about who.
 
         The returned params bind BEFORE any WHERE-clause params, because
         these placeholders sit earlier in the SQL text and psycopg binds %s
         strictly by position."""
         if org_id is None:
+            if identified:
+                return "LEFT JOIN run_groups g ON FALSE", []
             return "LEFT JOIN run_groups g ON g.group_id = t.group_id", []
         return (
             "LEFT JOIN run_groups g ON g.group_id = t.group_id"
@@ -979,7 +1013,8 @@ class RunRegistry:
         (and the token-less dev caller) may read those, so only they may list
         them — auth/ownership fails them closed for everyone else, and a list
         that offers a row the drawer then refuses is a list that lies."""
-        join, join_params = self._group_join(folder_org_id or org_id)
+        join, join_params = self._group_join(
+            folder_org_id or org_id, identified=user_id is not None)
         clauses: list = []
         params: list = []
         if user_id is not None:
@@ -1050,16 +1085,21 @@ class RunRegistry:
         as 'not yours'. Read it by ATTRIBUTE, never by unpacking.
 
         group_id joined the tuple when a folder became what publishes a run:
-        the /reports gate has to know whether the org published this one, and
-        it reads t.group_id straight off the row rather than through
-        _group_join. Those agree, because a run and its folder are always in
-        the same org — assign_runs and _fileable_group_id both enforce it —
-        so the gate still pairs it with an org test of its own."""
+        the /reports gate has to know whether the org published this one.
+        It is the folder resolved against the RUN's OWN org, not the raw
+        column — a run pointing at some other org's folder is published to
+        nobody, and reporting the raw id let ownership.py rule 3 fire on it
+        for every member of the run's org. This method takes no caller, so
+        the caller half of rule 3 stays where it is (org_id must equal the
+        caller's); anchoring to t.org_id here makes the pair mean exactly
+        what list_runs' _group_join means for the same caller."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT user_id, org_id, group_id FROM test_runs "
-                    "WHERE run_id = %s",
+                    "SELECT t.user_id, t.org_id, g.group_id FROM test_runs t "
+                    "LEFT JOIN run_groups g ON g.group_id = t.group_id "
+                    "                      AND g.org_id = t.org_id "
+                    "WHERE t.run_id = %s",
                     (run_id,),
                 ).fetchone()
             return (RunOwnership(row["user_id"], row["org_id"], row["group_id"])

@@ -321,15 +321,17 @@ class TestReadPathVisibility:
                               AND g.org_id = <caller org>
     so a row's folder tag is g.name, its folder id is g.group_id (never
     t.group_id), and "Ungrouped" means "in no folder I can see" rather than
-    "t.group_id IS NULL". A caller with no org scope (the token-less path with
-    AUTH_ENFORCED off) gets the join UNFILTERED: binding a NULL org would
-    evaluate the condition to NULL for every row and collapse the whole page
-    into Ungrouped.
+    "t.group_id IS NULL". The TOKEN-LESS path (AUTH_ENFORCED off) gets the
+    join UNFILTERED: binding a NULL org would evaluate the condition to NULL
+    for every row and collapse the whole page into Ungrouped. An identified
+    caller who simply has no org is the other no-org case and resolves NO
+    folder — they own no org, so nothing is theirs to see.
 
     There is no per-user term in the join any more — a folder belongs to the
     org, so every member sees every folder in it. WHICH RUNS a caller sees is
-    a separate predicate (_VISIBLE_RUN_SQL): their own, plus anything the org
-    published into a folder.
+    a separate predicate (_VISIBLE_RUN_SQL), but it reads its published half
+    off this same join: their own work, plus anything filed into a folder of
+    THEIR org.
 
     The org trap: a platform admin's FILTER org_id is None (their runs span
     every org) while their folder org is not, so the join always binds
@@ -410,6 +412,50 @@ class TestReadPathVisibility:
                                      folder_org_id=self.ORG, group="ungrouped")
         assert rid in [r["run_id"] for r in ungrouped]
 
+    def test_a_foreign_folder_does_not_publish_a_run_to_a_peer(self, reg):
+        """The other seat on the row above, which asserts only as the OWNER —
+        for whom the predicate's first half answers no matter what its second
+        half does. A folder outside the org cannot publish anything TO the
+        org, so a peer must not reach the run at all: not in their table, not
+        under Ungrouped, and not in the chip that counts it. Testing the raw
+        t.group_id here handed a colleague's unfiled work — log.html and
+        whatever credentials its author typed — to every member."""
+        foreign = reg.create_group("org-elsewhere", self.ADMIN, "Theirs")["group_id"]
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, self.ORG)
+        with reg._pool.connection() as conn:
+            conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                         (foreign, rid))
+
+        peer = "u-peer"
+        rows, total = reg.list_runs(user_id=peer, org_id=self.ORG,
+                                    folder_org_id=self.ORG)
+        assert [r["run_id"] for r in rows] == [] and total == 0
+
+        ungrouped, u_total = reg.list_runs(user_id=peer, org_id=self.ORG,
+                                           folder_org_id=self.ORG,
+                                           group="ungrouped")
+        assert [r["run_id"] for r in ungrouped] == []
+        assert reg.count_ungrouped(
+            peer, self.ORG, folder_org_id=self.ORG) == u_total == 0
+
+    def test_a_caller_with_no_org_sees_only_their_own_runs(self, reg):
+        """ownership.caller_can_access rule 4: an identity carrying no org_id
+        claim falls back to the bare owner check. With no org there is no org
+        anything could have been published TO, so the predicate's second half
+        must vanish for them — and the folder join must not hand them a
+        foreign folder's name either."""
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        theirs, mine = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, theirs, self.ADMIN, self.ORG)
+        self._seed(reg, mine, "u-nomad", None)
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [theirs], gid) is True
+
+        rows, total = reg.list_runs(user_id="u-nomad", org_id=None,
+                                    folder_org_id=None)
+        assert [r["run_id"] for r in rows] == [mine] and total == 1
+        assert rows[0]["group_id"] is None and rows[0]["group_name"] is None
+
     def test_count_ungrouped_agrees_with_the_ungrouped_filter(self, reg):
         """The chip and the filter must always describe ONE set. Ungrouped
         means work in progress, so for a member it is their OWN unfiled runs:
@@ -439,6 +485,47 @@ class TestReadPathVisibility:
         n = reg.count_ungrouped(None, self.ORG, folder_org_id=self.ORG)
         assert sorted(r["run_id"] for r in rows) == sorted([a1, m1])
         assert n == total == 2
+
+    def test_the_chip_equals_the_filter_for_every_caller_shape(self, reg):
+        """The chip and the Ungrouped filter share one predicate constant so
+        they cannot drift; this pins that for the caller shapes the two tests
+        above do not cover, against a board that includes a run pointing at a
+        FOREIGN folder — the row where the two used to agree on the wrong
+        number for a peer.
+
+        Shapes, in order: a plain member of the org; the org_admin (no
+        per-user narrowing); a platform admin (runs span every org, folders
+        do not); the token-less dev caller (no scope at all); and an identity
+        with no org (rule 4, own work only)."""
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        foreign = reg.create_group("org-elsewhere", self.ADMIN, "Theirs")["group_id"]
+        filed, peer_open, stray, nomad = (str(uuid.uuid4()) for _ in range(4))
+        self._seed(reg, filed, self.ADMIN, self.ORG)
+        self._seed(reg, peer_open, self.MEMBER, self.ORG)
+        self._seed(reg, stray, self.ADMIN, self.ORG)
+        self._seed(reg, nomad, "u-nomad", None)
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [filed], gid) is True
+        with reg._pool.connection() as conn:
+            conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                         (foreign, stray))
+
+        shapes = [
+            # (label, user_id, org_id, folder_org_id, include_unowned, expected)
+            ("member", self.MEMBER, self.ORG, self.ORG, False, [peer_open]),
+            ("org_admin", None, self.ORG, self.ORG, False, [peer_open, stray]),
+            ("platform_admin", None, None, self.ORG, True,
+             [peer_open, stray, nomad]),
+            ("dev_caller", None, None, None, True, [peer_open, nomad]),
+            ("no_org", "u-nomad", None, None, False, [nomad]),
+        ]
+        for label, uid, org, folder_org, unowned, expected in shapes:
+            rows, total = reg.list_runs(
+                user_id=uid, org_id=org, folder_org_id=folder_org,
+                group="ungrouped", include_unowned=unowned)
+            n = reg.count_ungrouped(uid, org, folder_org_id=folder_org,
+                                    include_unowned=unowned)
+            assert sorted(r["run_id"] for r in rows) == sorted(expected), label
+            assert n == total == len(expected), label
 
     def test_folder_run_count_agrees_with_the_folder_filter(self, reg):
         """A folder's contents are the ORG's, so the chip and the filtered
@@ -494,7 +581,11 @@ class TestReadPathVisibility:
 class TestGroupAssignmentAndFilter:
     """assign_runs atomicity + the group filter / group_name join in
     list_runs and get_run. Reuses TestGroupRegistryCrud's isolated-schema
-    pattern via the same fixtures."""
+    pattern via the same fixtures.
+
+    The reads pass org_id, as every real call site does (history_scope always
+    supplies the caller's own org): an identity with no org resolves no
+    folder at all, so a folder filter from one narrows to nothing."""
 
     # Same isolated registry as TestGroupRegistryCrud (class-scoped copy —
     # tests may run per-class, so each class owns its schema lifecycle).
@@ -542,11 +633,11 @@ class TestGroupAssignmentAndFilter:
 
         assert reg.assign_runs(ORG_A, "u1", False, [r1, r2], gid) is True
 
-        rows, total = reg.list_runs(user_id="u1", group=gid)
+        rows, total = reg.list_runs(user_id="u1", org_id=ORG_A, group=gid)
         assert total == 2
         assert all(r["group_id"] == gid and r["group_name"] == "Checkout" for r in rows)
         assert reg.list_groups(ORG_A)[0]["run_count"] == 2
-        assert reg.count_ungrouped("u1") == 0
+        assert reg.count_ungrouped("u1", ORG_A) == 0
 
     def test_unassign_with_none_and_ungrouped_filter(self, reg):
         r1 = str(uuid.uuid4())
@@ -555,7 +646,7 @@ class TestGroupAssignmentAndFilter:
         reg.assign_runs(ORG_A, "u1", False, [r1], gid)
 
         assert reg.assign_runs(ORG_A, "u1", False, [r1], None) is True
-        rows, total = reg.list_runs(user_id="u1", group="ungrouped")
+        rows, total = reg.list_runs(user_id="u1", org_id=ORG_A, group="ungrouped")
         assert total == 1 and rows[0]["run_id"] == r1 and rows[0]["group_id"] is None
 
     def test_assign_foreign_run_rejected_atomically(self, reg):
@@ -566,7 +657,7 @@ class TestGroupAssignmentAndFilter:
 
         assert reg.assign_runs(ORG_A, "u1", False, [mine, theirs], gid) is False
         # Atomic: my run was NOT grouped either.
-        _, total = reg.list_runs(user_id="u1", group=gid)
+        _, total = reg.list_runs(user_id="u1", org_id=ORG_A, group=gid)
         assert total == 0
 
     def test_assign_into_foreign_group_rejected(self, reg):
@@ -575,7 +666,7 @@ class TestGroupAssignmentAndFilter:
         foreign_gid = reg.create_group(ORG_B, "u2", "Theirs")["group_id"]
 
         assert reg.assign_runs(ORG_A, "u1", False, [mine], foreign_gid) is False
-        _, total = reg.list_runs(user_id="u1", group="ungrouped")
+        _, total = reg.list_runs(user_id="u1", org_id=ORG_A, group="ungrouped")
         assert total == 1
 
     def test_group_filter_combines_with_status(self, reg):
@@ -585,7 +676,8 @@ class TestGroupAssignmentAndFilter:
         gid = reg.create_group(ORG_A, "u1", "G")["group_id"]
         reg.assign_runs(ORG_A, "u1", False, [r1, r2], gid)
 
-        rows, total = reg.list_runs(user_id="u1", group=gid, status="failed")
+        rows, total = reg.list_runs(user_id="u1", org_id=ORG_A, group=gid,
+                                    status="failed")
         assert total == 1 and rows[0]["run_id"] == r2
 
     def test_delete_group_ungroups_members(self, reg):

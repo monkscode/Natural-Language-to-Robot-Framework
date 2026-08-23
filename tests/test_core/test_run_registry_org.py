@@ -251,3 +251,49 @@ def test_backfill_attributes_org_member_rows_too(registry):
     updated = registry.backfill_org_ids()
     assert updated >= 1
     assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_get_run_owner_does_not_publish_a_foreign_orgs_folder(registry):
+    """The /reports gate reads publication straight off this row and pairs it
+    with an org test of the CALLER's — so the folder half has to be anchored
+    too. A run pointing at a folder outside its own org is not published to
+    anybody; reading the raw column made it published to the run's whole org,
+    which is how a peer reached an unfiled colleague's log.html."""
+    users, orgs = UserRepository(), OrgRepository()
+    user = users.create_user(f"fo-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
+    foreign = registry.create_group(
+        f"org-{uuid.uuid4().hex[:8]}", "u-outsider", "Theirs")["group_id"]
+    rid = _run_id()
+    registry.record_start(
+        rid,
+        {"user_id": str(user["id"]), "email": user["email"], "org_id": org_id},
+        "do a thing", "generated",
+    )
+    with registry._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (foreign, rid))
+
+    own = registry.get_run_owner(rid)
+    assert own.user_id == str(user["id"]) and own.org_id == org_id
+    assert own.group_id is None, (
+        "a folder outside the run's org reported the run as published")
+
+    # A folder in the run's OWN org still publishes it — the other half of
+    # the gate, which must not be narrowed away.
+    mine = registry.create_group(org_id, str(user["id"]), "Mine")["group_id"]
+    with registry._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (mine, rid))
+    assert registry.get_run_owner(rid).group_id == mine
+
+
+def test_list_groups_without_a_folder_scope_lists_nothing(registry):
+    """A concrete RUN scope with no FOLDER scope is not a shape any endpoint
+    produces, and it used to emit no WHERE at all — every org's folders, for
+    a caller whose own folder scope was None. groups_endpoints guards it; a
+    guard and a fail-closed default are not the same protection."""
+    org_id = f"org-{uuid.uuid4().hex[:8]}"
+    registry.create_group(org_id, "u-x", "Somewhere")
+    assert [g["name"] for g in registry.list_groups(org_id)] == ["Somewhere"]
+    assert registry.list_groups(None, run_org_id=org_id) == []

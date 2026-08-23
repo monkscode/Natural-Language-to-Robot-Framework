@@ -2,8 +2,13 @@
 
 The one rule every read derives from (owner decisions, 2026-08-23):
 
-    visible_to(caller) := t.user_id = caller OR (t.group_id IS NOT NULL
-                                                 AND t.org_id = caller_org)
+    visible_to(caller) := t.user_id = caller OR (t.user_id IS NOT NULL
+                                                 AND the run is in a folder
+                                                 of the CALLER'S org)
+
+The folder half is read off the org-scoped join (g.group_id), never the raw
+t.group_id column: a caller with no org resolves no folder and so gets their
+own work only, and a folder in another org publishes nothing here.
 
 So "Ungrouped" means work in progress, private to whoever is doing it, and
 moving a run into a folder is the act of publishing it to the team. There is
@@ -50,7 +55,7 @@ def client():
 
 
 from tests.test_api.test_groups import (  # noqa: E402
-    _auth, _register, _seed_run_for, _team_of_two,
+    _auth, _login, _register, _seed_run_for, _team_of_two,
 )
 
 
@@ -236,6 +241,121 @@ def test_rows_carry_whether_the_caller_may_move_them(client, shared):
     own = _seed_run_for(client, shared["tok_b"], "B own run")
     rows = client.get("/api/history", headers=_auth(shared["tok_b"])).json()["runs"]
     assert next(r for r in rows if r["run_id"] == own)["can_move"] is True
+
+
+# ---------------------------------------------------------------------------
+# The published half is anchored to the CALLER'S org, not to the raw column
+# ---------------------------------------------------------------------------
+
+def _orgless_token(client, email):
+    """A real, active user holding a token that carries no org claim.
+
+    ownership.caller_can_access rule 4 keeps this caller a live contract, and
+    the list has to agree with it. Login cannot mint one today
+    (_token_payload provisions an org first), so it is minted directly —
+    which is also what the harness requires, since test_api/conftest.py stubs
+    the admin repo without a token_version and a re-login would 401.
+    """
+    import jwt as _jwt
+    from src.backend.auth.jwt_utils import create_access_token
+    from src.backend.core.config import settings
+
+    tok = _register(client, email)
+    claims = _jwt.decode(tok, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+    orgless = create_access_token({
+        "id": claims["sub"], "email": claims["email"], "role": "user",
+        "display_name": "", "org_id": None, "org_role": None,
+        "status": "active", "token_version": claims.get("tv", 0),
+    })
+    return tok, orgless
+
+
+def test_a_token_with_no_org_sees_only_its_own_runs(client, shared):
+    """Three layers disagreed at once: the list handed an org-less identity
+    another org's grouped run — author email, query, folder name, report flag
+    — while the drawer answered 404 for the same id and /api/groups showed
+    nothing at all. The list was the one that was wrong: with no org there is
+    no org anything could have been published to."""
+    own_tok, orgless = _orgless_token(client, f"nomad-{uuid.uuid4().hex[:8]}@e.com")
+    own = _seed_run_for(client, own_tok, "the org-less caller's own run")
+
+    page = client.get("/api/history", headers=_auth(orgless)).json()
+    assert [r["run_id"] for r in page["runs"]] == [own]
+    assert shared["grouped"] not in [r["run_id"] for r in page["runs"]]
+    assert all(r["group_name"] is None for r in page["runs"]), (
+        "a foreign org's folder name reached a caller with no org")
+
+    # …and the two layers that were already right still say the same thing.
+    assert client.get(f"/api/history/{shared['grouped']}",
+                      headers=_auth(orgless)).status_code == 404
+    listed = client.get("/api/groups", headers=_auth(orgless)).json()
+    ungrouped = client.get("/api/history?group=ungrouped",
+                           headers=_auth(orgless)).json()
+    assert listed["groups"] == []
+    assert listed["ungrouped_count"] == ungrouped["total"] == 1
+
+
+@pytest.fixture
+def stray(client):
+    """A team of three where B's ungrouped run points at a folder in ANOTHER
+    org — the state the read must not treat as published.
+
+    Not reachable through the product today (record_start's _fileable_group_id
+    and assign_runs both bind the row's org, and nothing else writes either
+    column), so it is forced with SQL. The point is that the READ must not
+    depend on that invariant: A is org_admin, B owns the run, C is the peer.
+    """
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.auth.org_repository import OrgRepository
+    from src.backend.core.run_registry import get_run_registry
+
+    tok_a, tok_b, org_id = _team_of_two(client)
+    email_c = f"tc-{uuid.uuid4().hex[:8]}@e.com"
+    uid_c = decode_token(_register(client, email_c))["user_id"]
+    OrgRepository().add_member(org_id, uid_c)
+    tok_c = _login(client, email_c)
+
+    rid = _seed_run_for(client, tok_b, "B work in progress")
+    reg = get_run_registry()
+    foreign = reg.create_group(
+        f"org-{uuid.uuid4().hex[:8]}", "u-outsider", "Theirs")["group_id"]
+    with reg._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (foreign, rid))
+    return {"tok_a": tok_a, "tok_b": tok_b, "tok_c": tok_c, "run": rid}
+
+
+def test_a_foreign_folder_does_not_publish_a_run_to_the_org(client, stray):
+    """A folder outside the org cannot publish anything TO the org. The row
+    displayed as Ungrouped to a peer while the /reports gate let them open
+    it, so an unfiled run became org-readable — log.html and whatever
+    credentials its author typed included."""
+    from src.backend.auth.jwt_utils import authorize_report_access
+
+    peer = _auth(stray["tok_c"])
+    rows = client.get("/api/history", headers=peer).json()["runs"]
+    assert stray["run"] not in [r["run_id"] for r in rows]
+
+    ungrouped = client.get("/api/history?group=ungrouped", headers=peer).json()
+    assert stray["run"] not in [r["run_id"] for r in ungrouped["runs"]]
+    listed = client.get("/api/groups", headers=peer).json()
+    assert listed["ungrouped_count"] == ungrouped["total"]
+
+    denied = authorize_report_access(_Req(stray["tok_c"]), stray["run"])
+    assert denied is not None and denied.status_code == 403
+
+
+def test_the_owner_of_a_foreign_folder_run_still_reads_it(client, stray):
+    """The other half: it is still their own work. Closing the peer's route
+    must not close the author's — the first half of the predicate is what
+    answers for them, and it is untouched by the folder."""
+    from src.backend.auth.jwt_utils import authorize_report_access
+
+    rows = client.get("/api/history", headers=_auth(stray["tok_b"])).json()["runs"]
+    assert stray["run"] in [r["run_id"] for r in rows]
+    assert client.get(f"/api/history/{stray['run']}",
+                      headers=_auth(stray["tok_b"])).status_code == 200
+    assert authorize_report_access(_Req(stray["tok_b"]), stray["run"]) is None
 
 
 def test_a_platform_admins_foreign_rows_cannot_be_moved(client):
