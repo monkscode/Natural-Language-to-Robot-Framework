@@ -279,7 +279,19 @@ _SCHEMA_DDL = (
             FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
             ON DELETE SET NULL;
         EXCEPTION WHEN duplicate_object THEN
-          NULL;  -- another process's construction won the race; the constraint is there either way
+          -- Two different situations raise this identical SQLSTATE: another
+          -- concurrent RunRegistry() construction won the race (benign,
+          -- expected, nothing to do) and a constraint already sitting on
+          -- this name that is NOT our foreign key (contrived, but would
+          -- otherwise leave the schema silently missing the FK forever).
+          -- Tell them apart in the log rather than staying quiet either way.
+          IF EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND conname = 'fk_test_runs_group' AND contype = 'f') THEN
+            RAISE NOTICE 'test_runs: fk_test_runs_group already existed when this construction tried to add it -- lost the race to another concurrent RunRegistry() construction, nothing to do';
+          ELSE
+            RAISE NOTICE 'test_runs: a constraint named fk_test_runs_group already exists and is NOT the group_id foreign key (contype is not f) -- the FK was not added, investigate';
+          END IF;
         END;
       END IF;
     END $$;

@@ -244,7 +244,7 @@ def test_the_repair_logs_a_warning_naming_the_row_count(scratch, caplog):
     finally:
         reg2.close()
 
-def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
+def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch, caplog):
     """Two RunRegistry() constructions against the same fresh schema can both
     pass the fk_test_runs_group IF NOT EXISTS guard before either's ALTER
     commits — the guard is a TOCTOU, not a lock. Reproduced deterministically
@@ -254,11 +254,16 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
     T2 is confirmed blocked (polled via pg_locks, not slept for), T1 adds the
     constraint itself and commits, so T2's statement resumes straight into
     duplicate_object. Before the fix that propagates out of T2's execute();
-    after it, the nested BEGIN/EXCEPTION swallows it and T2 returns clean."""
+    after it, the nested BEGIN/EXCEPTION swallows it and T2 returns clean —
+    but should still say so: T2's connection gets the same notice handler
+    production wires onto `setup`, so the RAISE NOTICE the handler now emits
+    on this path is verified to actually reach the logger, not assumed."""
     import threading
     import time
 
-    from src.backend.core.run_registry import _SCHEMA_DDL, RunRegistry
+    from src.backend.core.run_registry import (
+        _SCHEMA_DDL, RunRegistry, _log_schema_notice,
+    )
 
     schema, dsn, admin = scratch
     reg = RunRegistry(dsn=dsn)          # builds everything, including the FK
@@ -275,6 +280,7 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
     t1.execute("LOCK TABLE test_runs IN ACCESS EXCLUSIVE MODE")
 
     t2 = psycopg.connect(dsn, autocommit=True)
+    t2.add_notice_handler(_log_schema_notice)
     t2_errors: list[Exception] = []
 
     def run_t2() -> None:
@@ -283,38 +289,39 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
         except Exception as exc:  # noqa: BLE001 - captured for the assertion below
             t2_errors.append(exc)
 
-    thread = threading.Thread(target=run_t2)
-    thread.start()
-    try:
-        deadline = time.monotonic() + 5
-        blocked = False
-        while time.monotonic() < deadline:
-            row = admin.execute(
-                "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a"
-                " ON l.pid = a.pid"
-                " WHERE a.query LIKE %s AND NOT l.granted",
-                ("%fk_test_runs_group%",),
-            ).fetchone()
-            if row is not None:
-                blocked = True
-                break
-            time.sleep(0.05)
-        assert blocked, "t2 never blocked on t1's lock — the race was never set up"
+    with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
+        thread = threading.Thread(target=run_t2)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            blocked = False
+            while time.monotonic() < deadline:
+                row = admin.execute(
+                    "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a"
+                    " ON l.pid = a.pid"
+                    " WHERE a.query LIKE %s AND NOT l.granted",
+                    ("%fk_test_runs_group%",),
+                ).fetchone()
+                if row is not None:
+                    blocked = True
+                    break
+                time.sleep(0.05)
+            assert blocked, "t2 never blocked on t1's lock — the race was never set up"
 
-        # T1 performs the real ADD CONSTRAINT — it already holds the lock —
-        # and commits, which is what lets t2's blocked statement resume and
-        # discover the constraint already there.
-        t1.execute(
-            "ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group"
-            " FOREIGN KEY (group_id) REFERENCES run_groups(group_id)"
-            " ON DELETE SET NULL"
-        )
-        t1.execute("COMMIT")
-        thread.join(timeout=5)
-        assert not thread.is_alive(), "t2 never woke up after t1 committed"
-    finally:
-        t1.close()
-        t2.close()
+            # T1 performs the real ADD CONSTRAINT — it already holds the lock —
+            # and commits, which is what lets t2's blocked statement resume and
+            # discover the constraint already there.
+            t1.execute(
+                "ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group"
+                " FOREIGN KEY (group_id) REFERENCES run_groups(group_id)"
+                " ON DELETE SET NULL"
+            )
+            t1.execute("COMMIT")
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "t2 never woke up after t1 committed"
+        finally:
+            t1.close()
+            t2.close()
 
     assert t2_errors == [], (
         f"the losing construction's DO block raised instead of swallowing "
@@ -323,6 +330,14 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch):
         "SELECT count(*) FROM pg_constraint WHERE conname = 'fk_test_runs_group'"
         " AND conrelid = 'test_runs'::regclass"
     ).fetchone()[0] == 1
+
+    # The handler now speaks instead of staying permanently silent: exactly
+    # one WARNING, naming this as the benign lost-the-race case rather than
+    # the "name taken by something that is not our FK" one.
+    warnings = [r.getMessage() for r in caplog.records
+                if r.name == "src.backend.core.run_registry" and r.levelno >= 30]
+    assert len(warnings) == 1, warnings
+    assert "lost the race" in warnings[0], warnings
 
 
 def _indexes(admin, schema):

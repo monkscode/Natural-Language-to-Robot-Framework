@@ -195,8 +195,12 @@ def list_history(
         "total": total,
         # "all" means scope.user_id is None — no per-user narrowing — which
         # an org_admin gets for their whole org, not just a platform admin.
-        # Only role='admin' (checked separately, via scope.is_admin) means
-        # "every run on the platform"; the client tells those two apart.
+        # Only a platform admin, or the token-less dev caller when
+        # AUTH_ENFORCED is off (see include_unowned above), sees every run
+        # on the platform — and neither is_admin nor caller_user_id is part
+        # of this response body, so the client tells the three cases apart
+        # from its own role === 'admin' check against /auth/me, not from
+        # anything returned here.
         "scope": "all" if scope.user_id is None else "own",
     }
 
