@@ -1145,8 +1145,17 @@ class RunRegistry:
 
         Unknown ids are simply absent from the mapping, which every caller
         must read as "not reachable" — the same answer /api/history/{id} gives
-        for a run that does not exist. A storage error returns {} and so fails
-        closed the same way.
+        for a run that does not exist.
+
+        A storage error returns {}, which is fail-closed and matches the rest
+        of this registry's reads. It is NOT symmetric with the detail
+        endpoint, and the difference is worth stating plainly: that endpoint
+        is a separate query on a separate pooled connection, so a transient
+        failure HERE can mark every re-run row on a page "no longer
+        available" while clicking one through would in fact have answered
+        200. Erring that way is the deliberate side — a badge that overstates
+        the loss is recoverable by reloading, whereas a live-looking link that
+        404s is the exact defect this field exists to remove.
 
         An empty run_ids costs NO query at all: most History pages carry no
         re-run row, and they must not pay for the ones that do (owner ruling

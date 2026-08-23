@@ -36,7 +36,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.backend.api.history_scope import history_scope
+from src.backend.api.history_scope import HistoryScope, history_scope
 from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import get_run_registry
@@ -50,7 +50,7 @@ router = APIRouter()
 _REPORT_STATUSES = ("passed", "failed")
 
 
-def _can_open(scope, user: dict | None, run: dict) -> bool:
+def _can_open(scope: HistoryScope, user: dict | None, run: dict) -> bool:
     """Would GET /api/history/{run['run_id']} answer 200 for this caller?
 
     ONE expression, two call sites: run_detail's own gate, and the batched
@@ -69,7 +69,9 @@ def _can_open(scope, user: dict | None, run: dict) -> bool:
     )
 
 
-def _reachable_originals(run_ids: set[str], scope, user: dict | None) -> set[str]:
+def _reachable_originals(
+    run_ids: set[str], scope: HistoryScope, user: dict | None,
+) -> set[str]:
     """Which of these original runs this caller could actually open.
 
     ONE query for the whole page, and none at all when the set is empty —

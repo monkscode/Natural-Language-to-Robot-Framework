@@ -71,27 +71,40 @@ def _sql_spy():
 
     The registry issues all of its reads through `conn.execute`, so this counts
     QUERIES, not method calls — a per-row implementation hidden behind one
-    helper call would still be caught."""
+    helper call would still be caught.
+
+    The bound PARAMETERS are kept alongside the text, because the statement
+    alone cannot answer every question asked of it: a batched-but-not-
+    deduplicated lookup issues exactly one statement too, and only its id
+    array tells the two apart."""
     import psycopg
 
-    seen: list[str] = []
+    seen: list[tuple[str, object]] = []
     real = psycopg.Connection.execute
 
     def _spy(self, query, params=None, **kw):
-        seen.append(str(query))
+        seen.append((str(query), params))
         return real(self, query, params, **kw)
 
     with patch.object(psycopg.Connection, "execute", _spy):
         yield seen
 
 
-def _original_lookups(seen: list[str]) -> list[str]:
-    """The statements the batched original-run lookup issues, and only those.
+def _original_lookups(seen: list[tuple[str, object]]) -> list[tuple[str, object]]:
+    """The (sql, params) of the batched original-run lookup, and only those.
 
     It is the one read that asks test_runs for a SET of ids; the list's own
     COUNT/SELECT carry no `= ANY(`, and assign_runs' UPDATE carries no
-    `FROM test_runs t`."""
-    return [s for s in seen if "FROM test_runs t" in s and "= ANY(" in s]
+    `FROM test_runs t`.
+
+    This matches on statement TEXT, so it is coupled to the wording of that
+    SQL: reword it (`FROM test_runs AS t`, `ANY (%s)`, `IN %s`) and the filter
+    silently matches nothing, which on its own would let the two `== []`
+    zero-query guards below pass vacuously. What keeps it honest is the pair
+    of `assert len(lookups) == 1` tests — they go red on exactly the same
+    reword, so the drift announces itself instead of hiding."""
+    return [(sql, params) for sql, params in seen
+            if "FROM test_runs t" in sql and "= ANY(" in sql]
 
 
 @pytest.fixture
@@ -180,9 +193,14 @@ def test_a_still_published_original_stays_reachable_for_a_peer(client):
 # ---------------------------------------------------------------------------
 
 def test_a_page_of_reruns_costs_exactly_one_extra_query(client, unfiled):
-    """Four re-run rows over two distinct originals — still ONE lookup. A
-    per-row implementation issues four, and a non-deduplicating one issues a
-    four-id query where two would do."""
+    """Four re-run rows over two distinct originals — still ONE lookup, and
+    that lookup asks for TWO ids.
+
+    Two separate claims needing two separate assertions. A per-row
+    implementation issues four statements, which the count catches. A batched
+    but non-deduplicating one issues exactly ONE statement and sails past the
+    count — only its bound id array shows it asking for four ids where two
+    would do, so that array is asserted too."""
     peer = _auth(unfiled["tok_b"])
     own = _seed_run_for(client, unfiled["tok_b"], "bob's own run")
     _seed_rerun_for(client, unfiled["tok_b"], own, "r1")
@@ -195,6 +213,12 @@ def test_a_page_of_reruns_costs_exactly_one_extra_query(client, unfiled):
     assert len([r for r in page["runs"] if r["rerun_of"]]) == 4
     lookups = _original_lookups(seen)
     assert len(lookups) == 1, f"expected one batched lookup, got {len(lookups)}"
+    # The id array is the LAST bound parameter (the folder join binds the org
+    # before it). Four re-run rows, two distinct originals.
+    asked_for = lookups[0][1][-1]
+    assert len(asked_for) == 2, (
+        f"the lookup asked for {len(asked_for)} ids where 2 distinct "
+        f"originals exist: {asked_for}")
 
 
 def test_a_page_with_no_reruns_costs_no_extra_query(client):
