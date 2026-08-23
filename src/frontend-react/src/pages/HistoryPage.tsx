@@ -672,6 +672,14 @@ export default function HistoryPage() {
                               <Badge className="gap-1 border-border bg-muted text-xs text-muted-foreground hover:bg-muted">
                                 <Repeat2 className="h-3 w-3" />
                                 <span>Re-run</span>
+                                {/* The title attribute is mouse-only. This
+                                    span is the same sentence as real text, so
+                                    a keyboard or screen-reader user is told
+                                    why the pill does nothing instead of
+                                    meeting a badge with no explanation. */}
+                                <span className="sr-only">
+                                  {` of ${row.rerun_of} — you no longer have access to the original run`}
+                                </span>
                               </Badge>
                             </span>
                           ))}
@@ -846,8 +854,16 @@ export default function HistoryPage() {
                       {d.rerun_of}
                     </span>
                   )}
+                  {/* The leading space in the string below is load-bearing.
+                      JSX strips the newline between two adjacent elements, so
+                      without it textContent, a copy-paste and every screen
+                      reader read "…b05c23967b51(no longer available to you)".
+                      The ml-2 that used to sit here moved 8px on screen and
+                      nothing anywhere else. */}
                   {!d.rerun_of_accessible && (
-                    <span className="ml-2 text-muted-foreground">(no longer available to you)</span>
+                    <span className="text-muted-foreground">
+                      {' (no longer available to you)'}
+                    </span>
                   )}
                 </span>
               )}
