@@ -12,7 +12,7 @@
  * identity or no org) surface as thrown ApiError with the server's
  * human-readable detail — dialogs display e.message directly.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 
 export interface RunGroup {
@@ -33,17 +33,28 @@ export function useGroups() {
   // "no groups exist" apart from "the list hasn't arrived yet" — without it
   // they would act on an empty list during the initial render.
   const [loaded, setLoaded] = useState(false)
+  // Guards against refresh() calls resolving out of order: a mutation's
+  // refresh can overlap the mount fetch or another mutation's refresh, and
+  // whichever RESPONSE lands last would otherwise win regardless of which
+  // REQUEST was issued last. Only the request holding the current sequence
+  // number when it settles is allowed to apply its result.
+  const refreshSeq = useRef(0)
 
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current
     try {
       const data = await api<{ groups: RunGroup[]; ungrouped_count: number }>('/api/groups')
-      setGroups(data.groups)
-      setUngroupedCount(data.ungrouped_count)
-      setError('')
+      if (seq === refreshSeq.current) {
+        setGroups(data.groups)
+        setUngroupedCount(data.ungrouped_count)
+        setError('')
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load groups')
+      if (seq === refreshSeq.current) {
+        setError(e instanceof Error ? e.message : 'Failed to load groups')
+      }
     } finally {
-      setLoaded(true)
+      if (seq === refreshSeq.current) setLoaded(true)
     }
   }, [])
 

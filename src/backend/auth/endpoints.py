@@ -251,8 +251,9 @@ async def me(user: dict = Depends(get_current_user)):
     # Read from the TOKEN's claims, not from a fresh org query: those claims
     # are what _require_org_scope enforces on, so mirroring them is the only
     # way the drawn control and the honoured request agree by construction.
-    # A stale claim is impossible — the checks above already 401 a token whose
-    # token_version is behind, and every role change bumps it.
+    # A stale claim can still exist (provisioning does not bump token_version),
+    # but it cannot make the UI and the server disagree — both read this same
+    # claim, so a stale flag only ever fails closed.
     public["can_manage_org_folders"] = _can_manage_org_folders(
         user.get("org_id"), user.get("org_role"))
     return public
