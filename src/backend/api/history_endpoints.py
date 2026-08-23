@@ -13,6 +13,12 @@ GET /api/history/{run_id} is the detail view (drawer): the same row plus the
 run's stored Robot code via resolve_robot_code(). Unknown ids and other
 users' runs both 404 so run existence cannot be probed by id.
 
+Both responses carry rerun_of_accessible beside rerun_of: whether THIS caller
+could open the original this row was cloned from, which is a live question —
+un-filing the original un-publishes it. Both are computed by _can_open, the
+same function that gates the detail endpoint, so the flag is that endpoint's
+answer rather than a guess about it.
+
 Authorization for the report FILES under /reports/{run_id}/ is enforced
 separately by authorize_report_access (auth/jwt_utils.py) using the same
 ownership rows, so a user cannot open another user's log.html by URL.
@@ -42,6 +48,52 @@ router = APIRouter()
 
 # Statuses with Robot artifacts on disk — only these runs have a log.html.
 _REPORT_STATUSES = ("passed", "failed")
+
+
+def _can_open(scope, user: dict | None, run: dict) -> bool:
+    """Would GET /api/history/{run['run_id']} answer 200 for this caller?
+
+    ONE expression, two call sites: run_detail's own gate, and the batched
+    reachability of the ORIGINAL a re-run row points at. They have to give the
+    same answer for the same run or the "Re-run of …" control lies in one
+    direction or the other, and the only way to guarantee that is for them to
+    be the same line of code.
+
+    `run` must carry group_id from the CALLER-scoped folder join (get_run /
+    get_run_owners_for_caller), never the raw test_runs.group_id column: "is
+    this published to me" is "did a folder of MY org resolve"."""
+    return caller_can_access(
+        user, run.get("user_id"), run.get("org_id"),
+        is_platform_admin=scope.is_admin,
+        is_grouped=run.get("group_id") is not None,
+    )
+
+
+def _reachable_originals(run_ids: set[str], scope, user: dict | None) -> set[str]:
+    """Which of these original runs this caller could actually open.
+
+    ONE query for the whole page, and none at all when the set is empty —
+    most pages carry no re-run row, and a per-row lookup was never on the
+    table (owner ruling R4). Ids that are not well-formed UUIDs are dropped
+    rather than looked up: run_detail answers 400 for those, which is not a
+    200, so they are unreachable by the same definition.
+    """
+    ids = set()
+    for rid in run_ids:
+        try:
+            ids.add(str(uuid.UUID(rid)))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    owners = get_run_registry().get_run_owners_for_caller(
+        sorted(ids), org_id=scope.folder_org_id,
+        identified=scope.caller_user_id is not None,
+    )
+    return {
+        rid for rid, own in owners.items()
+        if _can_open(scope, user,
+                     {"user_id": own.user_id, "org_id": own.org_id,
+                      "group_id": own.group_id})
+    }
 
 
 def resolve_robot_code(run: dict) -> str | None:
@@ -103,8 +155,18 @@ def list_history(
         # table carried rows whose drawer and report both answered 404.
         include_unowned=scope.is_admin or scope.caller_user_id is None,
     )
+    # One lookup for the whole page, before the row loop — never one per row.
+    reachable = _reachable_originals(
+        {r["rerun_of"] for r in runs if r.get("rerun_of")}, scope, user)
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
+        # `rerun_of` stays on the wire because it is TRUE — the row is a
+        # re-run — but whether the original is still reachable changes
+        # underneath it: a peer re-runs a published run, its owner unfiles it,
+        # and the link dies. The SPA draws a link only when this says so;
+        # without it the pill was a control that could only 404, and the
+        # drawer then read as "the original's code is missing".
+        r["rerun_of_accessible"] = r.get("rerun_of") in reachable
         # Whether THIS caller may file THIS run, computed here rather than
         # re-derived in the SPA. Seeing a run and being able to move it are
         # different questions now that a folder publishes a run: a peer reads
@@ -158,16 +220,17 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     # holds for a caller with NO org only because identified says so: without
     # it the join fell back to its unfiltered form and named a folder from
     # any org at all.
-    allowed = run is not None and caller_can_access(
-        user, run.get("user_id"), run.get("org_id"),
-        is_platform_admin=scope.is_admin,
-        is_grouped=run.get("group_id") is not None,
-    )
+    allowed = run is not None and _can_open(scope, user, run)
     if run is None or not allowed:
         raise HTTPException(status_code=404, detail="Run not found")
 
     run["robot_code"] = resolve_robot_code(run)
     run["has_report"] = run["status"] in _REPORT_STATUSES
+    # At most ONE extra lookup, and only for a row that IS a re-run — the
+    # drawer header offers the same link the row pill does, so it needs the
+    # same answer. Same helper, so the two cannot disagree.
+    run["rerun_of_accessible"] = run.get("rerun_of") in _reachable_originals(
+        {run["rerun_of"]} if run.get("rerun_of") else set(), scope, user)
     run["can_move"] = (
         scope.caller_user_id is None
         or run.get("user_id") == scope.caller_user_id

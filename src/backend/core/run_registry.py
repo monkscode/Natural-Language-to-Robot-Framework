@@ -1125,6 +1125,59 @@ class RunRegistry:
             logger.error(f"[RUN_REGISTRY] get_run_owner failed for {run_id}: {e}")
             return RunOwnership(None, None, None)
 
+    def get_run_owners_for_caller(
+        self,
+        run_ids: list[str],
+        org_id: str | None = None,
+        *,
+        identified: bool = False,
+    ) -> dict[str, RunOwnership]:
+        """{run_id: RunOwnership} for the runs that exist, in ONE query.
+
+        The three facts an access decision needs, for many runs at once, read
+        through the SAME _group_join every other caller-scoped read uses — so
+        the group_id reported here means "in a folder of THIS caller's org",
+        exactly as it does in get_run and list_runs. That is the whole point:
+        the History page has to answer "could this caller open run X" for the
+        originals its re-run rows point at, and re-expressing the published
+        rule inline is precisely how the two halves of it drifted apart
+        before. org_id and identified mean what they mean in get_run.
+
+        Unknown ids are simply absent from the mapping, which every caller
+        must read as "not reachable" — the same answer /api/history/{id} gives
+        for a run that does not exist. A storage error returns {} and so fails
+        closed the same way.
+
+        An empty run_ids costs NO query at all: most History pages carry no
+        re-run row, and they must not pay for the ones that do (owner ruling
+        R4). De-duplication belongs to the caller, which passes distinct ids;
+        ANY() would tolerate repeats, but the caller knows the page.
+
+        Deliberately NOT get_run_owner's batch form: that one anchors the
+        folder to the RUN's org because it has no caller, and this one anchors
+        it to the CALLER's. Two different questions that happen to select the
+        same three columns."""
+        if not run_ids:
+            return {}
+        join, params = self._group_join(org_id, identified=identified)
+        try:
+            with self._pool.connection() as conn:
+                rows = conn.execute(
+                    "SELECT t.run_id, t.user_id, t.org_id, g.group_id "
+                    "FROM test_runs t "
+                    f"{join} "
+                    "WHERE t.run_id = ANY(%s)",
+                    params + [list(run_ids)],
+                ).fetchall()
+            return {
+                r["run_id"]: RunOwnership(r["user_id"], r["org_id"], r["group_id"])
+                for r in rows
+            }
+        except Exception as e:
+            logger.error(
+                "[RUN_REGISTRY] get_run_owners_for_caller failed: %s", e)
+            return {}
+
     def backfill_org_ids(self) -> int:
         """Set org_id on rows that have a user_id but no org_id, from that
         user's org_members row. Idempotent; returns rows updated.
