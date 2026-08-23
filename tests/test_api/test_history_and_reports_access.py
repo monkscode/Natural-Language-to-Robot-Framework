@@ -222,7 +222,12 @@ class TestHistoryEndpoint:
         ids = {r["run_id"] for r in body["runs"]}
         assert ids == {"run-u1-a", "run-u1-b"}
         # Identity columns are not echoed back to non-admins.
-        assert all("user_email" not in r and "user_id" not in r for r in body["runs"])
+        # The internal user id stays admin-only; the EMAIL now ships to every
+        # caller. A folder is shared, so a member's table carries colleagues'
+        # runs, and an unattributed row would leave the org unable to say who
+        # wrote what (decision D8, 2026-08-23).
+        assert all("user_id" not in r for r in body["runs"])
+        assert all(r.get("user_email") for r in body["runs"])
         by_id = {r["run_id"]: r for r in body["runs"]}
         assert by_id["run-u1-a"]["has_report"] is True      # passed -> artifacts
         assert by_id["run-u1-b"]["has_report"] is False     # generated -> none
@@ -741,7 +746,8 @@ class TestRunDetailEndpoint:
         assert body["robot_code"] == "*** Code 1 ***"
         assert body["has_report"] is True
         # Identity columns are not echoed back to non-admins.
-        assert "user_id" not in body and "user_email" not in body
+        assert "user_id" not in body      # internal id stays admin-only
+        assert body.get("user_email")     # the author does not — see the list test
 
     def test_foreign_run_is_404_for_users(self, detail_seeded):
         client = _client(detail_seeded, _USER1)

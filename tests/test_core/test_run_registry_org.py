@@ -39,7 +39,13 @@ def test_record_start_persists_org_id(registry):
         "do a thing", "generated",
     )
     assert registry.get_run(rid)["org_id"] == org_id
-    assert registry.get_run_owner(rid) == (str(user["id"]), org_id)
+    # By FIELD NAME, not by position: get_run_owner returns a RunOwnership so
+    # that adding a field can never silently break a caller. Naming the fields
+    # here is what still catches a RENAME.
+    own = registry.get_run_owner(rid)
+    assert own.user_id == str(user["id"])
+    assert own.org_id == org_id
+    assert own.group_id is None
 
 
 def test_list_runs_preserves_unattributed_error_rows(registry):

@@ -2,7 +2,8 @@
 Run-history API — the History tab's data source.
 
 GET /api/history lists test_runs rows newest-first:
-- regular users get ONLY their own runs (scoped by the JWT's user_id);
+- regular users get their own runs PLUS every run their org has published
+  into a folder (moving a run into a folder is what shares it);
 - admins get every user's runs (the admin claim is re-validated against the
   users table — a stale token of a demoted admin falls back to own-runs);
 - with AUTH_ENFORCED off (local API-only debugging) token-less requests see
@@ -31,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.backend.api.history_scope import history_scope
 from src.backend.auth.jwt_utils import require_user
-from src.backend.auth.ownership import caller_can_read
+from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
 
@@ -94,20 +95,37 @@ def list_history(
     runs, total = get_run_registry().list_runs(
         user_id=scope.user_id, org_id=scope.org_id,
         limit=limit, offset=offset, status=status, q=q, group=group,
-        # The caller's IDENTITY, not the scoping user_id: an org_admin's
-        # scope user_id is None while their identity is not, and folder
-        # visibility turns on which private folders are theirs.
-        caller_user_id=scope.caller_user_id,
         # The FOLDER scope is the caller's own org even when their RUN scope
         # is every org — see history_scope.folder_org_id.
         folder_org_id=scope.folder_org_id,
+        # Only a platform admin (or the token-less dev caller) may READ a run
+        # no user owns, so only they may list one. Without this an org_admin's
+        # table carried rows whose drawer and report both answered 404.
+        include_unowned=scope.is_admin or scope.caller_user_id is None,
     )
     for r in runs:
         r["has_report"] = r["status"] in _REPORT_STATUSES
+        # Whether THIS caller may file THIS run, computed here rather than
+        # re-derived in the SPA. Seeing a run and being able to move it are
+        # different questions now that a folder publishes a run: a peer reads
+        # a colleague's published test but only its owner or an org_admin
+        # moves it, and a platform admin's table spans orgs whose folders
+        # they do not have. Without the flag the UI drew a Move control on
+        # every row, and on those two kinds it could only ever answer 404.
+        r["can_move"] = (
+            scope.caller_user_id is None                       # dev, no token
+            or r.get("user_id") == scope.caller_user_id        # own run
+            or (scope.is_org_admin and r.get("org_id") == scope.folder_org_id)
+        )
+        # org_id was selected only to answer can_move.
+        r.pop("org_id", None)
         if not scope.is_admin:
-            # A user's own rows don't need identity columns echoed back.
+            # The internal user id stays admin-only. The EMAIL does not: a
+            # folder is shared, so a row a colleague wrote reaches this
+            # caller, and an unattributed row would leave the org unable to
+            # say who wrote what — the accountability the whole model rests
+            # on (decision D8).
             r.pop("user_id", None)
-            r.pop("user_email", None)
     return {
         "runs": runs,
         "total": total,
@@ -128,26 +146,29 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid run id")
 
-    # Same folder scope as the list, from the same helper: a platform admin
-    # (or the token-less dev caller) is unscoped, everyone else sees their own
-    # org's folders and their own private ones. caller_user_id is the
-    # identity, never the scoping user_id.
+    # Same folder scope as the list, from the same helper: the token-less dev
+    # caller is unscoped, everyone else sees their own org's folders.
     scope = history_scope(user)
-    run = get_run_registry().get_run(
-        run_id,
-        org_id=scope.folder_org_id,
-        caller_user_id=scope.caller_user_id,
-    )
-    allowed = run is not None and caller_can_read(
+    run = get_run_registry().get_run(run_id, org_id=scope.folder_org_id)
+    # group_id comes from the org-scoped join, so it is non-NULL only when
+    # the folder belongs to THIS caller's org — which is exactly the fact the
+    # published-run rule needs, already established by the read itself.
+    allowed = run is not None and caller_can_access(
         user, run.get("user_id"), run.get("org_id"),
         is_platform_admin=scope.is_admin,
+        is_grouped=run.get("group_id") is not None,
     )
     if run is None or not allowed:
         raise HTTPException(status_code=404, detail="Run not found")
 
     run["robot_code"] = resolve_robot_code(run)
     run["has_report"] = run["status"] in _REPORT_STATUSES
+    run["can_move"] = (
+        scope.caller_user_id is None
+        or run.get("user_id") == scope.caller_user_id
+        or (scope.is_org_admin and run.get("org_id") == scope.folder_org_id)
+    )
     if not scope.is_admin:
+        # The email stays — see the list endpoint for why.
         run.pop("user_id", None)
-        run.pop("user_email", None)
     return run

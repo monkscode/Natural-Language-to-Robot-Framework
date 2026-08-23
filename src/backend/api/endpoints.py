@@ -20,7 +20,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import caller_can_act
+from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -91,19 +91,22 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     # flag, so the ownership gate below costs no extra DB round-trip.
     scope = history_scope(user)
     source = get_run_registry().get_run(
-        source_run_id, org_id=scope.folder_org_id,
-        caller_user_id=scope.caller_user_id
-    )
-    # caller_can_ACT, not _read: a re-run executes a container against the
-    # org's environment using the credentials embedded in the stored script,
-    # so it must end when the membership does. The owner-across-orgs read rule
-    # would otherwise let anyone who ever authored a run here keep firing
-    # tests at the customer's systems after they were removed — nothing in a
-    # token distinguishes an offboarding from an internal move. The author
-    # keeps the READ of this run either way.
-    allowed = source is not None and caller_can_act(
+        source_run_id, org_id=scope.folder_org_id)
+    # A re-run executes a container against the org's environment using the
+    # credentials embedded in the stored script, so it ends when the
+    # membership does — an ex-member cannot keep firing tests at a customer's
+    # systems. That is the ordinary org rule; there is no author-keeps-it
+    # exception any more.
+    #
+    # is_grouped opens it to the rest of the org (decision D5): a test the
+    # team published into a folder is there to be re-run by the team. The
+    # group_id read here comes from the org-scoped join above, so it is
+    # non-NULL only when the folder is one THIS caller's org owns — the same
+    # fact the ownership rule needs, already established by the read.
+    allowed = source is not None and caller_can_access(
         user, source.get("user_id"), source.get("org_id"),
-        is_platform_admin=scope.is_admin
+        is_platform_admin=scope.is_admin,
+        is_grouped=source.get("group_id") is not None,
     )
     if source is None or not allowed:
         # 404, not 403 — don't leak run existence across orgs. The read above
@@ -261,10 +264,16 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # owner_id=None/org_id=None and is refused by the same line with the same
     # status, so the two cases already answer identically and there is no
     # existence to leak.
+    #
+    # is_grouped is deliberately NOT passed (decision D7): D5 opened the
+    # RE-RUN of a published test to the whole org, not its learning record.
+    # Feedback rewrites the hints every future generation in the org sees,
+    # which is a different power from reading or repeating a colleague's
+    # test, and it stays with the run's owner and the org_admin.
     admin = await asyncio.to_thread(is_validated_admin, user)
     owner_id = run_row.get("user_id") if run_row else None
     org_id = run_row.get("org_id") if run_row else None
-    if not caller_can_act(user, owner_id, org_id, is_platform_admin=admin):
+    if not caller_can_access(user, owner_id, org_id, is_platform_admin=admin):
         raise HTTPException(
             status_code=403,
             detail="You cannot submit feedback for this run",

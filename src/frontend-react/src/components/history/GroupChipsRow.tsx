@@ -4,7 +4,7 @@
  * Deliberately fixed-width: the row never grows with the number of groups.
  * It carries at most three controls — Ungrouped, the groups control, and
  * "＋ New" — so creating twenty groups cannot push the page's toolbar down.
- * That matters more now that groups are org-shared and the list gets longer.
+ * That matters more now that a group is the org's and the list gets longer.
  *
  * The groups control is the whole taxonomy behind one button: it reads
  * "All Groups" while no group is filtered, and becomes the selected group's
@@ -14,7 +14,9 @@
  * icons that only appear beside an active chip.
  *
  * Management affordances are offered only where the caller may actually use
- * them (canManage / canCreate); the server refuses the rest regardless.
+ * them (canRename / canDelete / canCreate); the server refuses the rest
+ * regardless. Rename and delete are separate permissions: an org-admin alone
+ * may delete, because that un-shares every run the folder held.
  */
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -23,8 +25,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Folder, FolderOpen, Pencil, Plus, Trash2, X } from 'lucide-react'
-import type { GroupChanges, GroupVisibility, RunGroup } from './useGroups'
-import { PrivateLock, VisibilityField } from './GroupVisibility'
+import type { RunGroup } from './useGroups'
 // The filter type lives with the shared state it describes — the sidebar's
 // quick-access list writes the same value this row does.
 import type { GroupFilter } from './RunGroupsContext'
@@ -34,16 +35,16 @@ interface Props {
   ungroupedCount: number
   active: GroupFilter
   onSelect: (value: GroupFilter) => void
-  onCreate: (name: string, visibility: GroupVisibility) => Promise<unknown>
-  onUpdate: (groupId: string, changes: GroupChanges) => Promise<unknown>
+  onCreate: (name: string) => Promise<unknown>
+  onRename: (groupId: string, name: string) => Promise<unknown>
   onDelete: (groupId: string) => Promise<unknown>
-  /** May this caller rename/delete this group? (creator, or org-admin on
-   *  a shared group). A hint only — the server 404s either way. */
-  canManage: (group: RunGroup) => boolean
-  /** May this caller change WHO CAN SEE this group? Narrower than canManage:
-   *  only the creator, never an org-admin acting on someone else's group — a
-   *  hint only, the server 403s either way. */
-  canChangeVisibility: (group: RunGroup) => boolean
+  /** May this caller RENAME this group? (its creator, or an org-admin).
+   *  A hint only — the server 404s either way. */
+  canRename: (group: RunGroup) => boolean
+  /** May this caller DELETE it? Narrower than canRename: an org-admin only.
+   *  Deleting returns every run inside to Ungrouped, which un-shares them
+   *  from the whole org, so it is not the folder creator's call to make. */
+  canDelete: (group: RunGroup) => boolean
   /** False without an identity: the server refuses every mutation with 403,
    *  so offering the control would only produce a dead end. */
   canCreate: boolean
@@ -58,33 +59,29 @@ type Overlay =
   | { kind: 'delete'; group: RunGroup; from?: 'browse' }
   | null
 
-/** A private and a shared group may legitimately carry the SAME name, and the
- *  lock beside it is the only thing separating them — so an action's
- *  accessible name has to carry what the lock carries visually. */
-const actionLabel = (verb: string, group: RunGroup) =>
-  `${verb} ${group.name}${group.visibility === 'private' ? ' (private)' : ''}`
+/** Folder names are unique within the org, so the name alone identifies the
+ *  row an action belongs to. */
+const actionLabel = (verb: string, group: RunGroup) => `${verb} ${group.name}`
 
 export function GroupChipsRow({
   groups, ungroupedCount, active, onSelect,
-  onCreate, onUpdate, onDelete, canManage, canChangeVisibility, canCreate,
+  onCreate, onRename, onDelete, canRename, canDelete, canCreate,
 }: Props) {
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [name, setName] = useState('')
-  const [visibility, setVisibility] = useState<GroupVisibility>('org')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const returnFocusRef = useRef<HTMLElement | null>(null)
 
   const activeGroup = groups.find(g => g.group_id === active) ?? null
 
-  const open = (next: Overlay, initialName = '', initialVisibility: GroupVisibility = 'org') => {
+  const open = (next: Overlay, initialName = '') => {
     // These dialogs are controlled and render no <DialogTrigger>, so Radix has
     // nothing to restore focus to on close and it drops to <body>. Remember the
     // control that opened the chain — only at its START, so browse → edit keeps
     // the original opener rather than an Edit button that is about to unmount.
     if (!overlay) returnFocusRef.current = document.activeElement as HTMLElement | null
     setName(initialName)
-    setVisibility(initialVisibility)
     setError('')
     setBusy(false)
     setOverlay(next)
@@ -112,29 +109,22 @@ export function GroupChipsRow({
     opener.focus()
   }
 
-  /** Only what actually changed — an empty PATCH body is a 400. */
-  const pendingChanges = (group: RunGroup): GroupChanges => {
-    const changes: GroupChanges = {}
-    if (name.trim() && name.trim() !== group.name) changes.name = name.trim()
-    if (visibility !== group.visibility) changes.visibility = visibility
-    return changes
-  }
-
   const submit = async () => {
     if (!overlay) return
     setBusy(true)
     setError('')
     try {
-      if (overlay.kind === 'create') await onCreate(name.trim(), visibility)
+      if (overlay.kind === 'create') await onCreate(name.trim())
       else if (overlay.kind === 'edit') {
-        const changes = pendingChanges(overlay.group)
-        if (Object.keys(changes).length) await onUpdate(overlay.group.group_id, changes)
+        if (name.trim() !== overlay.group.name) {
+          await onRename(overlay.group.group_id, name.trim())
+        }
       } else if (overlay.kind === 'delete') await onDelete(overlay.group.group_id)
       dismiss()
     } catch (e) {
-      // Server refusals are actionable: a shared group still holding other
-      // members' runs cannot go private, and that 409 names the count. Show
-      // the server's own words and leave the dialog open so the user can act.
+      // Server refusals are actionable — a name the org already uses answers
+      // 409 naming it. Show the server's own words and leave the dialog open
+      // so the user can act on them.
       setError(e instanceof Error ? e.message : 'Something went wrong')
       setBusy(false)
     }
@@ -147,7 +137,7 @@ export function GroupChipsRow({
 
   const nameDialogOpen = overlay?.kind === 'create' || overlay?.kind === 'edit'
   const submitDisabled = busy || !name.trim() || (
-    overlay?.kind === 'edit' && Object.keys(pendingChanges(overlay.group)).length === 0
+    overlay?.kind === 'edit' && name.trim() === overlay.group.name
   )
 
   return (
@@ -177,7 +167,6 @@ export function GroupChipsRow({
             >
               <Folder className="h-3 w-3" />
               {activeGroup.name}
-              {activeGroup.visibility === 'private' && <PrivateLock name={activeGroup.name} />}
               <span className="text-muted-foreground">· {activeGroup.run_count}</span>
             </Button>
             <Button
@@ -227,8 +216,8 @@ export function GroupChipsRow({
           <DialogHeader>
             <DialogTitle>All Groups</DialogTitle>
             <DialogDescription>
-              Pick a group to filter the runs. A lock marks a private group,
-              visible only to whoever created it.
+              Pick a group to filter the runs. Everyone in your organization
+              sees the same groups and the tests inside them.
             </DialogDescription>
           </DialogHeader>
 
@@ -254,31 +243,29 @@ export function GroupChipsRow({
                 >
                   <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span className="truncate">{g.name}</span>
-                  {g.visibility === 'private' && (
-                    <PrivateLock name={g.name} className="h-3.5 w-3.5 text-muted-foreground" />
-                  )}
                   <span className="shrink-0 text-xs text-muted-foreground">
                     · {g.run_count} run{g.run_count === 1 ? '' : 's'}
                   </span>
                 </button>
-                {canManage(g) && (
-                  <>
-                    <Button
-                      variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                      title={canChangeVisibility(g) ? 'Edit group (name and who can see it)' : 'Edit group (name)'}
-                      aria-label={actionLabel('Edit', g)}
-                      onClick={() => open({ kind: 'edit', group: g, from: 'browse' }, g.name, g.visibility)}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                      title="Delete group (runs are kept)" aria-label={actionLabel('Delete', g)}
-                      onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </>
+                {canRename(g) && (
+                  <Button
+                    variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                    title="Rename group"
+                    aria-label={actionLabel('Rename', g)}
+                    onClick={() => open({ kind: 'edit', group: g, from: 'browse' }, g.name)}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {canDelete(g) && (
+                  <Button
+                    variant="ghost" size="icon" className="h-7 w-7 shrink-0"
+                    title="Delete group (runs are kept, but stop being shared)"
+                    aria-label={actionLabel('Delete', g)}
+                    onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 )}
               </div>
             ))}
@@ -298,18 +285,16 @@ export function GroupChipsRow({
         </DialogContent>
       </Dialog>
 
-      {/* Create / Edit share one form: a name plus, on create or an edit by
-          the folder's creator, who can see it — canChangeVisibility below
-          hides that field on an admin's edit of someone else's folder. PATCH
-          takes both in one call, so flipping visibility needs no second dialog. */}
+      {/* Create / Rename share one form — a name, and nothing else to decide:
+          a group is the org's, so there is no visibility to choose. */}
       <Dialog open={nameDialogOpen} onOpenChange={o => { if (!o) dismiss() }}>
         <DialogContent className="sm:max-w-sm" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
-            <DialogTitle>{overlay?.kind === 'edit' ? 'Edit group' : 'New group'}</DialogTitle>
+            <DialogTitle>{overlay?.kind === 'edit' ? 'Rename group' : 'New group'}</DialogTitle>
             <DialogDescription>
-              Groups keep test runs together. A shared group is visible to
-              everyone in the organization; a private one only to whoever
-              created it.
+              A group holds the tests your team has finished. Everyone in the
+              organization can see a group and the tests inside it, so moving
+              a test here is how you share it.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={e => { e.preventDefault(); void submit() }} className="flex flex-col gap-2">
@@ -320,26 +305,20 @@ export function GroupChipsRow({
               onChange={e => setName(e.target.value)}
               placeholder="e.g. Checkout flows"
             />
-            {(overlay?.kind !== 'edit' || canChangeVisibility(overlay.group)) && (
-              <VisibilityField
-                id="group-chips-visibility"
-                value={visibility}
-                onChange={setVisibility}
-                disabled={busy}
-              />
-            )}
             {error && <p className="text-xs text-destructive">{error}</p>}
             <DialogFooter className="mt-2">
               <Button type="button" size="sm" variant="outline" onClick={dismiss}>Cancel</Button>
               <Button type="submit" size="sm" disabled={submitDisabled}>
-                {overlay?.kind === 'edit' ? 'Save' : 'Create'}
+                {overlay?.kind === 'edit' ? 'Rename' : 'Create'}
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* Delete confirmation — runs survive, they just return to Ungrouped. */}
+      {/* Delete confirmation. Runs survive, but they return to Ungrouped —
+          which now means only their own author sees them again, so the copy
+          has to say that and not just "the runs are safe". */}
       <Dialog open={overlay?.kind === 'delete'} onOpenChange={o => { if (!o) dismiss() }}>
         <DialogContent className="sm:max-w-sm" onCloseAutoFocus={restoreFocus}>
           <DialogHeader>
@@ -347,7 +326,9 @@ export function GroupChipsRow({
               Delete “{overlay?.kind === 'delete' ? overlay.group.name : ''}”?
             </DialogTitle>
             <DialogDescription>
-              Runs in this group are NOT deleted — they return to Ungrouped.
+              The runs are NOT deleted — they return to Ungrouped, where only
+              the person who ran each one can see it. Move them into another
+              group to share them again.
             </DialogDescription>
           </DialogHeader>
           {error && <p className="text-xs text-destructive">{error}</p>}

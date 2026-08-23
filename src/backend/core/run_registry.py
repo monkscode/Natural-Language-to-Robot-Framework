@@ -27,7 +27,7 @@ Depends on: core/config.py (DATABASE_URL).
 import logging
 import uuid
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import psycopg
 from psycopg.rows import dict_row
@@ -65,16 +65,17 @@ _SCHEMA_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_test_runs_created"
     " ON test_runs (created_at DESC)",
     # --- run groups (History page folders) ---
-    # Keyed to the ORG, with a per-folder visibility flag. No DROP of this
-    # TABLE may ever appear here: this tuple runs on EVERY RunRegistry()
-    # construction (see __init__), so one would delete every folder on each
-    # process start and each test fixture, and would fail outright once T4's
-    # foreign key references the table. There are exactly TWO exceptions,
-    # both below, and neither can destroy anything a user made: the
-    # pre-release per-user TABLE (0 rows, never shipped) is dropped by the
-    # guarded block below, because CREATE TABLE IF NOT EXISTS would otherwise
-    # silently keep the old column set; and the superseded per-user private
-    # INDEX is dropped by name, which carries no rows at all.
+    # Keyed to the ORG, and to nothing finer: a folder is the org's, and the
+    # runs inside it are the org's. No DROP of this TABLE may ever appear
+    # here: this tuple runs on EVERY RunRegistry() construction (see
+    # __init__), so one would delete every folder on each process start and
+    # each test fixture, and would fail outright once the foreign key below
+    # references the table. There are exactly TWO exceptions, both below, and
+    # neither can destroy anything a user made: the pre-release per-user
+    # TABLE (0 rows, never shipped) is dropped by the guarded block below,
+    # because CREATE TABLE IF NOT EXISTS would otherwise silently keep the
+    # old column set; and the superseded visibility INDEXES are dropped by
+    # name inside the one-shot migration block, which carry no rows at all.
     #
     # ...and this is the ONE exception the comment above allows, because it
     # cannot delete anything anyone made. A database that ran PR #94's
@@ -138,69 +139,89 @@ _SCHEMA_DDL = (
         org_id     TEXT NOT NULL,
         created_by TEXT NOT NULL,
         name       TEXT NOT NULL,
-        visibility TEXT NOT NULL DEFAULT 'org'
-                   CHECK (visibility IN ('private','org')),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
-    # Two PARTIAL unique indexes, not one. A single (org_id, lower(name))
-    # index would let a member's private folder block the org from creating
-    # a folder of that name, and the 409 would reveal that a private folder
-    # by that name exists — an existence leak in the one feature whose whole
-    # point is privacy. Cost: a private "Checkout" and an org "Checkout" can
-    # coexist in one list, so the UI marks private folders (T5).
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_org_name"
-    " ON run_groups (org_id, lower(name)) WHERE visibility = 'org'",
-    # The private one is keyed per (ORG, creator). Keyed on the creator
-    # alone, a private folder stranded in an org the user left blocked that
-    # name in every org they joined afterwards, and the 409 named a folder
-    # nobody could see — the entire reason org_repository grew a routine to
-    # flip a departing member's private folders to 'org', publishing names
-    # chosen in private and renaming them on collision. Org-scoping removes
-    # the cause. Both halves of the rationale above survive: still a separate
-    # partial index, so a private folder cannot block an org name and an
-    # org-name 409 cannot leak a private folder. Decision 2, 2026-08-21.
+    # A folder name belongs to the ORG, case-insensitively: one name, one
+    # folder, whoever created it, so a testcase can only ever carry one
+    # folder name. There is no per-folder visibility any more, so this is a
+    # single full unique index rather than the pair of partial ones the
+    # private/org model needed. Owner decision D1/D2, 2026-08-23.
     #
-    # CREATE precedes the DROP because _SCHEMA_DDL runs statement by
-    # statement on an AUTOCOMMIT connection: dropping first would commit a
-    # window with no private-name uniqueness at all. Holding both is legal in
-    # any state, because the new key is a strict RELAXATION — a pair
-    # colliding on (org_id, created_by, name) also collides on
-    # (created_by, name), which the old index already enforced.
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_private_org_name"
-    " ON run_groups (org_id, created_by, lower(name))"
-    " WHERE visibility = 'private'",
-    # Exception two to the no-DROP rule, and the narrower one: an index
-    # carries no rows. Two things about its shape are load-bearing.
+    # Created here for a fresh database and, identically, inside the
+    # migration block below for one that still carries `visibility` — so a
+    # migrating database is never left even momentarily without folder-name
+    # uniqueness. The IF NOT EXISTS then makes this statement a no-op there.
     #
-    # Pinned to the schema owning run_groups, not a bare DROP INDEX: an
-    # unqualified index name resolves through search_path, so on a
-    # `<isolated>,public` connection — how six registry fixtures are
-    # configured — a bare DROP walks past the isolated schema and deletes
-    # public's index from under a live app. to_regclass resolves exactly as
-    # the CREATEs above just did.
+    # --- migration off the private/org model -------------------------------
+    # Only reachable while a `visibility` column is still present, which is
+    # every database that ran this branch before 2026-08-23 and none that
+    # ever ran a release: the feature has not shipped. Guarded on the column,
+    # so it runs exactly ONCE per schema and then returns at the first IF.
+    # That is what lets it use plain DROP INDEX IF EXISTS: the "skipping"
+    # notice it can emit is a one-time event, not the every-process-start
+    # WARNING the pre-2026-08-23 code contorted itself to avoid.
     #
-    # Existence is TESTED rather than left to IF EXISTS, whose "does not
-    # exist, skipping" notice carries SQLSTATE 00000 from inside a DO block —
-    # the code _log_schema_notice reads as one of ours and routes to WARNING.
-    # This statement re-runs on every construction, so IF EXISTS would log a
-    # WARNING at every process start forever, undoing b72f167. Both measured
-    # 2026-08-22.
+    # Names are resolved BEFORE the unique index is built, because a private
+    # "Login" and a shared "Login" could legitimately coexist under the old
+    # pair of partial indexes and would now collide. The SHARED one keeps the
+    # name — it is the one the org already knows — and any other row is
+    # renamed with its own group_id, which cannot collide because it is the
+    # primary key. Nothing is deleted and no folder loses its runs.
+    #
+    # Every object is schema-qualified through to_regclass: six registry
+    # fixtures run on a `<isolated>,public` search_path, where a bare DROP
+    # INDEX would walk past the isolated schema and delete public's index
+    # from under a live app.
     """
     DO $$
-    DECLARE ns text;
+    DECLARE
+      t  regclass := to_regclass('run_groups');
+      ns text;
+      r  record;
+      n  bigint := 0;
     BEGIN
-        SELECT n.nspname INTO ns
-          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.oid = to_regclass('run_groups');
-        IF ns IS NOT NULL
-           AND to_regclass(
-                 format('%I.idx_run_groups_private_name', ns)) IS NOT NULL THEN
-            EXECUTE format('DROP INDEX %I.idx_run_groups_private_name', ns);
-        END IF;
+      IF t IS NULL THEN RETURN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_attribute
+                     WHERE attrelid = t AND attname = 'visibility'
+                       AND NOT attisdropped) THEN
+        RETURN;   -- already the single-visibility shape
+      END IF;
+      SELECT n2.nspname INTO ns
+        FROM pg_class c JOIN pg_namespace n2 ON n2.oid = c.relnamespace
+       WHERE c.oid = t;
+
+      FOR r IN
+        SELECT group_id, name FROM (
+          SELECT group_id, name,
+                 row_number() OVER (PARTITION BY org_id, lower(name)
+                                    ORDER BY (visibility = 'org') DESC,
+                                             created_at, group_id) AS rn
+            FROM run_groups
+        ) ranked WHERE rn > 1
+      LOOP
+        UPDATE run_groups
+           SET name = left(r.name, 47) || ' (' || left(r.group_id, 8) || ')',
+               updated_at = now()
+         WHERE group_id = r.group_id;
+        n := n + 1;
+      END LOOP;
+      IF n > 0 THEN
+        RAISE NOTICE 'run_groups: renamed % folder(s) whose name collided once folder visibility was removed', n;
+      END IF;
+
+      EXECUTE format('DROP INDEX IF EXISTS %I.idx_run_groups_org_name', ns);
+      EXECUTE format('DROP INDEX IF EXISTS %I.idx_run_groups_private_org_name', ns);
+      EXECUTE format('DROP INDEX IF EXISTS %I.idx_run_groups_private_name', ns);
+      EXECUTE format('ALTER TABLE %s DROP COLUMN visibility', t);
+      EXECUTE format(
+        'CREATE UNIQUE INDEX idx_run_groups_org_name ON %s (org_id, lower(name))', t);
+      RAISE NOTICE 'run_groups: folders are now org-wide; per-folder visibility removed';
     END $$;
     """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_groups_org_name"
+    " ON run_groups (org_id, lower(name))",
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS group_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_test_runs_group ON test_runs (group_id)",
     # ON DELETE SET NULL is what returns a deleted folder's runs to
@@ -252,41 +273,64 @@ _SCHEMA_DDL = (
 )
 
 
-_VISIBILITIES = ("org", "private")
+# The ONE run-visibility predicate, shared verbatim by list_runs and
+# count_ungrouped so the table and the chips can never describe different
+# sets. Binds exactly one parameter: the caller's user_id.
+#
+#     you see a run if you own it, OR the org published it into a folder
+#
+# So work in progress stays with whoever is doing it, and moving a run into a
+# folder is the act of handing it to the team (owner decision, 2026-08-23).
+#
+# `t.user_id IS NOT NULL` on the second half is not decoration. An
+# unattributed run (AUTH_ENFORCED off, or a legacy row) is readable only by a
+# platform admin — a standing fail-closed rule, because /reports serves the
+# credentials somebody typed into the script and no user owns that row. This
+# predicate has to agree with auth/ownership.py exactly or the list would
+# offer rows whose drawer and report then answer 403.
+#
+# It sits alongside a `t.org_id = %s` clause at every call site, so "in a
+# folder" always means "in a folder of the org this row belongs to".
+_VISIBLE_RUN_SQL = (
+    "(t.user_id = %s"
+    " OR (t.group_id IS NOT NULL AND t.user_id IS NOT NULL))"
+)
+
+# The same fail-closed rule for the ONE caller _VISIBLE_RUN_SQL does not
+# cover: an org_admin, whose filter user_id is None because their view spans
+# the org. Without it their table listed unowned rows whose drawer and report
+# then answered 404 — a list offering something no other endpoint would
+# honour. Predates the org-visibility work; surfaced by it, because the table
+# now shows an author column and an unowned row renders blank and unopenable.
+_OWNED_RUN_SQL = "t.user_id IS NOT NULL"
+
+
+class RunOwnership(NamedTuple):
+    """What the authorization gates need to know about one run.
+
+    A NamedTuple, and read by ATTRIBUTE at every call site, because this is
+    the shape that bit: it used to be a bare 2-tuple, adding group_id made
+    every `a, b = get_run_owner(...)` raise ValueError, and all four call
+    sites sat inside a broad `except` that swallowed it. The result was not a
+    crash but silence — llm_traces simply stopped being attributed to an org.
+
+    Attribute access cannot drift that way. A fifth field tomorrow breaks
+    nobody, and tests/test_core/test_run_registry_org.py pins the field names
+    so a RENAME still fails loudly.
+    """
+
+    user_id: Optional[str]
+    org_id: Optional[str]
+    group_id: Optional[str]
 
 
 class DuplicateGroupName(Exception):
-    """A group with this name already exists in the scope that owns the name
-    (case-insensitive): the org for an 'org' folder, the creator for a
-    'private' one."""
+    """A folder of this name already exists in the org (case-insensitive).
 
-
-class GroupVisibilityConflict(Exception):
-    """'org' -> 'private' refused: the folder still holds runs owned by other
-    members, who would lose sight of their own runs the moment it turns
-    private. Carries the COUNT only — never the owners, which would leak who
-    else works in the folder."""
-
-    def __init__(self, count: int):
-        self.count = count
-        super().__init__(
-            "1 run by another member is in this folder" if count == 1
-            else f"{count} runs by other members are in this folder"
-        )
-
-
-class GroupVisibilityForbidden(Exception):
-    """Only a folder's creator may change its visibility.
-
-    An org_admin may rename an 'org' folder they did not create. Flipping it
-    to 'private' is different: created_by stays the member, so _visible_group
-    then hides the folder from the admin who just changed it and no API call
-    can undo the change. 403 rather than the feature's usual 404 because the
-    caller has already listed this folder — its existence is not the secret
-    the 404 rule protects."""
-
-    def __init__(self):
-        super().__init__("Only the folder's creator can change its visibility")
+    The org owns the name, so this is raised for a collision with ANY
+    member's folder — the copy cannot say "you already have", which would be
+    false for a folder a colleague created. One name, one folder, so a
+    testcase can only ever carry one folder name (owner decision D2)."""
 
 
 def _log_schema_notice(diag: psycopg.errors.Diagnostic) -> None:
@@ -385,30 +429,25 @@ class RunRegistry:
             return None
 
     def _fileable_group_id(
-        self, group_id: str, org_id: Optional[str], user_id: Optional[str]
+        self, group_id: str, org_id: Optional[str]
     ) -> Optional[str]:
-        """group_id when a run owned by user_id in org_id may be FILED into
-        that folder, else None — the same predicate assign_runs enforces
-        (folder in the org, and a private folder takes only its creator's
-        runs), applied at the write instead of at the read.
+        """group_id when a run in org_id may be FILED into that folder, else
+        None — the same predicate assign_runs enforces (the folder is in the
+        run's org), applied at the write instead of at the read.
 
-        It has to be the whole predicate, and it has to be keyed on the NEW
-        ROW'S OWNER rather than on whoever read the source. A re-run inherits
-        the folder of the run it was cloned from, and a validated platform
-        admin reads that source row through the UNFILTERED group join (see
-        _group_join, and history_scope, which hands them org_id None), so the
-        id arriving here can name ANY org's folder and any user's private one.
-        An org-only check catches the cross-org half and misses the rest: a
-        platform admin inside the member's own org would file their own new
-        run into that member's private folder — a run sitting where its owner
-        cannot see it, which is exactly what this feature forbids.
+        It has to be keyed on the NEW ROW'S ORG rather than on whoever read
+        the source. A re-run inherits the folder of the run it was cloned
+        from, and the token-less dev caller reads that source row through the
+        UNFILTERED group join (see _group_join), so the id arriving here can
+        name ANY org's folder. Filing the new run there would put it in a
+        folder its own org cannot see — and, now that a folder is what
+        publishes a run, would show it to an org that never had access.
 
         Only record_start can make this decision, because only it knows the
-        org and owner actually written on the new row — _lookup_org_id can
-        supply the org when the token did not. An org-less row (AUTH_ENFORCED
-        off) matches no folder at all: run_groups.org_id is NOT NULL, so there
-        is nothing for it to equal, and filing an unowned run into someone's
-        folder is the worse answer.
+        org actually written on the new row — _lookup_org_id can supply it
+        when the token did not. An org-less row (AUTH_ENFORCED off) matches
+        no folder at all: run_groups.org_id is NOT NULL, so there is nothing
+        for it to equal.
 
         Runs on its OWN pool connection and swallows its own errors, exactly
         like _lookup_org_id: this decides a folder tag, and nothing about a
@@ -418,9 +457,9 @@ class RunRegistry:
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT 1 FROM run_groups WHERE group_id = %s AND org_id = %s "
-                    "AND (visibility = 'org' OR created_by = %s)",
-                    (group_id, org_id, user_id),
+                    "SELECT 1 FROM run_groups "
+                    "WHERE group_id = %s AND org_id = %s",
+                    (group_id, org_id),
                 ).fetchone()
             return group_id if row else None
         except Exception as e:
@@ -467,7 +506,7 @@ class RunRegistry:
             if org_id is None and user_id:
                 org_id = self._lookup_org_id(user_id)
             if group_id is not None:
-                group_id = self._fileable_group_id(group_id, org_id, user_id)
+                group_id = self._fileable_group_id(group_id, org_id)
             sql = """
                 INSERT INTO test_runs
                     (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
@@ -533,86 +572,70 @@ class RunRegistry:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
 
     # ------------------------------------------------------------------
-    # Run groups (History page folders). Keyed to the ORG, each folder
-    # carrying a visibility: 'org' (everyone in the org sees it) or
-    # 'private' (only its creator). User-facing CRUD: these methods
-    # PROPAGATE storage errors (the swallow-everything discipline above
-    # exists to protect the generation pipeline, not this UI path) —
-    # DuplicateGroupName, GroupVisibilityConflict, GroupVisibilityForbidden
-    # and every 409/404/403 depend on the exception escaping.
+    # Run groups (History page folders). Keyed to the ORG and nothing finer:
+    # a folder belongs to the org, and so does every run filed into it. That
+    # is the whole model — moving a run into a folder is the act of
+    # publishing it to the team, and "Ungrouped" is work in progress that
+    # stays with whoever is doing it (owner decisions D1-D4, 2026-08-23).
+    # User-facing CRUD: these methods PROPAGATE storage errors (the
+    # swallow-everything discipline above exists to protect the generation
+    # pipeline, not this UI path) — DuplicateGroupName and every 409/404
+    # depend on the exception escaping.
     #
     # Authority:
     #   create                    anyone in the org
-    #   rename / delete           the creator, or an org_admin on an 'org'
-    #                             folder — never on a private one, which
-    #                             they cannot see and whose existence
-    #                             acting on it would leak
-    #   flip visibility           the creator only — see GroupVisibilityForbidden
-    #   file a run                the folder must be visible to the caller
-    #                             AND the run must be the caller's own, or
-    #                             the caller is org_admin and the run is in
-    #                             their org; a PRIVATE folder additionally
-    #                             takes only its creator's runs, so a run
-    #                             can never land where its owner cannot see
-    #                             it
-    # A caller who may not act gets False (the endpoints render that as 404,
-    # never 403) — except the visibility flip, whose own refusal is 403 by
-    # design; see GroupVisibilityForbidden for why.
-    # ------------------------------------------------------------------
+    #   rename                    the creator, or an org_admin
+    #   delete                    an org_admin ONLY — deleting a folder
+    #                             un-publishes every run in it, so it is an
+    #                             org-level act even for the person who made
+    #                             the folder (owner decision, 2026-08-23)
+    #   file a run                the folder must be in the caller's org AND
+    #                             the run must be the caller's own, or the
+    #                             caller is org_admin and the run is in their
+    #                             org. SEEING a shared run is not authority
+    #                             over it: a peer reads it and re-runs it,
+    #                             but only its owner or an org_admin files it
+    # A caller who may not act gets False, which the endpoints render as 404,
+    # never 403 — a folder's existence cannot be probed by id.
 
     def list_groups(
         self,
-        org_id: Optional[str],
-        user_id: Optional[str],
-        scope_user_id: Optional[str] = None,
-        folder_org_id: Optional[str] = None,
+        folder_org_id: Optional[str],
+        run_org_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Folders visible to the caller, name-sorted, each with its
-        member-run count: the caller's org's 'org' folders plus their own
-        private ones.
+        """The org's folders, name-sorted, each with its run count.
 
-        Four arguments, because each dimension carries a FILTER and an
-        IDENTITY, exactly as in list_runs and count_ungrouped:
+        Two org arguments, because they are two different things for exactly
+        one caller. folder_org_id is which FOLDERS are listed — always the
+        caller's own org, whoever they are, so that read and write bind the
+        same value and no control is drawn that a mutation would 404.
+        run_org_id is which RUNS the count counts; it defaults to
+        folder_org_id and differs only for a platform admin, whose runs span
+        every org while their folders do not. None means no narrowing on that
+        dimension and belongs to the token-less dev path alone — filtering on
+        a NULL org would evaluate to NULL for every row and return nothing.
 
-        org_id is the RUN scope — which runs run_count counts. None is the
-        unscoped caller (platform admin, or token-less with AUTH_ENFORCED
-        off), whose runs span every org, so no org narrows the count.
-        folder_org_id is the FOLDER scope — which folders are listed — and
-        for a platform admin it is NOT org_id: their runs span every org,
-        their folders are their own org's. It defaults to org_id, so a caller
-        that passes nothing is unchanged; None lists every org's folders and
-        belongs to the token-less path alone, since filtering on a NULL org
-        would evaluate to NULL for every row and hide the lot.
-
-        user_id is the caller's IDENTITY (which private folders are theirs);
-        scope_user_id is the run-list scope run_count is counted within —
-        None means the whole org, exactly as list_runs(user_id=None) does for
-        an org_admin. Both pairs really do differ for a real caller: an
-        org_admin's filter user_id is None while their identity is not, and a
-        platform admin's filter org_id is None while their folder org is not.
-        run_count MUST use the same predicates list_runs uses or the chip
-        disagrees with the table — one org_id doing both jobs here put a
-        platform admin's folder chip at 1 beside a table of 2.
+        There is no per-user narrowing here any more, and there must not be:
+        a folder's contents are the org's, so the count is the org's. Scoping
+        it to the caller was what made a member's chip read 1 beside a folder
+        holding 2 — the same defect as their table listing one run out of two.
 
         The run scope goes in the JOIN condition, not the WHERE clause: in
         the WHERE it would turn the LEFT JOIN into an inner one and drop
-        every folder that holds none of the caller's runs."""
-        folder_org_id = folder_org_id or org_id
+        every folder that holds no runs."""
+        if run_org_id is None:
+            run_org_id = folder_org_id
         join, join_params = "", []
-        if scope_user_id is not None:
-            join += " AND t.user_id = %s"
-            join_params.append(scope_user_id)
-        if org_id is not None:
-            join += " AND t.org_id = %s"
-            join_params.append(org_id)
+        if run_org_id is not None:
+            join = " AND t.org_id = %s"
+            join_params = [run_org_id]
         where, where_params = "", []
         if folder_org_id is not None:
-            where = ("WHERE g.org_id = %s "
-                     "  AND (g.visibility = 'org' OR g.created_by = %s) ")
-            where_params = [folder_org_id, user_id]
+            where = "WHERE g.org_id = %s "
+            where_params = [folder_org_id]
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT g.group_id, g.name, g.visibility, g.created_by, "
+                "SELECT g.group_id, g.name, g.created_by, "
                 "       g.created_at, g.updated_at, "
                 "       COUNT(t.run_id) AS run_count "
                 "FROM run_groups g "
@@ -639,15 +662,15 @@ class RunRegistry:
     ) -> Optional[Dict[str, Any]]:
         """The folder row when this caller may MUTATE it, else None (callers
         turn None into a 404, never a 403). Mutating is stricter than seeing:
-        the creator always may, an org_admin only on an 'org' folder inside a
-        concrete org — never on a private one, which _visible_group has
-        already hidden from them."""
-        row = self._visible_group(conn, org_id, user_id, group_id)
+        every member of the org sees every folder, but only the creator — or
+        an org_admin inside a concrete org — RENAMES one. Deleting is
+        stricter still and does not come through here; see delete_group."""
+        row = self._visible_group(conn, org_id, group_id)
         if row is None:
             return None
         if row["created_by"] == user_id:
             return row
-        if is_org_admin and org_id is not None and row["visibility"] == "org":
+        if is_org_admin and org_id is not None:
             return row
         return None
 
@@ -655,46 +678,37 @@ class RunRegistry:
         self,
         conn,
         org_id: Optional[str],
-        user_id: str,
         group_id: str,
     ) -> Optional[Dict[str, Any]]:
         """The folder row when this caller can SEE it, else None: it is in
-        their org and is either an 'org' folder or their own private one.
-        Seeing a folder is what lets a caller file runs into it — mutating
-        it is a stricter test (_mutable_group).
+        their org. Seeing a folder is what lets a caller file their own runs
+        into it — mutating the folder itself is stricter (_mutable_group).
 
-        FOR UPDATE, because every caller of this method goes on to act on
-        what it read. rename_group's 'org' -> 'private' flip counts the
-        folder's foreign-owned runs and then writes; without the lock a
-        concurrent assign_runs reads 'org', files another member's run in,
-        and both commit — leaving a run inside a private folder its owner
-        cannot see. Reproduced 2026-08-21. The pool is not autocommit, so
-        the lock is held for the rest of the caller's `with` block.
+        Deliberately takes NO row lock. The private/org model needed one:
+        rename counted a folder's foreign-owned runs and then flipped it to
+        private, and without FOR UPDATE a concurrent assign_runs could slip a
+        run in between the count and the write. With visibility gone there is
+        no read-then-decide left to protect — every remaining race is closed
+        by the database itself. A concurrent delete makes assign_runs' UPDATE
+        raise ForeignKeyViolation (caught, answered 404) and makes
+        rename_group's UPDATE match 0 rows (also 404).
 
-        The lock ORDER is not uniform, so a narrow deadlock class exists.
-        rename_group, delete_group and assign_runs all take run_groups here
-        FIRST and test_runs second (assign_runs updates the runs,
-        delete_group lets the FK cascade into them). record_start is the
-        exception and goes the other way: it writes its test_runs row, and
-        the foreign key on group_id then takes a KEY SHARE lock on the
-        run_groups parent — verified 2026-08-21 by holding this FOR UPDATE
-        and watching a concurrent record_start(group_id=G) block until it
-        was released. Closing the cycle needs the same folder AND the same
-        run row concurrently, and a re-run normally writes its group_id on
-        its first insert, so the window is small — but record_start can be
-        the loser, and it swallows every exception (logging an ERROR), so
-        the failure would show as a run with no history row rather than as
-        a request that fails."""
+        Dropping the lock also removes a real deadlock class rather than
+        merely documenting it. The lock order was NOT uniform: rename, delete
+        and assign all took run_groups first and test_runs second, while
+        record_start goes the other way — it writes its test_runs row and the
+        foreign key then takes a KEY SHARE lock on the run_groups parent.
+        record_start swallows every exception, so it was the side that would
+        lose quietly, and a deadlocked re-run would have produced a run with
+        no history row at all."""
         row = conn.execute(
-            "SELECT group_id, org_id, created_by, name, visibility "
-            "FROM run_groups WHERE group_id = %s FOR UPDATE",
+            "SELECT group_id, org_id, created_by, name "
+            "FROM run_groups WHERE group_id = %s",
             (group_id,),
         ).fetchone()
         if row is None:
             return None
         if org_id is not None and row["org_id"] != org_id:
-            return None
-        if row["visibility"] != "org" and row["created_by"] != user_id:
             return None
         return row
 
@@ -703,24 +717,17 @@ class RunRegistry:
         org_id: str,
         user_id: str,
         name: str,
-        visibility: str = "org",
     ) -> Dict[str, Any]:
         """Create a folder in the caller's org — anyone in the org may.
-        Raises DuplicateGroupName on a case-insensitive name collision in
-        whichever scope owns the name: the org for an 'org' folder, the
-        (org, creator) pair for a 'private' one — so the same user may hold a
-        private folder of that name in a different org."""
-        if visibility not in _VISIBILITIES:
-            raise ValueError(f"invalid visibility: {visibility!r}")
+        Raises DuplicateGroupName on a case-insensitive name collision with
+        ANY folder in that org, whoever created it: the org owns the name."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "INSERT INTO run_groups "
-                    "    (group_id, org_id, created_by, name, visibility) "
-                    "VALUES (%s, %s, %s, %s, %s) "
-                    "RETURNING group_id, name, visibility, created_by, "
-                    "          created_at, updated_at",
-                    (str(uuid.uuid4()), org_id, user_id, name, visibility),
+                    "INSERT INTO run_groups (group_id, org_id, created_by, name) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "RETURNING group_id, name, created_by, created_at, updated_at",
+                    (str(uuid.uuid4()), org_id, user_id, name),
                 ).fetchone()
         except psycopg.errors.UniqueViolation:
             raise DuplicateGroupName(name)
@@ -736,60 +743,24 @@ class RunRegistry:
         user_id: str,
         is_org_admin: bool,
         group_id: str,
-        name: Optional[str] = None,
-        visibility: Optional[str] = None,
+        name: str,
     ) -> bool:
-        """Rename a folder and/or change its visibility (at least one).
-
-        False when the folder doesn't exist or the caller may not mutate it.
-        Raises DuplicateGroupName when the new name collides — rename needs
-        its OWN guard, create's does not cover it. Raises
-        GroupVisibilityConflict on 'org' -> 'private' while the folder still
-        holds runs owned by anyone other than its creator: those members
-        would silently lose sight of their own runs, and a refusal they can
-        act on beats quiet data movement behind a settings toggle.
-        'private' -> 'org' only widens visibility and is always allowed.
-        Raises GroupVisibilityForbidden when anyone but the creator tries to
-        change visibility — renaming stays open to an org_admin."""
-        if name is None and visibility is None:
-            raise ValueError("rename_group needs a name or a visibility")
-        if visibility is not None and visibility not in _VISIBILITIES:
-            raise ValueError(f"invalid visibility: {visibility!r}")
-        collision_name = name
+        """Rename a folder. False when it doesn't exist or the caller may not
+        mutate it. Raises DuplicateGroupName when the new name collides —
+        rename needs its OWN guard, create's does not cover it."""
         try:
             with self._pool.connection() as conn:
-                row = self._mutable_group(
-                    conn, org_id, user_id, is_org_admin, group_id)
-                if row is None:
+                if self._mutable_group(
+                        conn, org_id, user_id, is_org_admin, group_id) is None:
                     return False
-                if visibility is not None and row["created_by"] != user_id:
-                    raise GroupVisibilityForbidden()
-                if collision_name is None:
-                    collision_name = row["name"]
-                if visibility == "private" and row["visibility"] == "org":
-                    others = conn.execute(
-                        "SELECT COUNT(*) AS n FROM test_runs "
-                        "WHERE group_id = %s AND user_id IS DISTINCT FROM %s",
-                        (group_id, row["created_by"]),
-                    ).fetchone()["n"]
-                    if others:
-                        raise GroupVisibilityConflict(others)
-                sets, params = [], []
-                if name is not None:
-                    sets.append("name = %s")
-                    params.append(name)
-                if visibility is not None:
-                    sets.append("visibility = %s")
-                    params.append(visibility)
-                params.append(group_id)
                 cur = conn.execute(
-                    f"UPDATE run_groups SET {', '.join(sets)}, updated_at = now() "
+                    "UPDATE run_groups SET name = %s, updated_at = now() "
                     "WHERE group_id = %s",
-                    params,
+                    (name, group_id),
                 )
                 return cur.rowcount == 1
         except psycopg.errors.UniqueViolation:
-            raise DuplicateGroupName(collision_name)
+            raise DuplicateGroupName(name)
 
     def delete_group(
         self,
@@ -801,11 +772,26 @@ class RunRegistry:
         """Delete a folder and return its member runs to Ungrouped. Runs are
         NEVER deleted: fk_test_runs_group is ON DELETE SET NULL, so Postgres
         ungroups the members as part of the DELETE — no second statement,
-        and no window in which a run points at a folder that is gone. False
-        when the folder doesn't exist or the caller may not mutate it."""
+        and no window in which a run points at a folder that is gone.
+
+        ORG_ADMIN ONLY, which is stricter than rename: returning the runs to
+        Ungrouped un-publishes every one of them, so the org loses sight of
+        that work until someone re-files it. That is an org-level consequence
+        whoever created the folder, and the folder is the org's anyway. A
+        member who made a folder can still rename it and still move their own
+        runs out of it; they ask an admin to remove it.
+
+        No dead end for a solo user: ensure_personal_org seats them as
+        org_admin of their own personal org, so they still delete their own
+        folders. Only a plain member inside a TEAM org is narrowed.
+
+        False when the folder doesn't exist, is outside the caller's org, or
+        the caller is not an org_admin — the endpoint renders all three as
+        404 alike, so nothing about the folder leaks either way."""
         with self._pool.connection() as conn:
-            if self._mutable_group(
-                    conn, org_id, user_id, is_org_admin, group_id) is None:
+            if not (is_org_admin and org_id is not None):
+                return False
+            if self._visible_group(conn, org_id, group_id) is None:
                 return False
             cur = conn.execute(
                 "DELETE FROM run_groups WHERE group_id = %s", (group_id,)
@@ -818,32 +804,42 @@ class RunRegistry:
         self,
         user_id: Optional[str] = None,
         org_id: Optional[str] = None,
-        caller_user_id: Optional[str] = None,
         folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
     ) -> int:
         """The Ungrouped chip's live count on the History page.
 
         Takes the caller's whole (user_id, org_id) scope and the same
-        visibility join list_runs uses, so the chip always equals the total
-        of list_runs(group="ungrouped") for that caller. A bare per-user
-        count disagreed with the table for an org_admin, whose History spans
-        the org. "Ungrouped" is g.group_id IS NULL — in no folder the caller
-        can SEE — not t.group_id IS NULL, or a run inside someone else's
-        private folder would belong to no filter at all and vanish.
+        visibility predicate list_runs uses, so the chip always equals the
+        total of list_runs(group="ungrouped") for that caller.
+
+        Ungrouped is g.group_id IS NULL — in no folder the caller can see —
+        rather than t.group_id IS NULL. The two coincide today, because a run
+        and its folder are always in the same org (assign_runs enforces it,
+        and so does _fileable_group_id), so any run in the caller's org that
+        carries a group_id resolves through the join. Keeping the JOIN form
+        means a row that somehow pointed at a folder outside the org would
+        read as Ungrouped rather than disappearing from every filter.
 
         folder_org_id is the caller's OWN org and scopes the folder join
-        alone, which org_id cannot do here: a platform admin's org_id is
-        None because their runs span every org, and reusing that for the
-        join handed them every org's folders. It defaults to org_id, so a
-        caller that passes nothing is unchanged."""
-        # The FOLDER scope is the caller's own org, which is not the run
-        # filter: a platform admin's runs span every org while their folders
-        # do not. Defaults to org_id so every existing caller is unchanged.
-        join, params = self._group_join(folder_org_id or org_id, caller_user_id)
+        alone, which org_id cannot do here: a platform admin's org_id is None
+        because their runs span every org, and reusing that for the join
+        handed them every org's folders. It defaults to org_id."""
+        join, params = self._group_join(folder_org_id or org_id)
         clauses = ["g.group_id IS NULL"]
         if user_id is not None:
-            clauses.append("t.user_id = %s")
+            # The shared-run predicate, written exactly as list_runs writes
+            # it. Inside this count its second half is always false —
+            # g.group_id IS NULL and t.group_id IS NOT NULL cannot both hold
+            # for a run in the caller's org — so it collapses to "my own
+            # work", which is what Ungrouped means. Sharing one constant with
+            # list_runs is what keeps the chip and the table one set.
+            clauses.append(_VISIBLE_RUN_SQL)
             params = params + [user_id]
+        elif not include_unowned:
+            # Same rule as list_runs, for the same reason: the chip must count
+            # exactly what the Ungrouped filter lists.
+            clauses.append(_OWNED_RUN_SQL)
         if org_id is not None:
             clauses.append("t.org_id = %s")
             params = params + [org_id]
@@ -865,39 +861,44 @@ class RunRegistry:
     ) -> bool:
         """Atomically file runs into a folder (group_id None = ungroup).
 
-        The folder must be visible to the caller, and every run must be one
-        the caller may file: their own, or — for an org_admin — any run in
-        their org. A PRIVATE folder takes only its creator's runs, so a run
-        can never land in a folder its own owner cannot see; that also makes
-        an org_admin unable to sweep a member's run into their own private
-        folder.
+        The folder must be in the caller's org, and every run must be one the
+        caller may file: their own, or — for an org_admin — any run in their
+        org. Seeing a shared run does NOT confer this: a peer reads and
+        re-runs another member's published test, but only its owner or an
+        org_admin moves it (owner decision D4).
 
-        All-or-nothing: filing is now a per-row authority decision, which is
+        Every run must ALSO be in the caller's org, org_admin or not. Without
+        that clause a member could file a run they own in an org they have
+        since left into a folder of the org they are in now, leaving a row
+        whose org_id and folder disagree. That was harmless while grouping
+        only decorated a row; now that grouping is what PUBLISHES a run, it
+        would have shown the old org's members a run they never had access
+        to. The clause also excludes a run with no org at all (AUTH_ENFORCED
+        off), which no folder can legitimately hold — run_groups.org_id is
+        NOT NULL, so there is nothing for it to equal.
+
+        All-or-nothing: filing is a per-row authority decision, which is
         exactly when partial writes appear, so a batch containing one run the
         caller may not file writes NOTHING and returns False — the caller's
-        own runs stay ungrouped too."""
+        own runs stay where they were."""
+        if org_id is None:
+            # No org: nothing to file into, and no org to test a run against.
+            return False
         with self._pool.connection() as conn:
-            owner_only = None  # set => only this user's runs may be filed
             if group_id is not None:
-                g = self._visible_group(conn, org_id, user_id, group_id)
-                if g is None:
+                if self._visible_group(conn, org_id, group_id) is None:
                     return False
-                if g["visibility"] != "org":
-                    owner_only = g["created_by"]
-            params: list = [group_id, list(run_ids)]
-            if owner_only is not None:
-                allowed = "user_id = %s"
-                params.append(owner_only)
-            elif is_org_admin and org_id is not None:
-                allowed = "(user_id = %s OR org_id = %s)"
-                params.extend([user_id, org_id])
+            params: list = [group_id, list(run_ids), org_id]
+            if is_org_admin:
+                allowed = "org_id = %s"
+                params.append(org_id)
             else:
                 allowed = "user_id = %s"
                 params.append(user_id)
             try:
                 cur = conn.execute(
                     f"UPDATE test_runs SET group_id = %s "
-                    f"WHERE run_id = ANY(%s) AND {allowed}",
+                    f"WHERE run_id = ANY(%s) AND org_id = %s AND {allowed}",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -912,23 +913,20 @@ class RunRegistry:
             return True
 
     @staticmethod
-    def _group_join(
-        org_id: Optional[str], caller_user_id: Optional[str]
-    ) -> Tuple[str, list]:
-        """(SQL, params) for the ONE visibility-filtered LEFT JOIN every read
-        derives its folder answers from: a row's folder tag is g.name, its
-        folder id is g.group_id, and "in no folder I can see" is
-        g.group_id IS NULL.
+    def _group_join(org_id: Optional[str]) -> Tuple[str, list]:
+        """(SQL, params) for the ONE folder join every read derives its
+        folder answers from: a row's folder tag is g.name, its folder id is
+        g.group_id, and "in no folder I can see" is g.group_id IS NULL.
 
-        Two forms, and both matter. org_id None is the unscoped caller — a
-        platform admin, or token-less with AUTH_ENFORCED off — who already
-        sees every org's runs, so the join carries no filter: binding their
-        NULL org would make g.org_id = NULL evaluate to NULL for every row,
-        hide every folder name and collapse the whole page into Ungrouped.
-        Otherwise the caller's org plus their own identity, which is
-        caller_user_id and never the scoping user_id — an org_admin's filter
-        user_id is None while their identity is not, and a None there would
-        silently hide their own private folders.
+        Two forms, and both matter. org_id None is the unscoped caller — the
+        token-less dev path with AUTH_ENFORCED off — for whom the join
+        carries no filter: binding a NULL org would make g.org_id = NULL
+        evaluate to NULL for every row, hide every folder name and collapse
+        the whole page into Ungrouped. Otherwise the caller's own org.
+
+        No per-user term any more. Every folder in an org is visible to every
+        member of it, so the caller's identity does not enter this join —
+        which is why it takes one argument where it used to take two.
 
         The returned params bind BEFORE any WHERE-clause params, because
         these placeholders sit earlier in the SQL text and psycopg binds %s
@@ -937,9 +935,8 @@ class RunRegistry:
             return "LEFT JOIN run_groups g ON g.group_id = t.group_id", []
         return (
             "LEFT JOIN run_groups g ON g.group_id = t.group_id"
-            " AND g.org_id = %s"
-            " AND (g.visibility = 'org' OR g.created_by = %s)",
-            [org_id, caller_user_id],
+            " AND g.org_id = %s",
+            [org_id],
         )
 
     def list_runs(
@@ -951,32 +948,45 @@ class RunRegistry:
         status: Optional[str] = None,
         q: Optional[str] = None,
         group: Optional[str] = None,
-        caller_user_id: Optional[str] = None,
         folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """Most-recent-first run rows + total count. user_id=None lists all
-        users' runs (admin scope); otherwise only that user's rows. status
-        narrows both the rows and the total to one run status, so the History
-        tabs paginate and count within their own filter. q is a case-insensitive
-        substring match over the description, owner email and run id — applied
-        server-side so it spans ALL of a user's runs, not just the loaded page,
-        and so rows/total/pagination stay consistent with the active search.
-        group narrows to one folder (a run_groups id) or, with the literal
-        "ungrouped", to rows in no folder the caller can SEE; rows carry
-        group_id and group_name from _group_join so the History table renders
-        folder tags without extra requests. caller_user_id is the caller's own
-        identity for that join — see _group_join for why it is not user_id.
+        """Most-recent-first run rows + total count.
+
+        user_id=None lists every user's runs (admin scope). Otherwise it is
+        the caller's identity, and the rows they get are the ones
+        _VISIBLE_RUN_SQL admits: their own work, plus every run the org has
+        published into a folder. It is NOT a plain t.user_id filter any more
+        — that was what made a shared folder cosmetic, showing a member their
+        own slice of a folder the whole team was supposed to be reading.
+
+        status narrows both the rows and the total to one run status, so the
+        History tabs paginate and count within their own filter. q is a
+        case-insensitive substring match over the description, owner email
+        and run id — applied server-side so it spans the whole visible set,
+        not just the loaded page. group narrows to one folder (a run_groups
+        id) or, with the literal "ungrouped", to rows in no folder the caller
+        can see; rows carry group_id and group_name from _group_join so the
+        History table renders folder tags without extra requests.
+
         folder_org_id scopes that join to the caller's OWN org, which org_id
         cannot do: org_id is the ROW filter, and a platform admin's is None
         because their runs span every org — reusing it for the join tagged
         their rows with other orgs' folder names. Defaults to org_id, so a
-        caller that passes nothing is unchanged."""
-        join, join_params = self._group_join(folder_org_id or org_id, caller_user_id)
+        caller that passes nothing is unchanged.
+
+        include_unowned=False drops rows no user owns. Only a platform admin
+        (and the token-less dev caller) may read those, so only they may list
+        them — auth/ownership fails them closed for everyone else, and a list
+        that offers a row the drawer then refuses is a list that lies."""
+        join, join_params = self._group_join(folder_org_id or org_id)
         clauses: list = []
         params: list = []
         if user_id is not None:
-            clauses.append("t.user_id = %s")
+            clauses.append(_VISIBLE_RUN_SQL)
             params.append(user_id)
+        elif not include_unowned:
+            clauses.append(_OWNED_RUN_SQL)
         if org_id is not None:
             clauses.append("t.org_id = %s")
             params.append(org_id)
@@ -1008,7 +1018,8 @@ class RunRegistry:
                     f"SELECT COUNT(*) AS n FROM test_runs t {join}{where}", params
                 ).fetchone()["n"]
                 rows = conn.execute(
-                    f"SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
+                    f"SELECT t.run_id, t.user_id, t.user_email, t.org_id, "
+                    f"       t.user_query, "
                     f"       t.rerun_of, t.status, t.created_at, t.updated_at, "
                     f"       g.group_id, g.name AS group_name "
                     f"FROM test_runs t "
@@ -1031,22 +1042,31 @@ class RunRegistry:
     def get_owner(self, run_id: str) -> Optional[str]:
         """The user_id that owns run_id, or None (unknown run, unattributed
         legacy run, or storage error — all treated as 'not yours')."""
-        user_id, _ = self.get_run_owner(run_id)
-        return user_id
+        return self.get_run_owner(run_id).user_id
 
-    def get_run_owner(self, run_id: str) -> Tuple[Optional[str], Optional[str]]:
-        """(user_id, org_id) for the ownership predicate, or (None, None) on
-        unknown run / storage error — both treated as 'not yours'."""
+    def get_run_owner(self, run_id: str) -> RunOwnership:
+        """Ownership + publication state for the authorization gates, or an
+        all-None RunOwnership on unknown run / storage error — both treated
+        as 'not yours'. Read it by ATTRIBUTE, never by unpacking.
+
+        group_id joined the tuple when a folder became what publishes a run:
+        the /reports gate has to know whether the org published this one, and
+        it reads t.group_id straight off the row rather than through
+        _group_join. Those agree, because a run and its folder are always in
+        the same org — assign_runs and _fileable_group_id both enforce it —
+        so the gate still pairs it with an org test of its own."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
-                    "SELECT user_id, org_id FROM test_runs WHERE run_id = %s",
+                    "SELECT user_id, org_id, group_id FROM test_runs "
+                    "WHERE run_id = %s",
                     (run_id,),
                 ).fetchone()
-            return (row["user_id"], row["org_id"]) if row else (None, None)
+            return (RunOwnership(row["user_id"], row["org_id"], row["group_id"])
+                    if row else RunOwnership(None, None, None))
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] get_run_owner failed for {run_id}: {e}")
-            return (None, None)
+            return RunOwnership(None, None, None)
 
     def backfill_org_ids(self) -> int:
         """Set org_id on rows that have a user_id but no org_id, from that
@@ -1084,21 +1104,22 @@ class RunRegistry:
         self,
         run_id: str,
         org_id: Optional[str] = None,
-        caller_user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Full row for one run (including robot_code), or None if unknown
         or on storage error (callers treat both as 'not found').
 
-        org_id/caller_user_id are the CALLER's scope, not the row's, and feed
-        _group_join: a run sitting in a folder this caller cannot see reports
-        NULL for both group_id and group_name, so the drawer never shows a
-        private folder's name nor a folder id the caller cannot resolve. They
-        default to the unscoped form, which is what the feedback path in
-        api/endpoints.py wants — it reads ownership and lineage, never the
-        group fields. The rerun path DOES pass a scope: a re-run inherits its
-        source run's folder, so reading that folder unscoped would file the
-        new run somewhere its own owner cannot see it."""
-        join, params = self._group_join(org_id, caller_user_id)
+        org_id is the CALLER's org, not the row's, and feeds _group_join: a
+        run sitting in a folder outside that org reports NULL for both
+        group_id and group_name, so the drawer never shows a folder name the
+        caller cannot resolve. It defaults to the unscoped form, which is
+        what the feedback path in api/endpoints.py wants — that reads
+        ownership and lineage, never the group fields.
+
+        The rerun path DOES pass a scope, and reads the authorization
+        decision itself off the group_id this join returns: a re-run inherits
+        its source's folder, and "is this run published to my org" is exactly
+        "did the folder resolve"."""
+        join, params = self._group_join(org_id)
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(

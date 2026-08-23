@@ -29,10 +29,9 @@ import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
-import { PrivateLock } from '@/components/history/GroupVisibility'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
-import type { GroupChanges, RunGroup } from '@/components/history/useGroups'
+import type { RunGroup } from '@/components/history/useGroups'
 import { useAuth } from '@/auth/AuthContext'
 
 type RunStatus = 'generated' | 'running' | 'passed' | 'failed' | 'error'
@@ -50,6 +49,11 @@ interface Run {
   created_at: string
   updated_at: string
   has_report: boolean
+  // Server-computed: may THIS caller file THIS run? Seeing a run and being
+  // able to move it are different questions — a grouped run is visible to
+  // the whole org, but only its owner or an org_admin moves it. Never
+  // re-derive it here; the row does not carry the org id it would need.
+  can_move: boolean
 }
 
 interface RunDetail extends Run {
@@ -136,7 +140,8 @@ export default function HistoryPage() {
   // Shared with the sidebar's group quick-access: whichever surface the user
   // picks a group from, both render the same active group.
   const {
-    groups, ungroupedCount, createGroup, updateGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, refresh: refreshGroups,
+    createGroup, renameGroup, deleteGroup, assignRuns,
     groupFilter, setGroupFilter,
   } = useRunGroups()
 
@@ -145,26 +150,20 @@ export default function HistoryPage() {
   // still loads, because GET /api/groups answers 200 with an empty list.
   const { user } = useAuth()
 
-  // Mirrors the server's rule: the creator, or a team org-admin on a SHARED
-  // group. A hint only — the server 404s any folder the caller may not mutate.
-  const canManage = useCallback((g: RunGroup) => (
-    !!user && (g.created_by === user.id || (user.is_org_admin === true && g.visibility === 'org'))
+  // Mirrors the server's rules, which differ per action. A hint only — the
+  // server 404s any folder the caller may not mutate either way.
+  const canRename = useCallback((g: RunGroup) => (
+    !!user && (g.created_by === user.id || user.is_org_admin === true)
   ), [user])
 
-  // Narrower than canManage on purpose: an org-admin may RENAME a shared group
-  // they did not create, but only its creator may change who can see it —
-  // flipping it private would hide it from the admin permanently.
-  const canChangeVisibility = useCallback((g: RunGroup) => (
-    !!user && g.created_by === user.id
+  // Narrower on purpose: deleting a folder returns every run inside it to
+  // Ungrouped, which un-shares them from the whole org. That consequence is
+  // the org's, so the authority is an org-admin's — not the folder creator's.
+  // A solo user is org-admin of their own personal org, so nothing they made
+  // becomes undeletable.
+  const canDelete = useCallback((_g: RunGroup) => (
+    !!user && user.is_org_admin === true
   ), [user])
-
-  // /api/history rows carry only group_id and group_name, so a row tag's lock
-  // is derived from the groups list rather than a second request. The two sets
-  // agree by construction — the history join and the groups list apply the
-  // same org+visibility test.
-  const isPrivateGroup = useCallback((groupId: string | null | undefined) => (
-    !!groupId && groups.some(g => g.group_id === groupId && g.visibility === 'private')
-  ), [groups])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"
@@ -236,12 +235,29 @@ export default function HistoryPage() {
     }
   }, [queryString])
 
+  // Rows and folder counts in ONE gesture, fired together rather than in
+  // sequence: they are independent requests and the chips must never lag the
+  // table. Deriving the counts from the loaded rows instead would be cheaper
+  // and wrong — the table is paginated, so anything past the first page would
+  // be missing from the arithmetic.
+  //
+  // Every caller that can change either one goes through here: the Refresh
+  // button, a re-run (which adds a row and moves the Ungrouped count), and a
+  // move. Before this, /api/groups was refetched ONLY by a group mutation, so
+  // a re-run left "Ungrouped · N" one behind and pressing Refresh did not fix
+  // it — the same chip-versus-table disagreement, arriving as staleness
+  // rather than as a wrong query.
+  const reloadAll = useCallback(async (dropIds?: Set<string>) => {
+    await Promise.all([refreshLoaded(dropIds), refreshGroups()])
+  }, [refreshLoaded, refreshGroups])
+
   // Deleting the active group falls back to All groups; renames/deletes can
   // change row tags, so refresh the loaded rows in place afterwards.
-  const handleUpdateGroup = useCallback(async (groupId: string, changes: GroupChanges) => {
-    await updateGroup(groupId, changes)
+  // useGroups already refetched the folder list, so this only needs the rows.
+  const handleRenameGroup = useCallback(async (groupId: string, name: string) => {
+    await renameGroup(groupId, name)
     void refreshLoaded()
-  }, [updateGroup, refreshLoaded])
+  }, [renameGroup, refreshLoaded])
 
   const handleDeleteGroup = useCallback(async (groupId: string) => {
     await deleteGroup(groupId)
@@ -291,12 +307,15 @@ export default function HistoryPage() {
       // supposed to keep. With no filter at all the run stays visible either
       // way, and dropping it would make an older row vanish.
       const staysInView = groupFilter === 'ungrouped' ? groupId === null : groupId === groupFilter
-      if (groupFilter && !staysInView) void refreshLoaded(new Set(runIds))
-      else void refreshLoaded()
+      // assignRuns already refetched the folder list; reloadAll's second
+      // request is what keeps the Ungrouped count right when a run leaves or
+      // joins it, and the two fire together so neither lags the other.
+      if (groupFilter && !staysInView) void reloadAll(new Set(runIds))
+      else void reloadAll()
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : 'Failed to move runs')
     }
-  }, [assignRuns, groupFilter, refreshLoaded, reloadDetail, selected])
+  }, [assignRuns, groupFilter, reloadAll, reloadDetail, selected])
 
   const toggleChecked = useCallback((runId: string) => {
     setCheckedIds(prev => {
@@ -330,17 +349,35 @@ export default function HistoryPage() {
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
 
+  // Who ran each test. A group is shared, so a member's table now contains
+  // colleagues' runs, and a row with no author would leave the org unable to
+  // say who wrote what — the accountability the whole shared model rests on.
+  //
+  // Shown when there is actually someone else to distinguish: an admin's
+  // table always spans users, and a team's does as soon as a second author's
+  // run is loaded. A solo user in their own org sees only their own runs, and
+  // repeating their address down every line would be noise.
+  const showAuthor = isAdminScope || visible.some(
+    r => r.user_email && r.user_email !== user?.email)
+
   // Header select-all works over the VISIBLE (loaded) rows only, so stray ids
   // checked under a previous filter neither satisfy "all selected" nor get
   // swept along by the header toggle.
-  const allVisibleSelected = visible.length > 0 && visible.every(r => checkedIds.has(r.run_id))
-  const someVisibleSelected = visible.some(r => checkedIds.has(r.run_id))
+  // Only rows this caller may actually file can be selected. A bulk move is
+  // all-or-nothing server-side, so one unmovable row in the selection rejects
+  // the entire batch — and now that a folder is shared, a member's table is
+  // full of colleagues' runs they may read but not move. Select-all over the
+  // raw list would have made the bulk move unusable for every team member.
+  const movable = visible.filter(r => r.can_move)
+  const allVisibleSelected = movable.length > 0 && movable.every(r => checkedIds.has(r.run_id))
+  const someVisibleSelected = movable.some(r => checkedIds.has(r.run_id))
 
   const toggleAllVisible = useCallback(() => {
     setCheckedIds(prev => {
       const next = new Set(prev)
-      if (visible.every(r => next.has(r.run_id))) visible.forEach(r => next.delete(r.run_id))
-      else visible.forEach(r => next.add(r.run_id))
+      const all = visible.filter(r => r.can_move)
+      if (all.every(r => next.has(r.run_id))) all.forEach(r => next.delete(r.run_id))
+      else all.forEach(r => next.add(r.run_id))
       return next
     })
   }, [visible])
@@ -355,7 +392,7 @@ export default function HistoryPage() {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
         // First event = the new run row exists; surface it at the top
         // (the table is populated and the stream is still going).
-        if (!listRefreshed) { listRefreshed = true; void refreshLoaded() }
+        if (!listRefreshed) { listRefreshed = true; void reloadAll() }
         if (ev.test_status === 'passed') note('✓ Re-run passed')
         else if (ev.test_status === 'failed') note('✗ Re-run failed — open its report from the new row on top')
         else if (ev.status === 'error') note(`Error: ${ev.message || 'execution failed'}`)
@@ -365,9 +402,11 @@ export default function HistoryPage() {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
-      void refreshLoaded()
+      // The new run exists and may have landed in its source's folder, so the
+      // chip counts moved too — reload both.
+      void reloadAll()
     }
-  }, [refreshLoaded])
+  }, [reloadAll])
 
   const copyText = useCallback(async (text: string, key: string) => {
     try {
@@ -397,10 +436,13 @@ export default function HistoryPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">
             {isAdminScope
               ? 'All users’ test runs (admin view) — click any run to view its script and details'
-              : 'Click any run to view its script and re-run it as-is — no regeneration time, no LLM cost'}
+              : 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'}
           </p>
         </div>
-        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => loadRuns(0, false)}>
+        <Button
+          size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+          onClick={() => { void loadRuns(0, false); void refreshGroups() }}
+        >
           <RefreshCw className="h-3 w-3" /> Refresh
         </Button>
       </div>
@@ -427,7 +469,7 @@ export default function HistoryPage() {
                 <Input
                   value={search}
                   onChange={e => setSearch(e.target.value)}
-                  placeholder={isAdminScope ? 'Search description, user or id…' : 'Search description or id…'}
+                  placeholder={showAuthor ? 'Search description, user or id…' : 'Search description or id…'}
                   className="h-7 w-56 pl-8 text-xs"
                 />
               </div>
@@ -446,11 +488,11 @@ export default function HistoryPage() {
                 ungroupedCount={ungroupedCount}
                 active={groupFilter}
                 onSelect={setGroupFilter}
-                onCreate={async (name, visibility) => { await createGroup(name, visibility) }}
-                onUpdate={handleUpdateGroup}
+                onCreate={async name => { await createGroup(name) }}
+                onRename={handleRenameGroup}
                 onDelete={handleDeleteGroup}
-                canManage={canManage}
-                canChangeVisibility={canChangeVisibility}
+                canRename={canRename}
+                canDelete={canDelete}
                 canCreate={!!user}
               />
             </div>
@@ -546,8 +588,8 @@ export default function HistoryPage() {
                     )}
                     <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
                     <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
-                    {isAdminScope && (
-                      <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">User</th>
+                    {showAuthor && (
+                      <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">Ran by</th>
                     )}
                     <th className="w-[320px] py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden md:table-cell">ID</th>
                     <th className="w-24 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:table-cell">When</th>
@@ -560,14 +602,21 @@ export default function HistoryPage() {
                     <tr
                       key={row.run_id}
                       className="group cursor-pointer border-b last:border-0 hover:bg-muted/30 transition-colors"
-                      onClick={() => (selectMode ? toggleChecked(row.run_id) : setSelected(row.run_id))}
+                      onClick={() => (
+                        selectMode
+                          ? (row.can_move && toggleChecked(row.run_id))
+                          : setSelected(row.run_id)
+                      )}
                     >
                       {selectMode && (
                         <td className="py-3 pl-4" onClick={e => e.stopPropagation()}>
                           <input
                             type="checkbox"
-                            className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                            className="h-3.5 w-3.5 accent-primary disabled:cursor-not-allowed disabled:opacity-40 enabled:cursor-pointer"
                             aria-label={`Select run ${row.user_query || 'Pasted code run'}`}
+                            title={row.can_move ? undefined
+                              : 'Only the owner of a run, or an org admin, can move it'}
+                            disabled={!row.can_move}
                             checked={checkedIds.has(row.run_id)}
                             onChange={() => toggleChecked(row.run_id)}
                           />
@@ -601,14 +650,11 @@ export default function HistoryPage() {
                             >
                               <Folder className="h-3 w-3" />
                               {row.group_name}
-                              {isPrivateGroup(row.group_id) && (
-                                <PrivateLock name={row.group_name} className="h-2.5 w-2.5" />
-                              )}
                             </span>
                           )}
                         </div>
                       </td>
-                      {isAdminScope && (
+                      {showAuthor && (
                         <td className="py-3 px-4 text-xs text-muted-foreground hidden lg:table-cell">
                           {row.user_email ? (
                             <button
@@ -640,7 +686,7 @@ export default function HistoryPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex gap-1 justify-end">
-                          {user && (
+                          {user && row.can_move && (
                             <MoveToGroupMenu
                               groups={groups}
                               currentGroupId={row.group_id}
@@ -718,8 +764,10 @@ export default function HistoryPage() {
                   <span>Re-run</span>
                 </Badge>
               )}
-              {isAdminScope && d?.user_email && (
-                <span className="text-xs text-muted-foreground">{d.user_email}</span>
+              {d?.user_email && d.user_email !== user?.email && (
+                <span className="text-xs text-muted-foreground" title="Who ran this test">
+                  {d.user_email}
+                </span>
               )}
             </div>
             <SheetTitle className="text-base leading-snug">
@@ -791,7 +839,10 @@ export default function HistoryPage() {
                 <RotateCw className="h-3.5 w-3.5" /> Regenerate
               </Button>
             )}
-            {d && user && (
+            {/* A run this caller may read but not file still shows WHERE it
+                lives — that is the shared folder doing its job — but as a
+                label rather than a control that could only 404. */}
+            {d && user && (d.can_move ? (
               <MoveToGroupMenu
                 groups={groups}
                 currentGroupId={d.group_id}
@@ -801,13 +852,18 @@ export default function HistoryPage() {
                   <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
                     <FolderInput className="h-3.5 w-3.5" />
                     {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
-                    {d.group_name && isPrivateGroup(d.group_id) && (
-                      <PrivateLock name={d.group_name} />
-                    )}
                   </Button>
                 }
               />
-            )}
+            ) : d.group_name && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs text-muted-foreground"
+                title="Only the owner of a run, or an org admin, can move it"
+              >
+                <Folder className="h-3.5 w-3.5" />
+                Group: {d.group_name}
+              </span>
+            ))}
           </div>
 
           {/* The card header's copy of this sits BEHIND the drawer overlay, so

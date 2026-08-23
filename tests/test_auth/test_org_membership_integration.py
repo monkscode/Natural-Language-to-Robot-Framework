@@ -336,45 +336,33 @@ def test_set_org_owner_role_change_keeps_single_membership():
             conn.commit()
 
 def _group_row(reg, group_id):
-    """The raw folder row, read past every visibility filter — the point is to
-    prove what the row still says, not what a caller is allowed to see."""
+    """The raw folder row — the point is to prove what the row still says."""
     with reg._pool.connection() as conn:
         return conn.execute(
-            "SELECT group_id, org_id, created_by, name, visibility "
+            "SELECT group_id, org_id, created_by, name "
             "FROM run_groups WHERE group_id = %s", (group_id,)).fetchone()
 
 
 # ---------------------------------------------------------------------------
-# Private folders survive an org move UNCHANGED — they are not published to
-# the org the user left.
+# A folder STAYS WITH ITS ORG when its creator leaves.
 #
-# This replaces eight tests that pinned the opposite: a routine that flipped a
-# departing member's private folders to 'org' visibility, publishing names
-# they chose in private and silently renaming them on collision. That routine
-# existed only to work around a private uniqueness index keyed on the CREATOR
-# alone, under which a folder stranded in an org the user left blocked that
-# name in every org they joined afterwards. The index is now keyed on
-# (org_id, created_by, lower(name)), so the block is gone and the workaround
-# with it. Decision 2, 2026-08-21.
+# A folder belongs to the org, not to whoever made it, so a departure changes
+# nothing about it: the org keeps the folder, the runs inside it stay
+# published to the org, and the remaining members can rename or delete it
+# through the ordinary org_admin route. There is no folder ownership to
+# transfer and nothing to clean up.
+#
+# This replaces the private-folder handling that came before it — a routine
+# that flipped a departing member's private folders to 'org' visibility,
+# publishing names they chose in private and silently renaming them on
+# collision, plus the later decision to leave them stranded instead. Neither
+# question exists once folders have no visibility of their own.
 # ---------------------------------------------------------------------------
 
-def test_org_move_leaves_a_private_folder_private_and_frees_its_name():
-    """The whole contract the deleted eight were compensating for.
-
-    After the move the folder is still private, still created_by the mover,
-    still in the old org, and still named what the user named it — the old
-    org's admin cannot see it, and no name of theirs was published. And the
-    mover can now create a private folder of that name in their NEW org,
-    which is the one thing the flip actually bought.
-
-    The runs inside such a folder are not lost: the visibility join reads them
-    as Ungrouped for everyone in the old org, so an org_admin can re-file
-    them anywhere. Only the folder row is dead.
-
-    The deleted `run_groups`-table-absent case goes deliberately, with the
-    code that needed it: nothing in OrgRepository touches run_groups any
-    more, so there is no guard left to regress.
-    """
+def test_a_folder_survives_its_creator_leaving_and_the_org_still_manages_it():
+    """The contract: the folder is the org's, so a leaver takes nothing with
+    them and strands nothing behind them. The org_admin who remains can still
+    see it, rename it and delete it — no folder is ever unreachable."""
     users, orgs = UserRepository(), OrgRepository()
     reg = get_run_registry()
     admin_email = f"pmv-a-{uuid.uuid4().hex[:8]}@x.com"
@@ -385,26 +373,28 @@ def test_org_move_leaves_a_private_folder_private_and_frees_its_name():
         mover = users.create_user(mover_email, "password123", "Mover")
         old_org = orgs.create_team_org("Old Co", str(admin["id"]))
         orgs.add_member(old_org, str(mover["id"]), "org_member")
-        group = reg.create_group(old_org, str(mover["id"]), "checkout",
-                                 visibility="private")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout")
 
         new_org = orgs.create_team_org("New Co", str(mover["id"]))  # vacates old_org
 
         row = _group_row(reg, group["group_id"])
         assert row is not None, "the folder row must still exist"
-        assert row["visibility"] == "private", "the folder was published to the org"
-        assert str(row["created_by"]) == str(mover["id"])
-        assert str(row["org_id"]) == str(old_org)
+        assert str(row["org_id"]) == str(old_org), "the folder stays with the org"
         assert row["name"] == "checkout", "the user's chosen name was rewritten"
+        assert str(row["created_by"]) == str(mover["id"]), "authorship is history"
 
-        # The old org's admin still cannot see it — that is what private means.
-        seen = reg.list_groups(old_org, str(admin["id"]), scope_user_id=None)
-        assert all(g["group_id"] != group["group_id"] for g in seen)
+        # The org that kept the work can still see it AND still manage it —
+        # this is what makes the folder reachable rather than stranded.
+        seen = reg.list_groups(old_org)
+        assert group["group_id"] in [g["group_id"] for g in seen]
+        assert reg.rename_group(old_org, str(admin["id"]), True,
+                                group["group_id"], "checkout v2") is True
+        assert reg.delete_group(old_org, str(admin["id"]), True,
+                                group["group_id"]) is True
 
-        # And the name is free again for the mover in the org they joined.
-        fresh = reg.create_group(new_org, str(mover["id"]), "checkout",
-                                 visibility="private")
-        assert fresh["group_id"] != group["group_id"]
+        # And the name is free for the mover in the org they joined, because
+        # names are scoped to the org.
+        assert reg.create_group(new_org, str(mover["id"]), "checkout")
     finally:
         with get_pool().connection() as conn:
             for oid in (old_org, new_org):
@@ -415,11 +405,11 @@ def test_org_move_leaves_a_private_folder_private_and_frees_its_name():
             conn.commit()
 
 
-def test_remove_member_also_leaves_the_private_folder_alone():
+def test_remove_member_leaves_the_folder_with_the_org():
     """remove_member deletes the membership directly — it never goes through
     _collapse_to_single, so it was the one genuinely separate call site the
-    deleted flip needed. It now has no folder behaviour at all, and this is
-    what says so."""
+    old folder handling needed. It now has no folder behaviour at all, and
+    this is what says so."""
     users, orgs = UserRepository(), OrgRepository()
     reg = get_run_registry()
     admin_email = f"rmv-a-{uuid.uuid4().hex[:8]}@x.com"
@@ -430,17 +420,14 @@ def test_remove_member_also_leaves_the_private_folder_alone():
         leaver = users.create_user(leaver_email, "password123", "Leaver")
         org_id = orgs.create_team_org("Kept Co", str(admin["id"]))
         orgs.add_member(org_id, str(leaver["id"]), "org_member")
-        group = reg.create_group(org_id, str(leaver["id"]), "payments",
-                                 visibility="private")
+        group = reg.create_group(org_id, str(leaver["id"]), "payments")
 
         assert orgs.remove_member(org_id, str(leaver["id"])) is True
 
         row = _group_row(reg, group["group_id"])
-        assert row["visibility"] == "private"
-        assert row["name"] == "payments"
-        assert all(g["group_id"] != group["group_id"]
-                   for g in reg.list_groups(org_id, str(admin["id"]),
-                                            scope_user_id=None))
+        assert row["name"] == "payments", "the folder is untouched by a removal"
+        assert group["group_id"] in [
+            g["group_id"] for g in reg.list_groups(org_id)]
     finally:
         with get_pool().connection() as conn:
             if org_id:

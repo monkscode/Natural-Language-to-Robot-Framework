@@ -4,9 +4,9 @@ The inheritance is read at the endpoint and written at the registry, so this
 covers both ends of the wire plus the service hop between them:
 
 - POST /execute-test {rerun_of}: the source row is now read through the
-  caller's OWN visibility scope, so the folder id handed to stream_execute_only
+  caller's OWN org scope, so the folder id handed to stream_execute_only
   is one the caller can see — an org_admin re-running a member's run never
-  learns that member's private folder, let alone files a run into it.
+  can name only a folder that caller's org owns.
 - stream_execute_only -> _record_run -> record_start: the id reaches the new
   run's history row, and record_start drops it when the folder belongs to a
   different org than the row.
@@ -167,18 +167,7 @@ def _rerun(registry, user, source_run_id, validated_admin=False):
 
 class TestRerunEndpointInheritsTheSourceFolder:
     def test_org_folder_is_inherited(self, reg):
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout", "org")["group_id"]
-        rid = _seed_run(reg, _MEMBER, _rid())
-        _file_run(reg, _MEMBER, rid, gid)
-
-        resp, captured = _rerun(reg, _MEMBER, rid)
-
-        assert resp.status_code == 200
-        assert captured["group_id"] == gid
-
-    def test_own_private_folder_is_inherited(self, reg):
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "My Drafts",
-                               "private")["group_id"]
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout")["group_id"]
         rid = _seed_run(reg, _MEMBER, _rid())
         _file_run(reg, _MEMBER, rid, gid)
 
@@ -192,8 +181,8 @@ class TestRerunEndpointInheritsTheSourceFolder:
 
         rerun_of still names A (root-flattened for feedback routing), so an
         implementation that inherited from rerun_of would answer F here."""
-        f = reg.create_group(_ORG_A, _MEMBER["user_id"], "F", "org")["group_id"]
-        g = reg.create_group(_ORG_A, _MEMBER["user_id"], "G", "org")["group_id"]
+        f = reg.create_group(_ORG_A, _MEMBER["user_id"], "F")["group_id"]
+        g = reg.create_group(_ORG_A, _MEMBER["user_id"], "G")["group_id"]
         rid_a = _seed_run(reg, _MEMBER, _rid())
         _file_run(reg, _MEMBER, rid_a, f)
         rid_b = _seed_run(reg, _MEMBER, _rid(), rerun_of=rid_a)
@@ -205,27 +194,20 @@ class TestRerunEndpointInheritsTheSourceFolder:
         assert captured["rerun_of"] == rid_a   # lineage unchanged
         assert captured["group_id"] == g       # folder from B, not from A
 
-    def test_org_admin_never_learns_a_members_private_folder(self, reg, stored_group_id):
-        """caller_can_read rule 4 lets an org_admin re-run a member's run. The
-        member's PRIVATE folder is invisible to them, so the new run must be
-        ungrouped — a run in a folder its own owner cannot see is forbidden."""
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Member Private",
-                               "private")["group_id"]
+    def test_a_peer_reruns_a_published_test_into_the_same_folder(
+            self, reg, stored_group_id):
+        """Decision D5: a member re-runs a colleague's grouped test, and the
+        new run — theirs — stays beside its source. That is what a shared
+        folder is for, and it is the case an owner-only gate refused."""
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Completed")["group_id"]
         rid = _seed_run(reg, _MEMBER, _rid())
         _file_run(reg, _MEMBER, rid, gid)
-        # The source really is filed there — the None below is the visibility
-        # filter, not a failed seed.
         assert stored_group_id(rid) == gid
 
         resp, captured = _rerun(reg, _ORG_ADMIN, rid)
 
         assert resp.status_code == 200
-        assert captured["group_id"] is None
-        # Contrast on the SAME source run: its owner does inherit the folder,
-        # so the None above is the visibility join at work, not a group_id
-        # that is None for everyone.
-        _, owner_captured = _rerun(reg, _MEMBER, rid)
-        assert owner_captured["group_id"] == gid
+        assert captured["group_id"] == gid
 
     def test_ungrouped_source_stays_ungrouped(self, reg, stored_group_id):
         rid = _seed_run(reg, _MEMBER, _rid())
@@ -243,7 +225,7 @@ class TestRerunEndpointInheritsTheSourceFolder:
         defence in depth — see TestRerunServiceWritesTheFolder — but it is no
         longer the only thing standing between an admin's re-run and another
         org's folder."""
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout", "org")["group_id"]
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout")["group_id"]
         rid = _seed_run(reg, _MEMBER, _rid())
         _file_run(reg, _MEMBER, rid, gid)
 
@@ -282,7 +264,7 @@ class TestRerunServiceWritesTheFolder:
         return seen["run_id"]
 
     def test_folder_lands_on_the_new_run_row(self, reg, stored_group_id):
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout", "org")["group_id"]
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout")["group_id"]
         new_run_id = self._execute(reg, _MEMBER, gid)
         assert stored_group_id(new_run_id) == gid
 
@@ -290,29 +272,15 @@ class TestRerunServiceWritesTheFolder:
         """The platform-admin case end to end: the endpoint forwarded an org A
         folder, the run is being written for org B, so the tag is dropped and
         the history row is written anyway."""
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout", "org")["group_id"]
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Checkout")["group_id"]
         new_run_id = self._execute(reg, _PLATFORM, gid)
         assert stored_group_id(new_run_id) is None
         assert reg.get_run(new_run_id)["user_query"] == "search for shoes"
 
-    def test_same_org_platform_admin_cannot_land_in_a_members_private_folder(
-            self, reg, stored_group_id):
-        """The hole an org-only guard leaves. A platform admin reads every
-        org's folders unfiltered, so a member's PRIVATE folder id reaches the
-        write; sharing that member's org makes the org check pass. The run
-        being written belongs to the ADMIN, so filing it there would put a run
-        in a folder its own owner cannot see."""
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Member Private",
-                               "private")["group_id"]
+    def test_a_same_org_folder_lands_whoever_created_it(self, reg, stored_group_id):
+        """The other branch of the same org check: the folder is the org's, so
+        who created it does not enter the predicate. Without this, dropping
+        every folder someone else made would pass the cross-org test above."""
+        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "Team Checkout")["group_id"]
         new_run_id = self._execute(reg, _PLATFORM_SAME_ORG, gid)
-        assert stored_group_id(new_run_id) is None
-        assert reg.get_run(new_run_id)["user_query"] == "search for shoes"
-
-    def test_own_private_folder_survives_the_visibility_guard(self, reg, stored_group_id):
-        """Same predicate, other branch: the folder's creator re-running their
-        own run keeps it. Without this, dropping every private folder would
-        pass the test above."""
-        gid = reg.create_group(_ORG_A, _MEMBER["user_id"], "My Drafts",
-                               "private")["group_id"]
-        new_run_id = self._execute(reg, _MEMBER, gid)
         assert stored_group_id(new_run_id) == gid

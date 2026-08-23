@@ -42,7 +42,6 @@ import {
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
-import { PrivateLock } from '@/components/history/GroupVisibility'
 
 /* ── Logo mark ── */
 const LogoMark = () => (
@@ -279,7 +278,6 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
                 >
                   <Folder />
                   <span className="truncate">{g.name}</span>
-                  {g.visibility === 'private' && <PrivateLock name={g.name} />}
                   <span className="ml-auto shrink-0 text-xs tabular-nums text-sidebar-foreground/60">
                     {g.run_count}
                   </span>

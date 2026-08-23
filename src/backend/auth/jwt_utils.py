@@ -248,13 +248,19 @@ def authorize_report_access(request, run_id: str) -> "JSONResponse | None":
         # Lazy import: jwt_utils loads during early app wiring; the registry
         # opens a DB pool on first use and must not do so at import time.
         from src.backend.core.run_registry import get_run_registry
-        owner_id, org_id = get_run_registry().get_run_owner(run_id)
+        run = get_run_registry().get_run_owner(run_id)
     except Exception as exc:
         logger.warning("[AUTH] report ownership lookup unavailable: %s", exc)
-        owner_id, org_id = None, None  # fail closed
+        from src.backend.core.run_registry import RunOwnership
+        run = RunOwnership(None, None, None)  # fail closed
 
-    from src.backend.auth.ownership import caller_can_read
-    if caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+    # A run filed into one of its org's folders is published to that org, so
+    # every member of it may open the report — the owner accepted that the
+    # log carries whatever credentials the author typed (decision D3). An
+    # ungrouped run is work in progress and stays with its author.
+    from src.backend.auth.ownership import caller_can_access
+    if caller_can_access(user, run.user_id, run.org_id, is_platform_admin=admin,
+                         is_grouped=run.group_id is not None):
         return None
     return JSONResponse(
         {"detail": "You do not have access to this report"}, status_code=403

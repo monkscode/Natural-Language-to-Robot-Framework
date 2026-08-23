@@ -82,7 +82,7 @@ def stored_group_id(admin_conn):
 
 
 def test_folder_in_the_runs_own_org_is_written(reg, stored_group_id):
-    gid = reg.create_group(_ORG_A, "u1", "Checkout", "org")["group_id"]
+    gid = reg.create_group(_ORG_A, "u1", "Checkout")["group_id"]
     rid = _rid()
     reg.record_start(rid, _USER, "q", "running", group_id=gid)
     assert stored_group_id(rid) == gid
@@ -91,33 +91,18 @@ def test_folder_in_the_runs_own_org_is_written(reg, stored_group_id):
 def test_folder_from_another_org_is_dropped(reg, stored_group_id):
     """A platform admin's re-run reads through the UNFILTERED group join, so
     the id handed to record_start can name a folder in a different org."""
-    gid = reg.create_group(_ORG_B, "u-other", "Their Folder", "org")["group_id"]
+    gid = reg.create_group(_ORG_B, "u-other", "Their Folder")["group_id"]
     rid = _rid()
     reg.record_start(rid, _USER, "q", "running", group_id=gid)
     assert stored_group_id(rid) is None
 
 
-def test_private_folder_of_another_user_in_the_same_org_is_dropped(reg, stored_group_id):
-    """The org half of the predicate is not enough.
-
-    history_scope hands a validated platform admin org_id None, so their re-run
-    reads the source row through the UNFILTERED group join and a member's
-    PRIVATE folder id reaches record_start. When that admin belongs to the SAME
-    org as the member — the ordinary shape here — an org-only check matches it,
-    and the new run, owned by the ADMIN, lands in a folder only the member can
-    see. That is the one arrangement this feature forbids outright."""
-    gid = reg.create_group(_ORG_A, "u-member", "Member Private",
-                           "private")["group_id"]
-    rid = _rid()
-    reg.record_start(rid, _USER, "q", "running", group_id=gid)
-    assert stored_group_id(rid) is None
-
-
-def test_own_private_folder_is_written(reg, stored_group_id):
-    """The other side of the same predicate: a private folder DOES take its
-    own creator's runs, so re-running out of one keeps it. Guards against
-    'fixing' the case above by refusing every private folder."""
-    gid = reg.create_group(_ORG_A, "u1", "My Drafts", "private")["group_id"]
+def test_a_colleagues_folder_in_the_same_org_is_inherited(reg, stored_group_id):
+    """A folder belongs to the ORG, not to whoever made it, so who created it
+    does not enter the predicate — only which org it is in. Re-running a
+    colleague's published test keeps the new run beside its source, which is
+    the behaviour a shared folder is FOR."""
+    gid = reg.create_group(_ORG_A, "u-colleague", "Team Checkout")["group_id"]
     rid = _rid()
     reg.record_start(rid, _USER, "q", "running", group_id=gid)
     assert stored_group_id(rid) == gid
@@ -127,7 +112,7 @@ def test_folder_is_dropped_when_the_run_has_no_org(reg, stored_group_id):
     """AUTH_ENFORCED=false writes rows with no org at all. Every folder has a
     NOT NULL org_id, so there is no org such a row could match — inherit
     nothing rather than file an org-less run into someone's folder."""
-    gid = reg.create_group(_ORG_A, "u1", "Checkout", "org")["group_id"]
+    gid = reg.create_group(_ORG_A, "u1", "Checkout")["group_id"]
     rid = _rid()
     reg.record_start(rid, None, "q", "running", group_id=gid)
     assert stored_group_id(rid) is None
@@ -136,8 +121,8 @@ def test_folder_is_dropped_when_the_run_has_no_org(reg, stored_group_id):
 def test_group_id_is_write_once(reg, stored_group_id):
     """Matches ownership: a second record_start for the same run cannot move
     it — the user may have filed it somewhere else in the meantime."""
-    first = reg.create_group(_ORG_A, "u1", "First", "org")["group_id"]
-    second = reg.create_group(_ORG_A, "u1", "Second", "org")["group_id"]
+    first = reg.create_group(_ORG_A, "u1", "First")["group_id"]
+    second = reg.create_group(_ORG_A, "u1", "Second")["group_id"]
     rid = _rid()
     reg.record_start(rid, _USER, "q", "running", group_id=first)
     reg.record_start(rid, _USER, "q", "passed", group_id=second)
@@ -151,13 +136,13 @@ def test_folder_deleted_mid_write_still_writes_the_run(reg, admin_conn, stored_g
     guard's read and the INSERT. Without the retry the ForeignKeyViolation is
     swallowed by record_start's outer except and NO row is written at all —
     strictly worse than a missing folder tag."""
-    gid = reg.create_group(_ORG_A, "u1", "Doomed", "org")["group_id"]
+    gid = reg.create_group(_ORG_A, "u1", "Doomed")["group_id"]
     rid = _rid()
 
     real_guard = RunRegistry._fileable_group_id
 
-    def _delete_after_reading(self, group_id, org_id, user_id):
-        inherited = real_guard(self, group_id, org_id, user_id)
+    def _delete_after_reading(self, group_id, org_id):
+        inherited = real_guard(self, group_id, org_id)
         admin_conn.execute(
             f"DELETE FROM {_SCHEMA}.run_groups WHERE group_id = %s", (group_id,)
         )
@@ -177,13 +162,13 @@ def test_folder_deleted_mid_write_still_writes_the_run(reg, admin_conn, stored_g
 def test_retry_reuses_the_org_id_already_derived(reg, admin_conn, stored_group_id):
     """T1 settles org_id into a local BEFORE the connection block precisely so
     this retry cannot lose it or re-trigger the org_members lookup."""
-    gid = reg.create_group(_ORG_A, "u1", "Doomed", "org")["group_id"]
+    gid = reg.create_group(_ORG_A, "u1", "Doomed")["group_id"]
     rid = _rid()
     orgless_user = {"user_id": str(uuid.uuid4()), "email": "u@test.local"}
     real_guard = RunRegistry._fileable_group_id
 
-    def _delete_after_reading(self, group_id, org_id, user_id):
-        inherited = real_guard(self, group_id, org_id, user_id)
+    def _delete_after_reading(self, group_id, org_id):
+        inherited = real_guard(self, group_id, org_id)
         admin_conn.execute(
             f"DELETE FROM {_SCHEMA}.run_groups WHERE group_id = %s", (group_id,)
         )

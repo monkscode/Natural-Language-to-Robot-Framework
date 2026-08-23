@@ -1,27 +1,28 @@
-"""Org moves: the author keeps the READ; leaving the org ends the ACTIONS.
+"""Leaving an org ends access to that org's data — reads included.
 
 A user moved between orgs (create_team_org / add_member / reassign_user_org
-all funnel through the single-active-org invariant) keeps read/download
-access to a run they own in their OLD org — caller_can_read's
-owner-keeps-access rule, whatever the org.
+all funnel through the single-active-org invariant) keeps NOTHING of the org
+they left: not the history list, not a run's detail by direct id, not its
+report, and not the two actions (re-run, feedback).
 
-They do NOT keep the two actions. Nothing in a token distinguishes an
-internal move from an offboarding — remove_member drops the user into a
-fresh personal org exactly as a move does — so the owner rule was granting
-"anyone who ever authored a run in this org, forever" two ongoing powers:
-POST /api/feedback fires conflict detection with org_id=record.org_id (the
-RUN's org, never the caller's), and a re-run executes a container against
-the org's environment using the credentials embedded in the stored script.
-caller_can_act is caller_can_read without that rule, and the rerun/feedback
-sites gate on it. Decision 1 Option E, 2026-08-22.
+That is the whole model, and it is deliberate. Nothing in a token
+distinguishes an internal transfer from an offboarding — remove_member drops
+the user into a fresh personal org exactly as a move does — so a rule keyed on
+authorship does not grant "an author who moved", it grants "anyone who ever
+authored anything here, forever". Every comparable product declines that:
+GitHub, Notion and Figma all revoke on removal and keep the content with the
+workspace. Decision 2026-08-23; this file previously pinned the opposite.
+
+Nothing is lost by the ORG: the runs stay, the author's email stays on every
+row, and an org_admin still sees and manages all of it. Nothing is lost by the
+USER either if they come back — access is computed from their CURRENT org, so
+rejoining restores everything with no retention window and no restore step.
 
 A different user who is now in the mover's NEW org still cannot see that old
 run: the run's stored org_id is still the OLD org, so ordinary org-scoping
-denies it — proving the owner rule does not widen access beyond the owner.
-The moved user's old-org run also does not appear in their NEW org's history
-list — list scoping is SQL-side and unaffected by the ownership rule.
+denies it.
 
-Referenced by: src/backend/auth/ownership.py (caller_can_read, caller_can_act),
+Referenced by: src/backend/auth/ownership.py (caller_can_access),
                src/backend/api/history_endpoints.py, src/backend/api/endpoints.py
                (rerun, feedback), src/backend/auth/jwt_utils.py
                (authorize_report_access).
@@ -110,14 +111,38 @@ def moved_run(client):
 # endpoints.py x2 on caller_can_act.
 # ---------------------------------------------------------------------------
 
-def test_moved_owner_reads_own_run_detail(client, moved_run):
-    r = client.get(f"/api/history/{moved_run['rid']}", headers=_auth(moved_run["mover_tok"]))
-    assert r.status_code == 200
+def test_moved_owner_cannot_read_own_old_org_run_detail(client, moved_run):
+    """INVERTED 2026-08-23 — was 200. The org's data stays with the org."""
+    r = client.get(f"/api/history/{moved_run['rid']}",
+                   headers=_auth(moved_run["mover_tok"]))
+    assert r.status_code == 404, r.text
 
 
-def test_moved_owner_downloads_own_report(moved_run):
+def test_moved_owner_cannot_download_own_old_org_report(moved_run):
+    """INVERTED 2026-08-23 — was allowed. The report carries whatever
+    credentials the author typed into the script, which is precisely what a
+    customer expects to stop leaving with a departing employee."""
     from src.backend.auth.jwt_utils import authorize_report_access
-    assert authorize_report_access(_Req(moved_run["mover_tok"]), moved_run["rid"]) is None
+
+    denied = authorize_report_access(_Req(moved_run["mover_tok"]), moved_run["rid"])
+    assert isinstance(denied, JSONResponse) and denied.status_code == 403
+
+
+def test_rejoining_the_org_restores_everything(client, moved_run):
+    """The other half of the rule, and why no retention window is needed:
+    access is computed from the caller's CURRENT org, so a user who comes back
+    sees their old work again with nothing to restore and nothing to expire."""
+    from src.backend.auth.jwt_utils import authorize_report_access, decode_token
+
+    moved_run["orgs"].reassign_user_org(
+        moved_run["mover_id"], moved_run["new_org"], moved_run["old_org"])
+    tok = _token(moved_run["users"], moved_run["mover_id"])
+    assert decode_token(tok)["org_id"] == moved_run["old_org"], (
+        "the fixture must actually put them back in the old org")
+
+    r = client.get(f"/api/history/{moved_run['rid']}", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    assert authorize_report_access(_Req(tok), moved_run["rid"]) is None
 
 
 def test_moved_owner_cannot_rerun_own_old_org_run(client, moved_run):
@@ -169,20 +194,20 @@ def test_moved_owner_cannot_submit_feedback_on_own_old_org_run(client, moved_run
 # remove_member rather than reassign_user_org.
 # ---------------------------------------------------------------------------
 
-def test_removed_member_keeps_the_read_but_loses_the_actions(client):
+def test_removed_member_loses_the_read_and_the_actions(client):
     """remove_member drops the user into a fresh personal org and bumps
     token_version, so they re-login carrying a different org while their runs
-    stay in the old one. That is byte-identical to a move from the token's
-    point of view — which is exactly why the read/act split, not a
-    move-vs-removal test, is what closes it.
+    stay in the old one. That is byte-identical to a MOVE from the token's
+    point of view — which is why one rule now covers both: leaving an org, for
+    any reason, ends access to that org's data.
 
-    It also pins the corner that would otherwise reopen the hole: the removed
-    member cannot arrive on _can's legacy `caller_org is None` branch, which
+    It also pins the corner that would otherwise reopen a hole: the removed
+    member must not arrive on the legacy `caller_org is None` branch, which
     still grants on a bare owner match. The bumped token_version kills their
     live token, require_user re-validates it, and _token_payload self-heals a
     personal org before minting — so the token below carries a concrete
     org_id and is refused on the org mismatch. If a future change drops that
-    self-heal, the two action asserts here are what fail.
+    self-heal, the asserts here are what fail.
     """
     from src.backend.auth.repository import UserRepository
     from src.backend.auth.org_repository import OrgRepository
@@ -215,9 +240,18 @@ def test_removed_member_keeps_the_read_but_loses_the_actions(client):
         "actions this test says are gone"
     )
 
-    # Kept: the work they wrote is still theirs to re-read.
-    assert client.get(f"/api/history/{rid}", headers=_auth(tok)).status_code == 200
-    assert authorize_report_access(_Req(tok), rid) is None
+    # INVERTED 2026-08-23: the read goes too. The run, its script and its
+    # report all stay with the org the work was done in.
+    assert client.get(f"/api/history/{rid}", headers=_auth(tok)).status_code == 404
+    denied = authorize_report_access(_Req(tok), rid)
+    assert isinstance(denied, JSONResponse) and denied.status_code == 403
+
+    # The org keeps all of it, attributed: the admin still reads it.
+    admin_tok = _token(users, str(admin["id"]))
+    detail = client.get(f"/api/history/{rid}", headers=_auth(admin_tok))
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["user_email"] == leaver["email"], (
+        "the departed author must still be named on their work")
 
     # Lost: no steering the org's learning store, no executing against its
     # environment.

@@ -433,7 +433,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         try:
             from src.backend.core.run_registry import get_run_registry
-            _, _run_org_id = get_run_registry().get_run_owner(run_id)
+            _run_org_id = get_run_registry().get_run_owner(run_id).org_id
         except Exception:
             _run_org_id = None
 
@@ -847,13 +847,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             collector = get_workflow_metrics_collector()
             # Prefer the org_id threaded into this call. The run row may not be
             # persisted yet on the stream_generate_only / stream_generate_and_run
-            # paths, so get_run_owner() can return (None, None) and would persist
+            # paths, so get_run_owner() can return an all-None row and would persist
             # an authenticated user's metrics as unscoped. Fall back to the
             # registry only when no org_id was threaded through.
             _run_org_id: str | None = org_id
             if _run_org_id is None:
                 try:
-                    _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+                    _run_org_id = get_run_registry().get_run_owner(workflow_id).org_id
                 except Exception as e:
                     logging.debug("[RUN_REGISTRY] org lookup for metrics failed: %s", e)
             collector.record_workflow(unified_metrics, org_id=_run_org_id)

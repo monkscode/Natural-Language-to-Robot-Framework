@@ -1,15 +1,17 @@
 """Run groups: registry CRUD/assignment + /api/groups + history filter.
 
 Groups are ORG-scoped folders over test_runs rows (one group per run,
-test_runs.group_id) carrying a per-folder visibility flag: an 'org' folder is
-visible to everyone in the org, a 'private' folder only to its creator.
-Authority: anyone in the org creates; the creator — or an org_admin, on an
-'org' folder only — renames and deletes; only the creator may change who can
-see it (GroupVisibilityForbidden, 403 — see run_registry.py for why). A run
-may be filed only into a folder the caller can see, and never into a private
-folder whose owner does not own the run. Refusals are otherwise 404 (False at
-the registry), never 403, so a private folder's existence cannot be probed.
-Mirrors the fixture patterns of test_history_org_scope.py.
+test_runs.group_id). A folder belongs to the org: every member sees every
+folder in it, and every run filed into one. Filing a run is what PUBLISHES it
+to the team — an ungrouped run is work in progress and stays with its author,
+which is what tests/test_api/test_group_org_visibility.py covers end to end.
+
+Authority: anyone in the org creates; the creator, or an org_admin, renames;
+an ORG_ADMIN alone deletes, because deleting returns every run inside to
+Ungrouped and so un-shares them from the whole org; a run is filed only by its own owner or an org_admin, so seeing a
+colleague's published test is not authority over where it lives. Refusals are
+404 (False at the registry), never 403, so a folder's existence cannot be
+probed by id. A folder name belongs to the org, case-insensitively.
 
 Referenced by: src/backend/core/run_registry.py,
                src/backend/api/groups_endpoints.py,
@@ -111,7 +113,7 @@ class TestGroupRegistryCrud:
 
     def test_rename_group(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Old")["group_id"]
-        assert reg.rename_group(ORG_A, "u1", False, gid, name="New") is True
+        assert reg.rename_group(ORG_A, "u1", False, gid, "New") is True
         assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["New"]
 
     def test_rename_to_existing_name_raises(self, reg):
@@ -120,18 +122,18 @@ class TestGroupRegistryCrud:
         reg.create_group(ORG_A, "u1", "Keep")
         gid = reg.create_group(ORG_A, "u1", "Other")["group_id"]
         with pytest.raises(DuplicateGroupName):
-            reg.rename_group(ORG_A, "u1", False, gid, name="keep")
+            reg.rename_group(ORG_A, "u1", False, gid, "keep")
         assert sorted(x["name"] for x in reg.list_groups(ORG_A, "u1")) == ["Keep", "Other"]
 
     def test_rename_foreign_or_unknown_is_false(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Mine")["group_id"]
-        assert reg.rename_group(ORG_B, "u2", True, gid, name="Stolen") is False
+        assert reg.rename_group(ORG_B, "u2", True, gid, "Stolen") is False
         assert reg.rename_group(ORG_A, "u1", False, str(uuid.uuid4()), name="Ghost") is False
         assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Mine"]
 
     def test_delete_group(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Gone")["group_id"]
-        assert reg.delete_group(ORG_A, "u1", False, gid) is True
+        assert reg.delete_group(ORG_A, "u1", True, gid) is True
         assert reg.list_groups(ORG_A, "u1") == []
 
     def test_delete_foreign_or_unknown_is_false(self, reg):
@@ -198,51 +200,53 @@ class TestGroupAuthorityMatrix:
         )
 
     # 1 -------------------------------------------------------------------
-    def test_org_folder_is_shared_private_folder_is_not(self, reg):
-        reg.create_group(self.ORG, self.ADMIN, "Shared")
-        reg.create_group(self.ORG, self.ADMIN, "Secret", visibility="private")
+    def test_every_folder_is_shared_with_the_whole_org(self, reg):
+        """A folder belongs to the org, so a member sees one an admin made and
+        an admin sees one a member made. There is no folder anybody in the org
+        cannot see."""
+        reg.create_group(self.ORG, self.ADMIN, "Admin made")
+        reg.create_group(self.ORG, self.MEMBER, "Member made")
 
-        assert [g["name"] for g in reg.list_groups(self.ORG, self.MEMBER)] == ["Shared"]
-        assert sorted(g["name"] for g in reg.list_groups(self.ORG, self.ADMIN)) == [
-            "Secret", "Shared"]
+        for who in (self.MEMBER, self.ADMIN):
+            assert sorted(g["name"] for g in reg.list_groups(self.ORG)) == [
+                "Admin made", "Member made"], f"{who} sees a different set"
 
     # 2 -------------------------------------------------------------------
-    def test_creator_owns_their_private_folder_org_admin_cannot_touch_it(self, reg):
-        gid = reg.create_group(
-            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
+    def test_a_creator_renames_their_own_folder_but_cannot_delete_it(self, reg):
+        """Rename and delete part company here. Deleting returns every run in
+        the folder to Ungrouped, un-sharing them from the org, so it is an
+        org-level act whoever made the folder (owner decision, 2026-08-23)."""
+        gid = reg.create_group(self.ORG, self.MEMBER, "Mine")["group_id"]
 
-        assert reg.rename_group(self.ORG, self.MEMBER, False, gid, name="Mine 2") is True
-        # The org_admin cannot even see it, so acting on it must look like a
-        # missing folder (404), never a refusal (403).
-        assert reg.rename_group(self.ORG, self.ADMIN, True, gid, name="Hax") is False
-        assert reg.delete_group(self.ORG, self.ADMIN, True, gid) is False
-        assert [g["name"] for g in reg.list_groups(self.ORG, self.MEMBER)] == ["Mine 2"]
-        assert reg.delete_group(self.ORG, self.MEMBER, False, gid) is True
+        assert reg.rename_group(self.ORG, self.MEMBER, False, gid, "Mine 2") is True
+        assert [g["name"] for g in reg.list_groups(self.ORG)] == ["Mine 2"]
+
+        assert reg.delete_group(self.ORG, self.MEMBER, False, gid) is False
+        assert [g["name"] for g in reg.list_groups(self.ORG)] == ["Mine 2"], (
+            "the refused delete must leave the folder alone")
+        assert reg.delete_group(self.ORG, self.ADMIN, True, gid) is True
 
     # 3 -------------------------------------------------------------------
     def test_org_admin_may_mutate_an_org_folder_they_did_not_create(self, reg):
         gid = reg.create_group(self.ORG, self.MEMBER, "Team")["group_id"]
-        assert reg.rename_group(self.ORG, self.ADMIN, True, gid, name="Team 2") is True
+        assert reg.rename_group(self.ORG, self.ADMIN, True, gid, "Team 2") is True
         assert reg.delete_group(self.ORG, self.ADMIN, True, gid) is True
 
     # 4 -------------------------------------------------------------------
     def test_member_may_not_mutate_an_org_folder_they_did_not_create(self, reg):
         gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
-        assert reg.rename_group(self.ORG, self.MEMBER, False, gid, name="Hax") is False
+        assert reg.rename_group(self.ORG, self.MEMBER, False, gid, "Hax") is False
         assert reg.delete_group(self.ORG, self.MEMBER, False, gid) is False
         assert [g["name"] for g in reg.list_groups(self.ORG, self.MEMBER)] == ["Team"]
 
     # 5 -------------------------------------------------------------------
-    def test_member_files_own_run_into_org_folder_but_not_a_private_one(self, reg):
+    def test_member_files_own_run_into_any_folder_in_the_org(self, reg):
         rid = str(uuid.uuid4())
         self._seed(reg, rid, self.MEMBER, self.ORG)
-        org_gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
-        priv_gid = reg.create_group(
-            self.ORG, self.ADMIN, "Secret", visibility="private")["group_id"]
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
 
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], org_gid) is True
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], priv_gid) is False
-        assert reg.get_run(rid)["group_id"] == org_gid
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+        assert reg.get_run(rid)["group_id"] == gid
 
     # 6 -------------------------------------------------------------------
     def test_org_admin_files_a_members_run_into_an_org_folder(self, reg):
@@ -254,14 +258,29 @@ class TestGroupAuthorityMatrix:
         assert reg.get_run(rid)["group_id"] == gid
 
     # 7 -------------------------------------------------------------------
-    def test_org_admin_cannot_file_a_members_run_into_their_own_private_folder(self, reg):
+    def test_member_cannot_file_a_run_they_do_not_own(self, reg):
+        """Decision D4. Once a colleague's run is published the member can SEE
+        it, which is exactly when this needs pinning: reading a run is not
+        authority over where it lives."""
         rid = str(uuid.uuid4())
-        self._seed(reg, rid, self.MEMBER, self.ORG)
-        gid = reg.create_group(
-            self.ORG, self.ADMIN, "Secret", visibility="private")["group_id"]
+        self._seed(reg, rid, self.ADMIN, self.ORG)
+        gid = reg.create_group(self.ORG, self.MEMBER, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is True
 
-        # A run must never land in a folder its own owner cannot see.
-        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is False
+        other = reg.create_group(self.ORG, self.MEMBER, "Elsewhere")["group_id"]
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], other) is False
+        assert reg.get_run(rid)["group_id"] == gid
+
+    # 7b ------------------------------------------------------------------
+    def test_a_run_from_another_org_is_never_filed(self, reg):
+        """The clause that stops grouping from publishing a run to an org it
+        does not belong to: a member's OWN run, made while they were in a
+        different org, cannot be filed into this org's folder."""
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, self.MEMBER, "org-elsewhere")
+        gid = reg.create_group(self.ORG, self.MEMBER, "Team")["group_id"]
+
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is False
         assert reg.get_run(rid)["group_id"] is None
 
     def test_assign_is_all_or_nothing_for_member_and_admin(self, reg):
@@ -280,63 +299,41 @@ class TestGroupAuthorityMatrix:
         assert reg.get_run(mine)["group_id"] is None
 
     # 8 -------------------------------------------------------------------
-    def test_name_collisions_are_scoped_per_visibility(self, reg):
+    def test_a_folder_name_belongs_to_the_whole_org(self, reg):
+        """One name, one folder, whoever created it — so every testcase
+        carries a single folder name. Case-insensitive, and scoped to the org
+        rather than to the creator, so a colleague's name is taken too."""
         from src.backend.core.run_registry import DuplicateGroupName
         reg.create_group(self.ORG, self.ADMIN, "checkout")
-        # Two ORG folders of the same name in one org — 409.
         with pytest.raises(DuplicateGroupName):
             reg.create_group(self.ORG, self.MEMBER, "Checkout")
-        # A private folder of the same name coexists with the org one: a
-        # single (org_id, name) index would leak that a private one exists.
-        reg.create_group(self.ORG, self.MEMBER, "checkout", visibility="private")
-        # Two private folders of the same name by the SAME user — 409.
         with pytest.raises(DuplicateGroupName):
-            reg.create_group(self.ORG, self.MEMBER, "CHECKOUT", visibility="private")
-        # Private folders of the same name by DIFFERENT users — both fine.
-        reg.create_group(self.ORG, self.ADMIN, "checkout", visibility="private")
-
-    # 9 -------------------------------------------------------------------
-    def test_flip_to_private_is_refused_while_other_members_runs_are_inside(self, reg):
-        from src.backend.core.run_registry import GroupVisibilityConflict
-        mine, theirs = str(uuid.uuid4()), str(uuid.uuid4())
-        self._seed(reg, mine, self.ADMIN, self.ORG)
-        self._seed(reg, theirs, self.MEMBER, self.ORG)
-        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
-        assert reg.assign_runs(self.ORG, self.ADMIN, True, [mine, theirs], gid) is True
-
-        with pytest.raises(GroupVisibilityConflict) as exc:
-            reg.rename_group(self.ORG, self.ADMIN, True, gid, visibility="private")
-        assert "1 run" in str(exc.value)          # names the count...
-        assert self.MEMBER not in str(exc.value)  # ...never the owners
-        assert reg.get_run(theirs)["group_id"] == gid  # nothing moved
-
-        # Once the other member's run is out, the flip goes through — the
-        # creator's own run inside the folder is no obstacle.
-        assert reg.assign_runs(self.ORG, self.ADMIN, True, [theirs], None) is True
-        assert reg.rename_group(
-            self.ORG, self.ADMIN, True, gid, visibility="private") is True
-        # private -> org only ever widens visibility: always allowed.
-        assert reg.rename_group(
-            self.ORG, self.ADMIN, True, gid, visibility="org") is True
+            reg.create_group(self.ORG, self.ADMIN, "CHECKOUT")
+        # A different org is a different name space.
+        reg.create_group("org-elsewhere", self.MEMBER, "checkout")
 
 
 class TestReadPathVisibility:
-    """The read half: the visibility-filtered LEFT JOIN.
+    """The read half: the org-scoped LEFT JOIN, and the run predicate.
 
     Every folder question is answered by ONE join —
         LEFT JOIN run_groups g ON g.group_id = t.group_id
                               AND g.org_id = <caller org>
-                              AND (g.visibility = 'org' OR g.created_by = <me>)
     so a row's folder tag is g.name, its folder id is g.group_id (never
     t.group_id), and "Ungrouped" means "in no folder I can see" rather than
-    "t.group_id IS NULL". A caller with no org scope (platform admin, or
-    token-less with AUTH_ENFORCED off) gets the join UNFILTERED: binding a
-    NULL org would evaluate the condition to NULL for every row and collapse
-    the whole page into Ungrouped.
+    "t.group_id IS NULL". A caller with no org scope (the token-less path with
+    AUTH_ENFORCED off) gets the join UNFILTERED: binding a NULL org would
+    evaluate the condition to NULL for every row and collapse the whole page
+    into Ungrouped.
 
-    The identity trap: an org_admin's FILTER user_id is None (they see the
-    whole org) while their identity is not, so the private-folder half of the
-    predicate is always caller_user_id, never the scoping user_id."""
+    There is no per-user term in the join any more — a folder belongs to the
+    org, so every member sees every folder in it. WHICH RUNS a caller sees is
+    a separate predicate (_VISIBLE_RUN_SQL): their own, plus anything the org
+    published into a folder.
+
+    The org trap: a platform admin's FILTER org_id is None (their runs span
+    every org) while their folder org is not, so the join always binds
+    folder_org_id, never the scoping org_id."""
 
     ORG = "org-acme"
     ADMIN = "u-admin"
@@ -379,157 +376,117 @@ class TestReadPathVisibility:
         )
 
     # 10 ------------------------------------------------------------------
-    def test_run_in_an_invisible_private_folder_reads_as_ungrouped(self, reg):
-        """Both halves, or the run disappears from every view: the org_admin
-        must see NO folder tag on it AND must find it under Ungrouped."""
+    def test_a_folder_name_shows_to_every_member(self, reg):
+        """A folder is the org's, so its name reaches every member — there is
+        no folder whose name is hidden from someone inside the org."""
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team Checkout")["group_id"]
         rid = str(uuid.uuid4())
         self._seed(reg, rid, self.MEMBER, self.ORG)
-        gid = reg.create_group(
-            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
         assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
 
-        # The org_admin's scope: whole org (filter user_id None), identity ADMIN.
-        rows, total = reg.list_runs(
-            user_id=None, org_id=self.ORG, caller_user_id=self.ADMIN)
-        assert total == 1
-        assert rows[0]["group_id"] is None and rows[0]["group_name"] is None
-        seen = reg.get_run(rid, org_id=self.ORG, caller_user_id=self.ADMIN)
-        assert seen["group_id"] is None and seen["group_name"] is None
+        rows, _ = reg.list_runs(user_id=self.MEMBER, org_id=self.ORG,
+                                folder_org_id=self.ORG)
+        row = next(r for r in rows if r["run_id"] == rid)
+        assert row["group_name"] == "Team Checkout"
+        assert row["group_id"] == gid
 
-        ung, ung_total = reg.list_runs(
-            user_id=None, org_id=self.ORG, group="ungrouped",
-            caller_user_id=self.ADMIN)
-        assert ung_total == 1 and ung[0]["run_id"] == rid
-
-        # The creator still sees it filed, and NOT under their Ungrouped.
-        mine, _ = reg.list_runs(
-            user_id=self.MEMBER, org_id=self.ORG, caller_user_id=self.MEMBER)
-        assert mine[0]["group_id"] == gid and mine[0]["group_name"] == "Mine"
-        assert reg.list_runs(
-            user_id=self.MEMBER, org_id=self.ORG, group="ungrouped",
-            caller_user_id=self.MEMBER)[1] == 0
-
-    # 11 ------------------------------------------------------------------
-    def test_org_folder_name_shows_to_every_member(self, reg):
+    def test_a_folder_from_another_org_reads_as_ungrouped(self, reg):
+        """The join is org-scoped, so a row somehow pointing at a foreign
+        folder reports no folder rather than leaking its name — and still
+        appears, under Ungrouped, instead of belonging to no filter at all."""
+        foreign = reg.create_group("org-elsewhere", self.ADMIN, "Theirs")["group_id"]
         rid = str(uuid.uuid4())
         self._seed(reg, rid, self.MEMBER, self.ORG)
-        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
+        with reg._pool.connection() as conn:
+            conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                         (foreign, rid))
 
-        for me, scope_user in ((self.MEMBER, self.MEMBER), (self.ADMIN, None)):
-            rows, total = reg.list_runs(
-                user_id=scope_user, org_id=self.ORG, caller_user_id=me)
-            assert total == 1
-            assert rows[0]["group_id"] == gid and rows[0]["group_name"] == "Team"
-            run = reg.get_run(rid, org_id=self.ORG, caller_user_id=me)
-            assert run["group_id"] == gid and run["group_name"] == "Team"
+        rows, _ = reg.list_runs(user_id=self.MEMBER, org_id=self.ORG,
+                                folder_org_id=self.ORG)
+        row = next(r for r in rows if r["run_id"] == rid)
+        assert row["group_id"] is None and row["group_name"] is None
 
-    # 12 ------------------------------------------------------------------
+        ungrouped, _ = reg.list_runs(user_id=self.MEMBER, org_id=self.ORG,
+                                     folder_org_id=self.ORG, group="ungrouped")
+        assert rid in [r["run_id"] for r in ungrouped]
+
     def test_count_ungrouped_agrees_with_the_ungrouped_filter(self, reg):
-        """The chip must agree with the table for all three scope shapes."""
-        # A solo user is org_admin of their own personal org (fact 2), so
-        # their scope is (org=personal, user=None).
-        solo = [str(uuid.uuid4()) for _ in range(3)]
-        for r in solo:
-            self._seed(reg, r, "u-solo", "org-solo")
-        solo_gid = reg.create_group(
-            "org-solo", "u-solo", "Solo", visibility="private")["group_id"]
-        assert reg.assign_runs("org-solo", "u-solo", True, solo[:1], solo_gid) is True
+        """The chip and the filter must always describe ONE set. Ungrouped
+        means work in progress, so for a member it is their OWN unfiled runs:
+        not a colleague's unfiled work, and not anything already published."""
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        filed, mine_open, theirs_open = (str(uuid.uuid4()) for _ in range(3))
+        self._seed(reg, filed, self.MEMBER, self.ORG)
+        self._seed(reg, mine_open, self.MEMBER, self.ORG)
+        self._seed(reg, theirs_open, self.ADMIN, self.ORG)
+        assert reg.assign_runs(self.ORG, self.MEMBER, False, [filed], gid) is True
 
-        # The team: the admin's run in an org folder, two member runs of which
-        # one sits in the member's OWN private folder (invisible to the admin).
-        a1, m1, m2 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        rows, total = reg.list_runs(user_id=self.MEMBER, org_id=self.ORG,
+                                    folder_org_id=self.ORG, group="ungrouped")
+        n = reg.count_ungrouped(self.MEMBER, self.ORG, folder_org_id=self.ORG)
+        assert [r["run_id"] for r in rows] == [mine_open]
+        assert n == total == 1
+
+    def test_an_org_admin_chip_still_equals_their_table(self, reg):
+        """An org_admin's scope spans the org, so their Ungrouped covers every
+        member's unfiled work — and the chip has to agree with that too."""
+        a1, m1 = str(uuid.uuid4()), str(uuid.uuid4())
         self._seed(reg, a1, self.ADMIN, self.ORG)
         self._seed(reg, m1, self.MEMBER, self.ORG)
-        self._seed(reg, m2, self.MEMBER, self.ORG)
-        team_gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
-        priv_gid = reg.create_group(
-            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
-        assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1], team_gid) is True
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [m1], priv_gid) is True
 
-        cases = [
-            ((None, "org-solo", "u-solo"), 2),           # solo: 3 runs, 1 filed
-            ((self.MEMBER, self.ORG, self.MEMBER), 1),   # member: m1 filed, m2 not
-            ((None, self.ORG, self.ADMIN), 2),           # admin: m1's folder invisible
-        ]
-        for (scope_user, scope_org, me), expected in cases:
-            _, total = reg.list_runs(
-                user_id=scope_user, org_id=scope_org, group="ungrouped",
-                caller_user_id=me)
-            assert total == expected, (scope_user, scope_org, me)
-            assert reg.count_ungrouped(scope_user, scope_org, me) == total
+        rows, total = reg.list_runs(user_id=None, org_id=self.ORG,
+                                    folder_org_id=self.ORG, group="ungrouped")
+        n = reg.count_ungrouped(None, self.ORG, folder_org_id=self.ORG)
+        assert sorted(r["run_id"] for r in rows) == sorted([a1, m1])
+        assert n == total == 2
 
-    # 13 ------------------------------------------------------------------
     def test_folder_run_count_agrees_with_the_folder_filter(self, reg):
+        """A folder's contents are the ORG's, so the chip and the filtered
+        table read the same number for every member of it — not the caller's
+        share of the folder. A member seeing 1 beside a folder holding 2 was
+        the defect that made a shared folder cosmetic."""
         a1, m1 = str(uuid.uuid4()), str(uuid.uuid4())
         self._seed(reg, a1, self.ADMIN, self.ORG)
         self._seed(reg, m1, self.MEMBER, self.ORG)
         gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
         assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1, m1], gid) is True
 
-        # The member sees only their own run in it...
-        listed = reg.list_groups(self.ORG, self.MEMBER, scope_user_id=self.MEMBER)
-        _, total = reg.list_runs(
-            user_id=self.MEMBER, org_id=self.ORG, group=gid,
-            caller_user_id=self.MEMBER)
-        assert [g["run_count"] for g in listed] == [total] == [1]
-
-        # ...the org_admin sees both.
-        listed = reg.list_groups(self.ORG, self.ADMIN, scope_user_id=None)
-        _, total = reg.list_runs(
-            user_id=None, org_id=self.ORG, group=gid, caller_user_id=self.ADMIN)
-        assert [g["run_count"] for g in listed] == [total] == [2]
+        listed = reg.list_groups(self.ORG)
+        for scope_user in (self.MEMBER, None):   # plain member, then org_admin
+            _, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
+                                     folder_org_id=self.ORG, group=gid)
+            assert [g["run_count"] for g in listed] == [total] == [2], scope_user
 
     # 14 ------------------------------------------------------------------
-    def test_filtering_by_an_invisible_folder_returns_nothing(self, reg):
+    def test_filtering_by_a_foreign_orgs_folder_returns_nothing(self, reg):
+        """A folder id the caller's org does not own narrows to nothing rather
+        than reaching across orgs."""
+        foreign = reg.create_group("org-elsewhere", self.ADMIN, "Theirs")["group_id"]
         rid = str(uuid.uuid4())
         self._seed(reg, rid, self.MEMBER, self.ORG)
-        gid = reg.create_group(
-            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
 
-        rows, total = reg.list_runs(
-            user_id=None, org_id=self.ORG, group=gid, caller_user_id=self.ADMIN)
+        rows, total = reg.list_runs(user_id=self.MEMBER, org_id=self.ORG,
+                                    folder_org_id=self.ORG, group=foreign)
         assert rows == [] and total == 0
 
-    # 15 ------------------------------------------------------------------
-    def test_unscoped_caller_still_sees_every_folder(self, reg):
-        """org_id=None is the platform admin / token-less branch: no
-        visibility filter at all. Bind None into the join instead and every
-        folder vanishes and the page collapses into Ungrouped."""
-        rid = str(uuid.uuid4())
-        self._seed(reg, rid, self.MEMBER, self.ORG)
-        gid = reg.create_group(
-            self.ORG, self.MEMBER, "Mine", visibility="private")["group_id"]
-        assert reg.assign_runs(self.ORG, self.MEMBER, False, [rid], gid) is True
-
-        rows, total = reg.list_runs(user_id=None, org_id=None, caller_user_id=None)
-        assert total == 1
-        assert rows[0]["group_id"] == gid and rows[0]["group_name"] == "Mine"
-
-        assert reg.list_runs(user_id=None, org_id=None, group="ungrouped",
-                             caller_user_id=None)[1] == 0
-        assert reg.count_ungrouped(None, None, None) == 0
-        assert reg.list_runs(user_id=None, org_id=None, group=gid,
-                             caller_user_id=None)[1] == 1
-        run = reg.get_run(rid)
-        assert run["group_id"] == gid and run["group_name"] == "Mine"
-
     def test_join_parameters_bind_before_the_where_clause(self, reg):
-        """The join now carries its OWN placeholders, and they appear in the
-        SQL text BEFORE the WHERE clause's. psycopg binds %s strictly by
-        position, so mis-ordering them filters on the wrong values SILENTLY
-        rather than raising. Every filter at once is what catches it."""
+        """The join carries its OWN placeholders, and they appear in the SQL
+        text BEFORE the WHERE clause's. psycopg binds %s strictly by position,
+        so mis-ordering them filters on the wrong values SILENTLY rather than
+        raising. Every filter at once is what catches it.
+
+        Both runs are in the folder and both are visible to the member now, so
+        the STATUS filter is what has to do the narrowing here — which is the
+        point: it proves the WHERE params survived the join's."""
         mine, other = str(uuid.uuid4()), str(uuid.uuid4())
         self._seed(reg, mine, self.MEMBER, self.ORG, status="failed")
-        self._seed(reg, other, self.ADMIN, self.ORG, status="failed")
+        self._seed(reg, other, self.ADMIN, self.ORG, status="passed")
         gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
         assert reg.assign_runs(self.ORG, self.ADMIN, True, [mine, other], gid) is True
 
         rows, total = reg.list_runs(
             user_id=self.MEMBER, org_id=self.ORG, status="failed", q="q",
-            group=gid, caller_user_id=self.MEMBER, limit=10, offset=0)
+            group=gid, folder_org_id=self.ORG, limit=10, offset=0)
         assert total == 1
         assert rows[0]["run_id"] == mine and rows[0]["group_name"] == "Team"
 
@@ -588,7 +545,7 @@ class TestGroupAssignmentAndFilter:
         rows, total = reg.list_runs(user_id="u1", group=gid)
         assert total == 2
         assert all(r["group_id"] == gid and r["group_name"] == "Checkout" for r in rows)
-        assert reg.list_groups(ORG_A, "u1")[0]["run_count"] == 2
+        assert reg.list_groups(ORG_A)[0]["run_count"] == 2
         assert reg.count_ungrouped("u1") == 0
 
     def test_unassign_with_none_and_ungrouped_filter(self, reg):
@@ -637,7 +594,7 @@ class TestGroupAssignmentAndFilter:
         gid = reg.create_group(ORG_A, "u1", "Doomed")["group_id"]
         reg.assign_runs(ORG_A, "u1", False, [r1], gid)
 
-        assert reg.delete_group(ORG_A, "u1", False, gid) is True
+        assert reg.delete_group(ORG_A, "u1", True, gid) is True
         run = reg.get_run(r1)
         assert run is not None and run["group_id"] is None  # run survived, ungrouped
 
@@ -692,64 +649,6 @@ class TestGroupAssignmentAndFilter:
         assert refused, f"the losing UPDATE was allowed (it matched {matched} rows)"
         assert dangling == 0
 
-    def test_flip_to_private_cannot_race_a_concurrent_assign(self, reg):
-        """The org->private flip and a concurrent file-a-run must serialize.
-
-        Reproduced 2026-08-21 before the row lock: rename_group counted 0
-        foreign-owned runs, another member's run was filed in by a second
-        transaction, both committed, and the result was a run inside a
-        private folder its own owner cannot see — the invariant three
-        separate paths exist to uphold. The read path hides the breach (the
-        run just reads as Ungrouped), so nothing surfaces it.
-
-        _visible_group now takes the folder row FOR UPDATE, so the filer
-        waits for the flip to commit, re-reads 'private', and refuses.
-        """
-        import threading
-        import psycopg
-
-        gid = reg.create_group(ORG_A, "u1", "Shared")["group_id"]
-        rid = str(uuid.uuid4())
-        self._seed(reg, rid, "u2")
-
-        flip = psycopg.connect(reg.dsn)
-        result: list = []
-        t = None
-        try:
-            # Stand in for rename_group's transaction: hold the folder row
-            # exactly as _visible_group now does, BEFORE counting foreign runs.
-            flip.execute(
-                "SELECT created_by FROM run_groups WHERE group_id = %s FOR UPDATE",
-                (gid,),
-            )
-            t = threading.Thread(
-                target=lambda: result.append(
-                    reg.assign_runs(ORG_A, "u2", False, [rid], gid)))
-            t.start()
-            t.join(timeout=2.0)
-            assert t.is_alive(), (
-                "assign_runs did not wait for the folder row lock — without it "
-                "the flip's foreign-run count is already stale when it commits")
-            flip.execute(
-                "UPDATE run_groups SET visibility = 'private' WHERE group_id = %s",
-                (gid,))
-            flip.commit()
-        finally:
-            flip.close()
-            if t is not None:
-                t.join(timeout=10.0)
-
-        assert result == [False], (
-            "the filer must re-read the committed 'private' folder and refuse "
-            f"u2's run, got {result}")
-        with reg._pool.connection() as conn:
-            breached = conn.execute(
-                "SELECT COUNT(*) AS n FROM test_runs t "
-                "JOIN run_groups g ON g.group_id = t.group_id "
-                "WHERE g.visibility = 'private' AND g.created_by <> t.user_id"
-            ).fetchone()["n"]
-        assert breached == 0
-
     def test_assign_runs_returns_false_when_the_folder_vanishes(self, reg):
         """assign_runs loses the race: the folder clears the authority check,
         then is gone by the time the UPDATE runs. It must fail closed —
@@ -759,7 +658,7 @@ class TestGroupAssignmentAndFilter:
         r1 = str(uuid.uuid4())
         self._seed(reg, r1, "u1")
         ghost = str(uuid.uuid4())
-        vanished = {"group_id": ghost, "visibility": "org", "created_by": "u1"}
+        vanished = {"group_id": ghost, "created_by": "u1"}
 
         with patch.object(reg, "_visible_group", return_value=vanished):
             assert reg.assign_runs(ORG_A, "u1", False, [r1], ghost) is False
@@ -849,6 +748,8 @@ def test_groups_crud_roundtrip(client):
     r = client.patch(f"/api/groups/{gid}", json={"name": "Payments"}, headers=_auth(tok))
     assert r.status_code == 200 and r.json()["name"] == "Payments"
 
+    # A solo user is org_admin of their own personal org, so deleting their
+    # own folder is not blocked by the org_admin-only delete rule.
     assert client.delete(f"/api/groups/{gid}", headers=_auth(tok)).status_code == 204
     assert client.get("/api/groups", headers=_auth(tok)).json()["groups"] == []
 
@@ -876,7 +777,7 @@ def test_group_name_validation(client):
 
 def test_groups_are_invisible_and_immutable_across_orgs(client):
     """Two separately registered users sit in their own personal orgs, so
-    neither sees the other's folders whatever their visibility."""
+    neither sees the other's folders."""
     tok_a = _register(client, f"ga-{uuid.uuid4().hex[:8]}@e.com")
     tok_b = _register(client, f"gb-{uuid.uuid4().hex[:8]}@e.com")
 
@@ -923,34 +824,22 @@ def test_org_admin_can_file_a_members_run(client):
 
 
 def test_drawer_hides_a_folder_the_caller_cannot_see(client):
-    """PRESERVE item 5's negative: a run inside a folder the caller cannot see
-    reports null for BOTH group fields — never the folder's name, and never a
-    dangling id.
-
-    The private folder is created through the registry rather than the
-    endpoint, so this stays a read-path test; the endpoint reads the very
-    same rows."""
+    """A run pointing at a folder outside the caller's org reports null for
+    BOTH group fields — never the folder's name, and never a dangling id."""
     from src.backend.auth.jwt_utils import decode_token
     from src.backend.core.run_registry import get_run_registry
 
-    tok_a, tok_b, org_id = _team_of_two(client)
+    _tok_a, tok_b, _org_id = _team_of_two(client)
     uid_b = decode_token(tok_b)["user_id"]
-    rid = _seed_run_for(client, tok_b)
     reg = get_run_registry()
-    name = f"Bs secret {uuid.uuid4().hex[:6]}"
-    gid = reg.create_group(org_id, uid_b, name, visibility="private")["group_id"]
-    assert reg.assign_runs(org_id, uid_b, False, [rid], gid) is True
+    rid = _seed_run_for(client, tok_b)
+    foreign = reg.create_group("org-not-theirs", uid_b, "Elsewhere")["group_id"]
+    with reg._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (foreign, rid))
 
-    # The creator sees it filed...
-    mine = client.get(f"/api/history/{rid}", headers=_auth(tok_b)).json()
-    assert mine["group_id"] == gid and mine["group_name"] == name
-    # ...their org_admin sees the run itself, but no folder at all.
-    theirs = client.get(f"/api/history/{rid}", headers=_auth(tok_a)).json()
-    assert theirs["run_id"] == rid
-    assert theirs["group_id"] is None and theirs["group_name"] is None
-    # ...and it is under the admin's Ungrouped rather than nowhere.
-    page = client.get("/api/history?group=ungrouped", headers=_auth(tok_a)).json()
-    assert rid in [r["run_id"] for r in page["runs"]]
+    body = client.get(f"/api/history/{rid}", headers=_auth(tok_b)).json()
+    assert body["group_id"] is None and body["group_name"] is None
 
 
 def test_ungrouped_chip_agrees_with_the_history_table(client):
@@ -1088,7 +977,7 @@ def _orgless_token(client) -> str:
 
 def test_orgless_caller_sees_no_folders(client):
     """org_id=None means UNSCOPED at the registry — every org's folders,
-    private ones included. That branch belongs to the platform admin alone;
+    That branch belongs to the platform admin alone;
     a token that merely lacks an org must never reach it."""
     other = _register(client, f"oo-{uuid.uuid4().hex[:8]}@e.com")
     client.post("/api/groups", json={"name": "Someone elses"}, headers=_auth(other))
@@ -1156,9 +1045,8 @@ def test_platform_admin_folder_view_is_their_own_org(client):
     foreign_org = client.post(
         "/api/groups", json={"name": f"Foreign {uuid.uuid4().hex[:6]}"},
         headers=_auth(owner)).json()
-    foreign_private = client.post(
-        "/api/groups",
-        json={"name": f"Secret {uuid.uuid4().hex[:6]}", "visibility": "private"},
+    foreign_second = client.post(
+        "/api/groups", json={"name": f"Second {uuid.uuid4().hex[:6]}"},
         headers=_auth(owner)).json()
 
     admin = _register(client, f"pa2-{uuid.uuid4().hex[:8]}@e.com")
@@ -1180,7 +1068,7 @@ def test_platform_admin_folder_view_is_their_own_org(client):
     names = [g["name"] for g in seen]
     assert own["group_id"] in ids, "their own org's folder must show"
     assert foreign_org["group_id"] not in ids, "another org's folder must not"
-    assert foreign_private["name"] not in names, "a foreign PRIVATE name must not leak"
+    assert foreign_second["name"] not in names, "no foreign folder name may leak"
 
 
 def test_platform_admin_chip_still_equals_the_table(client):
@@ -1232,16 +1120,16 @@ def _forget_org_id(run_id: str) -> None:
 
 
 def test_platform_admin_folder_chip_equals_its_filtered_table(client):
-    """The PER-FOLDER chip count and that folder's own table must describe one
-    set of runs, for a platform admin too — the Ungrouped pair above is only
-    half the chip row.
+    """The chip and the folder-filtered table must describe ONE set for a
+    platform admin too — their runs span every org while their folders are
+    their own org's, so the count and the filter read two different scopes and
+    have to be kept in step deliberately.
 
-    A platform admin has two different org scopes: their FOLDERS are their own
-    org's, their RUNS span every org. One org_id doing both jobs narrowed the
-    counted runs to their own org while /api/history narrowed nothing, so a run
-    with no org_id filed into their own folder was in the table and not in the
-    chip. assign_runs authorises a run by ownership, not by org, so an
-    org-less run of the caller's own reaches an org folder.
+    A run with NO org is the awkward member of that set, and it is now
+    excluded at the WRITE instead: a folder is org-keyed, so an org-less run
+    (AUTH_ENFORCED off, or a row that predates the org backfill) has no org to
+    match and cannot be published at all. Refusing it is what keeps grouping
+    from meaning "visible to an org" for a row that belongs to none.
     """
     import jwt as _jwt
     from src.backend.auth.jwt_utils import create_access_token
@@ -1253,9 +1141,16 @@ def test_platform_admin_folder_chip_equals_its_filtered_table(client):
     _forget_org_id(legacy)
     gid = client.post("/api/groups", json={"name": f"Mixed {uuid.uuid4().hex[:6]}"},
                       headers=_auth(admin)).json()["group_id"]
+
+    # All-or-nothing, so the batch carrying the org-less row files nothing.
     assert client.put(
         "/api/groups/assignments",
         json={"run_ids": [attributed, legacy], "group_id": gid},
+        headers=_auth(admin)).status_code == 404
+    # The attributed run alone goes in fine.
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [attributed], "group_id": gid},
         headers=_auth(admin)).status_code == 200
 
     claims = _jwt.decode(admin, settings.JWT_SECRET_KEY, algorithms=["HS256"])
@@ -1269,8 +1164,8 @@ def test_platform_admin_folder_chip_equals_its_filtered_table(client):
     chips = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
     chip = [g for g in chips if g["group_id"] == gid][0]["run_count"]
     page = client.get(f"/api/history?group={gid}", headers=_auth(admin_tok)).json()
-    assert {r["run_id"] for r in page["runs"]} == {attributed, legacy}
-    assert chip == page["total"] == 2
+    assert {r["run_id"] for r in page["runs"]} == {attributed}
+    assert chip == page["total"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1320,172 +1215,55 @@ def test_history_invalid_group_param_is_400(client):
 
 
 # ---------------------------------------------------------------------------
-# Integration: T3 — visibility on the wire, empty ?group=, token-less mutations
+# Integration: what a folder carries on the wire, empty ?group=, token-less
+# mutations. There is no visibility field any more — a folder is the org's.
 # ---------------------------------------------------------------------------
 
-def test_create_private_folder_carries_visibility_and_created_by(client):
-    """visibility and created_by are what the chip row draws the lock icon
-    from and what it decides whether to offer rename/delete from, so both
-    POST's echo and GET's list have to carry them."""
+def test_create_carries_created_by_and_no_visibility(client):
+    """created_by is what the chip row draws Edit/Delete from, so it has to
+    reach the client on the create response AND on the list. visibility is
+    gone from both — its absence is the contract now."""
     from src.backend.auth.jwt_utils import decode_token
 
-    tok = _register(client, f"pv-{uuid.uuid4().hex[:8]}@e.com")
+    tok = _register(client, f"cb-{uuid.uuid4().hex[:8]}@e.com")
     uid = decode_token(tok)["user_id"]
 
-    r = client.post("/api/groups",
-                    json={"name": "Secret", "visibility": "private"},
-                    headers=_auth(tok))
+    r = client.post("/api/groups", json={"name": "Checkout"}, headers=_auth(tok))
     assert r.status_code == 201, r.text
-    assert r.json()["visibility"] == "private"
     assert r.json()["created_by"] == uid
+    assert "visibility" not in r.json()
 
     listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
     folder = next(g for g in listed if g["group_id"] == r.json()["group_id"])
-    assert folder["visibility"] == "private" and folder["created_by"] == uid
+    assert folder["created_by"] == uid
+    assert "visibility" not in folder
 
 
-def test_create_defaults_to_org_visibility(client):
-    """Sharing is the default: a folder created without a visibility is the
-    org's, matching the re-key's whole point."""
-    tok = _register(client, f"dv-{uuid.uuid4().hex[:8]}@e.com")
-    r = client.post("/api/groups", json={"name": "Shared"}, headers=_auth(tok))
-    assert r.status_code == 201, r.text
-    assert r.json()["visibility"] == "org"
+def test_a_taken_folder_name_is_reported_to_the_second_member(client):
+    """Decision D2: names belong to the org, so the SECOND person to reach for
+    one is told it already exists rather than quietly getting a duplicate —
+    which is what keeps one testcase on one folder name."""
+    tok_a, tok_b, _org = _team_of_two(client)
+    assert client.post("/api/groups", json={"name": "Login"},
+                       headers=_auth(tok_a)).status_code == 201
 
-
-def test_invalid_visibility_is_400_with_a_string_detail(client):
-    """A hand-rolled 400, not a pydantic Literal's 422: the SPA renders
-    detail as a string, and a 422's list-of-objects detail renders as
-    garbage in the dialog."""
-    tok = _register(client, f"bv-{uuid.uuid4().hex[:8]}@e.com")
-    r = client.post("/api/groups", json={"name": "Nope", "visibility": "team"},
-                    headers=_auth(tok))
-    assert r.status_code == 400, r.text
-    assert isinstance(r.json()["detail"], str)
-
-
-def test_non_string_visibility_is_400_with_a_string_detail(client):
-    """The same 422 rendering failure, reached by TYPE rather than by value:
-    a nullable dialog state binding straight to the field sends null, and a
-    pydantic `str` annotation would answer with a list detail. Validation is
-    manual, so any JSON value has to reach _clean_visibility."""
-    tok = _register(client, f"nv-{uuid.uuid4().hex[:8]}@e.com")
-    for junk in (123, None, True, ["private"], {"v": "private"}):
-        r = client.post("/api/groups", json={"name": "Nope", "visibility": junk},
-                        headers=_auth(tok))
-        assert r.status_code == 400, (junk, r.text)
-        assert isinstance(r.json()["detail"], str), junk
-
-    gid = client.post("/api/groups", json={"name": "Patch me"},
-                      headers=_auth(tok)).json()["group_id"]
-    for junk in (123, True, ["private"]):
-        r = client.patch(f"/api/groups/{gid}", json={"visibility": junk},
-                         headers=_auth(tok))
-        assert r.status_code == 400, (junk, r.text)
-        assert isinstance(r.json()["detail"], str), junk
-
-
-def test_patch_flips_private_to_org(client):
-    """Widening is always allowed, and the list reflects it immediately."""
-    tok = _register(client, f"fp-{uuid.uuid4().hex[:8]}@e.com")
-    gid = client.post("/api/groups",
-                      json={"name": "Widen me", "visibility": "private"},
-                      headers=_auth(tok)).json()["group_id"]
-
-    r = client.patch(f"/api/groups/{gid}", json={"visibility": "org"},
-                     headers=_auth(tok))
-    assert r.status_code == 200, r.text
-    assert r.json() == {"group_id": gid, "visibility": "org"}
-
-    listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
-    assert next(g for g in listed if g["group_id"] == gid)["visibility"] == "org"
-
-
-def test_flip_to_private_is_409_while_a_members_run_is_inside(client):
-    """Narrowing would silently hide another member's own run from them, so
-    it is refused — and the refusal is a COUNT, never who owns the runs."""
-    from src.backend.auth.jwt_utils import decode_token
-
-    tok_a, tok_b, _org_id = _team_of_two(client)
-    gid = client.post("/api/groups", json={"name": f"Shared {uuid.uuid4().hex[:6]}"},
-                      headers=_auth(tok_a)).json()["group_id"]
-    rid = _seed_run_for(client, tok_b)
-    assert client.put("/api/groups/assignments",
-                      json={"run_ids": [rid], "group_id": gid},
-                      headers=_auth(tok_b)).status_code == 200
-
-    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
-                     headers=_auth(tok_a))
+    r = client.post("/api/groups", json={"name": "login"}, headers=_auth(tok_b))
     assert r.status_code == 409, r.text
-    detail = r.json()["detail"]
-    assert "1 run by another member" in detail
-    claims_b = decode_token(tok_b)
-    assert claims_b["email"] not in detail and claims_b["user_id"] not in detail
-
-    # Refused means unchanged — B still sees the folder.
+    assert r.json()["detail"] == 'A group named "login" already exists'
+    # And the folder they were told about is one they can actually use.
     listed = client.get("/api/groups", headers=_auth(tok_b)).json()["groups"]
-    assert next(g for g in listed if g["group_id"] == gid)["visibility"] == "org"
-
-
-def test_only_the_creator_can_change_visibility(client):
-    """An org_admin may RENAME a member's org folder but may not flip it.
-
-    created_by stays the member, so after a flip _visible_group refuses the
-    admin the folder they just changed — a one-way action with no way back
-    through the API. 403, not 404: they can already see the folder, so a
-    'not found' would be a lie about something on their screen.
-    """
-    tok_admin, tok_member, _org_id = _team_of_two(client)
-
-    gid = client.post(
-        "/api/groups", json={"name": "Members folder"},
-        headers=_auth(tok_member)).json()["group_id"]
-
-    # The admin may still rename it.
-    assert client.patch(f"/api/groups/{gid}", json={"name": "Renamed by admin"},
-                        headers=_auth(tok_admin)).status_code == 200
-
-    # But not flip it.
-    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
-                     headers=_auth(tok_admin))
-    assert r.status_code == 403, r.text
-    assert r.json()["detail"] == "Only the folder's creator can change its visibility"
-
-    # Name and visibility both survive.
-    seen = [g for g in client.get("/api/groups", headers=_auth(tok_admin)).json()["groups"]
-            if g["group_id"] == gid][0]
-    assert seen["name"] == "Renamed by admin" and seen["visibility"] == "org"
-
-    # The creator still may.
-    assert client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
-                        headers=_auth(tok_member)).status_code == 200
+    assert [g["name"] for g in listed] == ["Login"]
 
 
 def test_patch_with_an_empty_body_is_400(client):
-    """Neither name nor visibility is nothing to do — a 400, not the
-    registry's ValueError surfacing as a 500."""
+    """No name is nothing to do — a 400, not the registry's ValueError
+    surfacing as a 500."""
     tok = _register(client, f"eb-{uuid.uuid4().hex[:8]}@e.com")
     gid = client.post("/api/groups", json={"name": "Untouched"},
                       headers=_auth(tok)).json()["group_id"]
 
     r = client.patch(f"/api/groups/{gid}", json={}, headers=_auth(tok))
     assert r.status_code == 400, r.text
-    assert isinstance(r.json()["detail"], str)
-
-
-def test_flip_that_collides_with_an_existing_private_name_is_409(client):
-    """The two partial indexes let a private "X" and an org "X" coexist, so
-    the flip is where that name collision finally lands."""
-    tok = _register(client, f"cc-{uuid.uuid4().hex[:8]}@e.com")
-    name = f"Dup {uuid.uuid4().hex[:6]}"
-    assert client.post("/api/groups", json={"name": name, "visibility": "private"},
-                       headers=_auth(tok)).status_code == 201
-    gid = client.post("/api/groups", json={"name": name, "visibility": "org"},
-                      headers=_auth(tok)).json()["group_id"]
-
-    r = client.patch(f"/api/groups/{gid}", json={"visibility": "private"},
-                     headers=_auth(tok))
-    assert r.status_code == 409, r.text
     assert isinstance(r.json()["detail"], str)
 
 

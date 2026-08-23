@@ -1,14 +1,23 @@
-"""Run-groups API — the History page's folder feature.
+"""Run-groups API — the Test Runs page's folder feature.
 
-Folders are ORG-keyed (run_groups.org_id) with a per-folder visibility flag:
-an 'org' folder is visible to everyone in the org, a 'private' one only to
-its creator. Anyone in the org may create; the creator — or an org_admin, on
-an 'org' folder only — renames and deletes; only the creator may change who
-can see it (GroupVisibilityForbidden, 403). A run may be filed only into a
-folder the caller can see, and never into a private folder
-whose owner does not own the run. A folder the caller cannot see is always a
-404, never 403, so its existence cannot be probed by id — the one exception
-is the visibility change above, refused with 403 on a folder already in view.
+Folders are ORG-keyed (run_groups.org_id) and nothing finer: every member of
+an org sees every folder in it, and every run filed into one. Moving a run
+into a folder is what PUBLISHES it to the team — an ungrouped run is work in
+progress and stays with whoever is doing it. Anyone in the org creates a
+folder; the creator, or an org_admin, renames it, and an ORG_ADMIN deletes
+it — removing a folder un-publishes every run inside it, so that authority is
+the org's whoever created the folder. A folder name
+belongs to the org, case-insensitively, so a taken name answers 409 and a
+testcase can only ever carry one folder name.
+
+Seeing a shared run is NOT authority over it: a peer reads a colleague's
+published test and re-runs it, but only its owner or an org_admin files it
+somewhere else. A folder the caller cannot act on is always a 404, never a
+403, so its existence cannot be probed by id.
+
+Every mutation here sets request.state.audit_detail, so the framework audit
+floor records WHAT changed alongside who changed it — the actor and the
+timestamp were already free, the folder and the run ids were not.
 
 The read scope comes from api/history_scope.py, the same helper /api/history
 uses, so the chip counts and the table always describe one set of runs.
@@ -21,25 +30,20 @@ the SPA reads any 401 as "session expired", clears the token and redirects to
 
 Referenced by: main.py (router registration), frontend HistoryPage
 (GroupChipsRow / MoveToGroupMenu / useGroups).
-Depends on: core/run_registry.py, api/history_scope.py, auth/jwt_utils.py.
+Depends on: core/run_registry.py, api/history_scope.py, auth/jwt_utils.py,
+core/audit_log.py (the floor that reads request.state.audit_detail).
 """
 
 import logging
 import uuid
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from src.backend.api.history_scope import history_scope
 from src.backend.auth.jwt_utils import require_user
-from src.backend.core.run_registry import (
-    DuplicateGroupName,
-    GroupVisibilityConflict,
-    GroupVisibilityForbidden,
-    _VISIBILITIES,
-    get_run_registry,
-)
+from src.backend.core.run_registry import DuplicateGroupName, get_run_registry
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +58,10 @@ _RUN_IDS_MAX = 500
 
 class GroupIn(BaseModel):
     name: str
-    # Deliberately untyped: _clean_visibility validates, and a `str`
-    # annotation would answer a null or a number with pydantic's 422, whose
-    # detail is a list of objects where the SPA renders a string.
-    visibility: Any = "org"
 
 
 class GroupPatchIn(BaseModel):
     name: str | None = None
-    visibility: Any = None
 
 
 class AssignmentsIn(BaseModel):
@@ -104,17 +103,6 @@ def _clean_name(raw: str) -> str:
     return name
 
 
-def _clean_visibility(raw: Any) -> str:
-    """Validated by hand, not by a pydantic Literal: the SPA renders `detail`
-    as a string, and FastAPI's 422 detail is a list of objects. Takes ANY
-    JSON value for the same reason — a wrong TYPE has to reach this 400 too,
-    not just a wrong string."""
-    if raw not in _VISIBILITIES:
-        raise HTTPException(
-            400, f"Visibility must be one of: {', '.join(_VISIBILITIES)}")
-    return raw
-
-
 def _valid_uuid(value: str, what: str) -> str:
     try:
         return str(uuid.UUID(value))
@@ -123,136 +111,129 @@ def _valid_uuid(value: str, what: str) -> str:
 
 
 def _duplicate(exc: DuplicateGroupName) -> HTTPException:
-    """409 for a name collision. The name is whichever scope the collision
-    landed in — the org's for an 'org' folder, the (org, creator) pair for a
-    private one — so the copy cannot say "you already have", which is false
-    for an org folder another member created. Private names being scoped to
-    the org as well as the creator is what stops a folder left behind in an
-    org the user departed from 409-ing a name they choose somewhere else,
-    naming a folder they can no longer see."""
+    """409 for a name collision. The name belongs to the ORG, so the copy
+    cannot say "you already have" — the folder holding it may well be one a
+    colleague created, and telling the caller it exists is the point: one
+    name, one folder, so every testcase carries a single folder name."""
     return HTTPException(409, f'A group named "{exc}" already exists')
 
 
 @router.get("/groups")
 def list_groups(user: dict | None = Depends(require_user)):
-    """The folders the caller can see, with run counts (plus the Ungrouped
-    count) — drives the History chip row.
+    """The org's folders, with run counts (plus the Ungrouped count) — drives
+    the Test Runs chip row and the sidebar's quick-access list.
 
-    Two answers, on ONE rule: folders are scoped to the caller's own org,
-    whoever they are. A caller WITH an org sees its 'org' folders plus their
-    own private ones. A caller with NO org — including the token-less dev
-    caller — gets an empty list, because folders are org-keyed so they own
-    none, and passing their None straight through would hand them the
-    registry's "no visibility filter" view of every org's folders, other
-    users' private ones included.
+    Folders are scoped to the caller's own org, whoever they are. A caller
+    with NO org — including the token-less dev caller — gets an empty list,
+    because folders are org-keyed so they own none, and passing their None
+    straight through would hand them the registry's "no filter" view of every
+    org's folders.
 
-    A validated platform admin used to take a third, unfiltered branch here.
-    That was the leak: every org's folder names came back, other users'
-    private ones among them, while every mutation binds their real token org
-    (_require_org_scope) and answered 404 for exactly those folders — so the
-    SPA drew Edit/Delete/Move controls that could never work. Their RUN scope
-    still spans every org; only their FOLDER scope narrowed.
+    A validated platform admin is no exception: their RUN scope still spans
+    every org, but their FOLDER scope is their own org's, the same value
+    every mutation binds. Before that, /api/groups answered with every org's
+    folder names while every write answered 404 for exactly those folders.
 
-    The run scope behind the counts MUST be the one /api/history computes for
-    this same caller, or the chip counts a different set of runs than the
-    table lists (an org_admin's History spans the org; a per-user count
-    showed 1 beside a table of 2). history_scope is that one computation.
+    run_count is the folder's WHOLE contents, not the caller's slice of it —
+    a folder belongs to the org, so its count does too. Scoping it per user
+    was what put a member's chip at 1 beside a folder holding 2.
     """
     scope = history_scope(user)
     reg = get_run_registry()
-    # ONE folder scope for everyone: the caller's own org. A platform admin
-    # used to take an unfiltered branch here, which handed them every org's
-    # folders including other users' private ones — while every mutation binds
-    # this same org and answered 404 for exactly those folders. A caller with
-    # no org (including the token-less dev caller) owns no folders, so [].
-    # The RUN scope behind run_count is a SEPARATE argument, and for a
-    # platform admin a different value: their runs span every org, so binding
-    # their folder org there counted a narrower set than /api/history lists
-    # and their folder chip read 1 beside a table of 2.
-    if scope.folder_org_id:
-        groups = reg.list_groups(
-            scope.org_id, scope.caller_user_id,
-            scope_user_id=scope.user_id,
-            folder_org_id=scope.folder_org_id)
-    else:
-        groups = []
+    groups = (
+        reg.list_groups(scope.folder_org_id, run_org_id=scope.org_id)
+        if scope.folder_org_id else []
+    )
     return {
         "groups": groups,
         "ungrouped_count": reg.count_ungrouped(
-            scope.user_id, scope.org_id, scope.caller_user_id,
-            folder_org_id=scope.folder_org_id),
+            scope.user_id, scope.org_id,
+            folder_org_id=scope.folder_org_id,
+            include_unowned=scope.is_admin or scope.caller_user_id is None),
     }
 
 
 @router.post("/groups", status_code=201)
-def create_group(body: GroupIn, user: dict | None = Depends(require_user)):
+def create_group(
+    request: Request, body: GroupIn, user: dict | None = Depends(require_user)
+):
     user_id = _require_identity(user)
     org_id, _ = _require_org_scope(user)
     name = _clean_name(body.name)
-    visibility = _clean_visibility(body.visibility)
     try:
-        return get_run_registry().create_group(org_id, user_id, name, visibility)
+        created = get_run_registry().create_group(org_id, user_id, name)
     except DuplicateGroupName as exc:
         raise _duplicate(exc)
+    request.state.audit_detail = {
+        "group_id": created["group_id"], "name": name}
+    return created
 
 
 @router.patch("/groups/{group_id}")
 def update_group(
-    group_id: str, body: GroupPatchIn, user: dict | None = Depends(require_user)
+    request: Request,
+    group_id: str,
+    body: GroupPatchIn,
+    user: dict | None = Depends(require_user),
 ):
-    """Rename a folder and/or change its visibility — at least one of them.
+    """Rename a folder — its creator, or an org_admin.
 
     Returns only what it changed: the SPA discards this body and refetches
     the list, so echoing the untouched fields would cost an extra read.
-    'org' -> 'private' is refused with 409 while the folder still holds runs
-    owned by other members, who would otherwise lose sight of their own runs;
-    that message carries a COUNT and never who owns them. A visibility change
-    by anyone but the folder's creator is refused with 403 (GroupVisibilityForbidden).
     """
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)
     group_id = _valid_uuid(group_id, "group id")
-    if body.name is None and body.visibility is None:
-        raise HTTPException(400, "Provide a name or a visibility to change")
-    name = None if body.name is None else _clean_name(body.name)
-    visibility = (
-        None if body.visibility is None else _clean_visibility(body.visibility)
-    )
+    if body.name is None:
+        raise HTTPException(400, "Provide a name to change")
+    name = _clean_name(body.name)
     try:
         changed = get_run_registry().rename_group(
-            org_id, user_id, is_org_admin, group_id,
-            name=name, visibility=visibility)
+            org_id, user_id, is_org_admin, group_id, name)
     except DuplicateGroupName as exc:
         raise _duplicate(exc)
-    except GroupVisibilityConflict as exc:
-        raise HTTPException(409, str(exc))
-    except GroupVisibilityForbidden as exc:
-        raise HTTPException(403, str(exc))
     if not changed:
         raise HTTPException(404, "Group not found")
-    out = {"group_id": group_id}
-    if name is not None:
-        out["name"] = name
-    if visibility is not None:
-        out["visibility"] = visibility
-    return out
+    request.state.audit_detail = {"group_id": group_id, "name": name}
+    return {"group_id": group_id, "name": name}
 
 
 @router.delete("/groups/{group_id}", status_code=204)
-def delete_group(group_id: str, user: dict | None = Depends(require_user)):
-    """Delete a group; its runs return to Ungrouped (runs are never deleted)."""
+def delete_group(
+    request: Request, group_id: str, user: dict | None = Depends(require_user)
+):
+    """Delete a folder; its runs return to Ungrouped (runs are never deleted).
+
+    ORG_ADMIN ONLY. Ungrouped means "mine alone", so this UN-PUBLISHES every
+    run the folder held — nothing is lost and any owner can re-file, but the
+    org loses sight of that work until someone does. That consequence is the
+    org's, so the authority is too, whoever created the folder.
+
+    A member who is refused gets the same 404 as a folder that does not
+    exist, so no caller can probe a folder with a delete.
+    """
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)
     group_id = _valid_uuid(group_id, "group id")
     if not get_run_registry().delete_group(org_id, user_id, is_org_admin, group_id):
         raise HTTPException(404, "Group not found")
+    request.state.audit_detail = {"group_id": group_id}
 
 
 @router.put("/groups/assignments")
-def assign_runs(body: AssignmentsIn, user: dict | None = Depends(require_user)):
-    """Move runs into a folder (group_id null = remove from folder). Atomic:
-    one run the caller may not file, or a folder they cannot see, rejects the
-    whole request — and rejection reads as 404, never 403."""
+def assign_runs(
+    request: Request, body: AssignmentsIn, user: dict | None = Depends(require_user)
+):
+    """Move runs into a folder (group_id null = remove from folder).
+
+    Filing a run into a folder PUBLISHES it to the org; passing null takes it
+    back to the author alone. Atomic: one run the caller may not file, or a
+    folder outside their org, rejects the whole request — and rejection reads
+    as 404, never 403.
+
+    Only the run's owner, or an org_admin, may file it. Being able to SEE a
+    colleague's published test is not authority over where it lives.
+    """
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)
     if not body.run_ids:
@@ -264,4 +245,8 @@ def assign_runs(body: AssignmentsIn, user: dict | None = Depends(require_user)):
     if not get_run_registry().assign_runs(
             org_id, user_id, is_org_admin, run_ids, group_id):
         raise HTTPException(404, "Group or run not found")
+    # Audited only on success: the floor writes one row per request whatever
+    # the status, and detail on a refused move would read as a move that
+    # happened. run_ids is capped at _RUN_IDS_MAX, so the JSON stays bounded.
+    request.state.audit_detail = {"group_id": group_id, "run_ids": run_ids}
     return {"assigned": len(run_ids), "group_id": group_id}
