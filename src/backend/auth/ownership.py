@@ -1,8 +1,9 @@
 """The one shared org-scoped access predicate (spec §6).
 
-Every path (reports, history, rerun, feedback, traces, metrics) routes its
-authorization decision through caller_can_access so the access model lives in
-one place. Pure function: no DB, no request — the caller passes the decoded
+Every access decision on a single resource (reports, history, rerun, feedback)
+routes through caller_can_access. Org-level aggregate dashboards (traces,
+metrics, learning) use is_dashboard_viewer below instead — a different rule.
+Pure function: no DB, no request — the caller passes the decoded
 JWT dict, the resource's owner_id/org_id, and a pre-computed is_platform_admin
 flag (is_validated_admin does the DB re-validation at the call site).
 
@@ -19,8 +20,8 @@ falls back to the exact pre-tenancy rule (owner_id == caller.user_id), so the
 single existing org's behaviour is unchanged until every token has rotated.
 
 Referenced by: auth/jwt_utils.py (reports), api/history_endpoints.py,
-api/endpoints.py (rerun, feedback), api/trace_endpoints.py,
-api/workflow_metrics_endpoints.py.
+api/endpoints.py (rerun, feedback); api/dashboard_scope.py and
+api/learning_endpoints.py (is_dashboard_viewer).
 Depends on: nothing (pure).
 """
 

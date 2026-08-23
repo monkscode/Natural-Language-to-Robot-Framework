@@ -26,8 +26,8 @@ ownership rows, so a user cannot open another user's log.html by URL.
 Referenced by: main.py (router registration), api/endpoints.py
 (resolve_robot_code for history reruns), frontend HistoryPage.
 Depends on: core/run_registry.py, api/history_scope.py (the shared run scope,
-shared with /api/groups), auth/jwt_utils.py, core/artifact_store.py
-(get_artifact_store).
+shared with /api/groups), auth/jwt_utils.py, auth/ownership.py
+(caller_can_access), core/artifact_store.py (get_artifact_store).
 """
 
 import logging

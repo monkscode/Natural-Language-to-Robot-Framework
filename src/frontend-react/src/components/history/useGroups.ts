@@ -18,7 +18,8 @@ import { api } from '@/lib/api'
 export interface RunGroup {
   group_id: string
   name: string
-  /** user_id of the creator — with is_org_admin, decides who may manage it. */
+  /** user_id of the creator. Rename: creator OR can_manage_org_folders.
+   *  Delete: can_manage_org_folders alone — this field plays no part. */
   created_by: string
   /** The folder's WHOLE contents, org-wide — not the caller's share of it. */
   run_count: number

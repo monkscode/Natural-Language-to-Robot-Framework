@@ -595,8 +595,8 @@ def test_an_unowned_run_stays_platform_admin_only_even_in_a_folder(client, share
 
     Both halves of the predicate carry the same `user_id IS NOT NULL` guard —
     the SQL in run_registry._VISIBLE_RUN_SQL and the rule in
-    auth/ownership._can — so the list cannot offer a row whose drawer and
-    report would then refuse it. This is what pins them together.
+    auth/ownership.caller_can_access — so the list cannot offer a row whose
+    drawer and report would then refuse it. This is what pins them together.
     """
     from src.backend.core.run_registry import get_run_registry
 

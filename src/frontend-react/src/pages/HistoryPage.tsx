@@ -159,7 +159,7 @@ export default function HistoryPage() {
   // Mirrors the server's rules, which differ per action. A hint only — the
   // server 404s any folder the caller may not mutate either way.
   const canRename = useCallback((g: RunGroup) => (
-    !!user && (g.created_by === user.id || user.is_org_admin === true)
+    !!user && (g.created_by === user.id || user.can_manage_org_folders === true)
   ), [user])
 
   // Narrower on purpose: deleting a folder returns every run inside it to

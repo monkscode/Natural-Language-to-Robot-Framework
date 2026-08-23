@@ -13,6 +13,8 @@ Read by:
   rows; admins see everything.
 - authorize_report_access (auth/jwt_utils.py) — per-owner authorization for the
   /reports/{run_id}/ files.
+- /api/groups (api/groups_endpoints.py) — lists folders with run counts,
+  creates/renames/deletes them, and files runs into them.
 
 Registry writes must never break the pipeline: every method swallows its own
 exceptions (mirrors the WorkflowMetricsCollector / learning-store discipline).
@@ -20,7 +22,7 @@ get_owner() fails CLOSED — on any error it returns None, which the reports
 guard treats as "not yours".
 
 Referenced by: services/workflow_service.py, api/history_endpoints.py,
-auth/jwt_utils.py (lazy import).
+api/groups_endpoints.py, auth/jwt_utils.py (lazy import).
 Depends on: core/config.py (DATABASE_URL).
 """
 

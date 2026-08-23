@@ -89,15 +89,15 @@ class TestGroupRegistryCrud:
     def test_create_and_list_groups(self, reg):
         g = reg.create_group(ORG_A, "u1", "Checkout")
         assert g["name"] == "Checkout" and g["run_count"] == 0 and g["group_id"]
-        listed = reg.list_groups(ORG_A, "u1")
+        listed = reg.list_groups(ORG_A)
         assert [x["name"] for x in listed] == ["Checkout"]
 
     def test_list_groups_is_per_org_and_name_sorted(self, reg):
         reg.create_group(ORG_A, "u1", "smoke")
         reg.create_group(ORG_A, "u1", "Checkout")
         reg.create_group(ORG_B, "u2", "Other")
-        assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Checkout", "smoke"]
-        assert [x["name"] for x in reg.list_groups(ORG_B, "u2")] == ["Other"]
+        assert [x["name"] for x in reg.list_groups(ORG_A)] == ["Checkout", "smoke"]
+        assert [x["name"] for x in reg.list_groups(ORG_B)] == ["Other"]
 
     def test_duplicate_name_case_insensitive(self, reg):
         from src.backend.core.run_registry import DuplicateGroupName
@@ -114,7 +114,7 @@ class TestGroupRegistryCrud:
     def test_rename_group(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Old")["group_id"]
         assert reg.rename_group(ORG_A, "u1", False, gid, "New") is True
-        assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["New"]
+        assert [x["name"] for x in reg.list_groups(ORG_A)] == ["New"]
 
     def test_rename_to_existing_name_raises(self, reg):
         """Rename has its OWN duplicate guard — create's does not cover it."""
@@ -123,13 +123,13 @@ class TestGroupRegistryCrud:
         gid = reg.create_group(ORG_A, "u1", "Other")["group_id"]
         with pytest.raises(DuplicateGroupName):
             reg.rename_group(ORG_A, "u1", False, gid, "keep")
-        assert sorted(x["name"] for x in reg.list_groups(ORG_A, "u1")) == ["Keep", "Other"]
+        assert sorted(x["name"] for x in reg.list_groups(ORG_A)) == ["Keep", "Other"]
 
     def test_rename_foreign_or_unknown_is_false(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Mine")["group_id"]
         assert reg.rename_group(ORG_B, "u2", True, gid, "Stolen") is False
         assert reg.rename_group(ORG_A, "u1", False, str(uuid.uuid4()), name="Ghost") is False
-        assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Mine"]
+        assert [x["name"] for x in reg.list_groups(ORG_A)] == ["Mine"]
 
     def test_rename_group_audit_old_name_captures_the_prior_name(self, reg):
         """The audit trail must say what a folder USED to be called, not
@@ -152,13 +152,13 @@ class TestGroupRegistryCrud:
     def test_delete_group(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Gone")["group_id"]
         assert reg.delete_group(ORG_A, "u1", True, gid) is True
-        assert reg.list_groups(ORG_A, "u1") == []
+        assert reg.list_groups(ORG_A) == []
 
     def test_delete_foreign_or_unknown_is_false(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Mine")["group_id"]
         assert reg.delete_group(ORG_B, "u2", True, gid) is False
         assert reg.delete_group(ORG_A, "u1", False, str(uuid.uuid4())) is False
-        assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Mine"]
+        assert [x["name"] for x in reg.list_groups(ORG_A)] == ["Mine"]
 
     def test_delete_group_no_connection_when_caller_lacks_authority(self, reg):
         """is_org_admin/org_id needs no database — a caller who fails that
@@ -267,7 +267,7 @@ class TestGroupAuthorityMatrix:
         gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
         assert reg.rename_group(self.ORG, self.MEMBER, False, gid, "Hax") is False
         assert reg.delete_group(self.ORG, self.MEMBER, False, gid) is False
-        assert [g["name"] for g in reg.list_groups(self.ORG, self.MEMBER)] == ["Team"]
+        assert [g["name"] for g in reg.list_groups(self.ORG)] == ["Team"]
 
     # 5 -------------------------------------------------------------------
     def test_member_files_own_run_into_any_folder_in_the_org(self, reg):
