@@ -236,6 +236,81 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "close_enough" | "completely_wrong"
 
 
+async def _gated_feedback_target(
+    run_row: dict | None,
+    submitted_id: str,
+    user: dict | None,
+    *,
+    is_platform_admin: bool,
+) -> str:
+    """The run whose learning record this feedback mutates — gated.
+
+    Re-run rows never own a learning record (their execution deliberately
+    skipped learning), so feedback applies to the ORIGINAL run the code was
+    cloned from. rerun_of is root-flattened at creation (_rerun_from_history:
+    `source.get("rerun_of") or source_run_id`), so there is at most one hop —
+    a chain walk here would be dead code.
+
+    submit_feedback's gate cleared the SUBMITTED row, and that is NOT
+    authority over the row about to be mutated. It used to be: under
+    owner-only re-run, whoever held the copy had already been authorized
+    against the original. D5 ended that by opening the re-run of a PUBLISHED
+    run to the whole org. A plain member now re-runs a colleague's shared
+    test, owns the copy, and would reach the colleague's learning record
+    through it; and a platform admin's legitimate cross-org re-run seats a
+    copy inside their own org, where that org's org_admin would inherit the
+    same reach into the ORIGINAL org's hints. So the same gate is re-applied
+    to the original.
+
+    Same two deliberate choices as the caller's gate, for the same reasons:
+    the read is UNSCOPED (a platform admin re-running across orgs is
+    legitimate, and a caller-org scope would refuse the one caller who is
+    entitled), and is_grouped is NOT passed — publication opens reading and
+    re-running a test, never rewriting the hints the org's future generations
+    receive.
+
+    Fails closed: nothing in src/backend/ ever deletes a run (zero
+    `DELETE FROM test_runs`), so a rerun_of that resolves to nothing is an
+    anomaly rather than ordinary state, and an unreadable original arrives at
+    the gate as owner_id=None/org_id=None — refused by the same line that
+    refuses an unknown run.
+
+    Referenced by: submit_feedback (this module).
+    Depends on: core/run_registry.py, auth/ownership.py.
+    """
+    rerun_of = run_row.get("rerun_of") if run_row else None
+    if not rerun_of:
+        return submitted_id
+
+    # Threaded like the caller's lookup: the registry query blocks.
+    try:
+        original = await asyncio.to_thread(
+            lambda: get_run_registry().get_run(rerun_of))
+    except Exception:
+        original = None
+    if original is None:
+        logging.warning(
+            "[FEEDBACK] run %s points at original %s, which does not resolve",
+            submitted_id, rerun_of,
+        )
+        original = {}
+
+    if not caller_can_access(
+        user, original.get("user_id"), original.get("org_id"),
+        is_platform_admin=is_platform_admin,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot submit feedback for this run",
+        )
+
+    logging.info(
+        f"[FEEDBACK] {submitted_id} is a re-run — applying feedback "
+        f"to its original run {rerun_of}"
+    )
+    return rerun_of
+
+
 @router.post('/api/feedback')
 async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(require_user)):
     """
@@ -282,18 +357,11 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
             detail="You cannot submit feedback for this run",
         )
 
-    # Re-run rows never own a learning record (their execution deliberately
-    # skipped learning), so feedback applies to the ORIGINAL run the code was
-    # cloned from. rerun_of is root-flattened at creation and was written
-    # server-side at rerun time, when the requester was already authorized
-    # against that original — no second ownership check needed.
-    feedback_target_id = request.workflow_id
-    if run_row and run_row.get("rerun_of"):
-        feedback_target_id = run_row["rerun_of"]
-        logging.info(
-            f"[FEEDBACK] {request.workflow_id} is a re-run — applying feedback "
-            f"to its original run {feedback_target_id}"
-        )
+    # Re-run rows redirect the mutation to their ORIGINAL run, which the
+    # gate above has NOT cleared — see _gated_feedback_target, which
+    # re-applies it (and refuses with the same 403).
+    feedback_target_id = await _gated_feedback_target(
+        run_row, request.workflow_id, user, is_platform_admin=admin)
 
     feedback_loop = get_feedback_loop()
     if not feedback_loop:
