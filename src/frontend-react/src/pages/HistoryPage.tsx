@@ -44,6 +44,12 @@ interface Run {
   // Original run this row was re-run from (root-flattened server-side).
   // Feedback on a re-run is applied to that original run's learning record.
   rerun_of?: string | null
+  // Server-computed: could THIS caller open that original right now? It is a
+  // live question — a peer re-runs a published run and its owner then unfiles
+  // it, which un-publishes it. Never re-derive it here; the row does not carry
+  // the org id it would need. False renders the pill as a non-interactive
+  // badge instead of a link that answers 404.
+  rerun_of_accessible?: boolean
   group_id?: string | null
   group_name?: string | null
   created_at: string
@@ -639,7 +645,7 @@ export default function HistoryPage() {
                       <td className="py-3 px-4">{STATUS_BADGE[row.status] ?? row.status}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          {row.rerun_of && (
+                          {row.rerun_of && (row.rerun_of_accessible ? (
                             <button
                               type="button"
                               className="shrink-0"
@@ -653,7 +659,22 @@ export default function HistoryPage() {
                                 <span>Re-run</span>
                               </Badge>
                             </button>
-                          )}
+                          ) : (
+                            /* Still a re-run — that stays true — but the
+                               original is no longer ours to open, so the pill
+                               is a statement, not a control. Muted and
+                               non-interactive; the full original id lives in
+                               the tooltip, never truncated. */
+                            <span
+                              className="shrink-0"
+                              title={`Re-run of ${row.rerun_of} — you no longer have access to the original run`}
+                            >
+                              <Badge className="gap-1 border-border bg-muted text-xs text-muted-foreground hover:bg-muted">
+                                <Repeat2 className="h-3 w-3" />
+                                <span>Re-run</span>
+                              </Badge>
+                            </span>
+                          ))}
                           <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
                             {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
                           </span>
@@ -806,14 +827,28 @@ export default function HistoryPage() {
               {d?.rerun_of && (
                 <span className="basis-full">
                   re-run of{' '}
-                  <button
-                    type="button"
-                    className="font-mono hover:text-foreground hover:underline"
-                    title="Open the original run — feedback on this re-run applies to it"
-                    onClick={() => setSelected(d.rerun_of!)}
-                  >
-                    {d.rerun_of}
-                  </button>
+                  {d.rerun_of_accessible ? (
+                    <button
+                      type="button"
+                      className="font-mono hover:text-foreground hover:underline"
+                      title="Open the original run — feedback on this re-run applies to it"
+                      onClick={() => setSelected(d.rerun_of!)}
+                    >
+                      {d.rerun_of}
+                    </button>
+                  ) : (
+                    /* The same rule as the row pill: the id is still shown in
+                       full, but it is text rather than a link that 404s. */
+                    <span
+                      className="font-mono"
+                      title="You no longer have access to the original run"
+                    >
+                      {d.rerun_of}
+                    </span>
+                  )}
+                  {!d.rerun_of_accessible && (
+                    <span className="ml-2 text-muted-foreground">(no longer available to you)</span>
+                  )}
                 </span>
               )}
             </SheetDescription>
