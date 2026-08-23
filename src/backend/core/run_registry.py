@@ -760,21 +760,36 @@ class RunRegistry:
         is_org_admin: bool,
         group_id: str,
         name: str,
+        *,
+        audit_old_name: list[str] | None = None,
     ) -> bool:
         """Rename a folder. False when it doesn't exist or the caller may not
         mutate it. Raises DuplicateGroupName when the new name collides —
-        rename needs its OWN guard, create's does not cover it."""
+        rename needs its OWN guard, create's does not cover it.
+
+        audit_old_name, if given, is appended with the folder's name as it
+        was BEFORE this call — _mutable_group's SELECT already reads it, so
+        the audit trail can say what a folder used to be called, not just
+        what it is now. Appended only once the UPDATE actually matches a
+        row, so it stays empty on every False return — a caller that only
+        records audit_detail after checking the return value can never be
+        handed a name for a rename that did not happen."""
         try:
             with self._pool.connection() as conn:
-                if self._mutable_group(
-                        conn, org_id, user_id, is_org_admin, group_id) is None:
+                row = self._mutable_group(
+                    conn, org_id, user_id, is_org_admin, group_id)
+                if row is None:
                     return False
                 cur = conn.execute(
                     "UPDATE run_groups SET name = %s, updated_at = now() "
                     "WHERE group_id = %s",
                     (name, group_id),
                 )
-                return cur.rowcount == 1
+                if cur.rowcount != 1:
+                    return False
+                if audit_old_name is not None:
+                    audit_old_name.append(row["name"])
+                return True
         except psycopg.errors.UniqueViolation:
             raise DuplicateGroupName(name)
 
@@ -784,6 +799,8 @@ class RunRegistry:
         user_id: str,
         is_org_admin: bool,
         group_id: str,
+        *,
+        audit_run_ids: list[str] | None = None,
     ) -> bool:
         """Delete a folder and return its member runs to Ungrouped. Runs are
         NEVER deleted: fk_test_runs_group is ON DELETE SET NULL, so Postgres
@@ -808,17 +825,34 @@ class RunRegistry:
 
         False when the folder doesn't exist, is outside the caller's org, or
         the caller is not an org_admin — the endpoint renders all three as
-        404 alike, so nothing about the folder leaks either way."""
+        404 alike, so nothing about the folder leaks either way.
+
+        audit_run_ids, if given, is appended with every run id the folder
+        held, read BEFORE the DELETE: fk_test_runs_group's ON DELETE SET
+        NULL erases each member's group_id as part of that same statement,
+        so this is the last query able to see the membership at all.
+        Appended only once the DELETE actually removes a row, so it stays
+        empty on every False return, the same guarantee rename_group's
+        audit_old_name makes."""
+        if not (is_org_admin and org_id is not None):
+            return False
         with self._pool.connection() as conn:
-            if not (is_org_admin and org_id is not None):
-                return False
             if self._visible_group(conn, org_id, group_id) is None:
                 return False
+            run_ids = None
+            if audit_run_ids is not None:
+                rows = conn.execute(
+                    "SELECT run_id FROM test_runs WHERE group_id = %s",
+                    (group_id,),
+                ).fetchall()
+                run_ids = [r["run_id"] for r in rows]
             cur = conn.execute(
                 "DELETE FROM run_groups WHERE group_id = %s", (group_id,)
             )
             if cur.rowcount != 1:
                 return False
+            if run_ids is not None:
+                audit_run_ids.extend(run_ids)
             return True
 
     def count_ungrouped(

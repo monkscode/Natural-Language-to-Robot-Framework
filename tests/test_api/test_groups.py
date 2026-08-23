@@ -131,6 +131,24 @@ class TestGroupRegistryCrud:
         assert reg.rename_group(ORG_A, "u1", False, str(uuid.uuid4()), name="Ghost") is False
         assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Mine"]
 
+    def test_rename_group_audit_old_name_captures_the_prior_name(self, reg):
+        """The audit trail must say what a folder USED to be called, not
+        just what it is now — the new name alone can't answer that."""
+        gid = reg.create_group(ORG_A, "u1", "Before")["group_id"]
+        captured: list = []
+        assert reg.rename_group(
+            ORG_A, "u1", False, gid, "After", audit_old_name=captured) is True
+        assert captured == ["Before"]
+
+    def test_rename_group_audit_old_name_empty_on_refusal(self, reg):
+        """A refused rename must record no name at all — the out-param
+        stays empty exactly when the caller's own audit_detail must too."""
+        gid = reg.create_group(ORG_A, "u1", "Untouched")["group_id"]
+        captured: list = []
+        assert reg.rename_group(
+            ORG_B, "u2", True, gid, "Stolen", audit_old_name=captured) is False
+        assert captured == []
+
     def test_delete_group(self, reg):
         gid = reg.create_group(ORG_A, "u1", "Gone")["group_id"]
         assert reg.delete_group(ORG_A, "u1", True, gid) is True
@@ -141,6 +159,18 @@ class TestGroupRegistryCrud:
         assert reg.delete_group(ORG_B, "u2", True, gid) is False
         assert reg.delete_group(ORG_A, "u1", False, str(uuid.uuid4())) is False
         assert [x["name"] for x in reg.list_groups(ORG_A, "u1")] == ["Mine"]
+
+    def test_delete_group_no_connection_when_caller_lacks_authority(self, reg):
+        """is_org_admin/org_id needs no database — a caller who fails that
+        check must never reach the pool at all, so the DELETE's own cost
+        (and any lock it would take) is paid only when it might actually
+        run."""
+        from unittest.mock import patch
+        gid = str(uuid.uuid4())
+        with patch.object(reg._pool, "connection") as mock_connect:
+            assert reg.delete_group(ORG_A, "u1", False, gid) is False
+            assert reg.delete_group(None, "u1", True, gid) is False
+        mock_connect.assert_not_called()
 
     def test_count_ungrouped(self, reg):
         r1, r2, r3 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
@@ -708,6 +738,41 @@ class TestGroupAssignmentAndFilter:
         assert reg.delete_group(ORG_A, "u1", True, gid) is True
         run = reg.get_run(r1)
         assert run is not None and run["group_id"] is None  # run survived, ungrouped
+
+    def test_delete_group_audit_run_ids_captures_members_before_the_delete(self, reg):
+        """fk_test_runs_group is ON DELETE SET NULL, so the membership is
+        gone the instant the DELETE commits — this proves the read happens
+        while it can still see it."""
+        r1, r2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, r1, "u1")
+        self._seed(reg, r2, "u1")
+        gid = reg.create_group(ORG_A, "u1", "Doomed")["group_id"]
+        reg.assign_runs(ORG_A, "u1", False, [r1, r2], gid)
+
+        captured: list = []
+        assert reg.delete_group(
+            ORG_A, "u1", True, gid, audit_run_ids=captured) is True
+        assert sorted(captured) == sorted([r1, r2])
+
+    def test_delete_group_audit_run_ids_empty_on_refusal(self, reg):
+        r1 = str(uuid.uuid4())
+        self._seed(reg, r1, "u1")
+        gid = reg.create_group(ORG_A, "u1", "Guarded")["group_id"]
+        reg.assign_runs(ORG_A, "u1", False, [r1], gid)
+
+        captured: list = []
+        assert reg.delete_group(
+            ORG_A, "u1", False, gid, audit_run_ids=captured) is False
+        assert captured == []
+
+    def test_delete_group_default_audit_run_ids_is_a_noop(self, reg):
+        """Every existing caller that does not ask for audit_run_ids must
+        see identical behaviour to before this parameter existed."""
+        r1 = str(uuid.uuid4())
+        self._seed(reg, r1, "u1")
+        gid = reg.create_group(ORG_A, "u1", "Plain")["group_id"]
+        reg.assign_runs(ORG_A, "u1", False, [r1], gid)
+        assert reg.delete_group(ORG_A, "u1", True, gid) is True
 
     def test_race_with_delete_cannot_orphan_a_run(self, reg):
         """Replay the assign/delete race on two connections at READ

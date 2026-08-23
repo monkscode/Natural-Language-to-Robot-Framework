@@ -472,6 +472,95 @@ def test_folder_creation_and_deletion_record_the_folder(client, shared, audit_ta
     assert rows and json.loads(rows[0]["detail"])["group_id"] == created["group_id"]
 
 
+def test_a_folder_delete_records_which_runs_it_ungrouped(client, shared, audit_table):
+    """D9: deleting un-publishes every run the folder held. Without the run
+    ids the audit log cannot answer what stopped being shared — the folder
+    id alone says a folder was removed, not what was inside it."""
+    path = f"/api/groups/{shared['gid']}"
+    assert client.delete(path, headers=_auth(shared["tok_a"])).status_code == 204
+
+    rows = _audit_rows(path)
+    detail = json.loads(rows[0]["detail"])
+    assert detail["run_ids"] == [shared["grouped"]]
+    assert detail["run_ids_truncated"] is False
+
+
+def test_a_folder_delete_over_the_cap_is_bounded_and_flagged(
+        client, shared, audit_table):
+    """A folder can hold far more runs than any one assignment can move, so
+    its audit record needs its own bound — and a truncated list must say so
+    plainly, or it reads as complete when it is not. Driven through a
+    stubbed registry: seeding _DELETE_AUDIT_RUN_IDS_MAX + 1 real rows would
+    make this test glacial for no extra coverage of the endpoint's own
+    capping arithmetic."""
+    from unittest.mock import MagicMock, patch
+
+    from src.backend.api import groups_endpoints
+
+    cap = groups_endpoints._DELETE_AUDIT_RUN_IDS_MAX
+    over_cap_ids = [str(uuid.uuid4()) for _ in range(cap + 1)]
+
+    def fake_delete_group(org_id, user_id, is_org_admin, group_id,
+                           audit_run_ids=None):
+        if audit_run_ids is not None:
+            audit_run_ids.extend(over_cap_ids)
+        return True
+
+    mock_reg = MagicMock()
+    mock_reg.delete_group.side_effect = fake_delete_group
+    gid = str(uuid.uuid4())
+
+    with patch.object(groups_endpoints, "get_run_registry",
+                      return_value=mock_reg):
+        resp = client.delete(f"/api/groups/{gid}", headers=_auth(shared["tok_a"]))
+    assert resp.status_code == 204
+
+    rows = _audit_rows(f"/api/groups/{gid}")
+    detail = json.loads(rows[0]["detail"])
+    assert len(detail["run_ids"]) == cap
+    assert detail["run_ids"] == over_cap_ids[:cap]
+    assert detail["run_ids_truncated"] is True
+
+
+def test_a_folder_rename_records_the_old_name_alongside_the_new(
+        client, shared, audit_table):
+    """The new name alone can't answer what a folder USED to be called."""
+    gid = client.post("/api/groups", json={"name": "Before"},
+                      headers=_auth(shared["tok_a"])).json()["group_id"]
+    path = f"/api/groups/{gid}"
+    assert client.patch(path, json={"name": "After"},
+                        headers=_auth(shared["tok_a"])).status_code == 200
+
+    rows = _audit_rows(path)
+    detail = json.loads(rows[0]["detail"])
+    assert detail["name"] == "After"
+    assert detail["old_name"] == "Before"
+
+
+def test_a_refused_delete_records_no_detail(client, shared, audit_table):
+    """A plain member's own folder still refuses THEM at delete (org_admin
+    only, D4) — the refusal must not read as a mutation that happened."""
+    mine = client.post("/api/groups", json={"name": "Member owned"},
+                       headers=_auth(shared["tok_b"])).json()["group_id"]
+    path = f"/api/groups/{mine}"
+    assert client.delete(path, headers=_auth(shared["tok_b"])).status_code == 404
+
+    rows = _audit_rows(path)
+    assert rows and rows[0]["detail"] is None
+
+
+def test_a_refused_rename_records_no_detail(client, shared, audit_table):
+    """Neither the creator nor an org_admin: refused, and just as silent."""
+    theirs = client.post("/api/groups", json={"name": "Admin owned"},
+                         headers=_auth(shared["tok_a"])).json()["group_id"]
+    path = f"/api/groups/{theirs}"
+    assert client.patch(path, json={"name": "Hax"},
+                        headers=_auth(shared["tok_b"])).status_code == 404
+
+    rows = _audit_rows(path)
+    assert rows and rows[0]["detail"] is None
+
+
 def test_only_an_org_admin_deletes_a_folder(client, shared):
     """Owner decision, 2026-08-23. Deleting returns every run inside to
     Ungrouped, which un-shares them from the whole org — an org-level

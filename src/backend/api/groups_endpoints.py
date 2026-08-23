@@ -54,6 +54,16 @@ _NAME_MAX = 60
 # the one request whose cost a client sets. 500 is far above any real
 # selection (the History page loads 200 rows at most).
 _RUN_IDS_MAX = 500
+# A folder's audit record needs its OWN, larger cap: it accumulates runs
+# across its whole lifetime — many assignment batches, not the one a client
+# sizes — so reusing _RUN_IDS_MAX would cap the common case, not just the
+# extreme one. 2000 is 4x _RUN_IDS_MAX: comfortably above anything real (the
+# live table holds 60 runs across 3 orgs and 0 folders today — R5) while
+# keeping audit_log.detail (a TEXT column written on every delete) bounded
+# to well under 100KB. A folder that ever exceeds it still deletes cleanly —
+# the record just says plainly that its run_ids list was capped, instead of
+# silently looking complete.
+_DELETE_AUDIT_RUN_IDS_MAX = 2000
 
 
 class GroupIn(BaseModel):
@@ -187,14 +197,20 @@ def update_group(
     if body.name is None:
         raise HTTPException(400, "Provide a name to change")
     name = _clean_name(body.name)
+    old_name: list[str] = []
     try:
         changed = get_run_registry().rename_group(
-            org_id, user_id, is_org_admin, group_id, name)
+            org_id, user_id, is_org_admin, group_id, name,
+            audit_old_name=old_name)
     except DuplicateGroupName as exc:
         raise _duplicate(exc)
     if not changed:
         raise HTTPException(404, "Group not found")
-    request.state.audit_detail = {"group_id": group_id, "name": name}
+    # Audited only on success: detail on a refused rename would read as one
+    # that happened. old_name names what the folder used to be called —
+    # rename_group only ever fills it in on this same success path.
+    request.state.audit_detail = {
+        "group_id": group_id, "name": name, "old_name": old_name[0]}
     return {"group_id": group_id, "name": name}
 
 
@@ -215,9 +231,19 @@ def delete_group(
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)
     group_id = _valid_uuid(group_id, "group id")
-    if not get_run_registry().delete_group(org_id, user_id, is_org_admin, group_id):
+    run_ids: list[str] = []
+    if not get_run_registry().delete_group(
+            org_id, user_id, is_org_admin, group_id, audit_run_ids=run_ids):
         raise HTTPException(404, "Group not found")
-    request.state.audit_detail = {"group_id": group_id}
+    # Audited only on success, matching every other mutation here. run_ids
+    # is what D8 needs answered — "what stopped being shared" — and gets
+    # its own cap (a folder outlives any one assignment's _RUN_IDS_MAX): a
+    # truncated list says so plainly rather than quietly looking complete.
+    request.state.audit_detail = {
+        "group_id": group_id,
+        "run_ids": run_ids[:_DELETE_AUDIT_RUN_IDS_MAX],
+        "run_ids_truncated": len(run_ids) > _DELETE_AUDIT_RUN_IDS_MAX,
+    }
 
 
 @router.put("/groups/assignments")
