@@ -3,7 +3,7 @@
 Org-dimension test strategy (mirrors test_history_org_scope pattern):
 - owner (org A) creates a run.
 - same-org org_admin peer (different user_id, same org_id) should be ALLOWED by
-  caller_can_read (org_admin of the run's org), but DENIED by the old bare
+  caller_can_access (org_admin of the run's org), but DENIED by the old bare
   user_id == user_id check — this is the genuine RED gate before the wiring.
 - stranger (org B) should be denied under both old and new code.
 - The request goes to /execute-test with {"rerun_of": rid}, which is the real
@@ -66,7 +66,7 @@ def test_same_org_admin_peer_can_rerun(client):
 
     This is the genuine org-dimension RED gate:
     - old code: compares peer.user_id != owner.user_id -> denies (wrong).
-    - new code: caller_can_read sees peer is org_admin of the same org -> allows.
+    - new code: caller_can_access sees peer is org_admin of the same org -> allows.
 
     The rerun will attempt Docker execution and likely fail (no real Docker run
     here), but the gate itself must not return 404/403 — any other status (200,

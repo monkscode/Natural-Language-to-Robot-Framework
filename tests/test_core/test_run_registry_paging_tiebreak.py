@@ -51,6 +51,12 @@ def test_paging_over_exactly_tied_created_at_neither_skips_nor_repeats(reg):
     the untied query's tie-break silently rode on — then read page 2. A total
     order must agree with itself across that disruption; an order that is
     merely "whatever the last physical layout happened to produce" will not.
+
+    CLUSTER reliably reproduced the pre-fix skip/repeat in testing, but that
+    reproduction leans on Postgres's unspecified tie-order-for-equal-keys
+    behavior, not a documented contract — a future planner or sort-algorithm
+    change could make this test stop catching a regression here while still
+    passing.
     """
     ids = [str(uuid.uuid4()) for _ in range(6)]
     for rid in ids:

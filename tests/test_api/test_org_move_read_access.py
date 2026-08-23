@@ -106,11 +106,12 @@ def moved_run(client):
 
 # ---------------------------------------------------------------------------
 # Required test 1 — the moved owner LOSES the READ (detail + report) AND the
-# two actions on a run they own in the org they just left. All four consumers
-# — history_endpoints.py and jwt_utils.py on the detail/report reads,
-# endpoints.py x2 on re-run/feedback — route through the single
-# caller_can_access predicate (auth/ownership.py); there is no read/act split
-# any more.
+# two actions on a run they own in the org they just left. Four protected
+# operations — detail, report, re-run, feedback — route through the single
+# caller_can_access predicate (auth/ownership.py) at five call sites:
+# history_endpoints.py and jwt_utils.py on detail/report, and endpoints.py x3
+# on re-run, the feedback re-run-to-original redirect, and feedback itself.
+# There is no read/act split any more.
 # ---------------------------------------------------------------------------
 
 def test_moved_owner_cannot_read_own_old_org_run_detail(client, moved_run):

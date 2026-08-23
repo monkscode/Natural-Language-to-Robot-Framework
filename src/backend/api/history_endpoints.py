@@ -238,7 +238,8 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
         or run.get("user_id") == scope.caller_user_id
         or (scope.is_org_admin and run.get("org_id") == scope.folder_org_id)
     )
-    # org_id was selected only to answer can_move — see the list endpoint.
+    # org_id is internal — the _can_open access gate above and can_move are
+    # its only readers; it is not part of the response.
     run.pop("org_id", None)
     if not scope.is_admin:
         # The email stays — see the list endpoint for why.

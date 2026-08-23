@@ -5,7 +5,7 @@ The org-dimension tests verify:
    the org column is wired, not just the user_id column).
 2. list_history endpoint scopes by the caller's org — an org-admin of their
    own personal org cannot see another org's runs via the list path.
-3. run_detail uses caller_can_read (org-aware predicate) instead of the
+3. run_detail uses caller_can_access (org-aware predicate) instead of the
    old hand-rolled is_owner comparison.
 
 Referenced by: src/backend/api/history_endpoints.py,
@@ -179,7 +179,7 @@ def test_org_admin_of_own_org_cannot_see_other_org_run(client):
 
 
 # ---------------------------------------------------------------------------
-# Integration: /api/history/{run_id} detail — caller_can_read predicate
+# Integration: /api/history/{run_id} detail — caller_can_access predicate
 # ---------------------------------------------------------------------------
 
 def test_run_detail_foreign_org_is_404(client):
