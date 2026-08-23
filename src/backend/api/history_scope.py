@@ -70,9 +70,11 @@ def history_scope(user: dict | None) -> HistoryScope:
     every org, every user. An org_admin with a concrete org gets their whole
     org with no per-user narrowing. Everyone else gets their own rows within
     their own org. folder_org_id is always the caller's own org, whoever they
-    are. It is None when there is no token at all — the token-less dev path,
-    which keeps its historic unfiltered folder join — and equally for a token
-    that carries no org, which reaches that same unfiltered join. Login makes
+    are, and it is None in two DIFFERENT cases that the registry reads apart
+    using caller_user_id: no token at all — the token-less dev path, which
+    keeps its historic unfiltered folder join — and a token that carries no
+    org, for which NO folder resolves, so that caller sees their own runs and
+    no folder names at all (ownership.caller_can_access rule 4). Login makes
     the second case unreachable in practice: _token_payload provisions an org
     for any ACTIVE user who lacks one before it mints a token.
     """

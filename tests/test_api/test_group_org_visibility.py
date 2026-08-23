@@ -295,6 +295,34 @@ def test_a_token_with_no_org_sees_only_its_own_runs(client, shared):
     assert listed["ungrouped_count"] == ungrouped["total"] == 1
 
 
+def test_the_drawer_hides_a_foreign_folder_from_a_token_with_no_org(client):
+    """The list already refuses a caller with no org a foreign folder's name;
+    the drawer read the same folder through an UNSCOPED join and handed it
+    over. Their OWN run is the only one they can open at all (rule 4), which
+    is exactly where the leak sat, and it is also the one place the drawer and
+    the list could disagree about the same row."""
+    from src.backend.core.run_registry import get_run_registry
+
+    own_tok, orgless = _orgless_token(client, f"drw-{uuid.uuid4().hex[:8]}@e.com")
+    rid = _seed_run_for(client, own_tok, "the org-less caller's own run")
+    reg = get_run_registry()
+    foreign = reg.create_group(
+        f"org-{uuid.uuid4().hex[:8]}", "u-outsider", "Theirs")["group_id"]
+    with reg._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (foreign, rid))
+
+    drawer = client.get(f"/api/history/{rid}", headers=_auth(orgless))
+    assert drawer.status_code == 200, drawer.text
+    assert drawer.json()["group_id"] is None
+    assert drawer.json()["group_name"] is None, (
+        "the drawer named a folder the list refuses this caller")
+
+    row = next(r for r in client.get("/api/history", headers=_auth(orgless))
+               .json()["runs"] if r["run_id"] == rid)
+    assert row["group_name"] == drawer.json()["group_name"]
+
+
 @pytest.fixture
 def stray(client):
     """A team of three where B's ungrouped run points at a folder in ANOTHER

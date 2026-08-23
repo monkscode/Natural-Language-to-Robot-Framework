@@ -91,7 +91,8 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     # flag, so the ownership gate below costs no extra DB round-trip.
     scope = history_scope(user)
     source = get_run_registry().get_run(
-        source_run_id, org_id=scope.folder_org_id)
+        source_run_id, org_id=scope.folder_org_id,
+        identified=scope.caller_user_id is not None)
     # A re-run executes a container against the org's environment using the
     # credentials embedded in the stored script, so it ends when the
     # membership does — an ex-member cannot keep firing tests at a customer's
@@ -102,7 +103,9 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     # team published into a folder is there to be re-run by the team. The
     # group_id read here comes from the org-scoped join above, so it is
     # non-NULL only when the folder is one THIS caller's org owns — the same
-    # fact the ownership rule needs, already established by the read.
+    # fact the ownership rule needs, already established by the read. A
+    # caller with no org owns none, and identified above is what makes the
+    # join say so rather than resolving any org's folder.
     allowed = source is not None and caller_can_access(
         user, source.get("user_id"), source.get("org_id"),
         is_platform_admin=scope.is_admin,

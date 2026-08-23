@@ -556,6 +556,25 @@ class TestReadPathVisibility:
                                     folder_org_id=self.ORG, group=foreign)
         assert rows == [] and total == 0
 
+    def test_get_run_hides_a_foreign_folder_from_a_caller_with_no_org(self, reg):
+        """get_run answers the drawer off the same join, so it owes the same
+        answer. The token-less dev caller keeps its historic unfiltered form;
+        an identity that simply has no org resolves no folder, exactly as it
+        does in the list."""
+        foreign = reg.create_group("org-elsewhere", self.ADMIN, "Theirs")["group_id"]
+        rid = str(uuid.uuid4())
+        self._seed(reg, rid, "u-nomad", None)
+        with reg._pool.connection() as conn:
+            conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                         (foreign, rid))
+
+        row = reg.get_run(rid, org_id=None, identified=True)
+        assert row is not None
+        assert row["group_id"] is None and row["group_name"] is None
+
+        dev = reg.get_run(rid)
+        assert dev["group_id"] == foreign and dev["group_name"] == "Theirs"
+
     def test_join_parameters_bind_before_the_where_clause(self, reg):
         """The join carries its OWN placeholders, and they appear in the SQL
         text BEFORE the WHERE clause's. psycopg binds %s strictly by position,

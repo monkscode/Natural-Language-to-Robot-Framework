@@ -834,9 +834,11 @@ class RunRegistry:
         join. That is what makes the two provably one set rather than two
         that happen to agree. A row pointing at a folder outside the org is
         in no folder this caller can see, so it is not published to them
-        either: it reads as Ungrouped for its OWNER, and is simply absent for
-        everyone else, instead of being visible org-wide while displaying as
-        Ungrouped.
+        either: it reads as Ungrouped for its OWNER and is simply absent for
+        a PEER, instead of being visible org-wide while displaying as
+        Ungrouped. It still reads as Ungrouped for an org_admin and for a
+        platform admin — rules 5 and 2 reach it without the folder, and this
+        change does not narrow those.
 
         folder_org_id is the caller's OWN org and scopes the folder join
         alone, which org_id cannot do here: a platform admin's org_id is None
@@ -962,7 +964,12 @@ class RunRegistry:
 
         The returned params bind BEFORE any WHERE-clause params, because
         these placeholders sit earlier in the SQL text and psycopg binds %s
-        strictly by position."""
+        strictly by position.
+
+        ONE other query expresses publication in SQL and cannot call this:
+        get_run_owner, which has no caller to bind and anchors to the run's
+        own org instead. Change what "published" means here and change it
+        there too."""
         if org_id is None:
             if identified:
                 return "LEFT JOIN run_groups g ON FALSE", []
@@ -1092,7 +1099,12 @@ class RunRegistry:
         for every member of the run's org. This method takes no caller, so
         the caller half of rule 3 stays where it is (org_id must equal the
         caller's); anchoring to t.org_id here makes the pair mean exactly
-        what list_runs' _group_join means for the same caller."""
+        what list_runs' _group_join means for the same caller.
+
+        This is the ONE publication join that is not _group_join, and nothing
+        couples them but this sentence: _group_join binds a CALLER's org and
+        this binds the row's, so it cannot literally reuse it. Change either
+        notion of "published" and change both."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
@@ -1144,6 +1156,8 @@ class RunRegistry:
         self,
         run_id: str,
         org_id: Optional[str] = None,
+        *,
+        identified: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Full row for one run (including robot_code), or None if unknown
         or on storage error (callers treat both as 'not found').
@@ -1155,11 +1169,18 @@ class RunRegistry:
         what the feedback path in api/endpoints.py wants — that reads
         ownership and lineage, never the group fields.
 
+        identified goes with it, and the two together mean the same thing
+        they mean in list_runs: an org_id of None is the token-less dev
+        caller when identified is False, and a caller who has an identity but
+        no org when it is True — for whom no folder resolves at all. Without
+        it the drawer answered with a foreign org's folder name for a row the
+        LIST reports as Ungrouped to the same caller.
+
         The rerun path DOES pass a scope, and reads the authorization
         decision itself off the group_id this join returns: a re-run inherits
         its source's folder, and "is this run published to my org" is exactly
         "did the folder resolve"."""
-        join, params = self._group_join(org_id)
+        join, params = self._group_join(org_id, identified=identified)
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(

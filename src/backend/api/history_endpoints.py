@@ -149,10 +149,15 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     # Same folder scope as the list, from the same helper: the token-less dev
     # caller is unscoped, everyone else sees their own org's folders.
     scope = history_scope(user)
-    run = get_run_registry().get_run(run_id, org_id=scope.folder_org_id)
+    run = get_run_registry().get_run(
+        run_id, org_id=scope.folder_org_id,
+        identified=scope.caller_user_id is not None)
     # group_id comes from the org-scoped join, so it is non-NULL only when
     # the folder belongs to THIS caller's org — which is exactly the fact the
-    # published-run rule needs, already established by the read itself.
+    # published-run rule needs, already established by the read itself. That
+    # holds for a caller with NO org only because identified says so: without
+    # it the join fell back to its unfiltered form and named a folder from
+    # any org at all.
     allowed = run is not None and caller_can_access(
         user, run.get("user_id"), run.get("org_id"),
         is_platform_admin=scope.is_admin,
