@@ -375,12 +375,18 @@ export default function HistoryPage() {
   // colleagues' runs, and a row with no author would leave the org unable to
   // say who wrote what — the accountability the whole shared model rests on.
   //
-  // Shown when there is actually someone else to distinguish: an admin's
-  // table always spans users, and a team's does as soon as a second author's
-  // run is loaded. A solo user in their own org sees only their own runs, and
-  // repeating their address down every line would be noise.
-  const showAuthor = isAdminScope || visible.some(
-    r => r.user_email && r.user_email !== user?.email)
+  // The question is only ever "is any loaded row someone else's". Reading
+  // scope='all' as a second yes was wrong twice over: the server returns it
+  // to ANY org_admin, and every solo signup is org_admin of their own
+  // personal org — so the one user this column exists to spare got their own
+  // address repeated down every line, which is exactly the noise the rule
+  // above was written to prevent. A single-member team org had it too.
+  //
+  // Deliberately not an email-present test: a row with NO author is not the
+  // viewer's either, and it is precisely the row whose "—" the org needs to
+  // see. Only a platform admin (and the token-less dev caller) is ever shown
+  // one, so this stays quiet for everyone else.
+  const showAuthor = visible.some(r => r.user_email !== user?.email)
 
   // Header select-all works over the VISIBLE (loaded) rows only, so stray ids
   // checked under a previous filter neither satisfy "all selected" nor get
