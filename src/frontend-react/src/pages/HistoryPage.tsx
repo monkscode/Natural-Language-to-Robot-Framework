@@ -25,7 +25,7 @@ import {
   Check, ChevronRight, Copy, Download, Folder, FolderInput, ListChecks,
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
-import { api } from '@/lib/api'
+import { ApiError, api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
@@ -416,7 +416,7 @@ export default function HistoryPage() {
     const note = (text: string) => setRerunNote(prev => ({ ...prev, [sourceId]: text }))
     note('Starting re-run of the stored code…')
     let listRefreshed = false
-    let failed = false
+    let refused = false
     try {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
         // First event = the new run row exists; surface it at the top
@@ -429,7 +429,13 @@ export default function HistoryPage() {
       })
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
-      failed = true
+      // Only a REFUSAL says the source row is gone: 404 (its owner un-filed
+      // it), 409 (no stored code), 403. A dropped connection or a 5xx says
+      // nothing about whether the run still exists, and evicting on those
+      // would delete a legitimate row off an older Load-more page over a
+      // network blip. 401 throws a plain Error and navigates to /login, so
+      // it never reaches here as an ApiError.
+      refused = e instanceof ApiError && e.status >= 400 && e.status < 500
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
       // The new run exists and may have landed in its source's folder, so the
@@ -441,7 +447,7 @@ export default function HistoryPage() {
       // in the tail and the user is left staring at a row the server denies.
       // Only this id — blanket-dropping everything missing from page zero is
       // what would delete the older Load-more pages.
-      void reloadAll(failed ? new Set([sourceId]) : undefined)
+      void reloadAll(refused ? new Set([sourceId]) : undefined)
     }
   }, [reloadAll])
 
