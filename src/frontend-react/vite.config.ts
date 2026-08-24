@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
@@ -27,5 +28,14 @@ export default defineConfig({
       '/rebuild-docker-image': { target: 'http://localhost:5000', changeOrigin: true },
       '/test': { target: 'http://localhost:5000', changeOrigin: true },
     },
+  },
+  // Unit tests for the pieces whose bugs are invisible in a type check: the
+  // group-state hooks and the folder chip row. Deliberately narrow — no page
+  // components, no browser suite, no coverage gate.
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    globals: false,
+    css: false,
   },
 })
