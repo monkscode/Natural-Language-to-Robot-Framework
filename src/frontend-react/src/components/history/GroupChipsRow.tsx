@@ -5,6 +5,8 @@
  * It carries at most three controls — Ungrouped, the groups control, and
  * "＋ New" — so creating twenty groups cannot push the page's toolbar down.
  * That matters more now that a group is the org's and the list gets longer.
+ * With no folders at all only "＋ New" is left: the other two would answer
+ * questions about a taxonomy that does not exist yet.
  *
  * The groups control is the whole taxonomy behind one button: it reads
  * "All Groups" while no group is filtered, and becomes the selected group's
@@ -142,16 +144,34 @@ export function GroupChipsRow({
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <Button
-        size="sm"
-        variant={active === 'ungrouped' ? 'secondary' : 'ghost'}
-        className={`h-7 gap-1.5 rounded-full text-xs ${active === 'ungrouped' ? '' : 'text-muted-foreground'}`}
-        title={active === 'ungrouped' ? 'Clear the filter' : 'Show only runs that are in no group'}
-        onClick={() => onSelect(active === 'ungrouped' ? null : 'ungrouped')}
-      >
-        Ungrouped
-        <span className="text-muted-foreground">· {ungroupedCount}</span>
-      </Button>
+      {/* Only worth offering once there is something to be grouped INTO.
+          With no visible folders every run resolves to no folder, so this
+          chip equals the total and filtering by it changes nothing — a
+          platform admin's read "Ungrouped · 241" beside a table of 241 rows
+          carrying no folder tag at all.
+
+          One exception, recorded rather than coded around: with
+          AUTH_ENFORCED=false the registry's folder join is unfiltered, so
+          grouped runs DO resolve their folder while /api/groups still
+          answers []. That is the local-debug path only — a deliberate
+          decision, not an oversight.
+
+          Kept on screen while it IS the active filter even with no folders
+          left: deleting the last one while filtering by Ungrouped would
+          otherwise take away the only control that clears it, stranding the
+          user on a filtered table until they reload. */}
+      {(groups.length > 0 || active === 'ungrouped') && (
+        <Button
+          size="sm"
+          variant={active === 'ungrouped' ? 'secondary' : 'ghost'}
+          className={`h-7 gap-1.5 rounded-full text-xs ${active === 'ungrouped' ? '' : 'text-muted-foreground'}`}
+          title={active === 'ungrouped' ? 'Clear the filter' : 'Show only runs that are in no group'}
+          onClick={() => onSelect(active === 'ungrouped' ? null : 'ungrouped')}
+        >
+          Ungrouped
+          <span className="text-muted-foreground">· {ungroupedCount}</span>
+        </Button>
+      )}
 
       {/* The whole taxonomy behind one control — "All Groups" until a group is
           filtered, then that group's own chip. Either way it opens the list. */}
