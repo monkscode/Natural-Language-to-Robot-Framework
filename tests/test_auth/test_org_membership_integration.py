@@ -3,6 +3,7 @@ import pytest
 from src.backend.auth.repository import UserRepository
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.db import get_pool
+from src.backend.core.run_registry import get_run_registry
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
@@ -332,4 +333,105 @@ def test_set_org_owner_role_change_keeps_single_membership():
                 conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([owner_email, member_email],))
+            conn.commit()
+
+def _group_row(reg, group_id):
+    """The raw folder row — the point is to prove what the row still says."""
+    with reg._pool.connection() as conn:
+        return conn.execute(
+            "SELECT group_id, org_id, created_by, name "
+            "FROM run_groups WHERE group_id = %s", (group_id,)).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# A folder STAYS WITH ITS ORG when its creator leaves.
+#
+# A folder belongs to the org, not to whoever made it, so a departure changes
+# nothing about it: the org keeps the folder, the runs inside it stay
+# published to the org, and the remaining members can rename or delete it
+# through the ordinary org_admin route. There is no folder ownership to
+# transfer and nothing to clean up.
+#
+# This replaces the private-folder handling that came before it — a routine
+# that flipped a departing member's private folders to 'org' visibility,
+# publishing names they chose in private and silently renaming them on
+# collision, plus the later decision to leave them stranded instead. Neither
+# question exists once folders have no visibility of their own.
+# ---------------------------------------------------------------------------
+
+def test_a_folder_survives_its_creator_leaving_and_the_org_still_manages_it():
+    """The contract: the folder is the org's, so a leaver takes nothing with
+    them and strands nothing behind them. The org_admin who remains can still
+    see it, rename it and delete it — no folder is ever unreachable."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"pmv-a-{uuid.uuid4().hex[:8]}@x.com"
+    mover_email = f"pmv-m-{uuid.uuid4().hex[:8]}@x.com"
+    old_org = new_org = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        mover = users.create_user(mover_email, "password123", "Mover")
+        old_org = orgs.create_team_org("Old Co", str(admin["id"]))
+        orgs.add_member(old_org, str(mover["id"]), "org_member")
+        group = reg.create_group(old_org, str(mover["id"]), "checkout")
+
+        new_org = orgs.create_team_org("New Co", str(mover["id"]))  # vacates old_org
+
+        row = _group_row(reg, group["group_id"])
+        assert row is not None, "the folder row must still exist"
+        assert str(row["org_id"]) == str(old_org), "the folder stays with the org"
+        assert row["name"] == "checkout", "the user's chosen name was rewritten"
+        assert str(row["created_by"]) == str(mover["id"]), "authorship is history"
+
+        # The org that kept the work can still see it AND still manage it —
+        # this is what makes the folder reachable rather than stranded.
+        seen = reg.list_groups(old_org)
+        assert group["group_id"] in [g["group_id"] for g in seen]
+        assert reg.rename_group(old_org, str(admin["id"]), True,
+                                group["group_id"], "checkout v2") is True
+        assert reg.delete_group(old_org, str(admin["id"]), True,
+                                group["group_id"]) is True
+
+        # And the name is free for the mover in the org they joined, because
+        # names are scoped to the org.
+        assert reg.create_group(new_org, str(mover["id"]), "checkout")
+    finally:
+        with get_pool().connection() as conn:
+            for oid in (old_org, new_org):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, mover_email],))
+            conn.commit()
+
+
+def test_remove_member_leaves_the_folder_with_the_org():
+    """remove_member deletes the membership directly — it never goes through
+    _collapse_to_single, so it was the one genuinely separate call site the
+    old folder handling needed. It now has no folder behaviour at all, and
+    this is what says so."""
+    users, orgs = UserRepository(), OrgRepository()
+    reg = get_run_registry()
+    admin_email = f"rmv-a-{uuid.uuid4().hex[:8]}@x.com"
+    leaver_email = f"rmv-l-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    try:
+        admin = users.create_user(admin_email, "password123", "Admin")
+        leaver = users.create_user(leaver_email, "password123", "Leaver")
+        org_id = orgs.create_team_org("Kept Co", str(admin["id"]))
+        orgs.add_member(org_id, str(leaver["id"]), "org_member")
+        group = reg.create_group(org_id, str(leaver["id"]), "payments")
+
+        assert orgs.remove_member(org_id, str(leaver["id"])) is True
+
+        row = _group_row(reg, group["group_id"])
+        assert row["name"] == "payments", "the folder is untouched by a removal"
+        assert group["group_id"] in [
+            g["group_id"] for g in reg.list_groups(org_id)]
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([admin_email, leaver_email],))
             conn.commit()

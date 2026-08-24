@@ -14,12 +14,13 @@ from src.backend.services.workflow_service import stream_generate_and_run, strea
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.runner_exec.client import RunnerExecUnavailable
 from src.backend.api.history_endpoints import resolve_robot_code
+from src.backend.api.history_scope import history_scope
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_CHARS
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import caller_can_read
+from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -69,6 +70,11 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     generation. The source's query still lands on the new history row via
     history_query so the run is recognizable in the list.
 
+    The new run stays in the folder the source run sits in until the user
+    moves it, inherited from the IMMEDIATE source row — never from rerun_of,
+    which is root-flattened below and would send a re-run of a since-moved
+    re-run back to the ORIGINAL run's folder.
+
     Access mirrors the detail endpoint: owner or validated admin; unknown ids
     and other users' runs both 404.
     """
@@ -77,13 +83,39 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid rerun_of: must be a UUID")
 
-    source = get_run_registry().get_run(source_run_id)
-    admin = is_validated_admin(user)
-    allowed = source is not None and caller_can_read(
-        user, source.get("user_id"), source.get("org_id"), is_platform_admin=admin
+    # Read through the caller's OWN scope: the new run inherits the source's
+    # folder, and an unscoped read would hand back a folder this caller cannot
+    # see — an org_admin re-running a member's run would file it into that
+    # member's private folder. history_scope is the single scope computation
+    # (never re-derive it here) and carries the re-validated platform-admin
+    # flag, so the ownership gate below costs no extra DB round-trip.
+    scope = history_scope(user)
+    source = get_run_registry().get_run(
+        source_run_id, org_id=scope.folder_org_id,
+        identified=scope.caller_user_id is not None)
+    # A re-run executes a container against the org's environment using the
+    # credentials embedded in the stored script, so it ends when the
+    # membership does — an ex-member cannot keep firing tests at a customer's
+    # systems. That is the ordinary org rule; there is no author-keeps-it
+    # exception any more.
+    #
+    # is_grouped opens it to the rest of the org (decision D5): a test the
+    # team published into a folder is there to be re-run by the team. The
+    # group_id read here comes from the org-scoped join above, so it is
+    # non-NULL only when the folder is one THIS caller's org owns — the same
+    # fact the ownership rule needs, already established by the read. A
+    # caller with no org owns none, and identified above is what makes the
+    # join say so rather than resolving any org's folder.
+    allowed = source is not None and caller_can_access(
+        user, source.get("user_id"), source.get("org_id"),
+        is_platform_admin=scope.is_admin,
+        is_grouped=source.get("group_id") is not None,
     )
     if source is None or not allowed:
-        # 404, not 403 — don't leak run existence across orgs.
+        # 404, not 403 — don't leak run existence across orgs. The read above
+        # is org-scoped, so "no such run" and "not an org you may act in"
+        # genuinely collapse here; both answer the same, which is what makes
+        # the 404 leak-free rather than merely vague.
         raise HTTPException(status_code=404, detail="Run not found")
 
     robot_code = resolve_robot_code(source)
@@ -102,7 +134,8 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     return StreamingResponse(
         stream_execute_only(robot_code, user=user,
                             history_query=source.get("user_query"),
-                            rerun_of=learning_anchor),
+                            rerun_of=learning_anchor,
+                            group_id=source.get("group_id")),
         media_type=SSE_MEDIA_TYPE,
     )
 
@@ -203,6 +236,81 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "close_enough" | "completely_wrong"
 
 
+async def _gated_feedback_target(
+    run_row: dict | None,
+    submitted_id: str,
+    user: dict | None,
+    *,
+    is_platform_admin: bool,
+) -> str:
+    """The run whose learning record this feedback mutates — gated.
+
+    Re-run rows never own a learning record (their execution deliberately
+    skipped learning), so feedback applies to the ORIGINAL run the code was
+    cloned from. rerun_of is root-flattened at creation (_rerun_from_history:
+    `source.get("rerun_of") or source_run_id`), so there is at most one hop —
+    a chain walk here would be dead code.
+
+    submit_feedback's gate cleared the SUBMITTED row, and that is NOT
+    authority over the row about to be mutated. It used to be: under
+    owner-only re-run, whoever held the copy had already been authorized
+    against the original. D5 ended that by opening the re-run of a PUBLISHED
+    run to the whole org. A plain member now re-runs a colleague's shared
+    test, owns the copy, and would reach the colleague's learning record
+    through it; and a platform admin's legitimate cross-org re-run seats a
+    copy inside their own org, where that org's org_admin would inherit the
+    same reach into the ORIGINAL org's hints. So the same gate is re-applied
+    to the original.
+
+    Same two deliberate choices as the caller's gate, for the same reasons:
+    the read is UNSCOPED (a platform admin re-running across orgs is
+    legitimate, and a caller-org scope would refuse the one caller who is
+    entitled), and is_grouped is NOT passed — publication opens reading and
+    re-running a test, never rewriting the hints the org's future generations
+    receive.
+
+    Fails closed: nothing in src/backend/ ever deletes a run (zero
+    `DELETE FROM test_runs`), so a rerun_of that resolves to nothing is an
+    anomaly rather than ordinary state, and an unreadable original arrives at
+    the gate as owner_id=None/org_id=None — refused by the same line that
+    refuses an unknown run.
+
+    Referenced by: submit_feedback (this module).
+    Depends on: core/run_registry.py, auth/ownership.py.
+    """
+    rerun_of = run_row.get("rerun_of") if run_row else None
+    if not rerun_of:
+        return submitted_id
+
+    # Threaded like the caller's lookup: the registry query blocks.
+    try:
+        original = await asyncio.to_thread(
+            lambda: get_run_registry().get_run(rerun_of))
+    except Exception:
+        original = None
+    if original is None:
+        logging.warning(
+            "[FEEDBACK] run %s points at original %s, which does not resolve",
+            submitted_id, rerun_of,
+        )
+        original = {}
+
+    if not caller_can_access(
+        user, original.get("user_id"), original.get("org_id"),
+        is_platform_admin=is_platform_admin,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot submit feedback for this run",
+        )
+
+    logging.info(
+        f"[FEEDBACK] {submitted_id} is a re-run — applying feedback "
+        f"to its original run {rerun_of}"
+    )
+    return rerun_of
+
+
 @router.post('/api/feedback')
 async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(require_user)):
     """
@@ -225,27 +333,35 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # credits), so only the run's owner — or a validated admin — may submit
     # it. `user` is None only when AUTH_ENFORCED is off (local debugging).
     # Unattributed/unknown runs are admin-only (fail closed).
+    #
+    # caller_can_ACT, not _read: conflict detection fires with
+    # org_id=record.org_id — the RUN's org, never the caller's — so under the
+    # read predicate an ex-member kept shaping the hints injected into that
+    # org's future generations indefinitely. 403 rather than the re-run path's
+    # 404 because THIS lookup is unscoped: an unknown run arrives here as
+    # owner_id=None/org_id=None and is refused by the same line with the same
+    # status, so the two cases already answer identically and there is no
+    # existence to leak.
+    #
+    # is_grouped is deliberately NOT passed (decision D7): D5 opened the
+    # RE-RUN of a published test to the whole org, not its learning record.
+    # Feedback rewrites the hints every future generation in the org sees,
+    # which is a different power from reading or repeating a colleague's
+    # test, and it stays with the run's owner and the org_admin.
     admin = await asyncio.to_thread(is_validated_admin, user)
     owner_id = run_row.get("user_id") if run_row else None
     org_id = run_row.get("org_id") if run_row else None
-    if not caller_can_read(user, owner_id, org_id, is_platform_admin=admin):
+    if not caller_can_access(user, owner_id, org_id, is_platform_admin=admin):
         raise HTTPException(
             status_code=403,
             detail="You cannot submit feedback for this run",
         )
 
-    # Re-run rows never own a learning record (their execution deliberately
-    # skipped learning), so feedback applies to the ORIGINAL run the code was
-    # cloned from. rerun_of is root-flattened at creation and was written
-    # server-side at rerun time, when the requester was already authorized
-    # against that original — no second ownership check needed.
-    feedback_target_id = request.workflow_id
-    if run_row and run_row.get("rerun_of"):
-        feedback_target_id = run_row["rerun_of"]
-        logging.info(
-            f"[FEEDBACK] {request.workflow_id} is a re-run — applying feedback "
-            f"to its original run {feedback_target_id}"
-        )
+    # Re-run rows redirect the mutation to their ORIGINAL run, which the
+    # gate above has NOT cleared — see _gated_feedback_target, which
+    # re-applies it (and refuses with the same 403).
+    feedback_target_id = await _gated_feedback_target(
+        run_row, request.workflow_id, user, is_platform_admin=admin)
 
     feedback_loop = get_feedback_loop()
     if not feedback_loop:

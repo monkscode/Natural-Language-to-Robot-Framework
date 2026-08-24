@@ -154,3 +154,29 @@ class TestCreateWorkflowSpan:
             "wf-lib", "query", "vertex", "gemini-2.5-flash", library_type="custom-lib"
         ):
             pass
+
+
+# ---------------------------------------------------------------------------
+# The suite must never install a live span exporter
+# ---------------------------------------------------------------------------
+
+class TestSuiteNeverExportsSpans:
+    """main.py calls init_observability() at IMPORT time, so any test that
+    imports the app installs a global OTel provider for the whole process. With
+    OBSERVABILITY_BACKEND=postgres (the .env value) that provider's exporter
+    writes to the live DATABASE_URL, and every later create_workflow_span() in
+    the run — including from unit tests that never intended an export — lands in
+    public.llm_traces. Measured: the gate suite wrote 6 rows per run.
+
+    tests/conftest.py pins the backend to "none" before anything imports
+    src.backend, which makes init_observability() return early and install
+    nothing. These assertions fail if that pin is ever removed.
+    """
+
+    def test_ambient_backend_is_none(self):
+        from src.backend.core.config import settings
+        assert settings.OBSERVABILITY_BACKEND == "none"
+
+    def test_init_observability_is_a_no_op_under_test(self):
+        from src.backend.core.observability import init_observability
+        assert init_observability() is False

@@ -251,8 +251,13 @@ class _StubRegistry:
     def get_owner(self, run_id: str) -> str | None:
         return self._owner
 
-    def get_run_owner(self, run_id: str) -> tuple[str | None, str | None]:
-        return (self._owner, self._org)
+    def get_run_owner(self, run_id: str):
+        # A real RunOwnership, not a bare tuple: the gate reads it by
+        # attribute, and a stand-in that only happens to unpack the same way
+        # would stop pinning that. group_id None = ungrouped, so the gate
+        # falls through to the owner/admin rules rather than the published one.
+        from src.backend.core.run_registry import RunOwnership
+        return RunOwnership(self._owner, self._org, None)
 
 
 def _allow_ownership(monkeypatch, owner: str = "u-1"):

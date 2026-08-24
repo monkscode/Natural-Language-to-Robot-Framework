@@ -1,7 +1,9 @@
 """test_runs gains org_id: written at record_start, exposed on read, backfilled."""
 
 import uuid
+from unittest.mock import patch
 
+import psycopg
 import pytest
 
 from src.backend.auth import db as auth_db
@@ -37,7 +39,13 @@ def test_record_start_persists_org_id(registry):
         "do a thing", "generated",
     )
     assert registry.get_run(rid)["org_id"] == org_id
-    assert registry.get_run_owner(rid) == (str(user["id"]), org_id)
+    # By FIELD NAME, not by position: get_run_owner returns a RunOwnership so
+    # that adding a field can never silently break a caller. Naming the fields
+    # here is what still catches a RENAME.
+    own = registry.get_run_owner(rid)
+    assert own.user_id == str(user["id"])
+    assert own.org_id == org_id
+    assert own.group_id is None
 
 
 def test_list_runs_preserves_unattributed_error_rows(registry):
@@ -65,16 +73,227 @@ def test_list_runs_preserves_unattributed_error_rows(registry):
 def test_backfill_maps_existing_rows_to_owner_org(registry):
     users, orgs = UserRepository(), OrgRepository()
     user = users.create_user(f"bf-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
-    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
     rid = _run_id()
-    # Simulate a pre-tenancy row: user attributed, org_id NULL.
+    # Simulate a pre-tenancy row: user attributed, org_id NULL. The org is
+    # provisioned AFTER record_start so record_start's own org_members
+    # fallback (Part B) has no membership to find yet and genuinely leaves
+    # org_id NULL -- the state backfill_org_ids exists to repair.
     registry.record_start(
         rid, {"user_id": str(user["id"]), "email": user["email"]}, "legacy", "passed"
     )
     assert registry.get_run(rid)["org_id"] is None
 
+    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
     updated = registry.backfill_org_ids()
     assert updated >= 1
     assert registry.get_run(rid)["org_id"] == org_id
-    # Idempotent: a second pass changes nothing.
-    assert registry.backfill_org_ids() == 0
+    # Idempotent: a second pass leaves an already-attributed row alone.
+    #
+    # Re-reading the row after a bare second pass proves nothing -- the UPDATE
+    # is WHERE org_id IS NULL, so it cannot touch this row and the assertion
+    # would re-state the line above whatever the function did. Move the user
+    # into a DIFFERENT org first and the two behaviours finally have different
+    # observable outcomes: a pass that skips attributed rows leaves the
+    # personal org id below, a pass that re-writes them puts the team org id
+    # there instead. add_member enforces single-active-org, so the user has
+    # exactly one membership at each stage and the backfill's join to
+    # org_members stays deterministic.
+    #
+    # Scoped to our own row on purpose: asserting a global
+    # backfill_org_ids() == 0 pins the same property but depends on no sibling
+    # in this shared schema having left an unattributed row behind, which is
+    # the file-order dependency this replaced.
+    peer = users.create_user(f"bf-peer-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team BF Idempotency", str(peer["id"]))
+    orgs.add_member(team_org_id, str(user["id"]), "org_member")
+    assert team_org_id != org_id
+    registry.backfill_org_ids()
+    assert registry.get_run(rid)["org_id"] == org_id,         "a second pass must not re-write a row that already has an org"
+
+
+def test_record_start_derives_org_id_for_org_member(registry):
+    """record_start with org_id=None resolves it via org_members when the
+    user's single membership is org_role='org_member' -- the case the old
+    org_admin-only predicate silently dropped (Part B). This is the test
+    that fails against the previous design."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"rr-owner-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    member = users.create_user(f"rr-member-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team RR Member", str(owner["id"]))
+    orgs.add_member(team_org_id, str(member["id"]), "org_member")
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(member["id"]), "email": member["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_record_start_derives_org_id_for_org_admin(registry):
+    """Same fallback, org_role='org_admin' -- must keep working."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"rr-admin-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    team_org_id = orgs.create_team_org("Team RR Admin", str(owner["id"]))
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(owner["id"]), "email": owner["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_record_start_leaves_org_id_null_without_membership(registry):
+    """A user_id with no org_members row at all -- org_id stays NULL, nothing raises."""
+    users = UserRepository()
+    user = users.create_user(f"rr-none-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": str(user["id"]), "email": user["email"]}, "do a thing", "generated",
+    )
+    assert registry.get_run(rid)["org_id"] is None
+
+
+def test_record_start_survives_non_uuid_user_id(registry):
+    """A non-UUID user_id is rejected by shape in _lookup_org_id's UUID
+    pre-check, before it ever reaches the pool -- org_id stays NULL AND the
+    row is still written. This guards the pre-check itself, not the
+    separate-connection isolation (see
+    test_record_start_survives_lookup_failure_at_db_level below for that)."""
+    rid = _run_id()
+    registry.record_start(
+        rid, {"user_id": "not-a-uuid", "email": "x@e.com"}, "do a thing", "generated",
+    )
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_record_start_survives_lookup_failure_at_db_level(registry):
+    """A user_id that IS a valid UUID, but whose org_members lookup fails at
+    the DB level (here: the pool cannot hand out a connection) -- org_id
+    stays NULL AND the row is still written. This is the case the UUID
+    pre-check does NOT intercept, and it is what actually proves the lookup
+    runs on its own connection: the failure is injected at the boundary
+    _lookup_org_id borrows from (_pool.connection()), not inside
+    _lookup_org_id itself, so a failure that shared the INSERT's connection/
+    transaction would poison it and the row would never be written at all
+    -- the transaction-poisoning mode this task exists to guard against."""
+    real_connection = registry._pool.connection
+    calls = {"n": 0}
+
+    def flaky_connection(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise psycopg.OperationalError("simulated connection failure")
+        return real_connection(*args, **kwargs)
+
+    rid = _run_id()
+    user_id = str(uuid.uuid4())  # valid UUID; no org_members row needed
+    with patch.object(registry._pool, "connection", side_effect=flaky_connection):
+        registry.record_start(
+            rid, {"user_id": user_id, "email": "x@e.com"}, "do a thing", "generated",
+        )
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_record_start_uses_supplied_org_id_verbatim(registry):
+    """A token-supplied org_id is used as-is, even when it disagrees with the
+    user's real org_members row -- proving the fallback never overrides an
+    explicit value, AND never runs the lookup at all (no extra query)."""
+    users, orgs = UserRepository(), OrgRepository()
+    user = users.create_user(f"rr-verbatim-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    real_org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
+    supplied_org_id = str(uuid.uuid4())
+    assert supplied_org_id != real_org_id
+
+    rid = _run_id()
+    with patch.object(registry, "_lookup_org_id") as mock_lookup:
+        registry.record_start(
+            rid,
+            {"user_id": str(user["id"]), "email": user["email"], "org_id": supplied_org_id},
+            "do a thing", "generated",
+        )
+        mock_lookup.assert_not_called()
+    assert registry.get_run(rid)["org_id"] == supplied_org_id
+
+
+def test_record_start_with_no_user_leaves_org_id_null(registry):
+    """user=None (unattributed / auth-off run) -- unchanged behaviour, nothing raises."""
+    rid = _run_id()
+    registry.record_start(rid, None, None, "error")
+    row = registry.get_run(rid)
+    assert row is not None
+    assert row["org_id"] is None
+
+
+def test_backfill_attributes_org_member_rows_too(registry):
+    """backfill_org_ids must attribute an org_member's rows, not only an
+    org_admin's -- the identical predicate defect Part B's lookup fixes at
+    write time, fixed here at backfill time too."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner = users.create_user(f"bf-owner-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    member = users.create_user(f"bf-member-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+
+    rid = _run_id()
+    # Pre-tenancy row for a user who is not yet a member of anything, so
+    # record_start's own fallback finds nothing and org_id stays NULL.
+    registry.record_start(
+        rid, {"user_id": str(member["id"]), "email": member["email"]}, "legacy", "passed",
+    )
+    assert registry.get_run(rid)["org_id"] is None
+
+    team_org_id = orgs.create_team_org("Team BF Member", str(owner["id"]))
+    orgs.add_member(team_org_id, str(member["id"]), "org_member")
+
+    updated = registry.backfill_org_ids()
+    assert updated >= 1
+    assert registry.get_run(rid)["org_id"] == team_org_id
+
+
+def test_get_run_owner_does_not_publish_a_foreign_orgs_folder(registry):
+    """The /reports gate reads publication straight off this row and pairs it
+    with an org test of the CALLER's — so the folder half has to be anchored
+    too. A run pointing at a folder outside its own org is not published to
+    anybody; reading the raw column made it published to the run's whole org,
+    which is how a peer reached an unfiled colleague's log.html."""
+    users, orgs = UserRepository(), OrgRepository()
+    user = users.create_user(f"fo-{uuid.uuid4().hex[:8]}@e.com", "S3cretpw!")
+    org_id = orgs.ensure_personal_org(str(user["id"]), user["email"])
+    foreign = registry.create_group(
+        f"org-{uuid.uuid4().hex[:8]}", "u-outsider", "Theirs")["group_id"]
+    rid = _run_id()
+    registry.record_start(
+        rid,
+        {"user_id": str(user["id"]), "email": user["email"], "org_id": org_id},
+        "do a thing", "generated",
+    )
+    with registry._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (foreign, rid))
+
+    own = registry.get_run_owner(rid)
+    assert own.user_id == str(user["id"]) and own.org_id == org_id
+    assert own.group_id is None, (
+        "a folder outside the run's org reported the run as published")
+
+    # A folder in the run's OWN org still publishes it — the other half of
+    # the gate, which must not be narrowed away.
+    mine = registry.create_group(org_id, str(user["id"]), "Mine")["group_id"]
+    with registry._pool.connection() as conn:
+        conn.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                     (mine, rid))
+    assert registry.get_run_owner(rid).group_id == mine
+
+
+def test_list_groups_without_a_folder_scope_lists_nothing(registry):
+    """A concrete RUN scope with no FOLDER scope is not a shape any endpoint
+    produces, and it used to emit no WHERE at all — every org's folders, for
+    a caller whose own folder scope was None. groups_endpoints guards it; a
+    guard and a fail-closed default are not the same protection."""
+    org_id = f"org-{uuid.uuid4().hex[:8]}"
+    registry.create_group(org_id, "u-x", "Somewhere")
+    assert [g["name"] for g in registry.list_groups(org_id)] == ["Somewhere"]
+    assert registry.list_groups(None, run_org_id=org_id) == []

@@ -2,7 +2,7 @@
 
 Org-dimension test strategy:
 - owner (org A) creates a run. Same-org org_admin (org A, different user) should
-  be allowed by caller_can_read (org_admin of the run's org) but is DENIED by the
+  be allowed by caller_can_access (org_admin of the run's org) but is DENIED by the
   old bare user_id == owner check — so this assertion fails RED before the wiring.
 - stranger (org B) should be denied under both old and new code (not a coincidence:
   the same-org assertion is the genuine RED signal).
@@ -30,7 +30,7 @@ def test_owner_allowed_other_org_denied():
 
     Owner -> allowed (trivial).
     Stranger (different org) -> 403 (also trivial, but needed for completeness).
-    Same-org org_admin (not owner) -> allowed by caller_can_read, denied by old
+    Same-org org_admin (not owner) -> allowed by caller_can_access, denied by old
       bare user_id check.  This third case is the genuine RED gate.
     """
     from src.backend.auth.repository import UserRepository
@@ -64,7 +64,7 @@ def test_owner_allowed_other_org_denied():
         {"id": str(owner["id"]), "email": owner["email"], "role": "user",
          "display_name": "", "org_id": o_org, "org_role": "org_admin"})
 
-    # Peer is an org_admin of the SAME org as the owner — caller_can_read
+    # Peer is an org_admin of the SAME org as the owner — caller_can_access
     # allows this (org_admin of the run's org), but the old bare user_id == owner
     # comparison denies it.  This is the RED gate.
     peer_tok = create_access_token(
@@ -79,7 +79,7 @@ def test_owner_allowed_other_org_denied():
 
     # RED before implementation: old code compares peer's user_id to owner's
     # user_id — they differ, so old code returns 403.  After wiring
-    # caller_can_read, peer is org_admin of the run's org and is allowed.
+    # caller_can_access, peer is org_admin of the run's org and is allowed.
     assert authorize_report_access(_Req(peer_tok), rid) is None            # allow: same-org admin
 
     denied = authorize_report_access(_Req(stranger_tok), rid)

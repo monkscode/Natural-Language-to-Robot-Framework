@@ -433,7 +433,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         try:
             from src.backend.core.run_registry import get_run_registry
-            _, _run_org_id = get_run_registry().get_run_owner(run_id)
+            _run_org_id = get_run_registry().get_run_owner(run_id).org_id
         except Exception:
             _run_org_id = None
 
@@ -847,13 +847,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             collector = get_workflow_metrics_collector()
             # Prefer the org_id threaded into this call. The run row may not be
             # persisted yet on the stream_generate_only / stream_generate_and_run
-            # paths, so get_run_owner() can return (None, None) and would persist
+            # paths, so get_run_owner() can return an all-None row and would persist
             # an authenticated user's metrics as unscoped. Fall back to the
             # registry only when no org_id was threaded through.
             _run_org_id: str | None = org_id
             if _run_org_id is None:
                 try:
-                    _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+                    _run_org_id = get_run_registry().get_run_owner(workflow_id).org_id
                 except Exception as e:
                     logging.debug("[RUN_REGISTRY] org lookup for metrics failed: %s", e)
             collector.record_workflow(unified_metrics, org_id=_run_org_id)
@@ -973,7 +973,7 @@ class _GenerationError(Exception):
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
                 robot_code: str | None = None, rerun_of: str | None = None,
-                error_message: str | None = None) -> None:
+                error_message: str | None = None, group_id: str | None = None) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
@@ -984,7 +984,7 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
         get_run_registry().record_start(
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
-            error_message=error_message,
+            error_message=error_message, group_id=group_id,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
@@ -1327,7 +1327,8 @@ async def stream_generate_only(
 
 async def stream_execute_only(
     robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
-    history_query: str | None = None, rerun_of: str | None = None
+    history_query: str | None = None, rerun_of: str | None = None,
+    group_id: str | None = None
 ) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
@@ -1346,6 +1347,14 @@ async def stream_execute_only(
         rerun_of: The ORIGINAL run this re-run was cloned from (root-flattened
             by the endpoint). Stored on the history row so /api/feedback can
             route feedback to the run that owns the learning record.
+        group_id: The folder of the run this one was cloned from — a re-run
+            stays where its source was filed until the user moves it. Set only
+            by the rerun path. record_start re-checks it against the ORG of the
+            row it is about to write and drops it if the folder is not that
+            org's, so a folder a platform admin could see but the new run's
+            org could not never reaches the row. Org only — there is no owner
+            term in that check, and there should not be: D5 lets any org member
+            re-run a published test, and their re-run stays in the folder.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -1396,7 +1405,7 @@ async def stream_execute_only(
         # owner/query attribution is write-once.
         await asyncio.to_thread(
             _record_run, run_id, user, history_query or user_query, status="running",
-            robot_code=robot_code, rerun_of=rerun_of)
+            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse

@@ -9,10 +9,23 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
+#
+# reconfigure() retunes the EXISTING wrapper in place. Rewrapping .buffer in a
+# NEW TextIOWrapper (what this used to do) hands that buffer a second owner, and
+# whichever wrapper is garbage-collected first closes it. Under pytest the buffer
+# belongs to the capture machinery, so importing this module used to arm a
+# landmine: the moment nothing kept the wrapper alive, every later test died at
+# setup/teardown with "ValueError: I/O operation on closed file". OTel init
+# happened to hold a reference and mask it for as long as tracing was on.
 if sys.platform.startswith('win'):
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    for _stream_name in ('stdout', 'stderr'):
+        _stream = getattr(sys, _stream_name, None)
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        elif hasattr(_stream, 'buffer'):
+            setattr(sys, _stream_name, io.TextIOWrapper(
+                _stream.buffer, encoding='utf-8', errors='replace'))
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # --- Structured Logging (must be FIRST — before any logger calls) ---
@@ -125,6 +138,10 @@ app.include_router(api_router)
 # (own runs for regular users, all runs for validated admins).
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
+
+# Run groups — the History page's org-scoped folder feature.
+from src.backend.api.groups_endpoints import router as groups_router
+app.include_router(groups_router, prefix="/api")
 
 # Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
