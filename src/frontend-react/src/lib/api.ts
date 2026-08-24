@@ -36,7 +36,13 @@ interface ApiOptions extends RequestInit {
   auth?: boolean
 }
 
-function extractDetail(data: unknown, fallback: string): string {
+/**
+ * Pull the human-readable message out of a FastAPI error body.
+ *
+ * Exported for lib/sse.ts, which reads its own error responses and would
+ * otherwise show a bare status code where the server sent a sentence.
+ */
+export function extractDetail(data: unknown, fallback: string): string {
   if (data && typeof data === 'object') {
     const d = data as Record<string, unknown>
     if (typeof d.detail === 'string') return d.detail

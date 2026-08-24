@@ -410,6 +410,7 @@ export default function HistoryPage() {
     const note = (text: string) => setRerunNote(prev => ({ ...prev, [sourceId]: text }))
     note('Starting re-run of the stored code…')
     let listRefreshed = false
+    let failed = false
     try {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
         // First event = the new run row exists; surface it at the top
@@ -422,11 +423,19 @@ export default function HistoryPage() {
       })
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
+      failed = true
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
       // The new run exists and may have landed in its source's folder, so the
       // chip counts moved too — reload both.
-      void reloadAll()
+      //
+      // A REFUSED re-run means the source is no longer ours to run: its owner
+      // un-filed it between the page load and the click, so it is gone from
+      // page zero. Drop it explicitly, or refreshLoaded's merge keeps it alive
+      // in the tail and the user is left staring at a row the server denies.
+      // Only this id — blanket-dropping everything missing from page zero is
+      // what would delete the older Load-more pages.
+      void reloadAll(failed ? new Set([sourceId]) : undefined)
     }
   }, [reloadAll])
 
@@ -813,8 +822,13 @@ export default function HistoryPage() {
                 </span>
               )}
             </div>
+            {/* detailError means d is null because the fetch was REFUSED,
+                not because the run has no description — so the "Pasted code
+                run" fallback would assert something false about a run we
+                could not read at all. The reason itself renders in the body
+                (see detailError below); the header only stops lying. */}
             <SheetTitle className="text-base leading-snug">
-              {d?.user_query || 'Pasted code run'}
+              {detailError ? 'Run unavailable' : d?.user_query || 'Pasted code run'}
             </SheetTitle>
             <SheetDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
               {selected && (
