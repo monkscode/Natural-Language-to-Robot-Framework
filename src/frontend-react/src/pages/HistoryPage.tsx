@@ -429,22 +429,35 @@ export default function HistoryPage() {
       })
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
-      // Only a REFUSAL says the source row is gone: 404 (its owner un-filed
-      // it), 409 (no stored code), 403. A dropped connection or a 5xx says
-      // nothing about whether the run still exists, and evicting on those
-      // would delete a legitimate row off an older Load-more page over a
-      // network blip. 401 throws a plain Error and navigates to /login, so
-      // it never reaches here as an ApiError.
-      refused = e instanceof ApiError && e.status >= 400 && e.status < 500
+      // ACCESS LOSS only — not "the request failed". 404 is the real case:
+      // the owner un-filed the run between the page load and the click, so
+      // it is gone from page zero and would otherwise linger in the merge
+      // tail. 403 cannot happen on this route today (it answers 404 for
+      // refusals so it cannot leak existence) and is listed so the day it
+      // does, this is already right.
+      //
+      // 409 is deliberately NOT here. It means the run predates code
+      // persistence — the endpoint only reaches that branch AFTER the access
+      // check passed, so the caller can still open the row and Regenerate
+      // from it. Evicting would delete a row they may legitimately read, and
+      // the row-level button fires blind on exactly these runs: the history
+      // payload carries no robot_code, so the row cannot know. 400/422/429
+      // are excluded for the same reason — none of them says the run is gone.
+      //
+      // An ALLOWLIST on purpose. An unknown status must default to KEEPING
+      // the row: a phantom that Refresh clears is recoverable, a wrongly
+      // deleted row is not. 401 throws a plain Error and navigates to
+      // /login, so it never arrives here as an ApiError.
+      refused = e instanceof ApiError && (e.status === 403 || e.status === 404)
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
       // The new run exists and may have landed in its source's folder, so the
       // chip counts moved too — reload both.
       //
-      // A REFUSED re-run means the source is no longer ours to run: its owner
-      // un-filed it between the page load and the click, so it is gone from
-      // page zero. Drop it explicitly, or refreshLoaded's merge keeps it alive
-      // in the tail and the user is left staring at a row the server denies.
+      // A run we LOST ACCESS to is gone from page zero, so drop it explicitly
+      // or refreshLoaded's merge keeps it alive in the tail and the user is
+      // left staring at a row the server denies. Anything else — a 409, a
+      // dropped connection, a 5xx — leaves the row alone; see the catch.
       // Only this id — blanket-dropping everything missing from page zero is
       // what would delete the older Load-more pages.
       void reloadAll(refused ? new Set([sourceId]) : undefined)
