@@ -667,11 +667,12 @@ class TestGroupAssignmentAndFilter:
         admin.close()
 
     @staticmethod
-    def _seed(reg, run_id, user_id, org_id=ORG_A, query="q", status="passed"):
+    def _seed(reg, run_id, user_id, org_id=ORG_A, query="q", status="passed",
+              rerun_of=None):
         reg.record_start(
             run_id,
             {"user_id": user_id, "org_id": org_id, "email": f"{user_id}@e.com"},
-            query, status,
+            query, status, rerun_of=rerun_of,
         )
 
     def test_assign_sets_group_and_filter_returns_rows(self, reg):
@@ -837,6 +838,99 @@ class TestGroupAssignmentAndFilter:
         # TypeError on NoneType.
         assert run is not None, "the pooled connection did not survive the rollback"
         assert run["group_id"] is None
+
+    # -- A re-run belongs to its test (owner decision X2) -----------------
+    #
+    # `rerun_of` is the only link between the two rows, and publication lives
+    # on each row's own group_id. Without the cascade below, a peer's re-run
+    # kept the author's script published to the org after the author un-filed
+    # the original — reproduced live 2026-08-24: the original answered 404
+    # while the re-run answered 200 with byte-identical robot_code.
+
+    def test_unfiling_a_test_takes_its_colocated_rerun_with_it(self, reg):
+        """The core case. The re-run sits in the SAME folder as its test, so
+        un-publishing the test un-publishes the copy of it."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        gid = reg.create_group(ORG_A, "u1", "Checkout")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], gid) is True
+        assert reg.assign_runs(ORG_A, "u2", False, [child], gid) is True
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
+
+        assert reg.get_run(parent)["group_id"] is None
+        assert reg.get_run(child)["group_id"] is None, (
+            "the re-run kept the test published after its owner un-filed it")
+
+    def test_an_ungrouped_rerun_is_never_dragged_along(self, reg):
+        """Monotonic: the cascade only ever REDUCES exposure. A re-run its
+        owner deliberately kept out of the folder stays out."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        gid = reg.create_group(ORG_A, "u1", "Checkout")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], gid) is True
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
+
+        assert reg.get_run(child)["group_id"] is None
+
+    def test_a_rerun_filed_somewhere_else_stays_there(self, reg):
+        """The re-run lives in its own folder, so it is not this test's copy
+        to move — yanking it out would un-publish work nobody asked about."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        a = reg.create_group(ORG_A, "u1", "A")["group_id"]
+        b = reg.create_group(ORG_A, "u1", "B")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], a) is True
+        assert reg.assign_runs(ORG_A, "u2", False, [child], b) is True
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
+
+        assert reg.get_run(child)["group_id"] == b
+
+    def test_filing_an_ungrouped_test_drags_no_rerun_in(self, reg):
+        """The guard on the parent's OLD folder being non-NULL. Publishing a
+        test must never publish a re-run of it that was not already shared."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        gid = reg.create_group(ORG_A, "u1", "Checkout")["group_id"]
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], gid) is True
+
+        assert reg.get_run(parent)["group_id"] == gid
+        assert reg.get_run(child)["group_id"] is None
+
+    def test_a_colocated_rerun_moves_between_folders_with_its_test(self, reg):
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        a = reg.create_group(ORG_A, "u1", "A")["group_id"]
+        b = reg.create_group(ORG_A, "u1", "B")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], a) is True
+        assert reg.assign_runs(ORG_A, "u2", False, [child], a) is True
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], b) is True
+
+        assert reg.get_run(parent)["group_id"] == b
+        assert reg.get_run(child)["group_id"] == b
+
+    def test_the_cascade_does_not_count_towards_all_or_nothing(self, reg):
+        """The child rows the cascade moves are NOT in run_ids, so folding
+        their rowcount into the atomicity check would make every cascading
+        move fail closed."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u1", rerun_of=parent)
+        a = reg.create_group(ORG_A, "u1", "A")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent, child], a) is True
+
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
+        assert reg.get_run(parent)["group_id"] is None
+        assert reg.get_run(child)["group_id"] is None
 
     def test_get_run_carries_group_name(self, reg):
         r1 = str(uuid.uuid4())

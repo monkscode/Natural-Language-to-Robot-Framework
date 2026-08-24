@@ -974,7 +974,25 @@ class RunRegistry:
         All-or-nothing: filing is a per-row authority decision, which is
         exactly when partial writes appear, so a batch containing one run the
         caller may not file writes NOTHING and returns False — the caller's
-        own runs stay where they were."""
+        own runs stay where they were.
+
+        A re-run travels with the test it was cloned from. Publication lives
+        on each row's own group_id, and `rerun_of` is the only thing joining
+        the two, so without the cascade below a peer's re-run went on showing
+        the org a byte-identical copy of the author's script after the author
+        un-filed the original — the original answering 404 while the copy
+        answered 200. A re-run BELONGS TO ITS TEST (owner decision, the
+        Xray / Zephyr Scale / qTest model), so the test's folder governs it.
+
+        The cascade moves rows the caller could not have moved directly — a
+        re-run is owned by whoever fired it, not by the test's author. That
+        is deliberate: the test's owner governs the test's publication. It is
+        safe because it can only ever REDUCE exposure, which is what the
+        parent's OLD folder being NOT NULL buys. Filing a test (NULL -> a
+        folder) drags nothing in, so a re-run its owner deliberately kept
+        unpublished stays unpublished; and matching the child on the parent's
+        CURRENT folder leaves a re-run filed somewhere else exactly where it
+        is."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
@@ -990,6 +1008,18 @@ class RunRegistry:
                 allowed = "user_id = %s"
                 params.append(user_id)
             try:
+                # Children FIRST, in the same transaction: the self-join reads
+                # the parent's folder off the row, so once the parent UPDATE
+                # below has run there is no pre-move value left to match on.
+                conn.execute(
+                    "UPDATE test_runs c SET group_id = %s "
+                    "FROM test_runs p "
+                    "WHERE c.rerun_of = p.run_id "
+                    "  AND p.run_id = ANY(%s) "
+                    "  AND p.group_id IS NOT NULL "
+                    "  AND c.group_id = p.group_id",
+                    [group_id, list(run_ids)],
+                )
                 cur = conn.execute(
                     f"UPDATE test_runs SET group_id = %s "
                     f"WHERE run_id = ANY(%s) AND org_id = %s AND {allowed}",
@@ -1001,6 +1031,10 @@ class RunRegistry:
                 # unusable folder — the endpoint turns False into a 404.
                 conn.rollback()
                 return False
+            # The parent UPDATE's rowcount alone. The cascade's rows are not
+            # in run_ids, so folding them in would make every cascading move
+            # fail its own atomicity check. A parent that turns out to be
+            # unfilable still rolls the cascade back with everything else.
             if cur.rowcount != len(set(run_ids)):
                 conn.rollback()
                 return False
