@@ -146,7 +146,7 @@ export default function HistoryPage() {
   // Shared with the sidebar's group quick-access: whichever surface the user
   // picks a group from, both render the same active group.
   const {
-    groups, ungroupedCount, refresh: refreshGroups,
+    groups, ungroupedCount, error: groupsError, refresh: refreshGroups,
     createGroup, renameGroup, deleteGroup, assignRuns,
     groupFilter, setGroupFilter,
   } = useRunGroups()
@@ -544,7 +544,7 @@ export default function HistoryPage() {
                     trigger={
                       <Button size="sm" className="h-7 text-xs gap-1.5" disabled={checkedIds.size === 0}>
                         <FolderInput className="h-3 w-3" />
-                        Move {checkedIds.size || ''} to…
+                        Move{checkedIds.size ? ` ${checkedIds.size}` : ''} to…
                       </Button>
                     }
                   />
@@ -566,6 +566,17 @@ export default function HistoryPage() {
               ))}
             </div>
           </div>
+          {/* A failed /api/groups leaves the chips showing whatever the last
+              good load left behind — a stale count, or none at all — with no
+              hint that anything went wrong. The sidebar already says so; this
+              page is where the folders are actually managed, so it has to as
+              well. Separate line from moveError: they are different failures
+              and either can be live. */}
+          {groupsError && (
+            <p className="text-xs text-destructive">
+              Couldn’t load groups — {groupsError}
+            </p>
+          )}
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
         </CardHeader>
 
@@ -648,7 +659,12 @@ export default function HistoryPage() {
                           <input
                             type="checkbox"
                             className="h-3.5 w-3.5 accent-primary disabled:cursor-not-allowed disabled:opacity-40 enabled:cursor-pointer"
-                            aria-label={`Select run ${row.user_query || 'Pasted code run'}`}
+                            /* The description alone is not unique — two runs
+                               of the same test gave a screen-reader user
+                               "Select run E2E::alice passed checkout" twice
+                               with nothing to tell them apart. The full run
+                               id, never truncated. */
+                            aria-label={`Select run ${row.user_query || 'Pasted code run'} (${row.run_id})`}
                             title={row.can_move ? undefined
                               : 'Only the owner of a run, or an org admin, can move it'}
                             disabled={!row.can_move}

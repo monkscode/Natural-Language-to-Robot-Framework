@@ -124,7 +124,11 @@ def _duplicate(exc: DuplicateGroupName) -> HTTPException:
     """409 for a name collision. The name belongs to the ORG, so the copy
     cannot say "you already have" — the folder holding it may well be one a
     colleague created, and telling the caller it exists is the point: one
-    name, one folder, so every testcase carries a single folder name."""
+    name, one folder, so every testcase carries a single folder name.
+
+    The exception carries the EXISTING folder's name, not the caller's
+    spelling of it, so the sentence names something they can actually find in
+    the list."""
     return HTTPException(409, f'A group named "{exc}" already exists')
 
 

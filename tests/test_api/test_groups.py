@@ -342,6 +342,24 @@ class TestGroupAuthorityMatrix:
         # A different org is a different name space.
         reg.create_group("org-elsewhere", self.MEMBER, "checkout")
 
+    # 8b ------------------------------------------------------------------
+    def test_the_duplicate_error_names_the_folder_that_already_exists(self, reg):
+        """The message has to be findable. Echoing the name the caller TYPED
+        answered 'a group named "regression PACK" already exists' for a folder
+        actually called "Regression Pack" — the user then goes looking for a
+        name nothing in the list carries."""
+        from src.backend.core.run_registry import DuplicateGroupName
+        reg.create_group(self.ORG, self.ADMIN, "Regression Pack")
+
+        with pytest.raises(DuplicateGroupName) as exc:
+            reg.create_group(self.ORG, self.MEMBER, "regression PACK")
+        assert str(exc.value) == "Regression Pack"
+
+        gid = reg.create_group(self.ORG, self.MEMBER, "Smoke")["group_id"]
+        with pytest.raises(DuplicateGroupName) as exc:
+            reg.rename_group(self.ORG, self.MEMBER, False, gid, "REGRESSION pack")
+        assert str(exc.value) == "Regression Pack"
+
 
 class TestReadPathVisibility:
     """The read half: the org-scoped LEFT JOIN, and the run predicate.
@@ -1004,7 +1022,9 @@ def test_groups_crud_roundtrip(client):
 
     r = client.post("/api/groups", json={"name": "checkout"}, headers=_auth(tok))
     assert r.status_code == 409
-    assert r.json()["detail"] == 'A group named "checkout" already exists'
+    # The folder that EXISTS, not the casing the caller typed — the message
+    # is what they use to go and find it.
+    assert r.json()["detail"] == 'A group named "Checkout" already exists'
 
     r = client.patch(f"/api/groups/{gid}", json={"name": "Payments"}, headers=_auth(tok))
     assert r.status_code == 200 and r.json()["name"] == "Payments"
@@ -1025,7 +1045,7 @@ def test_rename_onto_existing_name_is_409(client):
 
     r = client.patch(f"/api/groups/{gid}", json={"name": "alpha"}, headers=_auth(tok))
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == 'A group named "alpha" already exists'
+    assert r.json()["detail"] == 'A group named "Alpha" already exists'
     listed = client.get("/api/groups", headers=_auth(tok)).json()["groups"]
     assert sorted(g["name"] for g in listed) == ["Alpha", "Beta"]
 
@@ -1510,7 +1530,9 @@ def test_a_taken_folder_name_is_reported_to_the_second_member(client):
 
     r = client.post("/api/groups", json={"name": "login"}, headers=_auth(tok_b))
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == 'A group named "login" already exists'
+    # Named as the COLLEAGUE spelled it, which is how it appears in the list
+    # the second member is about to go and look at.
+    assert r.json()["detail"] == 'A group named "Login" already exists'
     # And the folder they were told about is one they can actually use.
     listed = client.get("/api/groups", headers=_auth(tok_b)).json()["groups"]
     assert [g["name"] for g in listed] == ["Login"]

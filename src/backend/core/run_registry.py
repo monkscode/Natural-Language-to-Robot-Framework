@@ -364,7 +364,13 @@ class DuplicateGroupName(Exception):
     The org owns the name, so this is raised for a collision with ANY
     member's folder — the copy cannot say "you already have", which would be
     false for a folder a colleague created. One name, one folder, so a
-    testcase can only ever carry one folder name (owner decision D2)."""
+    testcase can only ever carry one folder name (owner decision D2).
+
+    Carries the EXISTING folder's name, not the one the caller typed. The
+    match is case-insensitive, so those differ exactly when the message
+    matters most: typing "regression PACK" against a "Regression Pack" used
+    to answer with the caller's own casing, sending them to look for a name
+    the folder list does not contain."""
 
 
 def _log_schema_notice(diag: psycopg.errors.Diagnostic) -> None:
@@ -756,6 +762,33 @@ class RunRegistry:
             return None
         return row
 
+    def _colliding_group_name(self, org_id: Optional[str], name: str) -> str:
+        """The name of the folder already holding `name`'s case-insensitive
+        slot in this org, or `name` itself when it cannot be read.
+
+        ERROR PATH ONLY — one extra SELECT, and only after the unique index
+        has already refused a write. It needs its own connection: the caller
+        catches UniqueViolation OUTSIDE its `with`, so that connection has
+        been rolled back and returned to the pool by then.
+
+        Falls back to the caller's own spelling rather than raising. A
+        degraded message is a worse message; a 409 that turns into a 500 is a
+        different bug."""
+        if org_id is None:
+            return name
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT name FROM run_groups "
+                    "WHERE org_id = %s AND lower(name) = lower(%s)",
+                    (org_id, name),
+                ).fetchone()
+            return row["name"] if row else name
+        except Exception as e:
+            logger.warning(
+                f"[RUN_REGISTRY] Could not resolve the colliding folder name: {e}")
+            return name
+
     def create_group(
         self,
         org_id: str,
@@ -764,7 +797,9 @@ class RunRegistry:
     ) -> Dict[str, Any]:
         """Create a folder in the caller's org — anyone in the org may.
         Raises DuplicateGroupName on a case-insensitive name collision with
-        ANY folder in that org, whoever created it: the org owns the name."""
+        ANY folder in that org, whoever created it: the org owns the name.
+        The exception names the folder that ALREADY holds it, so the caller
+        can go and find it."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
@@ -774,7 +809,7 @@ class RunRegistry:
                     (str(uuid.uuid4()), org_id, user_id, name),
                 ).fetchone()
         except psycopg.errors.UniqueViolation:
-            raise DuplicateGroupName(name)
+            raise DuplicateGroupName(self._colliding_group_name(org_id, name))
         row = dict(row)
         row["run_count"] = 0
         row["created_at"] = row["created_at"].isoformat()
@@ -793,7 +828,8 @@ class RunRegistry:
     ) -> bool:
         """Rename a folder. False when it doesn't exist or the caller may not
         mutate it. Raises DuplicateGroupName when the new name collides —
-        rename needs its OWN guard, create's does not cover it.
+        rename needs its OWN guard, create's does not cover it — naming the
+        folder that already holds the name.
 
         audit_old_name, if given, is appended with the folder's name as it
         was BEFORE this call — _mutable_group's SELECT already reads it, so
@@ -819,7 +855,7 @@ class RunRegistry:
                     audit_old_name.append(row["name"])
                 return True
         except psycopg.errors.UniqueViolation:
-            raise DuplicateGroupName(name)
+            raise DuplicateGroupName(self._colliding_group_name(org_id, name))
 
     def delete_group(
         self,
