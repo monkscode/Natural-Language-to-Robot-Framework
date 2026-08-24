@@ -411,7 +411,7 @@ export default function HistoryPage() {
   }, [visible])
 
   const runAgain = useCallback(async (sourceId: string) => {
-    setSelected(sourceId) // feedback lives in the drawer
+    setSelected(sourceId) // the drawer is where the live status line renders
     setInFlight(prev => new Set(prev).add(sourceId))
     const note = (text: string) => setRerunNote(prev => ({ ...prev, [sourceId]: text }))
     note('Starting re-run of the stored code…')
