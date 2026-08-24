@@ -875,11 +875,18 @@ class TestGroupAssignmentAndFilter:
         assert reg.assign_runs(ORG_A, "u1", False, [parent], gid) is True
         assert reg.assign_runs(ORG_A, "u2", False, [child], gid) is True
 
+        assert reg.list_groups(ORG_A)[0]["run_count"] == 2
+
         assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
 
         assert reg.get_run(parent)["group_id"] is None
         assert reg.get_run(child)["group_id"] is None, (
             "the re-run kept the test published after its owner un-filed it")
+        # The chip has to follow the table out, or the cascade re-creates F1:
+        # a folder counting a run the folder filter no longer returns.
+        _, total = reg.list_runs(user_id="u1", org_id=ORG_A,
+                                 folder_org_id=ORG_A, group=gid)
+        assert reg.list_groups(ORG_A)[0]["run_count"] == total == 0
 
     def test_an_ungrouped_rerun_is_never_dragged_along(self, reg):
         """Monotonic: the cascade only ever REDUCES exposure. A re-run its
@@ -949,6 +956,28 @@ class TestGroupAssignmentAndFilter:
         assert reg.assign_runs(ORG_A, "u1", False, [parent], None) is True
         assert reg.get_run(parent)["group_id"] is None
         assert reg.get_run(child)["group_id"] is None
+
+    def test_a_refused_batch_rolls_the_cascade_back_too(self, reg):
+        """The cascade runs BEFORE the authority check that can reject the
+        whole request, so it has to be inside the same rollback. Without
+        that, a batch carrying one unfilable run would still have moved the
+        re-runs of the filable ones — a partial write of exactly the kind
+        the all-or-nothing rule exists to prevent."""
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        theirs = str(uuid.uuid4())
+        self._seed(reg, parent, "u1")
+        self._seed(reg, child, "u2", rerun_of=parent)
+        self._seed(reg, theirs, "u9", org_id=ORG_B)
+        a = reg.create_group(ORG_A, "u1", "A")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [parent], a) is True
+        assert reg.assign_runs(ORG_A, "u2", False, [child], a) is True
+
+        # theirs is in another org, so the batch is refused outright.
+        assert reg.assign_runs(ORG_A, "u1", False, [parent, theirs], None) is False
+
+        assert reg.get_run(parent)["group_id"] == a
+        assert reg.get_run(child)["group_id"] == a, (
+            "the cascade wrote through a batch the authority check refused")
 
     def test_get_run_carries_group_name(self, reg):
         r1 = str(uuid.uuid4())

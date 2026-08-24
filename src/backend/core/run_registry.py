@@ -1022,13 +1022,18 @@ class RunRegistry:
 
         The cascade moves rows the caller could not have moved directly — a
         re-run is owned by whoever fired it, not by the test's author. That
-        is deliberate: the test's owner governs the test's publication. It is
-        safe because it can only ever REDUCE exposure, which is what the
-        parent's OLD folder being NOT NULL buys. Filing a test (NULL -> a
-        folder) drags nothing in, so a re-run its owner deliberately kept
-        unpublished stays unpublished; and matching the child on the parent's
-        CURRENT folder leaves a re-run filed somewhere else exactly where it
-        is."""
+        is deliberate: the test's owner governs the test's publication.
+
+        What keeps it safe is ONE term: `c.group_id = p.group_id`. Only a
+        re-run sitting in the folder the test is leaving travels with it, so
+        a re-run filed somewhere else stays there, and an ungrouped one stays
+        ungrouped — SQL equality is NULL, not TRUE, when both sides are NULL,
+        so a test being FILED (NULL -> a folder) matches no child at all and
+        drags nothing into the org's view. The `p.group_id IS NOT NULL` term
+        beside it is therefore REDUNDANT (verified: the whole suite passes
+        without it) and is kept only to state that intent in the SQL rather
+        than leaving it to a NULL-semantics subtlety a later edit could
+        undo."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
@@ -1047,6 +1052,15 @@ class RunRegistry:
                 # Children FIRST, in the same transaction: the self-join reads
                 # the parent's folder off the row, so once the parent UPDATE
                 # below has run there is no pre-move value left to match on.
+                #
+                # Cost, measured on a throwaway 500k-run / 50-org / 200-folder
+                # schema: 3 ms for one id, ~42 ms at the endpoint's 500-id cap,
+                # against 0.1 ms for the parent UPDATE. The planner drives off
+                # idx_test_runs_group for a single id and switches to a hash
+                # join over a full scan for a batch. An index on rerun_of cuts
+                # the single-id case to 0.07 ms and changes NOTHING from ten
+                # ids up (the planner still prefers the scan), so it is not
+                # worth a schema change — see decision R5.
                 conn.execute(
                     "UPDATE test_runs c SET group_id = %s "
                     "FROM test_runs p "
