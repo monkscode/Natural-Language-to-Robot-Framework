@@ -421,7 +421,9 @@ def test_a_folder_name_is_taken_for_the_whole_org(client, shared):
     r = client.post("/api/groups", json={"name": "completed"},
                     headers=_auth(shared["tok_b"]))
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == 'A group named "completed" already exists'
+    # "Completed" is how tok_a spelled it, and how it appears in the list the
+    # refused member is about to go and look at — not their own casing.
+    assert r.json()["detail"] == 'A group named "Completed" already exists'
 
 
 @pytest.fixture
