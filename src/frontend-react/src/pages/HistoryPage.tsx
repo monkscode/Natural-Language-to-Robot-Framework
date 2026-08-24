@@ -25,7 +25,7 @@ import {
   Check, ChevronRight, Copy, Download, Folder, FolderInput, ListChecks,
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
-import { ApiError, api } from '@/lib/api'
+import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
@@ -429,26 +429,11 @@ export default function HistoryPage() {
       })
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
-      // ACCESS LOSS only — not "the request failed". 404 is the real case:
-      // the owner un-filed the run between the page load and the click, so
-      // it is gone from page zero and would otherwise linger in the merge
-      // tail. 403 cannot happen on this route today (it answers 404 for
-      // refusals so it cannot leak existence) and is listed so the day it
-      // does, this is already right.
-      //
-      // 409 is deliberately NOT here. It means the run predates code
-      // persistence — the endpoint only reaches that branch AFTER the access
-      // check passed, so the caller can still open the row and Regenerate
-      // from it. Evicting would delete a row they may legitimately read, and
-      // the row-level button fires blind on exactly these runs: the history
-      // payload carries no robot_code, so the row cannot know. 400/422/429
-      // are excluded for the same reason — none of them says the run is gone.
-      //
-      // An ALLOWLIST on purpose. An unknown status must default to KEEPING
-      // the row: a phantom that Refresh clears is recoverable, a wrongly
-      // deleted row is not. 401 throws a plain Error and navigates to
-      // /login, so it never arrives here as an ApiError.
-      refused = e instanceof ApiError && (e.status === 403 || e.status === 404)
+      // Only a run the caller can no longer READ may be dropped below — see
+      // isAccessLoss for why a 409 is not that. The row-level Run again
+      // button fires blind on exactly the runs that 409: the history payload
+      // carries no robot_code, so the row cannot know it has none.
+      refused = isAccessLoss(e)
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
       // The new run exists and may have landed in its source's folder, so the

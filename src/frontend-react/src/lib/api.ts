@@ -31,6 +31,31 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Did this failure mean the caller LOST ACCESS to the thing they acted on —
+ * as opposed to the request merely failing?
+ *
+ * Callers use it to decide whether a row may be dropped from a list. 404 is
+ * the real case: the resource is gone, or was never theirs. 403 is included
+ * so the rule is already right if a route ever adopts it; several of ours
+ * deliberately answer 404 instead, so as not to leak existence.
+ *
+ * Everything else is false, and the distinctions matter:
+ *   - 409 on a re-run means the run predates code persistence. The endpoint
+ *     reaches that branch only AFTER the access check passed, so the caller
+ *     can still open the row and Regenerate from it.
+ *   - 400 / 422 are client-side mistakes; 429 is transient; 5xx is ours.
+ *     None of them says the resource is gone.
+ *   - 401 never arrives here — lib/api and lib/sse redirect to /login.
+ *
+ * An ALLOWLIST on purpose. An unknown status must default to KEEPING the
+ * row: a phantom row is recoverable with a refresh, a wrongly deleted one
+ * is not.
+ */
+export function isAccessLoss(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 403 || error.status === 404)
+}
+
 interface ApiOptions extends RequestInit {
   /** Attach the bearer token. Default true; set false for login/register. */
   auth?: boolean
