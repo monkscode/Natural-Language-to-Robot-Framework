@@ -76,6 +76,7 @@ _API_PG_TABLES = (
     "anti_patterns", "learning_stats", "learning_metrics", "nl_feedback_corrections",
     "trigger_events", "hint_audit", "hint_review_sessions", "hint_review_recommendations",
     "hint_review_pages", "hint_workflow_trace", "learning_anchors", "execution_embeddings",
+    "hint_evidence",
 )
 
 
