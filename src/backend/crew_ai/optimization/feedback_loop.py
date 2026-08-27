@@ -56,38 +56,60 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# D3 — Write-queue drain helper
+# Ordering feedback behind the run's own learning write
 # ---------------------------------------------------------------------------
 
 def _get_with_retry(
     em,
     workflow_id: str,
-    max_attempts: int = 3,
+    ceiling_ms: int = 3000,
     base_ms: int = 100,
+    max_step_ms: int = 500,
 ):
-    """Retry em.get() to handle write-queue drain lag.
+    """Poll for this run's execution record until it exists or the budget ends.
+
+    Postgres is the only party that can answer "does this run have a learning
+    record?".  The answer outlives this process, and on more than one replica no
+    in-memory signal can speak for it — so the row itself is asked, repeatedly,
+    rather than a latch or a queue barrier (a barrier proves the queue drained,
+    which is not the same question).
 
     process_user_feedback is offloaded to an asyncio.to_thread worker by the
     async /api/feedback handler, so this runs on a worker thread (never the
-    event loop) — the sleep below is safe.  The execution record is written by
-    the learning-writer thread via write_queue.submit() inside
-    _process_learning_record(), which now runs immediately after the execution
-    result SSE is sent, ahead of the artifact work.  A user (or automated
-    caller) can still submit feedback before the INSERT is committed.
+    event loop) and the sleep below is safe.
 
-    Sleeping base_ms * 2^attempt between attempts gives the writer thread time
-    to drain.  Max wait: 100ms + 200ms = 300ms across 3 attempts — well within
-    the MAX_CONCURRENT_WORKFLOWS=10 worst-case queue depth of ~160ms.
-    Returns None after all attempts (same as the no-retry path), so the caller
-    degrades gracefully with an existing warning log.
+    The window covered is the store SUBMISSION plus its drain.  Since
+    _process_learning_record moved ahead of the artifact work, that submission
+    lands milliseconds behind the result SSE, so on the SPA path the first
+    attempt normally hits and nothing sleeps at all.  The full ceiling is spent
+    only on runs that have no record and never will — paste-and-execute,
+    errored and unknown runs — none of which the SPA can reach the feedback
+    panel from.
+
+    Neither LLM pipeline runs on the writer thread (fire_usage_attribution and
+    fire_conflict_detection both call the model on their caller's thread), so a
+    queued job is SQL plus a fastembed embed and the queue cannot stall this
+    poll for long.  The one case that can outlast the ceiling is the first embed
+    after boot loading the ONNX model; the caller then degrades to "no_record",
+    which still triages and still stores the raw text — strictly better than the
+    300ms budget this replaced.
+
+    Returns (record, outcome), where outcome is process_user_feedback's own
+    code: "processed" when the row was found, "no_record" when the budget ran
+    out.  One vocabulary, because the API layer renders these strings.
     """
-    for attempt in range(max_attempts):
+    waited_ms = 0
+    step_ms = base_ms
+    while True:
         record = em.get(workflow_id)
         if record is not None:
-            return record
-        if attempt < max_attempts - 1:
-            time.sleep(base_ms / 1000 * (2 ** attempt))
-    return None
+            return record, "processed"
+        if waited_ms >= ceiling_ms:
+            return None, "no_record"
+        sleep_ms = min(step_ms, ceiling_ms - waited_ms)
+        time.sleep(sleep_ms / 1000)
+        waited_ms += sleep_ms
+        step_ms = min(step_ms * 2, max_step_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -1090,10 +1112,12 @@ class FeedbackLoop:
         Process user NL feedback from the feedback UI.
 
         Pipeline:
-        1. Store raw feedback in execution record
-        2. Run NL triage (seed patterns → category + confidence)
-        3. Route triaged insight to all engines via learn_from_feedback
-        4. Return triage result for frontend display
+        1. Find this run's execution record (bounded poll — this is what orders
+           feedback behind the run's own learning write)
+        2. Store raw feedback in that execution record
+        3. Run NL triage (seed patterns → category + confidence)
+        4. Route triaged insight to all engines via learn_from_feedback
+        5. Return the triage result, plus what actually happened
 
         Called from: /api/feedback endpoint (DAY_08).
 
@@ -1106,7 +1130,13 @@ class FeedbackLoop:
                 None (auth disabled) falls back to "unknown" at the audit write.
 
         Returns:
-            Triage result dict with category, confidence, taxonomy_code.
+            Triage result dict (category, confidence, taxonomy_code) plus an
+            "outcome" key the API layer renders honestly:
+              "processed"       the record was found and the engines were routed
+              "no_record"       no learning record for this run within the
+                                poll's budget — triage ran, engines did not
+              "learning_paused" the circuit breaker is open; nothing was written
+              "error"           an internal failure; nothing here can be relied on
         """
         _fallback_triage = {
             "category": "uncategorized",
@@ -1116,20 +1146,29 @@ class FeedbackLoop:
             "matched_patterns": [],
         }
 
+        # The outcome for a paused breaker is read HERE, from the one call the
+        # request makes. is_enabled() has side effects — it transitions
+        # CLOSED->OPEN and OPEN->HALF_OPEN, and HALF_OPEN admits exactly one
+        # probe — so a second call anywhere would consume that probe and bounce
+        # this check. get_stats() is the side-effect-free read if one is needed.
         if not self.circuit_breaker.is_enabled():
-            return _fallback_triage
+            return {**_fallback_triage, "outcome": "learning_paused"}
 
         try:
-            # Step 1: Store raw feedback
+            # Step 1: Find this run's execution record.
+            record, outcome = _get_with_retry(self.execution_memory, workflow_id)
+            error_message = (
+                record.error_message if record else None
+            )
+
+            # Step 2: Store the raw feedback text — AFTER the lookup, and
+            # ALWAYS. The UPDATE is a silent no-op on a missing row, so ahead of
+            # the lookup the FIFO queue ran it before the store that creates the
+            # row and the column stayed NULL forever. Behind the poll it lands
+            # even when the poll gave up, because the store was queued first.
             self.write_queue.submit(
                 self.execution_memory.update_user_feedback,
                 workflow_id, feedback_text, feedback_type,
-            )
-
-            # Step 2: Get execution record for context (retry handles write-queue lag)
-            record = _get_with_retry(self.execution_memory, workflow_id)
-            error_message = (
-                record.error_message if record else None
             )
 
             # Step 3: NL triage
@@ -1244,6 +1283,7 @@ class FeedbackLoop:
             )
 
             self.circuit_breaker.record_success()
+            triage["outcome"] = outcome
             return triage
 
         except Exception as e:
@@ -1252,7 +1292,7 @@ class FeedbackLoop:
                 "[LEARNING] process_user_feedback error (non-blocking): %s",
                 e,
             )
-            return _fallback_triage
+            return {**_fallback_triage, "outcome": "error"}
 
     # ------------------------------------------------------------------
     # Trigger Telemetry — write path used by Trigger 1 and Trigger 2

@@ -293,7 +293,10 @@ class TestFeedbackLoopIntegration:
         from src.backend.crew_ai.optimization.feedback_loop import FeedbackLoop
         src = inspect.getsource(FeedbackLoop.process_user_feedback)
         assert '_fallback_triage' in src, "Missing fallback triage dict"
-        assert 'return _fallback_triage' in src
+        # T7: the fallback is returned carrying the outcome that explains it —
+        # learning_paused on the breaker path, error from the outer except.
+        assert '{**_fallback_triage, "outcome": "learning_paused"}' in src
+        assert '{**_fallback_triage, "outcome": "error"}' in src
 
     def test_extracts_error_message_for_cross_ref(self):
         from src.backend.crew_ai.optimization.feedback_loop import FeedbackLoop

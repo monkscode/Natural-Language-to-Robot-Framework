@@ -205,14 +205,20 @@ class TestProcessUserFeedbackCircuitBreakerDisabled:
 # ---------------------------------------------------------------------------
 
 class TestGetWithRetry:
+    """T7 rewrote this from a 3-attempt retry into a budgeted poll returning
+    (record, outcome).  ceiling_ms/base_ms are passed explicitly here so the
+    arithmetic stays readable; the production defaults (3s, 100ms, capped at
+    500ms a step) are pinned in test_feedback_ordering.py."""
+
     def test_returns_record_on_first_attempt(self):
         """If em.get() returns a record immediately, no retry is needed."""
         mock_em = MagicMock()
         mock_em.get.return_value = "record"
 
-        result = _get_with_retry(mock_em, "wf-1", max_attempts=3, base_ms=1)
+        record, outcome = _get_with_retry(mock_em, "wf-1", ceiling_ms=300, base_ms=100)
 
-        assert result == "record"
+        assert record == "record"
+        assert outcome == "processed"
         assert mock_em.get.call_count == 1
 
     def test_retries_until_record_appears(self):
@@ -221,18 +227,23 @@ class TestGetWithRetry:
         mock_em = MagicMock()
         mock_em.get.side_effect = [None, "record"]
 
-        result = _get_with_retry(mock_em, "wf-1", max_attempts=3, base_ms=1)
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
+            record, outcome = _get_with_retry(
+                mock_em, "wf-1", ceiling_ms=300, base_ms=100)
 
-        assert result == "record"
+        assert record == "record"
+        assert outcome == "processed"
         assert mock_em.get.call_count == 2
 
-    def test_returns_none_after_all_attempts_exhausted(self):
-        """If em.get() always returns None, _get_with_retry returns None
-        after max_attempts attempts."""
+    def test_returns_no_record_after_the_budget_is_spent(self):
+        """If em.get() always returns None, the poll gives up and says so."""
         mock_em = MagicMock()
         mock_em.get.return_value = None
 
-        result = _get_with_retry(mock_em, "wf-1", max_attempts=3, base_ms=1)
+        with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
+            record, outcome = _get_with_retry(
+                mock_em, "wf-1", ceiling_ms=300, base_ms=100)
 
-        assert result is None
-        assert mock_em.get.call_count == 3
+        assert record is None
+        assert outcome == "no_record"
+        assert mock_em.get.call_count == 3   # 100ms + 200ms of budget, then stop
