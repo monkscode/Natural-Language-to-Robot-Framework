@@ -15,6 +15,7 @@ Tests:
   9. Engine Stats & ABC                    (~4  tests)
 """
 
+import hashlib
 import inspect
 import sqlite3
 
@@ -669,7 +670,7 @@ class TestConflictFlagHints:
 
     def _insert_hint(
         self, conn, text: str = "some hint",
-        applied: int = 0, success: int = 0,
+        applied: int = 0, success: int = 0, used_sources: int = 0,
     ) -> int:
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -680,8 +681,19 @@ class TestConflictFlagHints:
             "        datetime('now'), datetime('now'))",
             (text, applied, success),
         )
+        hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # used_sources: how many INDEPENDENT queries produced those successes.
+        # The strong-history shield counts distinct sources, not events (T4), so
+        # a protected hint needs its evidence rows as well as its counters.
+        for i in range(used_sources):
+            conn.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'used', datetime('now'))",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return hint_id
 
     def test_empty_dict_returns_without_db_write(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
@@ -827,7 +839,8 @@ class TestConflictFlagHints:
     def test_conflict_flag_protected_high_history_hint(self, in_memory_db):
         """Hint with applied=10, success=8 (80%) must NOT be flagged by a single trigger."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8,
+                                    used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         engine.conflict_flag_hints({hint_id: "contradicts new approach"}, trigger_type="trigger_1")
@@ -863,7 +876,8 @@ class TestConflictFlagHints:
         the hint still queryable. The caller's trigger_events write is unaffected
         (caller path unchanged — not tested here)."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "high-history hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "high-history hint", applied=10,
+                                    success=8, used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         engine.conflict_flag_hints({hint_id: "trigger fired"}, trigger_type="trigger_1")
@@ -892,7 +906,7 @@ class TestConflictFlagHintsReturnValue:
 
     def _insert_hint(
         self, conn, text: str = "some hint",
-        applied: int = 0, success: int = 0,
+        applied: int = 0, success: int = 0, used_sources: int = 0,
     ) -> int:
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -903,8 +917,19 @@ class TestConflictFlagHintsReturnValue:
             "        datetime('now'), datetime('now'))",
             (text, applied, success),
         )
+        hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # used_sources: how many INDEPENDENT queries produced those successes.
+        # The strong-history shield counts distinct sources, not events (T4), so
+        # a protected hint needs its evidence rows as well as its counters.
+        for i in range(used_sources):
+            conn.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'used', datetime('now'))",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return hint_id
 
     def test_returns_actually_flagged_ids_on_success(self, in_memory_db):
         """A non-protected hint that gets flagged must appear in the return list."""
@@ -923,7 +948,8 @@ class TestConflictFlagHintsReturnValue:
     def test_returns_empty_list_when_all_suppressed_by_strong_history(self, in_memory_db):
         """Strong-history-protected hints must NOT appear in the return list."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8,
+                                    used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         result = engine.conflict_flag_hints(
@@ -939,7 +965,8 @@ class TestConflictFlagHintsReturnValue:
         """A mix of protected + unprotected hints must yield only the unprotected
         ones — matches the trigger_events.actually_flagged_hint_ids semantic."""
         conn = in_memory_db
-        protected_id   = self._insert_hint(conn, "old proven", applied=10, success=8)
+        protected_id   = self._insert_hint(conn, "old proven", applied=10, success=8,
+                                          used_sources=8)
         unprotected_id = self._insert_hint(conn, "new untested", applied=2, success=1)
         engine = NLFeedbackEngine(conn)
 

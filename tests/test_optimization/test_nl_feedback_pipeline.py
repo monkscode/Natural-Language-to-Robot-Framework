@@ -9,6 +9,7 @@ Tests: NLFeedbackEngine (learn_from_feedback, get_hints, update_hint_effectivene
 Uses in-memory SQLite with full Phase 1 schema via the ``in_memory_db`` fixture.
 """
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -575,11 +576,20 @@ class TestEndToEnd:
         hint_id = in_memory_db.execute(
             "SELECT id FROM nl_feedback_corrections"
         ).fetchone()["id"]
-        # Pre-seed failures just below the floor; one harmful verdict crosses it.
+        # Pre-seed failures just below the floor, each from its own query; one
+        # harmful verdict from a further query crosses it. The floor counts
+        # distinct sources (T4), so the evidence rows are part of the state.
         in_memory_db.execute(
             "UPDATE nl_feedback_corrections SET failure_count = ? WHERE id = ?",
             (AUTO_DISABLE_MIN_APPLICATIONS - 1, hint_id),
         )
+        for i in range(AUTO_DISABLE_MIN_APPLICATIONS - 1):
+            in_memory_db.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'failure', '2026-01-01T00:00:00+00:00')",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         in_memory_db.execute(
             "INSERT INTO execution_records (workflow_id, timestamp, user_query, "
             "test_status, hint_attribution_done) "

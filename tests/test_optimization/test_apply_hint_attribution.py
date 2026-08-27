@@ -14,6 +14,7 @@ conftest renames the pytest thread to the writer thread, so direct calls satisfy
 _assert_writer_thread.
 """
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -31,14 +32,31 @@ _RECENT = _NOW.isoformat()
 _OLD = (_NOW - timedelta(days=UNUSED_RETIRE_MIN_AGE_DAYS + 10)).isoformat()
 
 
-def _insert_exec(conn, workflow_id, *, done=0, status="passed"):
-    """Insert an execution_records row the attribution claim can target."""
+def _insert_exec(conn, workflow_id, *, done=0, status="passed", user_query="q"):
+    """Insert an execution_records row the attribution claim can target.
+
+    user_query is the credit's SOURCE (T3) — tests that need the lifecycle rules
+    to see independent evidence pass a distinct one per run.
+    """
     conn.execute(
         "INSERT INTO execution_records "
         "(workflow_id, timestamp, user_query, test_status, hint_attribution_done) "
-        "VALUES (?, '2026-01-01T00:00:00+00:00', 'q', ?, ?)",
-        (workflow_id, status, done),
+        "VALUES (?, '2026-01-01T00:00:00+00:00', ?, ?, ?)",
+        (workflow_id, user_query, status, done),
     )
+
+
+def _seed_evidence(conn, hint_id, bucket, queries):
+    """Evidence rows for outcomes that already happened, one per source query
+    (T4 — the lifecycle rules count distinct sources, not events)."""
+    for q in queries:
+        conn.execute(
+            "INSERT INTO hint_evidence "
+            "(hint_id, source_kind, source_key, source_hash, bucket, created_at) "
+            "VALUES (?, 'query', ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            (hint_id, q, hashlib.sha256(q.encode("utf-8")).hexdigest(),
+             bucket, _RECENT),
+        )
 
 
 def _insert_hint(conn, text, *, applied=0, success=0, failure=0, unused=0,
@@ -236,10 +254,13 @@ class TestTouchedSet:
 class TestAutoDisableAndRetire:
 
     def test_never_succeeded_auto_disables(self, in_memory_db):
-        # Pre: failure == min-1, success 0. One more failure crosses the floor.
+        # Pre: failure == min-1, success 0, each from its own source. One more
+        # failure from a further source crosses both floors (events and sources).
         hid = _insert_hint(in_memory_db, "bad",
                            failure=AUTO_DISABLE_MIN_APPLICATIONS - 1)
-        _insert_exec(in_memory_db, "wf-ns")
+        _seed_evidence(in_memory_db, hid, "failure",
+                       [f"q{i}" for i in range(AUTO_DISABLE_MIN_APPLICATIONS - 1)])
+        _insert_exec(in_memory_db, "wf-ns", user_query="q-last")
         in_memory_db.commit()
 
         engine = NLFeedbackEngine(in_memory_db)
@@ -268,7 +289,9 @@ class TestAutoDisableAndRetire:
     def test_unused_retirement_past_age_floor(self, in_memory_db):
         hid = _insert_hint(in_memory_db, "dead weight",
                            unused=UNUSED_RETIRE_THRESHOLD - 1, created_at=_OLD)
-        _insert_exec(in_memory_db, "wf-ur")
+        _seed_evidence(in_memory_db, hid, "unused",
+                       [f"q{i}" for i in range(UNUSED_RETIRE_THRESHOLD - 1)])
+        _insert_exec(in_memory_db, "wf-ur", user_query="q-last")
         in_memory_db.commit()
 
         engine = NLFeedbackEngine(in_memory_db)
@@ -316,8 +339,9 @@ class TestAutoDisableAndRetire:
 class TestStrongHistoryGuard:
 
     def test_strong_history_suppresses_flag_but_still_increments_failure(self, in_memory_db):
-        # used = success + failure = 8 + 0 = 8 (>=5); rate 1.0 (>=0.7) → protected.
+        # 8 successes across 8 distinct sources (>=5); rate 1.0 (>=0.7) → protected.
         hid = _insert_hint(in_memory_db, "proven good", success=8, failure=0)
+        _seed_evidence(in_memory_db, hid, "used", [f"q{i}" for i in range(8)])
         _insert_exec(in_memory_db, "wf-sh")
         in_memory_db.commit()
 
@@ -396,8 +420,10 @@ class TestFlagCore:
         assert _hint_row(in_memory_db, hid)["conflict_flagged"] == 1
 
     def test_strong_history_hint_is_suppressed(self, in_memory_db):
-        # used = 6 (>=5), success rate 5/6 ≈ 0.83 (>=0.7) → suppressed.
+        # 6 used outcomes from 6 distinct sources (>=5), rate 5/6 ≈ 0.83 (>=0.7).
         hid = _insert_hint(in_memory_db, "strong", success=5, failure=1)
+        _seed_evidence(in_memory_db, hid, "used", [f"q{i}" for i in range(5)])
+        _seed_evidence(in_memory_db, hid, "failure", ["q-failed"])
         in_memory_db.commit()
 
         engine = NLFeedbackEngine(in_memory_db)

@@ -61,16 +61,23 @@ _SCOPE_BY_CATEGORY = {
     "negative": "domain",
 }
 
-# Auto-disable: hint tried N times with 0 successes + same-category failures
+# Auto-disable: hint tried N times with 0 successes + same-category failures.
+# MIN_APPLICATIONS counts distinct used SOURCES (hint_evidence), not used events
+# — three failures on one query repeated is one query's opinion (T4).
 AUTO_DISABLE_MIN_APPLICATIONS = 3
 AUTO_DISABLE_RATIO_MIN_APPLICATIONS = 10
 AUTO_DISABLE_FAILURE_RATIO = 0.6
 
 # Trigger-flag protection. Strong-history hints are shielded from single-shot
-# flagging. Evaluated on USED outcomes (success + failure), NOT applied
-# (injections) — so over-surfacing / unused can't strip a good hint's protection
-# (S1). The MIN_APPLIED name is kept for continuity but now means "minimum used
-# outcomes" (success + failure).
+# flagging. The name has now carried three meanings, so state the current one
+# plainly: it is the minimum number of distinct SOURCES (independent normalised
+# queries, counted in hint_evidence) that have USED the hint — helped by it or
+# been failed by it. It was applied_count originally, then used OUTCOMES
+# (success + failure, S1) so over-surfacing could not buy protection, and now
+# used sources (T4/S4) so repetition cannot either: one query re-run five times
+# is one source. The QUALITY leg below stays on the event counters, deliberately
+# — a success-wins source rate would read 1.00 for a hint that helps and fails
+# the same five queries alternately, and shield it at a 50% event rate.
 TRIGGER_FLAG_PROTECTION_MIN_APPLIED = 5
 TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE = 0.70
 
@@ -78,6 +85,12 @@ TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE = 0.70
 # but never used (unused_count >= threshold) with zero successes is retired — but
 # only past an age floor, so a brand-new mis-surfaced hint isn't killed before
 # its right context appears. created_at is already on the row (no schema change).
+# The threshold is required of BOTH the distinct unused sources and the event
+# counter (T4). Uniquely among the four counters, unused_count is RESET — a
+# re-submission of the same correction is a fresh chance (learn_from_feedback's
+# UPSERT branch). hint_evidence is append-only and cannot express a reset, so
+# dropping the event leg would silently retire the hint on its next unused
+# outcome and void that fresh chance.
 UNUSED_RETIRE_THRESHOLD = 5
 UNUSED_RETIRE_MIN_AGE_DAYS = 30
 
@@ -724,16 +737,17 @@ class NLFeedbackEngine(LearningEngine):
         """Suspend hints from injection without permanently deactivating them.
 
         Strong-history guard: hints with a proven track record
-        (success+failure >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED AND
-        success/(success+failure) >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE)
+        (>= TRIGGER_FLAG_PROTECTION_MIN_APPLIED distinct sources have USED the
+        hint AND success/(success+failure) >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE)
         are NOT flagged by a single trigger call. The trigger_events row is
         still written by the caller, so batch hint review can act on accumulated
         evidence if multiple triggers fire against the same hint.
 
-        The guard reads USED outcomes (success+failure), not applied
-        (injections) — over-surfacing/unused can't strip a good hint's
-        protection (S1). Hints with few used outcomes still flag immediately —
-        LLM judgment is the best evidence available. The flagging loop itself
+        The guard reads USED outcomes, not applied (injections) — over-surfacing
+        / unused can't strip a good hint's protection (S1) — and counts them by
+        distinct source, so re-running one query cannot buy protection either
+        (T4). Hints with few used sources still flag immediately — LLM judgment
+        is the best evidence available. The flagging loop itself
         lives in _flag_hints_no_commit, shared with apply_hint_attribution so a
         Case-B credit + harm-flag commit atomically.
 
@@ -801,12 +815,15 @@ class NLFeedbackEngine(LearningEngine):
         usage-attribution counters, for apply_hint_attribution). The caller
         asserts the writer thread.
 
-        Strong-history guard (S1): a hint with >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED
-        USED outcomes (success + failure) and success/(success+failure)
+        Strong-history guard (S1/T4): a hint USED by >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED
+        distinct sources (hint_evidence) whose event success/(success+failure)
         >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE is shielded from single-shot
-        flagging — evaluated on used outcomes, not applied, so over-surfacing /
-        unused can't strip protection. Reads PRE-increment counts
-        (apply_hint_attribution calls this BEFORE applying its increments).
+        flagging — diversity from sources so repetition can't buy protection,
+        quality from the event counters so a coin-flip hint can't either.
+        Evaluated on used outcomes, not applied, so over-surfacing / unused
+        can't strip protection. Reads PRE-increment event counts and PRE-insert
+        source counts (apply_hint_attribution calls this BEFORE applying its
+        increments and BEFORE writing its evidence rows).
 
         Returns the ids actually flagged (protected hints excluded).
         """
@@ -830,14 +847,20 @@ class NLFeedbackEngine(LearningEngine):
             failure = hint["failure_count"] or 0
             used = success + failure
 
-            if used >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED:
-                success_rate = success / used
-                if success_rate >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE:
+            # Quality from the event counters, diversity from hint_evidence
+            # (T4/S4). The rate is checked first: it is already in hand, and it
+            # keeps the source query off every flagging call. No used outcomes
+            # means no rate and no shield.
+            success_rate = success / used if used else 0.0
+            if success_rate >= TRIGGER_FLAG_PROTECTION_MIN_SUCCESS_RATE:
+                used_src = self._source_counts(hint_id)["used_src"]
+                if used_src >= TRIGGER_FLAG_PROTECTION_MIN_APPLIED:
                     logger.info(
                         "[LEARNING:NL] Flag suppressed for hint %d — strong "
-                        "history (used=%d, success_rate=%.0f%%). Evidence "
-                        "recorded; batch review reconsiders if triggers accumulate.",
-                        hint_id, used, success_rate * 100,
+                        "history (used_sources=%d, used=%d, success_rate=%.0f%%). "
+                        "Evidence recorded; batch review reconsiders if triggers "
+                        "accumulate.",
+                        hint_id, used_src, used, success_rate * 100,
                     )
                     continue
 
@@ -872,6 +895,40 @@ class NLFeedbackEngine(LearningEngine):
                 )
             actually_flagged.append(hint_id)
         return actually_flagged
+
+    def _source_counts(self, hint_id: int) -> dict[str, int]:
+        """Distinct independent SOURCES behind a hint's outcomes (T4).
+
+        Diversity only — never a numerator, never a rate. The event counters on
+        the row keep every quality judgement (F6 pins their meaning), and a rate
+        computed from sources would read 1.00 for a hint that helps and fails the
+        same five queries alternately (S4).
+
+        used_src counts a source once across BOTH the used and failure buckets:
+        a query the hint helped in March and failed in April is one source that
+        has exercised the hint, not two.
+
+        Reads only source_kind='query' — the rows apply_hint_attribution writes.
+        Rows of any other kind key on the run rather than the query and carry no
+        diversity. Runs on the writer connection inside the caller's
+        transaction, so it sees that transaction's own uncommitted inserts.
+        """
+        row = self._em._writer_conn.execute(
+            "SELECT "
+            "  COUNT(DISTINCT CASE WHEN bucket IN ('used', 'failure') "
+            "                      THEN source_hash END) AS used_src, "
+            "  COUNT(DISTINCT CASE WHEN bucket = 'failure' "
+            "                      THEN source_hash END) AS failure_src, "
+            "  COUNT(DISTINCT CASE WHEN bucket = 'unused' "
+            "                      THEN source_hash END) AS unused_src "
+            "FROM hint_evidence WHERE hint_id = ? AND source_kind = 'query'",
+            (hint_id,),
+        ).fetchone()
+        return {
+            "used_src": row["used_src"] or 0,
+            "failure_src": row["failure_src"] or 0,
+            "unused_src": row["unused_src"] or 0,
+        }
 
     def _format_feedback_hint(self, feedback_text: str) -> str:
         # Pass feedback through verbatim with a universal warning header.
@@ -929,14 +986,14 @@ class NLFeedbackEngine(LearningEngine):
         the evidence rows are additive, and are what the lifecycle rules read
         when they need diversity rather than repetition.
 
-        Disable/retire rules, evaluated for EVERY touched hint (S1-R3) on the
-        (success+failure) used-outcome basis:
+        Disable/retire rules, evaluated for EVERY touched hint (S1-R3). Volume
+        is counted in distinct SOURCES (T4), the success guard in events:
           - never-succeeded (FR2, AUTOMATIC): failure>0 AND success==0 AND
-            (success+failure) >= AUTO_DISABLE_MIN_APPLICATIONS -> disable
-            (reason 'never_succeeded').
+            failure_src>0 AND used_src >= AUTO_DISABLE_MIN_APPLICATIONS ->
+            disable (reason 'never_succeeded').
           - over-surfaced dead weight (G1): unused >= UNUSED_RETIRE_THRESHOLD AND
-            success==0 AND age >= UNUSED_RETIRE_MIN_AGE_DAYS -> disable
-            (reason 'never_used').
+            unused_src >= UNUSED_RETIRE_THRESHOLD AND success==0 AND
+            age >= UNUSED_RETIRE_MIN_AGE_DAYS -> disable (reason 'never_used').
         The high-harm-RATIO rule is INFORM-ONLY this phase (FR2) — surfaced on
         the review panel, not auto-disabled here.
 
@@ -1020,7 +1077,7 @@ class NLFeedbackEngine(LearningEngine):
                 "SELECT user_query FROM execution_records WHERE workflow_id = ?",
                 (workflow_id,),
             ).fetchone()
-            source_key = ((src_row["user_query"] if src_row else "") or "").strip().lower()
+            source_key = (src_row["user_query"] or "").strip().lower()
             source_hash = hashlib.sha256(source_key.encode("utf-8")).hexdigest()
 
             # Read each touched hint's PRE-increment counts ONCE (N2). Only
@@ -1162,10 +1219,29 @@ class NLFeedbackEngine(LearningEngine):
         counts (the high-harm-ratio rule is inform-only this phase — FR2). Both
         require success == 0, so a hint that has ever genuinely helped is never
         auto-killed here.
+
+        The volume floors count distinct SOURCES (T4/S4) — three failures on one
+        query re-run is one query's opinion, not three. The success == 0 guards
+        stay on the event counter: hints whose successes predate hint_evidence
+        have success_src = 0, so a source-based guard would kill exactly the
+        proven helpers this rule exists to spare, and no backfill exists to save
+        them. Retirement additionally keeps its event leg, because unused_count
+        is reset by a re-submission and an append-only ledger cannot express that.
+
+        The event legs are evaluated first so the source query runs only for a
+        hint that is otherwise already eligible.
         """
-        used = success + failure
-        # never-succeeded (FR2 automatic), on the used-outcome basis.
-        if failure > 0 and success == 0 and used >= AUTO_DISABLE_MIN_APPLICATIONS:
+        never_succeeded = failure > 0 and success == 0
+        over_surfaced = unused >= UNUSED_RETIRE_THRESHOLD and success == 0
+        if not (never_succeeded or over_surfaced):
+            return
+        src = self._source_counts(hint_id)
+        # never-succeeded (FR2 automatic), on the used-source basis.
+        if (
+            never_succeeded
+            and src["failure_src"] > 0
+            and src["used_src"] >= AUTO_DISABLE_MIN_APPLICATIONS
+        ):
             self._auto_disable_hint(
                 hint_id, before_row, applied, success, failure, unused,
                 "never_succeeded", now_iso,
@@ -1173,8 +1249,8 @@ class NLFeedbackEngine(LearningEngine):
             return
         # over-surfaced dead weight (G1): retire only past the age floor.
         if (
-            unused >= UNUSED_RETIRE_THRESHOLD
-            and success == 0
+            over_surfaced
+            and src["unused_src"] >= UNUSED_RETIRE_THRESHOLD
             and self._hint_age_days(before_row["created_at"], now_iso)
             >= UNUSED_RETIRE_MIN_AGE_DAYS
         ):
