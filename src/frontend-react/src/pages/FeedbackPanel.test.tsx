@@ -35,7 +35,11 @@ const PAUSED =
 
 const mockApi = vi.mocked(api)
 
-afterEach(() => vi.clearAllMocks())
+// resetAllMocks, not clearAllMocks: clearAllMocks leaves a queued
+// mockResolvedValueOnce behind (verified by execution), and Step 6 adds a
+// fetch-on-mount to this panel, so an unconsumed value would start
+// answering the NEXT test's first call.
+afterEach(() => vi.resetAllMocks())
 
 /** A failed run: the correction form is open from the start. */
 function renderFailPanel() {

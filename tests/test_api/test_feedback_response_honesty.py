@@ -192,6 +192,44 @@ class TestTheOutcomeHasExactlyOneHome:
         assert body["status"] == "error"
 
 
+class TestTheVocabularyIsNotTwoVocabularies:
+    """T7 recorded the rule deliberately: "`_get_with_retry` returns
+    `process_user_feedback`'s OWN outcome codes, not a separate reason
+    vocabulary — one caller, one vocabulary, no mapping layer to get wrong."
+
+    The endpoint then had to hold a second copy of those codes, because it is
+    the layer that owns the words shown to a person. Drift between the two is
+    silent by construction: an outcome the endpoint does not know is
+    normalised to "error", so renaming "learning_paused" in the loop would
+    make every paused submission say "Something went wrong" instead — a wrong
+    statement produced by the honesty change. Nothing else would fail: the
+    tests above supply their own literals.
+
+    Read from the loop's SOURCE rather than from a declared tuple, because a
+    declaration can drift from the literals it claims to describe while the
+    literals are what actually ship. Limitation, stated rather than hidden: a
+    fifth outcome introduced through a variable instead of a literal is
+    invisible here.
+    """
+
+    def test_the_endpoint_can_describe_every_outcome_the_loop_can_return(self):
+        import inspect
+        import re
+
+        from src.backend.crew_ai.optimization import feedback_loop
+        from src.backend.api.endpoints import _FEEDBACK_OUTCOME_MESSAGES
+
+        src = inspect.getsource(feedback_loop)
+        produced = set(re.findall(r'"outcome":\s*"(\w+)"', src))
+        produced |= set(re.findall(r'return\s+\w+,\s*"(\w+)"', src))
+
+        assert produced, "the scan found no outcome literals — it has stopped working"
+        assert produced == set(_FEEDBACK_OUTCOME_MESSAGES), (
+            "the loop and the endpoint disagree about the outcome vocabulary; "
+            "loop=%s endpoint=%s" % (sorted(produced), sorted(_FEEDBACK_OUTCOME_MESSAGES))
+        )
+
+
 class TestTheBranchesThatMustNotChange:
     def test_learning_switched_off_answers_exactly_what_it_always_did(self):
         """The disabled early-return is a different statement from the four
