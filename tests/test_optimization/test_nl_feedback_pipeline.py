@@ -226,14 +226,18 @@ class TestStorage:
         )
 
     def test_store_dedup_increment(self, in_memory_db):
-        """Same feedback_text + domain + scope -> evidence_count incremented."""
+        """Same feedback_text + domain + scope -> evidence_count incremented.
+
+        One submission per run: T5 counts a correction once for the run that
+        produced it, so the three submissions here come from three runs — which
+        is what evidence_count was always meant to measure.
+        """
         engine = NLFeedbackEngine(in_memory_db)
-        record = FakeRecord()
         triage = {"feedback_text": "Use id=login-btn", "category": "locator"}
 
-        engine.learn_from_feedback(record, triage)
-        engine.learn_from_feedback(record, triage)
-        engine.learn_from_feedback(record, triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-1"), triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-2"), triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-3"), triage)
 
         row = in_memory_db.execute("SELECT evidence_count FROM nl_feedback_corrections").fetchone()
         assert row["evidence_count"] == 3, f"Expected 3, got {row['evidence_count']}"
@@ -619,7 +623,7 @@ class TestReactivationResetsUnusedCount:
 
     def test_resubmission_resets_unused_preserving_track_record(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
-        record = FakeRecord(domain="x.com", url="https://x.com")
+        record = FakeRecord(workflow_id="wf-orig", domain="x.com", url="https://x.com")
         triage = {"feedback_text": "always wait for the element to be visible",
                   "category": "keyword"}
         engine.learn_from_feedback(record, triage)  # create the hint
@@ -634,8 +638,14 @@ class TestReactivationResetsUnusedCount:
         )
         in_memory_db.commit()
 
-        # Re-submit identical feedback -> UPSERT branch (the fresh chance).
-        engine.learn_from_feedback(record, triage)
+        # Re-submit identical feedback from a LATER run -> UPSERT branch (the
+        # fresh chance). A different workflow_id on purpose: T5 counts one
+        # correction per run, and re-affirming a hint from a new run is exactly
+        # the recovery path that gate leaves open.
+        engine.learn_from_feedback(
+            FakeRecord(workflow_id="wf-resubmit", domain="x.com", url="https://x.com"),
+            triage,
+        )
 
         row = in_memory_db.execute(
             "SELECT unused_count, success_count, failure_count, is_active "

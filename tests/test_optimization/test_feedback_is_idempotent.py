@@ -1,0 +1,215 @@
+"""
+T5 — one correction per run, counted once.
+
+Re-submitting the same correction from the SAME run must not count twice. The
+gate is a hint_evidence row keyed (hint_id, 'workflow', sha256(workflow_id),
+'evidence'), written in the same transaction as the create/reinforce — so the
+token is exactly as durable as the effects it authorises, and a rolled-back
+submission leaves no phantom.
+
+The row is written in BOTH branches (R1). The create branch writes none of the
+UPSERT effects, so if it wrote no evidence row the second submission would find
+none, create one, and reinforce — only the third would be blocked. That is the
+ordinary user flow: Generate -> Run -> Feedback -> edit -> Run again (same
+workflow_id) -> Feedback again.
+
+What the gate deliberately leaves open: the SAME text from a DIFFERENT run. That
+is Gap 7's recovery path — a user re-affirming a hint the LLM wrongly flagged —
+and it still unflags, reactivates and resets unused_count.
+
+Real Postgres via the in_memory_db fixture (never mocked — optimization rule).
+"""
+
+import hashlib
+from datetime import datetime, timezone
+
+from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
+from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+
+
+_NOW = datetime.now(timezone.utc)
+_TEXT = "wait for the spinner to disappear before asserting"
+
+
+def _record(workflow_id, *, url="https://shop.test/dash", org_id=None):
+    return ExecutionRecord(
+        workflow_id=workflow_id, timestamp=_NOW,
+        user_query="verify the dashboard loads", url=url, domain="shop.test",
+        test_status="failed", org_id=org_id,
+    )
+
+
+def _triage(text=_TEXT, actor="tester"):
+    return {"category": "keyword", "feedback_text": text, "actor": actor}
+
+
+def _hints(conn):
+    return conn.execute(
+        "SELECT id, feedback_text, evidence_count, unused_count, is_active, "
+        "       conflict_flagged, last_seen "
+        "FROM nl_feedback_corrections ORDER BY id"
+    ).fetchall()
+
+
+def _evidence(conn, hint_id):
+    return conn.execute(
+        "SELECT source_kind, source_key, source_hash, bucket "
+        "FROM hint_evidence WHERE hint_id = ? ORDER BY id",
+        (hint_id,),
+    ).fetchall()
+
+
+def _seed_hint(conn, text=_TEXT, *, conflict_flagged=0):
+    """A hint that already exists — the engine's dedup key is
+    (feedback_text, domain, scope, org_id), so the domain must match the
+    record's or the submission takes the create branch instead."""
+    cur = conn.execute(
+        "INSERT INTO nl_feedback_corrections "
+        "(feedback_text, category, scope, domain, evidence_count, is_active, "
+        " conflict_flagged, created_at, last_seen) "
+        "VALUES (?, 'keyword', 'global', 'shop.test', 1, 1, ?, ?, ?) "
+        "RETURNING id",
+        (text, conflict_flagged, _NOW.isoformat(), _NOW.isoformat()),
+    )
+    hid = cur.fetchone()["id"]
+    conn.commit()
+    return hid
+
+
+class TestSameRunCountsOnce:
+    """The four cases of T5 Step 1."""
+
+    def test_new_text_twice_from_one_run_counts_once(self, in_memory_db):
+        """(a) The create branch must leave the token behind, or the FIRST
+        repeat slips through and only the third is blocked (R1)."""
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-1"), _triage())
+
+        rows = _hints(in_memory_db)
+        assert len(rows) == 1
+        hid = rows[0]["id"]
+        # State the second submission would otherwise change.
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections "
+            "SET unused_count = 7, last_seen = '2020-01-01T00:00:00+00:00' "
+            "WHERE id = ?", (hid,),
+        )
+        in_memory_db.commit()
+
+        engine.learn_from_feedback(_record("wf-1"), _triage())
+
+        row = _hints(in_memory_db)[0]
+        assert row["evidence_count"] == 1, (
+            "the same run's second submission reinforced the hint it had just "
+            "created — the create branch wrote no gate token"
+        )
+        assert row["unused_count"] == 7, "gated submission reset unused_count"
+        assert row["last_seen"] == "2020-01-01T00:00:00+00:00", (
+            "gated submission refreshed last_seen"
+        )
+
+    def test_existing_text_twice_from_one_run_counts_once(self, in_memory_db):
+        """(b) The UPSERT branch: one reinforcement, and a flag raised between
+        the two submissions survives the second."""
+        hid = _seed_hint(in_memory_db)
+        engine = NLFeedbackEngine(in_memory_db)
+
+        engine.learn_from_feedback(_record("wf-2"), _triage())
+        assert _hints(in_memory_db)[0]["evidence_count"] == 2
+
+        # Trigger 2 flags the hint between the two submissions.
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections "
+            "SET conflict_flagged = 1, conflict_flag_reason = 'llm' WHERE id = ?",
+            (hid,),
+        )
+        in_memory_db.commit()
+
+        engine.learn_from_feedback(_record("wf-2"), _triage())
+
+        row = _hints(in_memory_db)[0]
+        assert row["evidence_count"] == 2, "the same run counted twice"
+        assert row["conflict_flagged"] == 1, (
+            "the same run's duplicate submission unflagged the hint — the gate "
+            "must cover every UPSERT effect, the audit row included"
+        )
+        audit = in_memory_db.execute(
+            "SELECT id FROM hint_audit WHERE hint_id = ? AND action = 'unflag'",
+            (hid,),
+        ).fetchall()
+        assert audit == [], "gated submission wrote an unflag audit row"
+
+    def test_same_text_from_another_run_still_counts_and_unflags(self, in_memory_db):
+        """(c) Gap 7's recovery path — the gate is per run, not per hint."""
+        hid = _seed_hint(in_memory_db, conflict_flagged=1)
+        engine = NLFeedbackEngine(in_memory_db)
+
+        engine.learn_from_feedback(_record("wf-3a"), _triage())
+        engine.learn_from_feedback(_record("wf-3b"), _triage())
+
+        row = _hints(in_memory_db)[0]
+        assert row["evidence_count"] == 3, (
+            "a different run's identical feedback was gated — that is the "
+            "cross-run recovery path and must stay open"
+        )
+        assert row["conflict_flagged"] == 0
+        assert len(_evidence(in_memory_db, hid)) == 2, "one token per run"
+
+    def test_different_text_on_one_run_counts_separately(self, in_memory_db):
+        """(d) The gate is per (hint, run) — a second correction on the same run
+        is a different hint and must be stored."""
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-4"), _triage())
+        engine.learn_from_feedback(_record("wf-4"), _triage("use the stable id"))
+
+        rows = _hints(in_memory_db)
+        assert len(rows) == 2, "the run's second, different correction was lost"
+        assert {r["evidence_count"] for r in rows} == {1}
+
+
+class TestGateToken:
+    """The token's shape — it must be invisible to the lifecycle rules."""
+
+    def test_token_is_workflow_kind_and_does_not_inflate_source_counts(
+        self, in_memory_db,
+    ):
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-5"), _triage())
+        hid = _hints(in_memory_db)[0]["id"]
+
+        rows = _evidence(in_memory_db, hid)
+        assert len(rows) == 1
+        assert rows[0]["source_kind"] == "workflow"
+        assert rows[0]["bucket"] == "evidence"
+        assert rows[0]["source_key"] == "wf-5"
+        assert rows[0]["source_hash"] == hashlib.sha256(b"wf-5").hexdigest()
+
+        # T4's three lifecycle rules count source_kind='query' rows only. A
+        # 'query' row here would silently inflate used_src and shield the hint.
+        assert engine._source_counts(hid) == {
+            "used_src": 0, "failure_src": 0, "unused_src": 0,
+        }
+
+    def test_feedback_without_a_run_is_not_gated(self, in_memory_db):
+        """A record with no workflow_id has no run to be idempotent about.
+
+        The honest default is to proceed ungated: sha256(None) raises, and
+        learn_from_feedback swallows every exception, so gating on a missing id
+        would discard the correction entirely behind one WARNING. The product
+        path always has an id (the record is read back by workflow_id), so this
+        covers direct/API callers only.
+        """
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record(None), _triage())
+        engine.learn_from_feedback(_record(None), _triage())
+
+        rows = _hints(in_memory_db)
+        assert len(rows) == 1
+        assert rows[0]["evidence_count"] == 2, (
+            "a run-less submission was gated — the correction is discarded, "
+            "not deduplicated"
+        )
+        assert _evidence(in_memory_db, rows[0]["id"]) == [], (
+            "no run, no token: an empty source_hash would gate every "
+            "run-less caller against every other one"
+        )

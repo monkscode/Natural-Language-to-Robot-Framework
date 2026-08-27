@@ -382,6 +382,12 @@ class NLFeedbackEngine(LearningEngine):
         Deduplication: same feedback_text + domain + scope → increment
         evidence_count and update last_seen.
 
+        One correction per run (T5): the run that produced the feedback claims
+        the hint once. A second submission of the same text from the SAME run
+        changes nothing — the counters, the flags and the audit row are all
+        per-run facts. The same text from a LATER run still counts, which is
+        Gap 7's recovery path for a hint the LLM wrongly flagged.
+
         Args:
             record: ExecutionRecord for the workflow being given feedback.
             feedback_insight: Triage result dict (must include 'feedback_text').
@@ -410,6 +416,17 @@ class NLFeedbackEngine(LearningEngine):
         # similarity filter embeds and matches future queries against.
         anchor_query = getattr(record, "user_query", None)
         now = datetime.now(timezone.utc).isoformat()
+        # T5: the run is the idempotency key. Hashed before any SQL runs — a
+        # record with no workflow_id has no run to be idempotent about and
+        # proceeds ungated: sha256(None) raises, and the except below swallows
+        # everything, so gating on a missing id would silently DISCARD the
+        # correction instead of deduplicating it. The product path always has
+        # one (process_user_feedback reads the record back by workflow_id), so
+        # this covers direct and API callers only.
+        source_hash = (
+            hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+            if workflow_id else None
+        )
 
         try:
             # Upsert: increment evidence if exists, else insert.
@@ -439,6 +456,25 @@ class NLFeedbackEngine(LearningEngine):
 
             new_hint_id = None
             if existing:
+                # T5: claim this run for this hint BEFORE any of the effects
+                # below. Every one of them — evidence_count, last_seen,
+                # is_active, conflict_flagged (+ its two metadata columns),
+                # unused_count and the conditional 'unflag' audit row — is a
+                # per-run fact, so they are gated together: leaving the audit
+                # INSERT outside would make the LLM-accuracy KPI count an
+                # override that did not happen.
+                if source_hash is not None and not self._claim_feedback_run(
+                    existing["id"], workflow_id, source_hash, now,
+                ):
+                    # commit(): nothing was written, but the dedup SELECT above
+                    # opened a transaction on the long-lived writer connection.
+                    self._em._writer_conn.commit()
+                    logger.info(
+                        "[LEARNING:NL] Feedback '%s' already counted for hint %s "
+                        "from this run — not counted again",
+                        feedback_text[:50], existing["id"],
+                    )
+                    return
                 # Gap 7: user re-submitting identical feedback text is the
                 # strongest possible authoritative signal that the hint is
                 # correct — strictly more reliable than any LLM judgment.
@@ -502,6 +538,16 @@ class NLFeedbackEngine(LearningEngine):
                     ),
                 )
                 new_hint_id = cursor.fetchone()["id"]
+                # T5 (R1): the create branch must leave the claim behind too.
+                # Without it this run's next submission of the same text finds
+                # no claim, makes one, and reinforces the hint it just created —
+                # only the THIRD submission would be gated. That is the ordinary
+                # flow: run -> feedback -> edit the code -> run again (same
+                # workflow_id) -> feedback again.
+                if source_hash is not None:
+                    self._claim_feedback_run(
+                        new_hint_id, workflow_id, source_hash, now,
+                    )
                 logger.info(
                     "[LEARNING:NL] Stored new feedback correction: "
                     "'%s' scope=%s domain=%s",
@@ -524,6 +570,32 @@ class NLFeedbackEngine(LearningEngine):
             logger.warning(
                 "[LEARNING:NL] Failed to store feedback correction: %s", e,
             )
+
+    def _claim_feedback_run(
+        self, hint_id: int, workflow_id: str, source_hash: str, now: str,
+    ) -> bool:
+        """Claim a run as this hint's evidence; False if it already claimed it.
+
+        The claim IS a hint_evidence row, written on the writer connection
+        inside the caller's transaction — so it is exactly as durable as the
+        counter changes it authorises, and a submission that fails before the
+        commit leaves no phantom claim behind.
+
+        source_kind is 'workflow', never 'query': T4's three lifecycle rules
+        count 'query' rows (`_source_counts`), so a claim written under that
+        kind would silently inflate used_src and shield the hint on the
+        strength of a user pressing Submit twice.
+
+        ON CONFLICT DO NOTHING makes the claim atomic where the single-writer
+        invariant does not hold either — on a second replica the loser's
+        rowcount is 0 and its submission is gated, not duplicated.
+        """
+        return self._em._writer_conn.execute(
+            "INSERT INTO hint_evidence "
+            "(hint_id, source_kind, source_key, source_hash, bucket, created_at) "
+            "VALUES (?, 'workflow', ?, ?, 'evidence', ?) ON CONFLICT DO NOTHING",
+            (hint_id, workflow_id, source_hash, now),
+        ).rowcount == 1
 
     def get_hints(
         self, user_query: str, url: str, agent_role: str,
