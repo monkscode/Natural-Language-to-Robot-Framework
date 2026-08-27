@@ -15,7 +15,7 @@ Pinned here: the poll's shape, the four outcomes it feeds back to the caller,
 and the rule that keeps the raw feedback text durable even when the poll gives
 up.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.backend.crew_ai.optimization.feedback_loop import (
     FeedbackLoop,
@@ -170,6 +170,30 @@ class TestBoundedPoll:
         assert sleeps == [0.1, 0.2, 0.4, 0.5, 0.5, 0.5, 0.5, 0.3]
         assert round(sum(sleeps), 6) == 3.0
 
+    def test_a_zero_step_cannot_spin_forever(self):
+        """The loop's only exit is the elapsed budget, so a zero-length step
+        would read Postgres in a tight loop and never return.  The step is
+        clamped to at least 1ms so progress is structural, not argument-
+        dependent."""
+        calls = []
+
+        def get(_workflow_id):
+            calls.append(1)
+            if len(calls) > 50:
+                raise AssertionError("the poll never terminated")
+            return None
+
+        em = MagicMock()
+        em.get.side_effect = get
+
+        with patch(_SLEEP, lambda _s: None):
+            record, outcome = _get_with_retry(
+                em, "wf-zero", ceiling_ms=10, base_ms=0)
+
+        assert record is None
+        assert outcome == "no_record"
+        assert len(calls) == 5   # 1 + 2 + 4 + 3 ms of budget, then the last read
+
 
 # ---------------------------------------------------------------------------
 # The four outcomes
@@ -221,6 +245,22 @@ class TestOutcomes:
         assert triage["outcome"] == "no_record"
         assert triage["category"] == "locator", "triage still runs without a record"
         assert fl.nl_engine.feedback_calls == [], "no record means no engine routing"
+
+    def test_the_engines_triage_dict_is_not_stamped_after_they_receive_it(self, in_memory_db):
+        """The triage dict is handed to the writer thread at the routing step
+        and is that thread's to read from then on.  Adding the outcome to it in
+        place is a cross-thread mutation whose visibility depends on when the
+        queue drains — the caller gets a copy instead."""
+        fl, em = _build_loop(in_memory_db)
+        _store(fl, "wf-shared")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            returned = fl.process_user_feedback(
+                "wf-shared", "wrong login locator", "completely_wrong")
+
+        engine_triage = fl.nl_engine.feedback_calls[0][1]
+        assert returned["outcome"] == "processed"
+        assert "outcome" not in engine_triage
 
     def test_an_internal_error_reports_error(self, in_memory_db):
         """The outer except wraps every internal failure as success today."""

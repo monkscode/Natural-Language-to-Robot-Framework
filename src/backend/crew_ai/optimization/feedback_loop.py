@@ -99,7 +99,7 @@ def _get_with_retry(
     out.  One vocabulary, because the API layer renders these strings.
     """
     waited_ms = 0
-    step_ms = base_ms
+    step_ms = max(1, base_ms)   # never 0: the loop's only exit is elapsed budget
     while True:
         record = em.get(workflow_id)
         if record is not None:
@@ -1283,8 +1283,10 @@ class FeedbackLoop:
             )
 
             self.circuit_breaker.record_success()
-            triage["outcome"] = outcome
-            return triage
+            # A COPY: `triage` was handed to the writer thread at Step 4 and is
+            # that thread's to read. Stamping the outcome into it here would be
+            # a cross-thread mutation whose visibility depends on drain timing.
+            return {**triage, "outcome": outcome}
 
         except Exception as e:
             self.circuit_breaker.record_error(e)
