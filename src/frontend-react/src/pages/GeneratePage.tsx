@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
-import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair } from 'lucide-react'
+import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
 
 /* ── Types ── */
@@ -440,6 +440,12 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
   )
 }
 
+/** POST /api/feedback. `outcome` is the only authority on what happened to the
+    correction ("processed" | "no_record" | "learning_paused" | "error"); it is
+    absent when learning is switched off, which is equally not a success.
+    `message` is the backend's own sentence for whichever case fired. */
+interface FeedbackResponse { status?: string; outcome?: string; message?: string }
+
 /* ── Feedback footer, rendered inside the result card (generated runs only).
    Pass: thumbs row — 👍 is a UI-only acknowledgment (passing runs already feed
    learning automatically at execution time; an empty positive carried no
@@ -451,7 +457,8 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
-  const [status, setStatus] = useState<'idle' | 'sending' | 'done'>('idle')
+  const [status, setStatus] = useState<'idle' | 'sending'>('idle')
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
 
   // Nothing to attribute feedback to — don't render a dead form.
@@ -460,7 +467,7 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
   async function submit(feedbackText: string = text) {
     setStatus('sending'); setErr('')
     try {
-      await api('/api/feedback', {
+      const body = await api<FeedbackResponse>('/api/feedback', {
         method: 'POST',
         body: JSON.stringify({
           workflow_id: workflowId,
@@ -468,7 +475,19 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
           feedback_type: outcome === 'pass' ? 'close_enough' : 'completely_wrong',
         }),
       })
-      setStatus('done')
+      // Only "processed" means the correction reached the learning store. The
+      // panel used to thank the user for every one of the others too — no
+      // record found, learning paused, an internal error, learning switched
+      // off — while the text was discarded. The sentence itself is the
+      // backend's, so one place says what the system did.
+      const ok = body?.outcome === 'processed'
+      setResult({
+        ok,
+        message: body?.message || (ok
+          ? 'Thanks — your feedback helps the system learn.'
+          : 'Your feedback was sent, but the system did not confirm it was recorded.'),
+      })
+      setStatus('idle')
     } catch (e) {
       setStatus('idle')
       setErr(e instanceof Error ? e.message : 'Could not send feedback')
@@ -483,10 +502,13 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
     )
   }
 
-  if (status === 'done') {
+  if (result) {
     return (
-      <div className="flex items-center gap-2 text-sm">
-        <Check className="h-4 w-4 text-green-600" /> Thanks — your feedback helps the system learn.
+      <div className="flex items-start gap-2 text-sm">
+        {result.ok
+          ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-green-600" />
+          : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />}
+        <span className={result.ok ? undefined : 'text-muted-foreground'}>{result.message}</span>
       </div>
     )
   }

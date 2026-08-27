@@ -502,7 +502,12 @@ def _feedback_client(registry, user, validated_admin=False):
     app.dependency_overrides[require_user] = lambda: user
 
     mock_fb = MagicMock()
-    mock_fb.process_user_feedback.return_value = {"category": "locator"}
+    # "outcome" is part of process_user_feedback's contract, and the
+    # endpoint refuses to report success without it — a triage dict alone
+    # is not evidence the correction was applied.
+    mock_fb.process_user_feedback.return_value = {
+        "category": "locator", "outcome": "processed",
+    }
 
     patchers = [
         patch("src.backend.api.endpoints.get_run_registry", return_value=registry),

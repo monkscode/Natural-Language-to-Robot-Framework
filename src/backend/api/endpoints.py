@@ -236,6 +236,33 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "close_enough" | "completely_wrong"
 
 
+# What the response is allowed to claim, keyed by the outcome the learning loop
+# reported (process_user_feedback's own vocabulary — one set of strings, no
+# translation layer to get wrong). Every one of these paths used to answer
+# "Thanks — your feedback helps the system learn", including the two where the
+# correction was discarded outright.
+#
+# The wording is the backend's, not the SPA's, for the same reason the
+# "disabled" and error branches below already carry a `message`: one place says
+# what the system did, and an API caller reads the same sentence the panel
+# shows.
+_FEEDBACK_OUTCOME_MESSAGES = {
+    "processed": "Thanks — your feedback helps the system learn.",
+    "no_record": (
+        "We could not find the learning record this belongs to, so nothing "
+        "was learned from it. Please send it again in a moment."
+    ),
+    "learning_paused": (
+        "Learning is paused right now, so this correction was not recorded. "
+        "Please send it again later."
+    ),
+    "error": (
+        "Something went wrong, so this correction was not recorded. "
+        "Please send it again."
+    ),
+}
+
+
 async def _gated_feedback_target(
     run_row: dict | None,
     submitted_id: str,
@@ -319,6 +346,16 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     Triages feedback via NL seed patterns and routes to
     learning engines. Returns triage result for frontend display.
 
+    Two fields, two jobs:
+
+      * `outcome` is the only authority on what happened to the CORRECTION —
+        "processed" | "no_record" | "learning_paused" | "error", straight from
+        process_user_feedback. Read this one.
+      * `status` keeps the meaning it has across this router: could the
+        endpoint give an account at all. It is "error" only for the outcome of
+        the same name, which is the same class of event the handler's own
+        `except` already answers that way.
+
     Returns 200 with status="disabled" when learning system is off.
     """
     # One PK lookup serves both the ownership gate and the re-run redirect.
@@ -395,12 +432,31 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         # process_user_feedback runs a blocking conflict-detection LLM call
         # (up to 30s). Offload it so this async handler does not freeze the
         # event loop for every other request while it waits.
-        triage = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             feedback_loop.process_user_feedback,
             feedback_target_id, text, request.feedback_type,
             actor=actor,
         )
-        return {"status": "success", "triage": triage, "applied_to": feedback_target_id}
+
+        # An outcome this endpoint cannot describe is not evidence that the
+        # correction landed, so it is reported as an error rather than echoed
+        # back beside a message that contradicts it. Defaulting the other way
+        # would let the field go missing one refactor from now and silently
+        # restore the "thanks" this endpoint used to give unconditionally.
+        outcome = result.get("outcome")
+        if outcome not in _FEEDBACK_OUTCOME_MESSAGES:
+            outcome = "error"
+
+        # `outcome` is dropped from the triage view. `triage` is the category /
+        # confidence the SPA displays; publishing the same fact at two
+        # addresses would bind us to both contracts forever.
+        return {
+            "status": "error" if outcome == "error" else "success",
+            "outcome": outcome,
+            "message": _FEEDBACK_OUTCOME_MESSAGES[outcome],
+            "triage": {k: v for k, v in result.items() if k != "outcome"},
+            "applied_to": feedback_target_id,
+        }
     except Exception as e:
         logging.error(f"[FEEDBACK] Error processing feedback: {e}")
         return {
