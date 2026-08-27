@@ -273,14 +273,17 @@ class TestAutoRetireNeedsDistinctSources:
         the very next unused outcome and silently void the reset.
         """
         engine = NLFeedbackEngine(in_memory_db)
-        record = ExecutionRecord(
-            workflow_id="wf-orig", timestamp=_NOW,
-            user_query="check the dashboard", url="https://shop.test/dash",
-            domain="shop.test", test_status="failed",
-            user_feedback="wait for the spinner to disappear",
-        )
-        triage = {"feedback_text": record.user_feedback, "category": "keyword"}
-        engine.learn_from_feedback(record, triage)
+
+        def _record(workflow_id):
+            return ExecutionRecord(
+                workflow_id=workflow_id, timestamp=_NOW,
+                user_query="check the dashboard", url="https://shop.test/dash",
+                domain="shop.test", test_status="failed",
+                user_feedback="wait for the spinner to disappear",
+            )
+
+        triage = {"feedback_text": _record("x").user_feedback, "category": "keyword"}
+        engine.learn_from_feedback(_record("wf-orig"), triage)
         hid = in_memory_db.execute(
             "SELECT id FROM nl_feedback_corrections"
         ).fetchone()["id"]
@@ -295,8 +298,10 @@ class TestAutoRetireNeedsDistinctSources:
                        [f"query {i}" for i in range(UNUSED_RETIRE_THRESHOLD)])
         in_memory_db.commit()
 
-        # The user re-submits the same correction: unused_count -> 0.
-        engine.learn_from_feedback(record, triage)
+        # The user re-submits the same correction from a LATER run: unused_count
+        # -> 0. A different workflow_id on purpose — that is the cross-run
+        # recovery path, and it is the one T5's per-run gate leaves open.
+        engine.learn_from_feedback(_record("wf-resubmit"), triage)
         assert _hint_row(in_memory_db, hid)["unused_count"] == 0
 
         _insert_exec(in_memory_db, "wf-after-reset", "query 0")
