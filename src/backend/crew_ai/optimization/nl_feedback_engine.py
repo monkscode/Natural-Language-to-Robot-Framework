@@ -23,6 +23,7 @@ Taxonomy codes:
     X0 — Uncategorized (no pattern matched)
 """
 
+import hashlib
 import json
 import re
 import logging
@@ -917,8 +918,16 @@ class NLFeedbackEngine(LearningEngine):
 
         N2 ordering inside the transaction: claim -> flag (strong-history guard
         reads PRE-increment counts, so the triggering verdict isn't in its own
-        denominator) -> apply increments -> auto-disable / retire on
-        POST-increment counts -> commit.
+        denominator) -> apply increments -> record the run's source in
+        hint_evidence (T3) -> auto-disable / retire on POST-increment counts
+        -> commit.
+
+        hint_evidence (T3) records the independent SOURCE behind each outcome —
+        the run's normalised user_query — one row per (hint, source, bucket).
+        The event counters above still count every event (F6: they feed the
+        conflict-detection prompt, the review dashboard and the FR5 identity);
+        the evidence rows are additive, and are what the lifecycle rules read
+        when they need diversity rather than repetition.
 
         Disable/retire rules, evaluated for EVERY touched hint (S1-R3) on the
         (success+failure) used-outcome basis:
@@ -1000,6 +1009,20 @@ class NLFeedbackEngine(LearningEngine):
 
             now = datetime.now(timezone.utc).isoformat()
 
+            # T3: the independent SOURCE behind every credit this run makes —
+            # the run's own normalised query. The claim above matched a row, so
+            # this transaction holds it and the read cannot miss it. Normalised
+            # in Python (not SQL LOWER/TRIM) so the value hashed is exactly the
+            # value stored. _process_learning skips learning on an empty query,
+            # so an empty source_key means a direct caller, not a product path;
+            # all such runs then share one source, which no rule can be tripped by.
+            src_row = conn.execute(
+                "SELECT user_query FROM execution_records WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            source_key = ((src_row["user_query"] if src_row else "") or "").strip().lower()
+            source_hash = hashlib.sha256(source_key.encode("utf-8")).hexdigest()
+
             # Read each touched hint's PRE-increment counts ONCE (N2). Only
             # active, unflagged hints — a hint disabled/flagged since injection
             # is excluded here and silently skipped.
@@ -1051,6 +1074,22 @@ class NLFeedbackEngine(LearningEngine):
                     "    failure_count = ?, unused_count = ? "
                     "WHERE id = ?",
                     (applied, success, failure, unused, hint_id),
+                )
+                # T3: record WHICH source produced this outcome, in the SAME
+                # transaction as the counters — evidence must be exactly as
+                # durable as what it justifies. ON CONFLICT DO NOTHING: the same
+                # query crediting the same hint into the same bucket again is
+                # one source, not two, while the event counters above keep
+                # counting events (F6). Written BEFORE the disable/retire rules
+                # so they read POST-insert source counts, matching the
+                # POST-increment event counts they already read; the shield ran
+                # before this loop and so reads PRE-insert counts (R5).
+                conn.execute(
+                    "INSERT INTO hint_evidence "
+                    "(hint_id, source_kind, source_key, source_hash, bucket, "
+                    " created_at) "
+                    "VALUES (?, 'query', ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (hint_id, source_key, source_hash, kind, now),
                 )
                 self._maybe_auto_disable_or_retire(
                     hint_id, row, applied, success, failure, unused, now,
