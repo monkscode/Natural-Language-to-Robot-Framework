@@ -43,6 +43,11 @@ def _triage(text=_TEXT, actor="tester"):
     return {"category": "keyword", "feedback_text": text, "actor": actor}
 
 
+def _triage_locator(text=_TEXT):
+    """category 'locator' -> scope 'url' -> the OTHER dedup SELECT branch."""
+    return {"category": "locator", "feedback_text": text, "actor": "tester"}
+
+
 def _hints(conn):
     return conn.execute(
         "SELECT id, feedback_text, evidence_count, unused_count, is_active, "
@@ -154,6 +159,31 @@ class TestSameRunCountsOnce:
         )
         assert row["conflict_flagged"] == 0
         assert len(_evidence(in_memory_db, hid)) == 2, "one token per run"
+
+    def test_url_scoped_hints_are_gated_on_the_same_run(self, in_memory_db):
+        """The dedup SELECT has two branches — url-scoped hints key on url as
+        well. The gate sits after they converge, so both are covered; this
+        fails if it is ever moved inside one branch.
+        """
+        engine = NLFeedbackEngine(in_memory_db)
+        # category 'locator' -> scope 'url'
+        engine.learn_from_feedback(_record("wf-url"), _triage_locator())
+        engine.learn_from_feedback(_record("wf-url"), _triage_locator())
+
+        rows = _hints(in_memory_db)
+        assert len(rows) == 1
+        assert rows[0]["evidence_count"] == 1, "the url-scoped branch is ungated"
+
+        # A different page of the same domain is a different hint, and a later
+        # run reinforces — neither is collateral of the gate.
+        engine.learn_from_feedback(
+            _record("wf-url", url="https://shop.test/cart"), _triage_locator())
+        engine.learn_from_feedback(_record("wf-url-2"), _triage_locator())
+
+        rows = _hints(in_memory_db)
+        assert len(rows) == 2
+        assert rows[0]["evidence_count"] == 2
+        assert rows[1]["evidence_count"] == 1
 
     def test_different_text_on_one_run_counts_separately(self, in_memory_db):
         """(d) The gate is per (hint, run) — a second correction on the same run
