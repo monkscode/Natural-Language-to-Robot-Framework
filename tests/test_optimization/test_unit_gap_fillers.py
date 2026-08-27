@@ -486,7 +486,7 @@ def test_fl_process_execution_submit_count(in_memory_db):
     )
     # Expected submits: store(1) + 3 engines(3) + pattern_learner(1) + metrics(1) + daily_stats(1) = 7.
     # The old Step-7 nl_engine submit (update_hint_effectiveness) was removed —
-    # NL-hint usage attribution now runs from workflow_service._process_learning.
+    # NL-hint usage attribution now runs from workflow_service._process_learning_record.
     assert cq.count == 7, f"Expected 7 submits, got {cq.count}"
 
 

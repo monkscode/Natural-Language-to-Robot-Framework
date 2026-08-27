@@ -344,7 +344,7 @@ def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     inside the live container (docker_service.py). Deleting it there would pull
     the output directory out from under a running test, save a half-finished
     snapshot as that run's permanent evidence, and race the workflow_metrics
-    insert that _process_learning makes AFTER the execution result — which would
+    insert that _process_learning_record makes AFTER the execution result — which would
     re-attach the run to History moments after we deleted it. By the end of the
     sweep that work has finished, and one capture sees the whole run.
 

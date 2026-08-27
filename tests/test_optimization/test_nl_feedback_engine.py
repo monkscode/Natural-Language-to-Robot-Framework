@@ -352,25 +352,25 @@ class TestAPIEndpoints:
 
 
 class TestUserQueryGuard:
-    """user_query guard in _process_learning."""
+    """user_query guard in _process_learning_record."""
 
     def test_process_learning_has_user_query_guard(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         assert 'not user_query' in src or "user_query.strip()" in src, \
             "Missing user_query guard"
         assert 'Skipping learning' in src or 'paste-and-execute' in src
 
     def test_guard_runs_before_process_execution(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         guard_pos = src.find("not user_query")
         process_pos = src.find("process_execution")
         assert guard_pos < process_pos, "Guard must be before process_execution call"
 
     def test_guard_returns_early_when_user_query_empty(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         # Find the guard block and confirm it has a return
         lines = src.split('\n')
         in_guard = False

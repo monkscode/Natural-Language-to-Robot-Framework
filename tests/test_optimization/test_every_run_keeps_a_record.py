@@ -12,7 +12,7 @@ Three consequences are pinned here:
   * a re-run that flips failed -> passed updates ITS OWN row (the aggregation
     UPDATE bypassed the IntegrityError arm, so `_update_to_passing_state` never
     ran and another workflow received the working code);
-  * `is_first_attempt`, which `_process_learning` derives from
+  * `is_first_attempt`, which `_process_learning_record` derives from
     `em.get(run_id) is None`, is 1 then 0 across two executions of one workflow.
 
 Referenced by: docs/superpowers/plans/2026-08-26-feedback-integrity-and-org-isolation.md (T1)
@@ -101,7 +101,7 @@ def test_rerun_that_passes_updates_its_own_row_not_the_bucket(in_memory_em):
 
 
 def test_is_first_attempt_is_true_then_false_on_a_full_bucket(in_memory_em):
-    """R6: `_process_learning` sets `is_first_attempt = (em.get(run_id) is None)`.
+    """R6: `_process_learning_record` sets `is_first_attempt = (em.get(run_id) is None)`.
     With the bucket full, attempt 1's row was dropped, so attempt 2 also read
     'first' and three learning_metrics aggregates counted one workflow twice."""
     _fill_bucket(in_memory_em, "passed", prefix="wf-first")

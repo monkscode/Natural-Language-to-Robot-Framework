@@ -54,7 +54,7 @@ class TestProgressPrecedesImageProvisioning:
              patch.object(ws.runner_exec_client, "execute", fake_execute), \
              patch.object(ws, "_set_run_status", return_value=None), \
              patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
-             patch.object(ws, "_process_learning", return_value=None), \
+             patch.object(ws, "_process_learning_record", return_value=None), \
              patch.object(ws.json, "dumps", recording_dumps):
             store = ws.get_artifact_store()
             with patch.object(type(store), "run_dir", return_value=tmp_path):
@@ -79,7 +79,7 @@ class TestProgressPrecedesImageProvisioning:
              patch.object(ws.runner_exec_client, "execute", fake_execute), \
              patch.object(ws, "_set_run_status", return_value=None), \
              patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
-             patch.object(ws, "_process_learning", return_value=None):
+             patch.object(ws, "_process_learning_record", return_value=None):
             store = ws.get_artifact_store()
             with patch.object(type(store), "run_dir", return_value=tmp_path):
                 captured = _drain(

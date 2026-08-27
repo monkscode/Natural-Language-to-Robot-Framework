@@ -36,7 +36,8 @@ from src.backend.core.config import settings
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 
 # Hint metadata cache — bridges generation phase (crew.py) and execution phase
-# (_process_learning). Keyed by workflow_id, consumed via .pop() in _process_learning().
+# (_process_learning_record). Keyed by workflow_id, consumed via .pop() in
+# _process_learning_record().
 #
 # Leak mitigation: entries are timestamped on write. _store_hint_metadata() evicts
 # entries older than _HINT_CACHE_TTL_SECONDS and caps total size at _HINT_CACHE_MAX_SIZE
@@ -132,11 +133,11 @@ def _safe_evict_hint_metadata(workflow_id: str) -> None:
     """Remove the hint metadata cache entry for a workflow, swallowing all errors.
 
     Called from every error exit path in run_agentic_workflow() where
-    _process_learning() will NOT be called (validation failure, parse error,
+    _process_learning_record() will NOT be called (validation failure, parse error,
     unexpected exception). Without this call the entry leaks indefinitely because
-    _process_learning() is the only other consumer that pops it.
+    _process_learning_record() is the only other consumer that pops it.
 
-    On the success path _process_learning() pops the entry itself — do NOT
+    On the success path _process_learning_record() pops the entry itself — do NOT
     call this function there to avoid a redundant double-pop.
     """
     try:
@@ -153,7 +154,7 @@ def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
     _HINT_CACHE_TTL_SECONDS are purged, and if the cache still exceeds
     _HINT_CACHE_MAX_SIZE the oldest entries are removed until it fits.
     This prevents unbounded growth from generate-only flows that never
-    reach _process_learning() or _safe_evict_hint_metadata().
+    reach _process_learning_record() or _safe_evict_hint_metadata().
     """
     try:
         now = datetime.now(tz=timezone.utc).timestamp()
@@ -349,8 +350,15 @@ def _build_merged_attribution_prompt(
     )
 
 
-def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
-    """Feed execution results into the adaptive learning system.
+def _process_learning_record(
+    run_id: str, user_query: str, robot_code: str, result: dict
+) -> tuple | None:
+    """Store this run's execution record and route it to the learning engines.
+
+    The fast half of learning. Runs the moment the result SSE has been sent, so
+    the record is queued for the writer thread while the artifacts are still
+    being written — a feedback POST arriving milliseconds after the result then
+    finds the row instead of racing it.
 
     Non-blocking: failures are logged and swallowed so the main
     pipeline is never affected.
@@ -358,6 +366,13 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
     Guard: skips learning when user_query is empty (paste-and-execute).
     Empty queries pollute the execution embeddings and give hint retrieval
     nothing to match on — garbage in, garbage out.
+
+    Returns (pre_run_record, injected_hint_ids_json) for
+    _process_learning_attribution, or None when nothing was recorded — in which
+    case the attribution half must not run. Both values are handed on rather
+    than re-read there because neither survives: the hint metadata cache is
+    consumed with a destructive .pop(), and pre_run_record is the state of the
+    row BEFORE this run's own store overwrote it.
     """
     try:
         feedback_loop = get_feedback_loop()
@@ -414,7 +429,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         is_first_attempt = (pre_run_record is None)
 
         # Re-run after edit: _hint_metadata_cache was consumed by the v1
-        # _process_learning call (.pop is destructive), so nl_injected_ids
+        # _process_learning_record call (.pop is destructive), so nl_injected_ids
         # defaulted to []. Recover the original generation-time hint IDs from
         # the DB — Schema v10 preserves execution_records.injected_hint_ids
         # across _update_to_passing_state. Without this, the re-run pass would
@@ -466,6 +481,46 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 feedback_loop.execution_memory.store_hint_workflow_trace,
                 run_id, selection_trace,
             )
+
+        logging.info(f"✅ Learning system processed execution {run_id}")
+        return (pre_run_record, injected_hint_ids_json)
+    except Exception as e:
+        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
+        return None
+
+
+def _process_learning_attribution(
+    run_id: str,
+    user_query: str,
+    robot_code: str,
+    result: dict,
+    pre_run_record,
+    injected_hint_ids_json: str,
+) -> None:
+    """Credit the hints this run actually used — the slow half of learning.
+
+    Runs after persist_run: fire_usage_attribution makes a 5-30s LLM call on the
+    calling thread, and putting it ahead of persistence would delay a durable
+    report by that long. A client disconnect between the two halves therefore
+    loses the credits but keeps the record — hint_attribution_done stays 0, so a
+    later re-execution can still credit them.
+
+    pre_run_record and injected_hint_ids_json come from
+    _process_learning_record and must NOT be re-read here. By the time this runs
+    the writer thread may already have stored this run's own record, so a fresh
+    execution_memory.get() would return the row this run just wrote rather than
+    the one that preceded it — and the hint metadata cache has been popped.
+
+    Non-blocking: failures are logged and swallowed so the main
+    pipeline is never affected.
+    """
+    try:
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is None:
+            return
+
+        test_status = result.get('test_status', 'unknown')
+        url = extract_url_from_query(user_query) if user_query else None
 
         # NL-hint usage attribution (Part 2): on a passing run with NL hints
         # injected, credit only the hints actually used in the code via one LLM
@@ -532,9 +587,8 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 prompt_builder=prompt_builder,
             )
 
-        logging.info(f"✅ Learning system processed execution {run_id}")
     except Exception as e:
-        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
+        logging.warning(f"⚠️ Learning attribution error (non-blocking): {e}")
 
 
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None, user_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
@@ -1190,8 +1244,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
 
     release_slot is a 0-arg callable (the caller's _SlotReleaser.done). It is
     invoked the moment the result SSE has been sent, so the concurrency slot is
-    freed before the background learning step — which may make a 5-30s Trigger 1
-    LLM call — runs. Idempotent: the caller's finally releases the slot too.
+    freed before the background learning steps — the second of which may make a
+    5-30s attribution LLM call. Idempotent: the caller's finally releases the
+    slot too.
+
+    Learning runs in two halves around artifact persistence: the record half
+    immediately after the result SSE (so a feedback POST finds the row), the
+    attribution half after persist_run (so its LLM call cannot delay a durable
+    report).
     """
     test_filename = "test.robot"
     test_filepath = str(get_artifact_store().run_dir(run_id, create=True) / test_filename)
@@ -1241,6 +1301,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # (~5-30s) does not hold concurrency capacity it has no need for.
         release_slot()
 
+        # Learning, half 1 of 2: submit this run's execution record NOW, before
+        # the artifact work below. The user can hit Submit on the feedback panel
+        # milliseconds after the result SSE, and /api/feedback looks the record
+        # up by run_id — every step this write sits behind is a step it can lose
+        # that race by.
+        learning_ctx = await asyncio.to_thread(
+            _process_learning_record, run_id, user_query, robot_code, result)
+
         # Inline screenshots BEFORE persist_run so the durable copy (local serve
         # or S3 upload) is self-contained for the CSP-sandboxed report route.
         # Wrapped: an inlining failure must never fail a successful run.
@@ -1256,7 +1324,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # a successful run into an error.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
 
-        await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
+        # Learning, half 2 of 2: hint attribution makes a 5-30s LLM call, so it
+        # stays behind artifact durability. None means the record half stored
+        # nothing (learning off, empty query, or it threw) — there is nothing to
+        # credit against.
+        if learning_ctx is not None:
+            await asyncio.to_thread(
+                _process_learning_attribution, run_id, user_query, robot_code,
+                result, *learning_ctx)
 
     except Exception as e:
         logging.error(f"An error occurred during Docker execution: {e}")
@@ -1412,7 +1487,7 @@ async def stream_execute_only(
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
-        # if the task was cancelled between await points, _process_learning never
+        # if the task was cancelled between await points, _process_learning_record never
         # ran and its cache pop never fired. No-op if already consumed.
         if run_id is not None:
             _safe_evict_hint_metadata(run_id)
@@ -1476,7 +1551,7 @@ async def stream_generate_and_run(
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
-        # if the task was cancelled between await points, _process_learning never
+        # if the task was cancelled between await points, _process_learning_record never
         # ran and its cache pop never fired. No-op if already consumed.
         if run_id is not None:
             _safe_evict_hint_metadata(run_id)

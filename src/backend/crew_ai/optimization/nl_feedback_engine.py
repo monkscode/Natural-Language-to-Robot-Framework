@@ -1142,7 +1142,7 @@ class NLFeedbackEngine(LearningEngine):
             # the run's own normalised query. The claim above matched a row, so
             # this transaction holds it and the read cannot miss it. Normalised
             # in Python (not SQL LOWER/TRIM) so the value hashed is exactly the
-            # value stored. _process_learning skips learning on an empty query,
+            # value stored. _process_learning_record skips learning on an empty query,
             # so an empty source_key means a direct caller, not a product path;
             # all such runs then share one source, which no rule can be tripped by.
             src_row = conn.execute(

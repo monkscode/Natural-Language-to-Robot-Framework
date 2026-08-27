@@ -71,9 +71,9 @@ def _get_with_retry(
     async /api/feedback handler, so this runs on a worker thread (never the
     event loop) — the sleep below is safe.  The execution record is written by
     the learning-writer thread via write_queue.submit() inside
-    _process_learning(), which starts only AFTER the execution result SSE is
-    already sent to the client.  A user (or automated caller) can therefore
-    submit feedback before the INSERT is committed.
+    _process_learning_record(), which now runs immediately after the execution
+    result SSE is sent, ahead of the artifact work.  A user (or automated
+    caller) can still submit feedback before the INSERT is committed.
 
     Sleeping base_ms * 2^attempt between attempts gives the writer thread time
     to drain.  Max wait: 100ms + 200ms = 300ms across 3 attempts — well within
@@ -915,7 +915,7 @@ class FeedbackLoop:
 
         # Engine-boundary enforcement of the CLAUDE.md invariant: learning
         # must be skipped when user_query is empty (paste-and-execute mode)
-        # to avoid polluting embeddings. Callers (workflow_service._process_learning
+        # to avoid polluting embeddings. Callers (workflow_service._process_learning_record
         # today) are expected to guard this first; reaching here means a
         # caller violated the invariant — surface it loudly so the violation
         # is fixed at its source rather than silently swallowed.
@@ -1049,7 +1049,7 @@ class FeedbackLoop:
             )
 
             # NL-hint usage attribution (Part 2) runs from
-            # workflow_service._process_learning AFTER process_execution, not
+            # workflow_service._process_learning_attribution AFTER process_execution, not
             # here: it credits only the hints actually used in passing code via
             # one LLM judgment per workflow. The old Step-7 all-injected
             # per-execution crediting was removed with that change.

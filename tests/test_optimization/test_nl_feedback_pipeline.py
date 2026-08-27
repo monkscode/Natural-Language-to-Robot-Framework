@@ -511,7 +511,7 @@ class TestIntegration:
             test_status="passed",
         )
         # process_execution no longer credits NL hints — usage attribution moved
-        # to workflow_service._process_learning / apply_hint_attribution. It must
+        # to workflow_service._process_learning_record / apply_hint_attribution. It must
         # still complete and store the execution record without crashing.
         rec = conn.execute(
             "SELECT workflow_id FROM execution_records WHERE workflow_id = 'wf-int3'"

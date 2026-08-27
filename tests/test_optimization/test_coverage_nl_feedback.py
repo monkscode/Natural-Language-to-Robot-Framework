@@ -184,7 +184,7 @@ class TestConflictFlagHintsRollbackOnException:
 # ---------------------------------------------------------------------------
 # update_hint_effectiveness was replaced by apply_hint_attribution (Part 2):
 # malformed/empty injected_hint_ids is now rejected by the F3 gate in
-# workflow_service._process_learning (no scope-wide fallback), and the no-em /
+# workflow_service._process_learning_record (no scope-wide fallback), and the no-em /
 # atomic-claim behaviour is covered by test_apply_hint_attribution.py.
 # ---------------------------------------------------------------------------
 

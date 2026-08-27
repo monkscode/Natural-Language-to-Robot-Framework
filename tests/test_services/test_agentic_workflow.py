@@ -727,13 +727,13 @@ class TestWorkflowCompletionPaths:
         """When run_crew returns hint_metadata, it is placed in _hint_metadata_cache.
 
         run_agentic_workflow (generate-only path) stores hint_metadata but does NOT
-        consume it — that happens later in stream_execute_only via _process_learning.
+        consume it — that happens later in stream_execute_only via _process_learning_record.
         The cache entry must exist under the workflow_id emitted in the complete event,
         and its data (minus the internal _stored_at timestamp) must match hint_data.
         """
         import src.backend.services.workflow_service as ws
         # Full production schema: count (injected), available (candidates before cap), sources.
-        # _process_learning reads both count and available; omitting available causes it to
+        # _process_learning_record reads both count and available; omitting available causes it to
         # silently fall back to count, masking a regression in the generation contract.
         hint_data = {"planner": {"count": 3, "available": 7, "sources": ["structural"]}}
 
