@@ -41,7 +41,6 @@ from src.backend.crew_ai.optimization.execution_memory import (
     _mark,
 )
 from src.backend.crew_ai.optimization.learning_config import (
-    LEARNING_CONFIG,
     ExecutionStore,
     SemanticStore,
 )
@@ -65,8 +64,6 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     observability (get_health_status / get_learning_stats) reads them — they now
     track the fastembed embedder state, not ChromaDB.
     """
-
-    DEDUPLICATION_THRESHOLD = LEARNING_CONFIG["DEDUPLICATION_THRESHOLD"]
 
     # Sentinel for failed embedder init. The shared FeedbackLoop health check
     # compares against the store instance's own class attribute
@@ -172,64 +169,41 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         self.store(record)
 
     def _store_relational(self, record: ExecutionRecord) -> None:
-        _assert_writer_thread("PostgresExecutionMemory._store_relational")
-        normalized_query = record.user_query.strip().lower()
-        domain = record.domain or ""
-        try:
-            run_count = self._writer_conn.execute(
-                "SELECT COUNT(*) AS n FROM execution_records "
-                "WHERE LOWER(TRIM(user_query)) = ? "
-                "AND COALESCE(domain, '') = ? AND test_status = ? "
-                "AND COALESCE(org_id, '') = ?",
-                (normalized_query, domain, record.test_status, record.org_id or ""),
-            ).fetchone()["n"]
+        """One row per run, always. Never aggregate repeats.
 
-            if run_count >= self.DEDUPLICATION_THRESHOLD:
-                self._writer_conn.execute(
-                    """
-                    UPDATE execution_records
-                    SET robot_code = ?, error_message = ?, timestamp = ?,
-                        model_version = ?,
-                        total_llm_calls = total_llm_calls + ?,
-                        total_cost = total_cost + ?
-                    WHERE id = (
-                        SELECT id FROM execution_records
-                        WHERE LOWER(TRIM(user_query)) = ?
-                        AND COALESCE(domain, '') = ? AND test_status = ?
-                        AND COALESCE(org_id, '') = ?
-                        ORDER BY timestamp DESC LIMIT 1
-                    )
-                    """,
-                    (
-                        record.robot_code, record.error_message,
-                        record.timestamp.isoformat(), record.model_version,
-                        record.total_llm_calls, record.total_cost,
-                        normalized_query, domain, record.test_status,
-                        record.org_id or "",
-                    ),
-                )
-            else:
-                self._writer_conn.execute(
-                    """
-                    INSERT INTO execution_records (
-                        workflow_id, timestamp, user_query, url, domain,
-                        robot_code, code_structure, test_status, execution_exit_code,
-                        execution_duration_ms, failure_category, failed_keyword,
-                        error_message, total_llm_calls, total_cost, injected_hint_ids,
-                        model_version, org_id, hint_attribution_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        record.workflow_id, record.timestamp.isoformat(),
-                        record.user_query, record.url, record.domain,
-                        record.robot_code, record.code_structure, record.test_status,
-                        record.execution_exit_code, record.execution_duration_ms,
-                        record.failure_category, record.failed_keyword,
-                        record.error_message, record.total_llm_calls, record.total_cost,
-                        record.injected_hint_ids, record.model_version,
-                        record.org_id,
-                    ),
-                )
+        An aggregation branch used to UPDATE the newest row in the
+        (query, domain, status, org) bucket once it held 5 rows, instead of
+        inserting. It contradicted `workflow_id TEXT UNIQUE NOT NULL`: the
+        6th run had no record, so `em.get(workflow_id)` — the only way
+        feedback and `is_first_attempt` reach a run — returned None, and the
+        UPDATE (keyed on ORDER BY timestamp, not on this record) wrote one
+        run's code onto another's while bypassing the Case-B arm below. It
+        saved nothing: `_store_execution_embedding` writes the far larger
+        384-dim row unconditionally either way. Do not reintroduce it.
+        """
+        _assert_writer_thread("PostgresExecutionMemory._store_relational")
+        try:
+            self._writer_conn.execute(
+                """
+                INSERT INTO execution_records (
+                    workflow_id, timestamp, user_query, url, domain,
+                    robot_code, code_structure, test_status, execution_exit_code,
+                    execution_duration_ms, failure_category, failed_keyword,
+                    error_message, total_llm_calls, total_cost, injected_hint_ids,
+                    model_version, org_id, hint_attribution_done
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    record.workflow_id, record.timestamp.isoformat(),
+                    record.user_query, record.url, record.domain,
+                    record.robot_code, record.code_structure, record.test_status,
+                    record.execution_exit_code, record.execution_duration_ms,
+                    record.failure_category, record.failed_keyword,
+                    record.error_message, record.total_llm_calls, record.total_cost,
+                    record.injected_hint_ids, record.model_version,
+                    record.org_id,
+                ),
+            )
             self._writer_conn.commit()
         except sqlite3.IntegrityError as e:
             # Case B: a re-run of an existing workflow_id now passes.

@@ -356,8 +356,8 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
     pipeline is never affected.
 
     Guard: skips learning when user_query is empty (paste-and-execute).
-    Empty queries pollute ChromaDB embeddings and break SQLite
-    deduplication — garbage in, garbage out.
+    Empty queries pollute the execution embeddings and give hint retrieval
+    nothing to match on — garbage in, garbage out.
     """
     try:
         feedback_loop = get_feedback_loop()
@@ -400,7 +400,8 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         # for is_first_attempt. pre_run_record is None when this is the first
         # execution of this workflow_id.
         # DEPENDENCY: failed re-runs do not overwrite the DB record (IntegrityError
-        # re-raise in _store_sqlite). Do not remove that behaviour without revisiting this.
+        # re-raise in _store_relational). Do not remove that behaviour without
+        # revisiting this.
         pre_run_record = None
         try:
             pre_run_record = feedback_loop.execution_memory.get(run_id)

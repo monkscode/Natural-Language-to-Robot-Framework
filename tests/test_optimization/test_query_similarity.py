@@ -125,63 +125,6 @@ class TestModelVersionColumn:
         got = in_memory_em.get("wf-mv-2")
         assert got is not None and got.model_version is None
 
-    def test_model_version_refreshed_on_dedup(self, in_memory_em):
-        # DEDUPLICATION_THRESHOLD identical runs → the next store triggers the
-        # dedup UPDATE, which must refresh model_version (a current-state
-        # field, kept latest like robot_code) — not leave it stale. A domain
-        # is required: the dedup match is keyed on (query, domain, status).
-        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
-        for i in range(thr):
-            in_memory_em.store(ExecutionRecord(
-                workflow_id=f"wf-dv-{i}",
-                timestamp=datetime(2026, 1, 1, 0, 0, i),
-                user_query="same query for dedup",
-                domain="dedup.com",
-                test_status="passed",
-                model_version="gemini/old-model",
-            ))
-        in_memory_em.store(ExecutionRecord(
-            workflow_id="wf-dv-new",
-            timestamp=datetime(2026, 1, 2),
-            user_query="same query for dedup",
-            domain="dedup.com",
-            test_status="passed",
-            model_version="gemini/new-model",
-        ))
-        rows = in_memory_em._writer_conn.execute(
-            "SELECT model_version FROM execution_records "
-            "WHERE user_query = 'same query for dedup'"
-        ).fetchall()
-        assert len(rows) == thr                # last store deduped, not inserted
-        latest = in_memory_em._writer_conn.execute(
-            "SELECT model_version FROM execution_records "
-            "WHERE user_query = 'same query for dedup' "
-            "ORDER BY timestamp DESC LIMIT 1"
-        ).fetchone()[0]
-        assert latest == "gemini/new-model"
-
-
-class TestUrlLessDeduplication:
-    """Regression: a workflow with no URL stores domain=NULL. The dedup match
-    keys on domain; a plain `domain = ''` never matched NULL, so URL-less
-    rows accumulated unbounded. COALESCE(domain,'') in the match fixes it."""
-
-    def test_url_less_workflows_deduplicate(self, in_memory_em):
-        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
-        for i in range(thr + 1):          # thr inserts, then one more
-            in_memory_em.store(ExecutionRecord(
-                workflow_id=f"wf-nourl-{i}",
-                timestamp=datetime(2026, 1, 1, 0, 0, i),
-                user_query="a query with no url",
-                domain=None,               # URL-less → stored as NULL
-                test_status="passed",
-            ))
-        count = in_memory_em._writer_conn.execute(
-            "SELECT COUNT(*) FROM execution_records "
-            "WHERE user_query = 'a query with no url'"
-        ).fetchone()[0]
-        assert count == thr                # the last store deduped, not inserted
-
 
 # ===================================================================
 # filter_by_query_similarity

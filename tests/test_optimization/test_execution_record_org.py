@@ -29,17 +29,27 @@ def test_store_persists_org_id(in_memory_em):
     assert row["org_id"] == "org-A"
 
 
-def test_dedup_does_not_merge_across_orgs(in_memory_em):
-    # Same query/domain/status, two orgs. With the dedup org-scoped, BOTH rows
-    # exist (no cross-org merge). Run enough identical inserts to exceed the
-    # dedup threshold within org A, then assert org B still gets its own row.
-    for _ in range(in_memory_em.DEDUPLICATION_THRESHOLD + 1):
-        in_memory_em.store(_rec("org-A", code="A-code"))
-    in_memory_em.store(_rec("org-B", code="B-code"))
+def test_org_rows_are_independent(in_memory_em):
+    # Same query/domain/status, two orgs. Every run keeps its own row (T1), so
+    # repeated runs in org A can never absorb, overwrite or hide org B's row.
+    a_ids = []
+    for _ in range(6):
+        rec = _rec("org-A", code="A-code")
+        in_memory_em.store(rec)
+        a_ids.append(rec.workflow_id)
+    b_rec = _rec("org-B", code="B-code")
+    in_memory_em.store(b_rec)
+
     with in_memory_em.read_conn() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT org_id FROM execution_records "
+            "SELECT workflow_id, org_id, robot_code FROM execution_records "
             "WHERE LOWER(TRIM(user_query)) = 'login as admin' AND domain = 'a.test'"
         ).fetchall()
-    orgs = {r["org_id"] for r in rows}
-    assert "org-A" in orgs and "org-B" in orgs, "dedup merged org B into org A"
+
+    by_id = {r["workflow_id"]: r for r in rows}
+    assert set(by_id) == set(a_ids) | {b_rec.workflow_id}
+    assert by_id[b_rec.workflow_id]["org_id"] == "org-B"
+    assert by_id[b_rec.workflow_id]["robot_code"] == "B-code"
+    for wid in a_ids:
+        assert by_id[wid]["org_id"] == "org-A"
+        assert by_id[wid]["robot_code"] == "A-code"

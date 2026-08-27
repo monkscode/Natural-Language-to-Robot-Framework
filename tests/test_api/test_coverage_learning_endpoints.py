@@ -1572,9 +1572,10 @@ class TestRunsEndpoints:
         assert r.status_code == 404
         assert "No run data" in r.json()["detail"]    # the endpoint's own 404
 
-    def test_run_detail_dedup_run_has_trace_but_no_record(self, learning_client):
-        # A deduped run writes NO execution_records row but DOES write a trace
-        # (no FK). The endpoint must still return the trace with run=null.
+    def test_run_detail_recordless_run_has_trace_but_no_record(self, learning_client):
+        # A run whose learning was skipped writes NO execution_records row but
+        # DOES write a trace (no FK). The endpoint must still return the trace
+        # with run=null.
         client, em, mock_fb, db_path = learning_client
         hid = _insert_hint(db_path)
         conn = _pg_conn(db_path)

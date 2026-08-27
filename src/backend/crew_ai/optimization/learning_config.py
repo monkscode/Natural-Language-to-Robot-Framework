@@ -65,9 +65,6 @@ LEARNING_CONFIG = {
     "ERROR_RATE_THRESHOLD": 0.2,        # Disable if >20% errors
     "MIN_CALLS_BEFORE_CHECK": 10,       # Don't check rate until 10+ calls
     "RECOVERY_TIMEOUT_SECONDS": 300,    # Half-open probe after 5 minutes
-
-    # Performance
-    "DEDUPLICATION_THRESHOLD": 5,       # Aggregate after 5 identical runs
 }
 
 

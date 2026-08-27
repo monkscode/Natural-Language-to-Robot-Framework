@@ -1019,8 +1019,9 @@ def get_run(
     execution record, its metrics, the per-hint selection->attribution funnel
     (hint_workflow_trace LEFT JOIN the hint row for current text/state), and any
     trigger events. The funnel populates only for runs executed under Part 2; a
-    deduped run keeps a standalone funnel with run=null (no FK). 404 only when
-    nothing at all exists for this workflow_id.
+    run with no execution record (learning skipped, or a legacy row aggregated
+    away before T1) keeps a standalone funnel with run=null (no FK). 404 only
+    when nothing at all exists for this workflow_id.
     """
     admin = is_validated_admin(user)
     if not is_dashboard_viewer(user, is_platform_admin=admin):
@@ -1043,9 +1044,8 @@ def get_run(
         # hint_workflow_trace and learning_metrics have no org_id column, so they
         # cannot be org-scoped; serving them to a scoped caller whose execution_record
         # lookup returned None would leak another org's trace rows (D3 violation).
-        # Platform-admins (scope_org=None) are unaffected: they keep the existing
-        # deduped-run behaviour (a trace-only run with no execution record still
-        # returns 200 for platform admins).
+        # Platform-admins (scope_org=None) are unaffected: a trace-only run with
+        # no execution record still returns 200 for platform admins.
         if scope_org is not None and run is None:
             raise HTTPException(
                 status_code=404,
