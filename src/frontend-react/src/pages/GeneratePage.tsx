@@ -453,7 +453,7 @@ interface FeedbackResponse { status?: string; outcome?: string; message?: string
    form — the corrective text is the signal that actually trains the system.
    Fail: form open by default; Skip still records an empty completely_wrong
    (N0) label on the execution record. ── */
-function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
+export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
@@ -465,7 +465,7 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
   if (!workflowId) return null
 
   async function submit(feedbackText: string = text) {
-    setStatus('sending'); setErr('')
+    setStatus('sending'); setErr(''); setResult(null)
     try {
       const body = await api<FeedbackResponse>('/api/feedback', {
         method: 'POST',
@@ -502,13 +502,15 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
     )
   }
 
-  if (result) {
+  // Only a recorded correction retires the form. Every other answer tells the
+  // user to send it again, so the textarea, their typed text and Submit all
+  // have to survive — replacing them with the message would be advice the UI
+  // makes impossible to follow. Rendered like `err` below: a notice beside a
+  // still-usable form, not a terminal state.
+  if (result?.ok) {
     return (
-      <div className="flex items-start gap-2 text-sm">
-        {result.ok
-          ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-green-600" />
-          : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />}
-        <span className={result.ok ? undefined : 'text-muted-foreground'}>{result.message}</span>
+      <div className="flex items-center gap-2 text-sm">
+        <Check className="h-4 w-4 text-green-600" /> {result.message}
       </div>
     )
   }
@@ -532,6 +534,12 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
 
   return (
     <div className="space-y-2">
+      {result && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{result.message}</span>
+        </div>
+      )}
       <div>
         <div className="text-sm font-semibold">
           {outcome === 'fail' ? '💡 Help us get it right next time' : 'What was off?'}

@@ -356,6 +356,10 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         the same name, which is the same class of event the handler's own
         `except` already answers that way.
 
+    `applied_to` names the run this feedback TARGETED (the original, when the
+    submitted run is a re-run) — not a claim that anything was applied to it.
+    Only `outcome == "processed"` says that.
+
     Returns 200 with status="disabled" when learning system is off.
     """
     # One PK lookup serves both the ownership gate and the re-run redirect.
