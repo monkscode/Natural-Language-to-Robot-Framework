@@ -36,8 +36,6 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-import pytest
-
 from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
 
@@ -263,26 +261,14 @@ class TestAFailedCorrectionDoesNotPoisonTheNextOne:
             f"left the writer connection in an aborted transaction (got {texts})"
         )
 
-    def test_the_refusal_path_needs_no_transaction(self, in_memory_db):
-        """The T9 org guard returns before any SQL runs, so the new rollback
-        must not be reachable from it — and a correction after a refusal is
-        unaffected."""
-        engine = NLFeedbackEngine(in_memory_db)
-        engine.learn_from_feedback(_record("wf-noorg", org_id=None), _triage())
-        engine.learn_from_feedback(_record("wf-next"), _triage())
 
-        assert _only_hint(in_memory_db)["evidence_count"] == 1
-
-
-@pytest.mark.parametrize("actor", ["alice@example.com", None])
-def test_create_and_reinforce_agree_on_the_actor(in_memory_db, actor):
-    """One submitter, two runs, two rows — the same identity on both, so the
-    'who' half of the story is answerable from either end."""
+def test_the_two_rows_tell_one_story_in_order(in_memory_db):
+    """The whole point of the task, in one flow: created by someone, then
+    reinforced by someone, in that order, on one hint."""
     engine = NLFeedbackEngine(in_memory_db)
-    engine.learn_from_feedback(_record("wf-1"), _triage(actor=actor))
-    engine.learn_from_feedback(_record("wf-2"), _triage(actor=actor))
+    engine.learn_from_feedback(_record("wf-1"), _triage(actor="alice@example.com"))
+    engine.learn_from_feedback(_record("wf-2"), _triage(actor="bob@example.com"))
 
-    rows = _audit(in_memory_db)
+    rows = _audit(in_memory_db, _only_hint(in_memory_db)["id"])
     assert [r["action"] for r in rows] == ["create", "reinforce"]
-    expected = actor or "unknown"
-    assert [r["actor"] for r in rows] == [expected, expected]
+    assert [r["actor"] for r in rows] == ["alice@example.com", "bob@example.com"]

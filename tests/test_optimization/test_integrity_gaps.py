@@ -202,17 +202,31 @@ class TestTheIndexesMatchTheEnginesDedupKey:
         with pytest.raises(psycopg.errors.UniqueViolation):
             hint(pg, scope="global", domain="other.test")
 
-    def test_the_three_keys_do_not_overlap(self, pg):
-        """Partial-index predicates must partition the table, or a global hint
-        is keyed twice and one of the two keys is wrong. `scope` is NOT NULL,
-        so `NOT IN ('url','global')` / `= 'url'` / `= 'global'` is exhaustive."""
-        general = hint(pg, scope="domain")
-        url = hint(pg, scope="url", url="https://shop.test/cart")
-        glob = hint(pg, scope="global")
-        assert {r["id"] for r in rows(pg)} == {general, url, glob}
-        # Same text under a different scope is a different hint in all three
-        # directions — nothing was over-collapsed by widening the global key.
-        assert len(rows(pg)) == 3
+    def test_the_three_index_predicates_partition_the_table(self, pg):
+        """Each row must fall under exactly ONE of the three keys. If the
+        general index kept v18's `scope <> 'url'` it would also cover global
+        rows, keying them twice — under two different definitions, one of which
+        is the one this task removed. `scope` is NOT NULL, so these three
+        predicates are exhaustive as well as disjoint.
+
+        Read off the live catalog, not off the migration source: what Postgres
+        actually built is the thing that constrains writes."""
+        preds = {n: d.split(" WHERE ", 1)[1]
+                 for n, d in indexes(pg).items() if n in _V21_NAMES}
+        assert preds == {
+            "uq_nlfc_dedup_general_v21":
+                "(scope <> ALL (ARRAY['url'::text, 'global'::text]))",
+            "uq_nlfc_dedup_url_v21": "(scope = 'url'::text)",
+            "uq_nlfc_dedup_global_v21": "(scope = 'global'::text)",
+        }
+
+    def test_one_text_under_three_scopes_is_three_hints(self, pg):
+        """Nothing was over-collapsed by widening the global key: scope is
+        still part of what makes a hint distinct."""
+        ids = {hint(pg, scope="domain"),
+               hint(pg, scope="url", url="https://shop.test/cart"),
+               hint(pg, scope="global")}
+        assert {r["id"] for r in rows(pg)} == ids
 
     def test_a_second_org_still_gets_its_own_copy(self, pg):
         """org_id stays in every key: hints are org-private and one tenant's

@@ -695,40 +695,6 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
              WHERE kind = 'nl' AND record_id IN (SELECT id FROM absorbed)
              RETURNING 1
          ),
-         -- One row per absorbed hint, on the SURVIVOR's timeline: that is where
-         -- a reader looking at the jumped counters will be. hint_audit has no
-         -- FK, so the row outlives the hint it describes.
-         audited AS (
-             INSERT INTO hint_audit
-                 (hint_id, action, actor, reason, before_value, after_value, created_at)
-             SELECT b.survivor_id, 'merge', 'migration_v21',
-                    'Duplicate hint absorbed by migration 21 (dedup key realigned)',
-                    jsonb_build_object(
-                        'id', b.id,
-                        'evidence_count', b.evidence_count,
-                        'applied_count', b.applied_count,
-                        'success_count', b.success_count,
-                        'failure_count', b.failure_count,
-                        'unused_count', b.unused_count,
-                        'is_active', b.is_active,
-                        'conflict_flagged', b.conflict_flagged,
-                        'last_seen', b.last_seen)::text,
-                    jsonb_build_object(
-                        'survivor_id', b.survivor_id,
-                        'evidence_count', s.evidence_count + a.evidence_count,
-                        'applied_count',  s.applied_count  + a.applied_count,
-                        'success_count',  s.success_count  + a.success_count,
-                        'failure_count',  s.failure_count  + a.failure_count,
-                        'unused_count',   s.unused_count   + a.unused_count,
-                        'is_active', GREATEST(s.is_active, a.is_active),
-                        'conflict_flagged',
-                            GREATEST(s.conflict_flagged, a.conflict_flagged))::text,
-                    now()::text
-             FROM absorbed b
-             JOIN agg a ON a.survivor_id = b.survivor_id
-             JOIN nl_feedback_corrections s ON s.id = b.survivor_id
-             RETURNING 1
-         ),
          -- Preserve-when-uncertain, one expression per column: served if ANY
          -- member was served, flagged if ANY member was flagged. A wrongly
          -- active survivor is re-disabled by the next real evidence through the
@@ -756,6 +722,43 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                           THEN f.conflict_flag_reason ELSE s.conflict_flag_reason END
              FROM agg a LEFT JOIN flag f ON f.survivor_id = a.survivor_id
              WHERE s.id = a.survivor_id
+             RETURNING s.id AS survivor_id, s.evidence_count, s.applied_count,
+                       s.success_count, s.failure_count, s.unused_count,
+                       s.is_active, s.conflict_flagged
+         ),
+         -- One row per absorbed hint, on the SURVIVOR's timeline: that is where
+         -- a reader looking at the jumped counters will be. hint_audit has no
+         -- FK, so the row outlives the hint it describes. after_value reads
+         -- `merged`'s RETURNING instead of recomputing the sums -- UPDATE
+         -- RETURNING yields post-update values, and referencing another
+         -- data-modifying CTE's output is what orders the two -- so the audit
+         -- record cannot drift from the write it describes.
+         audited AS (
+             INSERT INTO hint_audit
+                 (hint_id, action, actor, reason, before_value, after_value, created_at)
+             SELECT b.survivor_id, 'merge', 'migration_v21',
+                    'Duplicate hint absorbed by migration 21 (dedup key realigned)',
+                    jsonb_build_object(
+                        'id', b.id,
+                        'evidence_count', b.evidence_count,
+                        'applied_count', b.applied_count,
+                        'success_count', b.success_count,
+                        'failure_count', b.failure_count,
+                        'unused_count', b.unused_count,
+                        'is_active', b.is_active,
+                        'conflict_flagged', b.conflict_flagged,
+                        'last_seen', b.last_seen)::text,
+                    jsonb_build_object(
+                        'survivor_id', m.survivor_id,
+                        'evidence_count', m.evidence_count,
+                        'applied_count', m.applied_count,
+                        'success_count', m.success_count,
+                        'failure_count', m.failure_count,
+                        'unused_count', m.unused_count,
+                        'is_active', m.is_active,
+                        'conflict_flagged', m.conflict_flagged)::text,
+                    now()::text
+             FROM absorbed b JOIN merged m ON m.survivor_id = b.survivor_id
              RETURNING 1
          )
          DELETE FROM nl_feedback_corrections WHERE id IN (SELECT id FROM absorbed)

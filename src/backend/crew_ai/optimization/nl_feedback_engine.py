@@ -570,7 +570,7 @@ class NLFeedbackEngine(LearningEngine):
                     (
                         existing["id"],
                         feedback_insight.get("actor") or "unknown",
-                        "User re-submitted this correction from another run",
+                        "User re-submitted this correction — evidence incremented",
                         json.dumps(
                             {"evidence_count": existing["evidence_count"] + 1}),
                         now,
