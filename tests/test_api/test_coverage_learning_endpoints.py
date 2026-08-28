@@ -465,6 +465,44 @@ class TestCreateHint:
         assert data["created"] is False
         assert data["hint"]["evidence_count"] == 2
 
+    def test_a_global_duplicate_typed_on_another_domain_still_dedups(
+        self, learning_client,
+    ):
+        """T12: `domain` left the global dedup key, and this SELECT has to
+        follow it. If it kept filtering on domain it would miss the existing
+        row and the INSERT would hit uq_nlfc_dedup_global_v21 — a 409 saying
+        "an identical hint was just created" for a hint created long ago,
+        instead of the evidence bump the admin asked for."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path,
+                     feedback_text="Use xpath for stable selectors",
+                     scope="global", domain="shop.test", evidence=1,
+                     org_id="org-admin")
+
+        resp = client.post("/hints", json=self._valid_payload(domain=None))
+
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["created"] is False
+        assert resp.json()["hint"]["evidence_count"] == 2
+
+    def test_a_domain_scoped_duplicate_on_another_domain_is_a_new_hint(
+        self, learning_client,
+    ):
+        """Anti-false-green: only the GLOBAL key lost `domain`. A domain-scoped
+        hint is about its domain, so the same text on another site is a new
+        hint and must still be created."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path,
+                     feedback_text="Use xpath for stable selectors",
+                     scope="domain", domain="shop.test", evidence=1,
+                     org_id="org-admin")
+
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="domain", domain="other.test"))
+
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["created"] is True
+
     def test_duplicate_flagged_hint_clears_flag_and_logs_audit(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
@@ -1351,8 +1389,15 @@ class TestApplyReviewSession:
         conn.close()
 
         rec_pairs = []
-        for cfg in rec_configs:
-            hint_id = _insert_hint(db_path, **cfg.get("hint_kwargs", {}))
+        for i, cfg in enumerate(rec_configs):
+            hint_kwargs = dict(cfg.get("hint_kwargs", {}))
+            # Every recommendation in a session is about a DIFFERENT hint, and
+            # _insert_hint defaults to one text at global scope. Two global
+            # hints with the same text in one org are the same hint since v21
+            # (domain left the global dedup key), so the seeds must differ —
+            # under the old NULL-distinct index they happened not to have to.
+            hint_kwargs.setdefault("feedback_text", f"use xpath {i}")
+            hint_id = _insert_hint(db_path, **hint_kwargs)
             conn = _pg_conn(db_path)
             conn.execute(
                 "INSERT INTO hint_review_recommendations "

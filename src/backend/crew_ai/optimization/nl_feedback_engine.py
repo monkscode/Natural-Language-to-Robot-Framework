@@ -392,8 +392,10 @@ class NLFeedbackEngine(LearningEngine):
         Scope is auto-determined from the triage category:
             structural → domain, keyword → global, locator → url, etc.
 
-        Deduplication: same feedback_text + domain + scope → increment
-        evidence_count and update last_seen.
+        Deduplication: same feedback_text + domain + scope + org → increment
+        evidence_count and update last_seen. url-scoped hints key on url as
+        well; global-scoped hints drop domain, because they are served on every
+        query in the org regardless of the page they were typed on.
 
         One correction per run (T5): the run that produced the feedback claims
         the hint once. A second submission of the same text from the SAME run
@@ -456,10 +458,17 @@ class NLFeedbackEngine(LearningEngine):
             # Upsert: increment evidence if exists, else insert.
             # URL-scoped hints include url in the dedup key so identical feedback
             # on two different pages under the same domain creates separate rows.
+            # Global-scoped hints EXCLUDE domain (T12): _SCOPE_WHERE serves them
+            # on every query in the org regardless of the page, so keying them by
+            # the page they were typed on split one correction into two org-wide
+            # hints with half the evidence each.
             # org_id is part of the dedup key: hints are org-private, so another
             # org's identical text must create that org's own row — matching
             # cross-org would let one tenant's feedback strengthen, reactivate,
             # or unflag another tenant's hint (and silently drop its own).
+            # Each branch mirrors one uq_nlfc_dedup_*_v21 index exactly; a
+            # SELECT narrower than its index dies on the constraint instead of
+            # deduplicating, and the correction is lost rather than counted.
             if scope == "url":
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "
@@ -468,6 +477,14 @@ class NLFeedbackEngine(LearningEngine):
                     "AND url IS NOT DISTINCT FROM ? AND scope = ? "
                     "AND org_id IS NOT DISTINCT FROM ?",
                     (feedback_text.strip(), domain, url, scope, record.org_id),
+                ).fetchone()
+            elif scope == "global":
+                existing = self._em._writer_conn.execute(
+                    "SELECT id, evidence_count, conflict_flagged "
+                    "FROM nl_feedback_corrections "
+                    "WHERE feedback_text = ? AND scope = 'global' "
+                    "AND org_id IS NOT DISTINCT FROM ?",
+                    (feedback_text.strip(), record.org_id),
                 ).fetchone()
             else:
                 existing = self._em._writer_conn.execute(

@@ -103,8 +103,17 @@ def test_ensure_schema_upgrades_existing_v17_db_to_org_aware_dedup():
                 "WHERE schemaname = %s AND tablename = 'nl_feedback_corrections'",
                 (_UPGRADE_SCHEMA,),
             ).fetchall()}
-            assert "uq_nlfc_dedup_general" in indexes and "uq_nlfc_dedup_url" in indexes, (
-                f"v18 unique indexes missing after upgrade (got {sorted(indexes)})"
+            # v18 created uq_nlfc_dedup_general / _url; v21 replaces both with
+            # the *_v21 names (an IF NOT EXISTS create under the old name would
+            # have been a silent no-op, so the rename is load-bearing). What
+            # this step pins is that the upgrade ends with dedup uniqueness in
+            # place, whatever the current names are.
+            assert {"uq_nlfc_dedup_general_v21", "uq_nlfc_dedup_url_v21",
+                    "uq_nlfc_dedup_global_v21"} <= indexes, (
+                f"dedup unique indexes missing after upgrade (got {sorted(indexes)})"
+            )
+            assert "uq_nlfc_dedup_general" not in indexes, (
+                "v21 left the superseded v18 index behind"
             )
             versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}
             assert 18 in versions, f"schema_version did not advance to 18 (got {sorted(versions)})"

@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
 # so that every migration newer than the baseline is applied on top — including
@@ -561,6 +561,219 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          "ON nl_feedback_corrections(org_id)",
          "DROP INDEX IF EXISTS idx_nlfc_org_shared",
          "ALTER TABLE nl_feedback_corrections DROP COLUMN IF EXISTS is_shared",
+     )),
+    (21, "Hint dedup indexes match the engine's dedup key (NULL-equal; global drops domain)",
+     (
+         # Two pre-existing gaps, closed together because they share one index set.
+         #
+         # 1. v18 indexed `domain`/`url` plainly, so Postgres treats two NULL
+         #    domains as DIFFERENT keys while the engine's SELECT uses
+         #    `IS NOT DISTINCT FROM`, which treats them as the SAME. One writer
+         #    thread and one uvicorn worker hide the disagreement today; a
+         #    second replica does not. COALESCE(x,'') aligns the index to the
+         #    engine. (NULLS NOT DISTINCT would match it exactly, but it is
+         #    PG15-only syntax and would fail into the silent-disable loop on
+         #    an older server; the NULL-vs-'' conflation it avoids is
+         #    unreachable — extract_domain yields None, never ''.)
+         #
+         # 2. The `keyword` triage category maps to scope='global', and
+         #    _SCOPE_WHERE ignores `domain` for global hints — but `domain` was
+         #    still in the dedup key, so the same correction typed on two sites
+         #    became two org-wide hints with split evidence, both injected and
+         #    neither ever reaching a lifecycle threshold. The global key is now
+         #    (feedback_text, org_id) and gets its own partial index; the three
+         #    predicates partition the table (scope is NOT NULL) so no row is
+         #    keyed twice.
+         #
+         # ORDER IS LOAD-BEARING: merge, then CREATE under NEW names, then DROP
+         # the old ones.
+         #   * `CREATE UNIQUE INDEX IF NOT EXISTS` matches on relation NAME, not
+         #     definition, so reusing uq_nlfc_dedup_general would succeed and
+         #     change nothing — the v18 definition would survive silently.
+         #   * Both ensure_schema call sites run autocommit
+         #     (postgres_execution_memory.py, main.py), so a DROP that lands
+         #     before a failing CREATE is durable: the table would have NO dedup
+         #     uniqueness for the whole retry loop. Creating first means a failed
+         #     CREATE leaves the old index standing, the version unrecorded, and
+         #     the advisory-locked retry re-runs the merge and succeeds.
+         #   * A failed migration does not crash the app. It raises inside
+         #     PostgresExecutionMemory.__init__, which learning_registry catches,
+         #     disabling the ENTIRE learning system behind one WARNING and
+         #     retrying every 300s. Silent, so the merge must leave zero
+         #     collisions and must be safe to run again.
+         #
+         # The merge DELETES absorbed rows rather than deactivating them: the
+         # unique indexes carry no is_active predicate, so a deactivated
+         # duplicate still aborts the CREATE. Deletion is safe — hint_audit has
+         # no FK, and get_hints_by_id (IN list), attribution's `pre` dict,
+         # trigger_events' JSON arrays and hint_workflow_trace all tolerate
+         # dangling ids.
+         #
+         # ONE statement, not six. Every data-modifying CTE runs exactly once
+         # and to completion in a single transaction, so the merge is
+         # all-or-nothing under autocommit. Split across statements it would not
+         # be: a counter UPDATE that commits before a failing DELETE leaves the
+         # survivors holding the sum AND the absorbed rows in place, and the
+         # 300s retry adds the sum again.
+         """
+         WITH ranked AS (
+             SELECT id, evidence_count, applied_count, success_count,
+                    failure_count, unused_count, last_seen, is_active,
+                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+                    first_value(id) OVER (
+                        PARTITION BY feedback_text, COALESCE(domain, ''), scope,
+                                     COALESCE(org_id, '')
+                        ORDER BY created_at, id) AS survivor_id
+             FROM nl_feedback_corrections WHERE scope NOT IN ('url', 'global')
+             UNION ALL
+             SELECT id, evidence_count, applied_count, success_count,
+                    failure_count, unused_count, last_seen, is_active,
+                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+                    first_value(id) OVER (
+                        PARTITION BY feedback_text, COALESCE(domain, ''),
+                                     COALESCE(url, ''), scope,
+                                     COALESCE(org_id, '')
+                        ORDER BY created_at, id) AS survivor_id
+             FROM nl_feedback_corrections WHERE scope = 'url'
+             UNION ALL
+             SELECT id, evidence_count, applied_count, success_count,
+                    failure_count, unused_count, last_seen, is_active,
+                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+                    first_value(id) OVER (
+                        PARTITION BY feedback_text, COALESCE(org_id, '')
+                        ORDER BY created_at, id) AS survivor_id
+             FROM nl_feedback_corrections WHERE scope = 'global'
+         ),
+         -- The survivor is the oldest row of each group; everything else in it
+         -- is absorbed. created_at is written by datetime.now(utc).isoformat()
+         -- at every write site, so it sorts lexicographically; id breaks ties.
+         absorbed AS (SELECT * FROM ranked WHERE id <> survivor_id),
+         agg AS (
+             SELECT survivor_id,
+                    sum(evidence_count)   AS evidence_count,
+                    sum(applied_count)    AS applied_count,
+                    sum(success_count)    AS success_count,
+                    sum(failure_count)    AS failure_count,
+                    sum(unused_count)     AS unused_count,
+                    max(last_seen)        AS last_seen,
+                    max(is_active)        AS is_active,
+                    max(conflict_flagged) AS conflict_flagged
+             FROM absorbed GROUP BY survivor_id
+         ),
+         -- Newest flag metadata across the WHOLE group, survivor included, so
+         -- a survivor that keeps its own flag keeps its own reason too.
+         flag AS (
+             SELECT DISTINCT ON (r.survivor_id)
+                    r.survivor_id, r.conflict_flagged_at, r.conflict_flag_reason
+             FROM ranked r JOIN agg a ON a.survivor_id = r.survivor_id
+             WHERE r.conflict_flagged = 1
+             ORDER BY r.survivor_id, r.conflict_flagged_at DESC NULLS LAST,
+                      r.id DESC
+         ),
+         -- Independent-source rows follow the survivor. This moves T5's
+         -- per-run claims (source_kind='workflow') too, deliberately: a run
+         -- that already submitted this correction against an absorbed hint
+         -- contributed once and must not be able to claim the survivor again.
+         -- ON CONFLICT DO NOTHING collapses a source two rows of the group
+         -- both carried.
+         moved_evidence AS (
+             INSERT INTO hint_evidence
+                 (hint_id, source_kind, source_key, source_hash, bucket, created_at)
+             SELECT b.survivor_id, e.source_kind, e.source_key, e.source_hash,
+                    e.bucket, e.created_at
+             FROM hint_evidence e JOIN absorbed b ON b.id = e.hint_id
+             ON CONFLICT DO NOTHING
+             RETURNING 1
+         ),
+         dropped_evidence AS (
+             DELETE FROM hint_evidence
+             WHERE hint_id IN (SELECT id FROM absorbed)
+             RETURNING 1
+         ),
+         dropped_anchors AS (
+             DELETE FROM learning_anchors
+             WHERE kind = 'nl' AND record_id IN (SELECT id FROM absorbed)
+             RETURNING 1
+         ),
+         -- One row per absorbed hint, on the SURVIVOR's timeline: that is where
+         -- a reader looking at the jumped counters will be. hint_audit has no
+         -- FK, so the row outlives the hint it describes.
+         audited AS (
+             INSERT INTO hint_audit
+                 (hint_id, action, actor, reason, before_value, after_value, created_at)
+             SELECT b.survivor_id, 'merge', 'migration_v21',
+                    'Duplicate hint absorbed by migration 21 (dedup key realigned)',
+                    jsonb_build_object(
+                        'id', b.id,
+                        'evidence_count', b.evidence_count,
+                        'applied_count', b.applied_count,
+                        'success_count', b.success_count,
+                        'failure_count', b.failure_count,
+                        'unused_count', b.unused_count,
+                        'is_active', b.is_active,
+                        'conflict_flagged', b.conflict_flagged,
+                        'last_seen', b.last_seen)::text,
+                    jsonb_build_object(
+                        'survivor_id', b.survivor_id,
+                        'evidence_count', s.evidence_count + a.evidence_count,
+                        'applied_count',  s.applied_count  + a.applied_count,
+                        'success_count',  s.success_count  + a.success_count,
+                        'failure_count',  s.failure_count  + a.failure_count,
+                        'unused_count',   s.unused_count   + a.unused_count,
+                        'is_active', GREATEST(s.is_active, a.is_active),
+                        'conflict_flagged',
+                            GREATEST(s.conflict_flagged, a.conflict_flagged))::text,
+                    now()::text
+             FROM absorbed b
+             JOIN agg a ON a.survivor_id = b.survivor_id
+             JOIN nl_feedback_corrections s ON s.id = b.survivor_id
+             RETURNING 1
+         ),
+         -- Preserve-when-uncertain, one expression per column: served if ANY
+         -- member was served, flagged if ANY member was flagged. A wrongly
+         -- active survivor is re-disabled by the next real evidence through the
+         -- live rules; a flagged survivor is recovered by resubmission (Gap 7).
+         -- disabled_at is cleared when the merge reactivates, matching what the
+         -- reactivate endpoints already do.
+         merged AS (
+             UPDATE nl_feedback_corrections s
+             SET evidence_count = s.evidence_count + a.evidence_count,
+                 applied_count  = s.applied_count  + a.applied_count,
+                 success_count  = s.success_count  + a.success_count,
+                 failure_count  = s.failure_count  + a.failure_count,
+                 unused_count   = s.unused_count   + a.unused_count,
+                 last_seen      = GREATEST(s.last_seen, a.last_seen),
+                 is_active      = GREATEST(s.is_active, a.is_active),
+                 disabled_at    = CASE WHEN GREATEST(s.is_active, a.is_active) = 1
+                                       THEN NULL ELSE s.disabled_at END,
+                 conflict_flagged =
+                     GREATEST(s.conflict_flagged, a.conflict_flagged),
+                 conflict_flagged_at =
+                     CASE WHEN GREATEST(s.conflict_flagged, a.conflict_flagged) = 1
+                          THEN f.conflict_flagged_at ELSE s.conflict_flagged_at END,
+                 conflict_flag_reason =
+                     CASE WHEN GREATEST(s.conflict_flagged, a.conflict_flagged) = 1
+                          THEN f.conflict_flag_reason ELSE s.conflict_flag_reason END
+             FROM agg a LEFT JOIN flag f ON f.survivor_id = a.survivor_id
+             WHERE s.id = a.survivor_id
+             RETURNING 1
+         )
+         DELETE FROM nl_feedback_corrections WHERE id IN (SELECT id FROM absorbed)
+         """,
+         "CREATE UNIQUE INDEX IF NOT EXISTS uq_nlfc_dedup_general_v21 "
+         "ON nl_feedback_corrections "
+         "(feedback_text, COALESCE(domain, ''), scope, COALESCE(org_id, '')) "
+         "WHERE scope NOT IN ('url', 'global')",
+         "CREATE UNIQUE INDEX IF NOT EXISTS uq_nlfc_dedup_url_v21 "
+         "ON nl_feedback_corrections "
+         "(feedback_text, COALESCE(domain, ''), COALESCE(url, ''), scope, "
+         " COALESCE(org_id, '')) "
+         "WHERE scope = 'url'",
+         "CREATE UNIQUE INDEX IF NOT EXISTS uq_nlfc_dedup_global_v21 "
+         "ON nl_feedback_corrections (feedback_text, COALESCE(org_id, '')) "
+         "WHERE scope = 'global'",
+         "DROP INDEX IF EXISTS uq_nlfc_dedup_general",
+         "DROP INDEX IF EXISTS uq_nlfc_dedup_url",
      )),
 )
 

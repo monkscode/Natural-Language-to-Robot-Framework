@@ -459,11 +459,18 @@ def create_hint(
         # own key. Identical text in another org is a separate hint by design —
         # that is what keeps the two copies' counters independent.
         #
-        # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url and
+        # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url_v21 and
         # NLFeedbackEngine.learn_from_feedback: identical text on two pages of
         # the same domain is two hints, one per page. Without the url predicate
         # the second page's create bumps evidence on the FIRST page's hint and
         # the hint the admin asked for is never written.
+        #
+        # global-scoped hints drop domain, mirroring uq_nlfc_dedup_global_v21:
+        # a global hint applies to every query in the org, so the page it was
+        # typed on is not part of its identity. Keeping domain here would make
+        # this SELECT narrower than its index — the duplicate would go unfound
+        # and the INSERT would 409 on the constraint instead of bumping
+        # evidence on the hint that already says the same thing.
         if request.scope == "url":
             existing = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
@@ -471,6 +478,13 @@ def create_hint(
                 "AND url IS NOT DISTINCT FROM ? AND scope = ? "
                 "AND org_id IS NOT DISTINCT FROM ?",
                 (text, request.domain, request.url, request.scope, org_id),
+            ).fetchone()
+        elif request.scope == "global":
+            existing = conn.execute(
+                "SELECT * FROM nl_feedback_corrections "
+                "WHERE feedback_text = ? AND scope = 'global' "
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, org_id),
             ).fetchone()
         else:
             existing = conn.execute(
