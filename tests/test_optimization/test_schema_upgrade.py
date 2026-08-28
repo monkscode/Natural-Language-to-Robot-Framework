@@ -158,11 +158,13 @@ def test_ensure_schema_upgrades_existing_v16_db():
             #    CREATE INDEX on the missing org_id column.
             pg_schema.ensure_schema(raw)
 
-            # 3) Every scoped table regained org_id, hints regained is_shared,
-            #    and the schema advanced to 17.
+            # 3) Every scoped table regained org_id and the schema advanced
+            #    past 17. is_shared is added by v17 and dropped again by v20,
+            #    so the end state must NOT have it — asserting its presence
+            #    here would pin the column this plan removed.
             nlfc = _columns(raw, "nl_feedback_corrections")
             assert "org_id" in nlfc, "v17 migration did not add org_id to the existing nl_feedback_corrections"
-            assert "is_shared" in nlfc, "v17 migration did not add is_shared"
+            assert "is_shared" not in nlfc, "v20 migration did not drop is_shared"
             for table, _ in _V17_DROPS:
                 assert "org_id" in _columns(raw, table), f"v17 migration did not add org_id to existing {table}"
             versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}

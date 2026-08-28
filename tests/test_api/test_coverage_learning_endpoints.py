@@ -109,7 +109,7 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
                  anchor_query="test query", is_active=1, conflict_flagged=0,
                  applied_count=0, success_count=0, failure_count=0,
                  original_failure_category=None, disabled_at=None,
-                 is_shared=0, org_id=None) -> int:
+                 org_id="org-admin") -> int:
     """Helper: insert a hint directly and return its id."""
     conn = _pg_conn(db_path)
     conn.row_factory = sqlite3.Row
@@ -120,11 +120,11 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
         "(feedback_text, category, scope, domain, url, original_failure_category, "
         " evidence_count, anchor_query, applied_count, success_count, failure_count, "
         " is_active, conflict_flagged, disabled_at, created_at, last_seen, "
-        " is_shared, org_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (feedback_text, category, scope, domain, url, original_failure_category,
          evidence, anchor_query, applied_count, success_count, failure_count,
-         is_active, conflict_flagged, disabled_at, now, now, is_shared, org_id),
+         is_active, conflict_flagged, disabled_at, now, now, org_id),
     )
     conn.commit()
     hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -391,6 +391,8 @@ class TestCreateHint:
             "anchor_query": "click the login button",
             "scope": "global",
             "actor": "alice",
+            # v20: every hint is owned by exactly one org.
+            "org_id": "org-admin",
         }
         base.update(overrides)
         return base
@@ -449,11 +451,12 @@ class TestCreateHint:
     def test_duplicate_hint_increments_evidence(self, learning_client):
         client, _, _, db_path = learning_client
         # Pre-insert the matching row directly so it's committed before the POST.
-        # Admin creates are global (is_shared=1) and dedup only against global
-        # rows, so the seeded duplicate must itself be shared.
+        # Admin creates dedup within the TARGET org, so the seeded duplicate must
+        # sit in the same org as the payload.
         _insert_hint(db_path,
                      feedback_text="Use xpath for stable selectors",
-                     scope="global", domain=None, evidence=1, is_shared=1)
+                     scope="global", domain=None, evidence=1,
+                     org_id="org-admin")
         payload = self._valid_payload()  # same text + scope + domain
         resp = client.post("/hints", json=payload)
         # Route decorator always returns 201; created=False signals the duplicate path
@@ -465,7 +468,8 @@ class TestCreateHint:
     def test_duplicate_flagged_hint_clears_flag_and_logs_audit(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
-                               conflict_flagged=1, scope="global", is_shared=1)
+                               conflict_flagged=1, scope="global",
+                               org_id="org-admin")
 
         payload = self._valid_payload()  # same text + scope → matches existing
         resp = client.post("/hints", json=payload)
@@ -498,39 +502,40 @@ class TestCreateHint:
         assert resp.status_code == 201
         assert resp.json()["hint"]["category"] == "timing"
 
-    def test_org_private_hint_does_not_capture_admin_global_create(self, learning_client):
-        """An org-private hint with identical text must NOT absorb an admin's
-        global create: the admin intends a hint for every org, so a new shared
-        row must be created and the org's private row left untouched."""
+    def test_another_orgs_hint_does_not_capture_an_admin_create(self, learning_client):
+        """Identical text in a DIFFERENT org must not absorb the create.
+
+        Before v20 this was about a shared row not being swallowed by a private
+        one; now it is simply that the dedup key includes org_id, so the two
+        rows coexist and keep their counters apart. Same defect, same test,
+        expressed on the axis that survived."""
         client, _, _, db_path = learning_client
-        org_hint_id = _insert_hint(
+        other_hint_id = _insert_hint(
             db_path, feedback_text="Dismiss the cookie banner first",
-            scope="domain", domain="shop.test", evidence=1,
-            is_shared=0, org_id="org-A",
+            scope="domain", domain="shop.test", evidence=1, org_id="org-A",
         )
 
         resp = client.post("/hints", json=self._valid_payload(
             feedback_text="Dismiss the cookie banner first",
-            scope="domain", domain="shop.test",
+            scope="domain", domain="shop.test", org_id="org-B",
         ))
         assert resp.status_code == 201
         data = resp.json()
         assert data["created"] is True, (
-            "admin global create was deduped into an org-private hint — "
-            "the intended shared hint was never created"
+            "the create was deduped into ANOTHER org's hint — org-B would "
+            "never get the hint, and org-A's evidence would be bumped by it"
         )
-        assert data["hint"]["is_shared"] == 1
-        assert data["hint"]["id"] != org_hint_id
+        assert data["hint"]["org_id"] == "org-B"
+        assert data["hint"]["id"] != other_hint_id
 
         conn = _pg_conn(db_path)
         org_row = conn.execute(
-            "SELECT evidence_count, is_shared, org_id FROM nl_feedback_corrections "
-            "WHERE id = ?", (org_hint_id,),
+            "SELECT evidence_count, org_id FROM nl_feedback_corrections "
+            "WHERE id = ?", (other_hint_id,),
         ).fetchone()
         conn.close()
-        assert org_row[0] == 1, "org hint's evidence must not be bumped by admin create"
-        assert org_row[1] == 0, "org hint must stay private"
-        assert org_row[2] == "org-A"
+        assert org_row[0] == 1, "org-A's evidence must not be bumped by an org-B create"
+        assert org_row[1] == "org-A"
 
     def test_url_scope_second_page_is_not_deduped_into_the_first(self, learning_client):
         """Two url-scoped hints with identical text+domain but different urls are
@@ -542,7 +547,7 @@ class TestCreateHint:
         first_id = _insert_hint(
             db_path, feedback_text="Wait for the spinner to clear",
             scope="url", domain="shop.test", url="https://shop.test/checkout",
-            evidence=1, is_shared=1,
+            evidence=1, org_id="org-admin",
         )
 
         resp = client.post("/hints", json=self._valid_payload(
@@ -575,7 +580,7 @@ class TestCreateHint:
         _insert_hint(
             db_path, feedback_text="Wait for the spinner to clear",
             scope="url", domain="shop.test", url="https://shop.test/checkout",
-            evidence=1, is_shared=1,
+            evidence=1, org_id="org-admin",
         )
 
         resp = client.post("/hints", json=self._valid_payload(

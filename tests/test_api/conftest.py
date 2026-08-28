@@ -292,9 +292,9 @@ class _DashClient:
         """Insert a hint scoped to *org_id* and return its id.
 
         Uses INSERT ... RETURNING id (idiomatic Postgres; avoids the fragile
-        last_insert_rowid() pattern noted in the Task-10 review).  is_shared=0
-        so the org-dimension privacy assertion is not accidentally passed by a
-        shared-hint bypass.
+        last_insert_rowid() pattern noted in the Task-10 review).  Since v20 a
+        hint belongs to exactly one org, so org_id alone decides visibility --
+        there is no shared-hint bypass left to accidentally pass through.
         """
         from datetime import datetime, timezone
         from src.backend.crew_ai.optimization import pg_compat
@@ -305,8 +305,8 @@ class _DashClient:
             row = conn.execute(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, evidence_count, anchor_query, "
-                " is_active, conflict_flagged, is_shared, org_id, created_at, last_seen) "
-                "VALUES (?, 'test', 'global', 1, 'seed anchor', 1, 0, 0, ?, ?, ?) "
+                " is_active, conflict_flagged, org_id, created_at, last_seen) "
+                "VALUES (?, 'test', 'global', 1, 'seed anchor', 1, 0, ?, ?, ?) "
                 "RETURNING id",
                 (text, org_id, now, now),
             ).fetchone()
@@ -382,9 +382,9 @@ def dash_client(learning_api_isolated, api_pg_em):
 def seeded_hint_id(api_pg_em) -> int:
     """Insert a hint + its kind='nl' anchor (org_id non-null) into the isolated schema.
 
-    Returns the new hint id.  The anchor has org_id='org-test-1' so the
-    anti-false-green assertion in test_promote_sets_is_shared can verify that
-    promote nulls it (the column starts non-null, must end NULL).
+    Returns the new hint id.  The anchor has org_id='org-test-1' so a caller
+    that reaches the removed promote path can be shown not to have nulled it
+    (the column starts non-null and must stay so).
     """
     from datetime import datetime, timezone
     from src.backend.crew_ai.optimization import pg_compat
@@ -397,12 +397,12 @@ def seeded_hint_id(api_pg_em) -> int:
         hint_id: int = conn.execute(
             "INSERT INTO nl_feedback_corrections "
             "(feedback_text, category, scope, evidence_count, anchor_query, "
-            " is_active, conflict_flagged, is_shared, created_at, last_seen) "
+            " is_active, conflict_flagged, org_id, created_at, last_seen) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 "use xpath locators for stable element selection",
                 "locator", "global", 1, "find element by xpath",
-                1, 0, 0, now, now,
+                1, 0, "org-test-1", now, now,
             ),
         ).fetchone()[0]
 

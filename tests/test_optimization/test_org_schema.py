@@ -1,5 +1,5 @@
 # tests/test_optimization/test_org_schema.py
-"""Phase 1c: org_id (+ is_shared on hints) columns exist on the scoped tables."""
+"""Phase 1c: org_id exists on the scoped tables. is_shared no longer does."""
 
 import pytest
 
@@ -25,6 +25,10 @@ def test_org_id_present_on_scoped_tables(in_memory_em):
             assert "org_id" in _columns(conn, t), f"{t} missing org_id"
 
 
-def test_is_shared_present_on_hints(in_memory_em):
+def test_is_shared_is_gone_from_hints(in_memory_em):
+    """Dropped in v20: a hint belongs to exactly one org. The flag was read on
+    retrieval only and never on mutation, so a hint visible to every org had its
+    counters, flags and disables decided by whichever tenant happened to use
+    it."""
     with in_memory_em.read_conn() as conn:
-        assert "is_shared" in _columns(conn, "nl_feedback_corrections")
+        assert "is_shared" not in _columns(conn, "nl_feedback_corrections")

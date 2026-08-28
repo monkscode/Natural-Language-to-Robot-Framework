@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
 # so that every migration newer than the baseline is applied on top — including
@@ -225,8 +225,7 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         disabled_at               TEXT,
         anchor_query              TEXT,
         unused_count              INTEGER NOT NULL DEFAULT 0,
-        org_id                    TEXT,
-        is_shared                 INTEGER NOT NULL DEFAULT 0
+        org_id                    TEXT
     )
     """,
     # Dedup uniqueness lives in the v18 migration (org-aware, mirrors the
@@ -542,6 +541,26 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          " created_at  TEXT    NOT NULL)",
          "CREATE UNIQUE INDEX IF NOT EXISTS uq_hint_evidence "
          "ON hint_evidence (hint_id, source_kind, source_hash, bucket)",
+     )),
+    (20, "Every hint is owned by exactly one org: drop is_shared",
+     (
+         # is_shared was read on retrieval only, never on mutation — the
+         # counter, flag, disable and retire writes are all bare WHERE id = ?.
+         # A hint visible to every org therefore had its lifecycle decided by
+         # whichever tenant's run happened to use it. Cross-org promotion was
+         # already removed for that reason; this removes the remaining
+         # admin-created shared hints so the guarantee is structural.
+         # scope='global' is a different axis (which queries a hint applies to,
+         # WITHIN an org) and is retained.
+         #
+         # idx_nlfc_org_shared was (org_id, is_shared) and is the hint table's
+         # ONLY org index; DROP COLUMN would take it away as a dependency. Every
+         # hint read filters on org_id, so it is replaced rather than lost —
+         # matching idx_anti_org / idx_anchors_org on the sibling tables.
+         "CREATE INDEX IF NOT EXISTS idx_nlfc_org "
+         "ON nl_feedback_corrections(org_id)",
+         "DROP INDEX IF EXISTS idx_nlfc_org_shared",
+         "ALTER TABLE nl_feedback_corrections DROP COLUMN IF EXISTS is_shared",
      )),
 )
 

@@ -1052,6 +1052,7 @@ class TestAdminTriageWarning:
             feedback_text="Click the submit button",
             anchor_query="submit the form on the page",
             scope="global",
+            org_id="org-A",
             run_triage=True,
             actor="test-admin",
         )

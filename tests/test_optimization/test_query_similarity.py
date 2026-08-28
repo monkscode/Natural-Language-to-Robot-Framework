@@ -859,7 +859,7 @@ class TestLearningEndpoints:
         from fastapi import HTTPException
         req = HintCreateRequest(
             feedback_text="a hint", anchor_query="ab",   # < 3 chars
-            scope="global", actor="admin",
+            scope="global", org_id=_ORG, actor="admin",
         )
         with pytest.raises(HTTPException) as exc:
             create_hint(req, fb=MagicMock())
@@ -875,7 +875,7 @@ class TestLearningEndpoints:
         req = HintCreateRequest(
             feedback_text="use Wait For Elements State, not Sleep",
             anchor_query="verify the product list loads after filtering",
-            scope="global", run_triage=False, actor="admin",
+            scope="global", org_id=_ORG, run_triage=False, actor="admin",
         )
         with patch("src.backend.api.learning_endpoints._admin_conn",
                    side_effect=lambda: pg_compat.connect(em.dsn)):

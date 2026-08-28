@@ -125,6 +125,7 @@ class HintCreateRequest(BaseModel):
     feedback_text: str
     anchor_query: str                       # example user request the hint applies to
     scope: str                              # url | domain | global
+    org_id: str                             # owning org — hints never cross one
     domain: str | None = None
     url: str | None = None
     category: str | None = None
@@ -220,9 +221,10 @@ def list_hints(
         conditions = []
         params: list = []
 
-        # Org scope: non-platform-admins see only their org's hints + shared hints.
+        # Org scope: a hint belongs to exactly one org, so a non-platform-admin
+        # sees their own org's and nothing else.
         if scope_org is not None:
-            conditions.append("(org_id = ? OR is_shared = 1)")
+            conditions.append("org_id = ?")
             params.append(scope_org)
 
         if status == "flagged":
@@ -335,7 +337,7 @@ def get_hint(
         if scope_org is not None:
             row = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
-                "WHERE id = ? AND (org_id = ? OR is_shared = 1)",
+                "WHERE id = ? AND org_id = ?",
                 (hint_id, scope_org),
             ).fetchone()
         else:
@@ -346,11 +348,12 @@ def get_hint(
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
 
         # The timeline is keyed by hint_id only — hint_audit and trigger_events
-        # carry no org_id, so they cannot be org-scoped in SQL. A shared hint can
-        # be fetched from another org via the is_shared=1 branch above; its audit
-        # trail and trigger rows would then expose the originating org's workflow
-        # ids, trigger reasons and audit actors. Surface the timeline only to
-        # platform-scope callers (scope_org is None) or the hint's own org.
+        # carry no org_id, so they cannot be org-scoped in SQL. The SELECT above
+        # already restricts an org-scoped caller to their own org, so this is now
+        # belt-and-braces rather than the sole gate it was while a shared hint
+        # could be fetched from another org. Kept: the cost of being wrong is the
+        # originating org's workflow ids, trigger reasons and audit actors, and
+        # this is what still holds if that SELECT is ever widened again.
         timeline: list = []
         if scope_org is None or row["org_id"] == scope_org:
             audit_rows = conn.execute(
@@ -402,6 +405,12 @@ def create_hint(
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    # Every hint is owned by exactly one org. Generic guidance wanted in several
+    # orgs is created once per org (the manual half of copy-on-promote), so each
+    # copy keeps its own counters, flags and disables permanently.
+    org_id = request.org_id.strip()
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
     actor = _audit_actor(admin, request.actor)
     text = request.feedback_text.strip()
     if not text:
@@ -446,10 +455,9 @@ def create_hint(
         # UNIQUE-constraint 500. Mirrors start_hint_review (same TOCTOU pattern).
         # Readers are never blocked — WAL allows concurrent reads throughout.
         conn.execute("BEGIN IMMEDIATE")
-        # Admin creates are global (is_shared=1), so dedup ONLY against global
-        # rows. Matching an org-private hint here would silently turn "create a
-        # hint for every org" into an evidence bump on one tenant's private row
-        # — the shared hint the admin intended would never exist.
+        # Dedup within the TARGET org, matching uq_nlfc_dedup_* and the engine's
+        # own key. Identical text in another org is a separate hint by design —
+        # that is what keeps the two copies' counters independent.
         #
         # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url and
         # NLFeedbackEngine.learn_from_feedback: identical text on two pages of
@@ -460,15 +468,16 @@ def create_hint(
             existing = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
-                "AND url IS NOT DISTINCT FROM ? AND scope = ? AND is_shared = 1",
-                (text, request.domain, request.url, request.scope),
+                "AND url IS NOT DISTINCT FROM ? AND scope = ? "
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, request.domain, request.url, request.scope, org_id),
             ).fetchone()
         else:
             existing = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
-                "AND is_shared = 1",
-                (text, request.domain, request.scope),
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, request.domain, request.scope, org_id),
             ).fetchone()
 
         if existing:
@@ -507,11 +516,11 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via, is_shared) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', 1)",
+                " created_via, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?)",
                 (
                     text, category, request.scope, request.domain, request.url,
-                    request.original_failure_category, anchor, now, now,
+                    request.original_failure_category, anchor, now, now, org_id,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -532,6 +541,7 @@ def create_hint(
                 "feedback_text": text, "scope": request.scope,
                 "domain": request.domain, "url": request.url,
                 "category": category, "created_via": "admin",
+                "org_id": org_id,
             },
         )
         conn.commit()
@@ -541,8 +551,12 @@ def create_hint(
         # only — so the add MUST go through the write queue. Best-effort: a
         # missed doc is healed by the next reconcile.
         try:
+            # org_id matters: filter_by_query_similarity matches an org-less
+            # anchor for EVERY calling org, so an unowned anchor would leave the
+            # SQL gate as the only thing standing between orgs.
             fb.write_queue.submit(
                 fb.execution_memory.add_anchor, "nl", hint_id, anchor,
+                org_id=org_id,
             )
         except Exception as e:
             logger.warning(
@@ -726,12 +740,14 @@ def unflag_hint(
 
 # ---------------------------------------------------------------------------
 # 5b. POST /hints/{id}/promote — REMOVED (2026-07-02 access-control review).
-# Promotion flipped an org-learned hint to is_shared=1 and nulled its anchor
+# Promotion flipped an org-learned hint to a shared one and nulled its anchor
 # org, injecting it into every org whose runs match the hint's domain. Hints
 # learned on one customer's site must never reach another customer, so the
-# route was deleted to make that guarantee structural. Global hints are
-# exclusively admin-CREATED (POST /hints — generic, non-site-specific guidance);
-# test_learning_promote.py pins the removal.
+# route was deleted to make that guarantee structural. The shared-visibility
+# flag it set is itself gone now (schema v20): a hint belongs to exactly one
+# org, and generic guidance wanted in several is CREATED once per org via
+# POST /hints. test_learning_promote.py and test_hints_are_org_owned.py pin
+# both halves.
 # ---------------------------------------------------------------------------
 
 

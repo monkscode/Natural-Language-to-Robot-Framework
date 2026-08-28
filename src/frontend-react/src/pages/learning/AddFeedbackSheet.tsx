@@ -1,10 +1,15 @@
 /**
  * Add feedback — admin creates a hint directly (POST /api/learning/hints).
- * Mirrors the legacy modal: text, anchor query, scope, category,
+ * Mirrors the legacy modal: owning org, text, anchor query, scope, category,
  * original failure category, optional auto-triage.
+ *
+ * The org is required and has no sensible default: every hint belongs to
+ * exactly one org (schema v20), and a platform admin — the only caller this
+ * endpoint admits — belongs to none. Guidance wanted in several orgs is added
+ * once per org, so each copy keeps its own counters, flags and disables.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -13,11 +18,20 @@ import { api } from '@/lib/api'
 import { useAuth } from '@/auth/AuthContext'
 import { HINT_CATEGORIES, FAILURE_CATEGORIES } from './types'
 
+interface Org {
+  id: string
+  name: string
+  kind: 'team' | 'personal'
+}
+
 export default function AddFeedbackSheet({ onCreated, onClose }: {
   onCreated: () => void
   onClose: () => void
 }) {
   const { user } = useAuth()
+  const [orgs, setOrgs] = useState<Org[]>([])
+  const [orgId, setOrgId] = useState('')
+  const [orgErr, setOrgErr] = useState('')
   const [text, setText] = useState('')
   const [anchor, setAnchor] = useState('')
   const [scope, setScope] = useState('domain')
@@ -29,7 +43,18 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
+  useEffect(() => {
+    let live = true
+    api<Org[]>('/auth/admin/orgs')
+      .then(rows => { if (live) setOrgs(rows) })
+      .catch(e => {
+        if (live) setOrgErr(e instanceof Error ? e.message : 'Failed to load orgs')
+      })
+    return () => { live = false }
+  }, [])
+
   const valid =
+    orgId.trim().length > 0 &&
     text.trim().length > 0 &&
     anchor.trim().length >= 3 &&
     (scope !== 'domain' || domain.trim().length > 0) &&
@@ -44,6 +69,7 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
         body: JSON.stringify({
           feedback_text: text.trim().slice(0, 500),
           anchor_query: anchor.trim().slice(0, 500),
+          org_id: orgId,
           scope,
           domain: scope === 'domain' ? domain.trim() : null,
           url: scope === 'url' ? url.trim() : null,
@@ -72,6 +98,19 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
           <SheetDescription>Teach the generator a rule or correction directly</SheetDescription>
         </SheetHeader>
         <div className="mt-4 space-y-4 text-sm">
+          <div>
+            <label className="mb-1 block text-xs font-medium">Owning org *</label>
+            <select className={selectCls} value={orgId} onChange={e => setOrgId(e.target.value)}>
+              <option value="">— choose an org —</option>
+              {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {orgErr
+                ? orgErr
+                : 'This hint reaches only this org. To give the same guidance to another org, add it there too.'}
+            </p>
+          </div>
+
           <div>
             <label className="mb-1 block text-xs font-medium">Feedback text *</label>
             <Textarea

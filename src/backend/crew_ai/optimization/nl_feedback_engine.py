@@ -716,7 +716,9 @@ class NLFeedbackEngine(LearningEngine):
 
         domain = extract_domain(url) if url else None
 
-        org_filter = " AND (org_id = ? OR is_shared = 1)"
+        # Trailing space: the next literal is "ORDER BY", and the old value
+        # ended in ")" so it did not need one.
+        org_filter = " AND org_id = ? "
         params = (domain, url, org_id)
         try:
             with self._em.read_conn() as conn:
@@ -844,8 +846,8 @@ class NLFeedbackEngine(LearningEngine):
         Distinct from get_hints() — the LLM conflict-detection triggers need the
         raw text plus hint id to flag specific rows by id.  Returns [] (never None).
 
-        When org_id is set, only the caller's org hints plus is_shared=1 hints
-        are returned (privacy gate).  A missing org returns [] — see T9's note
+        Only the caller's own org's hints are returned (privacy gate); a hint
+        belongs to exactly one org.  A missing org returns [] — see T9's note
         on get_hints_with_ids.
         """
         if not self._em:
@@ -856,7 +858,7 @@ class NLFeedbackEngine(LearningEngine):
                 "org — returning no hints rather than every org's")
             return []
         try:
-            org_filter = " AND (org_id = ? OR is_shared = 1)"
+            org_filter = " AND org_id = ?"
             params = (domain, url, org_id)
             return self._select_hints(
                 f"is_active = 1 AND conflict_flagged = 0 AND ({self._SCOPE_WHERE}){org_filter}",

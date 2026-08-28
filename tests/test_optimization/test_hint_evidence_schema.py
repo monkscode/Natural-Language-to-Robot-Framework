@@ -67,8 +67,8 @@ def _insert(conn, hint_id, kind, key, hash_, bucket):
     )
 
 
-def test_schema_version_is_19():
-    assert pg_schema.SCHEMA_VERSION == 19
+def test_schema_version_is_20():
+    assert pg_schema.SCHEMA_VERSION == 20
 
 
 def test_fresh_database_has_hint_evidence():
@@ -76,7 +76,7 @@ def test_fresh_database_has_hint_evidence():
     try:
         conn = _schema_conn(admin, _FRESH_SCHEMA)
         try:
-            assert pg_schema.ensure_schema(conn) == 19
+            assert pg_schema.ensure_schema(conn) == 20
             assert _columns(conn, _FRESH_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
         finally:
             conn.close()
@@ -101,7 +101,7 @@ def test_existing_v18_database_gains_hint_evidence_via_migration():
                 "WHERE table_schema = %s", (_UPGRADE_SCHEMA,),
             ).fetchall()}
 
-            assert pg_schema.ensure_schema(conn) == 19
+            assert pg_schema.ensure_schema(conn) == 20
 
             assert _columns(conn, _UPGRADE_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
             assert 19 in {r[0] for r in conn.execute(
