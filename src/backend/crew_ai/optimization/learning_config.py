@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 WRITER_THREAD_NAME = "learning-writer"
 
 
+# Default submit_and_wait() budget in seconds. Long enough for a single
+# learning-store write (plus, on a cold process, the first fastembed encode
+# loading its ONNX model); short enough that a human who just clicked Submit
+# on /api/feedback does not notice. A timeout never cancels the job — see
+# submit_and_wait's docstring.
+SUBMIT_AND_WAIT_DEFAULT_TIMEOUT_SECONDS = 5.0
+
+
 # Max characters accepted for a user feedback_text, server-enforced at the two
 # feedback endpoints (POST /feedback, POST /hints). Single source of truth so
 # the hint-injection guard test can derive _HINT_CHAR_CAP from it: raising this
@@ -316,6 +324,49 @@ class LearningWriteQueue:
     def submit(self, write_fn, *args, **kwargs):
         """Submit a write operation — never blocks the caller."""
         self._queue.put((write_fn, args, kwargs))
+
+    def submit_and_wait(
+        self, write_fn, *args,
+        timeout: float = SUBMIT_AND_WAIT_DEFAULT_TIMEOUT_SECONDS, **kwargs
+    ):
+        """Submit a write and wait for the writer thread's verdict.
+
+        Returns ("ok", None) | ("failed", exc) | ("timeout", None).
+
+        `submit` is fire-and-forget by design: the pipeline must never block on
+        learning. /api/feedback is not the pipeline — it is a human-speed endpoint
+        that already blocks on a conflict-detection LLM call — and it is the one
+        caller that must report whether the user's correction was actually stored.
+        A timeout does NOT cancel the job: it still runs, so "we queued it and could
+        not confirm within the budget" is the honest answer, never a lost write.
+        """
+        if threading.current_thread().name == WRITER_THREAD_NAME:
+            raise RuntimeError(
+                "submit_and_wait() called from the LearningWriteQueue writer "
+                "thread would deadlock waiting for itself — use submit() from "
+                "writer-thread code."
+            )
+
+        done = threading.Event()
+        outcome_box: dict = {}
+
+        def _wrapped():
+            try:
+                write_fn(*args, **kwargs)
+            except BaseException as e:
+                outcome_box["exc"] = e
+                logger.warning(f"[LEARNING] Write failed (waited): {e}")
+            finally:
+                done.set()
+
+        self.submit(_wrapped)
+
+        if done.wait(timeout):
+            exc = outcome_box.get("exc")
+            if exc is not None:
+                return ("failed", exc)
+            return ("ok", None)
+        return ("timeout", None)
 
     def shutdown(self, timeout: float = 5.0):
         """Drain pending writes and stop the worker thread.

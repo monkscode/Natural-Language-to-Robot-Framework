@@ -1132,11 +1132,23 @@ class FeedbackLoop:
         Returns:
             Triage result dict (category, confidence, taxonomy_code) plus an
             "outcome" key the API layer renders honestly:
-              "processed"       the record was found and the engines were routed
+              "processed"       the record was found and the correction write
+                                ran to completion without raising. This is also
+                                the honest outcome for every legitimate
+                                no-store path — empty text, category=
+                                "positive", and a T5-gated duplicate all reach
+                                a clean return.
               "no_record"       no learning record for this run within the
                                 poll's budget — triage ran, engines did not
               "learning_paused" the circuit breaker is open; nothing was written
-              "error"           an internal failure; nothing here can be relied on
+              "no_org"          the run carries no organisation, so the NL
+                                write was never submitted — it would only be
+                                refused downstream (nl_feedback_engine.py, T9)
+              "queued"          the NL write was submitted but did not confirm
+                                within the wait budget; it still runs to
+                                completion on the writer thread
+              "error"           the NL write raised, or an internal failure
+                                occurred; nothing here can be relied on
         """
         _fallback_triage = {
             "category": "uncategorized",
@@ -1245,15 +1257,9 @@ class FeedbackLoop:
                 # who submitted — recorded by the NL engine's implicit-unflag audit row
                 triage["actor"] = actor
 
-                engines = [
-                    self.structural_engine,
-                    self.keyword_engine,
-                    self.anti_pattern_engine,
-                ]
-                if self.nl_engine is not None:
-                    engines.append(self.nl_engine)
-
-                for engine in engines:
+                for engine in (
+                    self.structural_engine, self.keyword_engine, self.anti_pattern_engine,
+                ):
                     try:
                         self.write_queue.submit(
                             engine.learn_from_feedback, record, triage,
@@ -1263,6 +1269,40 @@ class FeedbackLoop:
                             "[LEARNING] Engine routing failed for %s: %s",
                             type(engine).__name__, e,
                         )
+
+                # Only the NL engine's write determines whether a correction
+                # row exists — verified: AntiPatternEngine, KeywordCorrection-
+                # Engine and StructuralRuleEngine define no learn_from_feedback
+                # of their own and inherit LearningEngine's no-op `pass`
+                # (learning_config.py:428-437), so their outcome can never
+                # speak for "the correction was stored." That is why only this
+                # call is awaited for a real verdict; the three above stay
+                # fire-and-forget, unchanged from before this task.
+                if self.nl_engine is not None:
+                    if record.org_id is None:
+                        # T9: nl_feedback_engine.py's own write refuses an
+                        # org-less record (a hint with no org could never be
+                        # read again) — checked again here so the caller
+                        # learns this now instead of after a queued job that
+                        # would only log a warning and do nothing.
+                        outcome = "no_org"
+                    else:
+                        try:
+                            verdict, _detail = self.write_queue.submit_and_wait(
+                                self.nl_engine.learn_from_feedback, record, triage,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "[LEARNING] Engine routing failed for %s: %s",
+                                type(self.nl_engine).__name__, e,
+                            )
+                            outcome = "error"
+                        else:
+                            if verdict == "failed":
+                                outcome = "error"
+                            elif verdict == "timeout":
+                                outcome = "queued"
+                            # verdict == "ok": outcome stays "processed"
             safe_wid = (
                 workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
                 else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()

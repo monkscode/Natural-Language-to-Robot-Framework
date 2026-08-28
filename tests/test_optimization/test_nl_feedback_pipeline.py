@@ -49,6 +49,10 @@ class SynchronousWriteQueue:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 class MockEngine:
     """Minimal mock of a LearningEngine for FeedbackLoop tests."""

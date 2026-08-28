@@ -256,6 +256,14 @@ _FEEDBACK_OUTCOME_MESSAGES = {
         "Learning is paused right now, so this correction was not recorded. "
         "Please send it again later."
     ),
+    "queued": (
+        "Your correction was received and is still being saved. You do not "
+        "need to send it again."
+    ),
+    "no_org": (
+        "This run is not associated with an organisation, so the correction "
+        "could not be filed and was not recorded."
+    ),
     "error": (
         "Something went wrong, so this correction was not recorded. "
         "Please send it again."
@@ -349,8 +357,8 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     Two fields, two jobs:
 
       * `outcome` is the only authority on what happened to the CORRECTION —
-        "processed" | "no_record" | "learning_paused" | "error", straight from
-        process_user_feedback. Read this one.
+        "processed" | "no_record" | "learning_paused" | "no_org" | "queued" |
+        "error", straight from process_user_feedback. Read this one.
       * `status` keeps the meaning it has across this router: could the
         endpoint give an account at all. It is "error" only for the outcome of
         the same name, which is the same class of event the handler's own

@@ -245,3 +245,45 @@ describe('the corrections this run already contributed', () => {
     expect(mockApi).not.toHaveBeenCalled()
   })
 })
+
+/* ── M9: the mount-only fetch above cannot see a correction filed during
+   THIS session, so a second correction typed after the first landed never
+   showed up in "Already recorded for this run" until the page was reloaded.
+   Re-fetching once the POST confirms `processed` closes that gap. ── */
+
+describe('M9: catching up after a correction lands', () => {
+  const getCalls = () =>
+    mockApi.mock.calls.filter(([path, opts]) => path === '/api/feedback/wf-1' && opts === undefined)
+
+  it('re-fetches the recorded list once a correction confirms processed', async () => {
+    onFile([])
+    const { box, submit } = renderFailPanel()
+    await mounted()
+    expect(getCalls()).toHaveLength(1)
+
+    mockApi.mockResolvedValueOnce({ status: 'success', outcome: 'processed', message: THANKS })
+    mockApi.mockResolvedValueOnce({
+      status: 'success',
+      corrections: [{ hint_id: 21, feedback_text: 'the search box locator was off', recorded_at: '2026-08-29T00:00:00Z' }],
+    })
+    fireEvent.change(box, { target: { value: 'the search box locator was off' } })
+    fireEvent.click(submit)
+    await screen.findByText(THANKS)
+
+    await waitFor(() => expect(getCalls()).toHaveLength(2))
+  })
+
+  it('does not re-fetch when the correction did not confirm processed', async () => {
+    onFile([])
+    const { box, submit } = renderFailPanel()
+    await mounted()
+    expect(getCalls()).toHaveLength(1)
+
+    mockApi.mockResolvedValueOnce({ status: 'success', outcome: 'no_record', message: 'not confirmed' })
+    fireEvent.change(box, { target: { value: 'the search box locator was off' } })
+    fireEvent.click(submit)
+    await screen.findByText('not confirmed')
+
+    expect(getCalls()).toHaveLength(1)
+  })
+})

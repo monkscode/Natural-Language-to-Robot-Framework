@@ -37,6 +37,10 @@ class _SyncQueue:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 def _make_minimal_fb(in_memory_em):
     """Build a FeedbackLoop with all deps mocked out except execution_memory."""

@@ -79,6 +79,11 @@ class SynchronousWriteQueue:
         self.submit_count += 1
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        self.submit_count += 1
+        fn(*args, **kwargs)
+        return ("ok", None)
+
     def pending(self):
         return 0
 

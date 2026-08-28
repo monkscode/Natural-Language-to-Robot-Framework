@@ -142,14 +142,44 @@ class TestTheFourOutcomes:
         assert body["status"] == "error"
         assert "helps the system learn" not in body["message"]
 
+    def test_queued_says_it_is_still_being_saved(self, client_and_loop):
+        """Task 1: the NL write was submitted (via submit_and_wait) but did
+        not confirm within budget — it still runs, so this is not an error."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="queued")
+
+        body = _post(client).json()
+
+        assert body["outcome"] == "queued"
+        assert body["status"] == "success", (
+            "nothing failed — confirmation merely did not arrive in budget"
+        )
+        assert "helps the system learn" not in body["message"]
+        assert "do not need to send it again" in body["message"].lower()
+
+    def test_no_org_says_the_run_has_no_organisation(self, client_and_loop):
+        """Task 1, mode (a): an org-less run's correction can never be filed
+        where it could be read again, so the NL write is never submitted."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_org")
+
+        body = _post(client).json()
+
+        assert body["outcome"] == "no_org"
+        assert body["status"] == "success"
+        assert "helps the system learn" not in body["message"]
+        assert "organisation" in body["message"].lower()
+
     def test_every_outcome_carries_its_own_message(self, client_and_loop):
         client, loop = client_and_loop
         seen = {}
-        for outcome in ("processed", "no_record", "learning_paused", "error"):
+        for outcome in (
+            "processed", "no_record", "learning_paused", "queued", "no_org", "error",
+        ):
             loop.process_user_feedback.return_value = _triage(outcome=outcome)
             seen[outcome] = _post(client).json()["message"]
 
-        assert len(set(seen.values())) == 4, seen
+        assert len(set(seen.values())) == 6, seen
 
 
 class TestTheOutcomeHasExactlyOneHome:
@@ -207,9 +237,13 @@ class TestTheVocabularyIsNotTwoVocabularies:
 
     Read from the loop's SOURCE rather than from a declared tuple, because a
     declaration can drift from the literals it claims to describe while the
-    literals are what actually ship. Limitation, stated rather than hidden: a
-    fifth outcome introduced through a variable instead of a literal is
-    invisible here.
+    literals are what actually ship. Limitation, stated rather than hidden: an
+    outcome introduced through a variable named anything other than `outcome`
+    is invisible here — Task 1's "no_org"/"queued"/mapped-"error" outcomes are
+    all assigned to a variable literally named `outcome` (feedback_loop.py's
+    own return uses `{**triage, "outcome": outcome}`), so the third pattern
+    below catches exactly that shape without also catching unrelated
+    string-literal assignments elsewhere in the module.
     """
 
     def test_the_endpoint_can_describe_every_outcome_the_loop_can_return(self):
@@ -222,6 +256,7 @@ class TestTheVocabularyIsNotTwoVocabularies:
         src = inspect.getsource(feedback_loop)
         produced = set(re.findall(r'"outcome":\s*"(\w+)"', src))
         produced |= set(re.findall(r'return\s+\w+,\s*"(\w+)"', src))
+        produced |= set(re.findall(r'\boutcome\s*=\s*"(\w+)"', src))
 
         assert produced, "the scan found no outcome literals — it has stopped working"
         assert produced == set(_FEEDBACK_OUTCOME_MESSAGES), (

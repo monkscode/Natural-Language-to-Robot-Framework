@@ -516,6 +516,16 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       // off — while the text was discarded. The sentence itself is the
       // backend's, so one place says what the system did.
       const ok = body?.outcome === 'processed'
+      // M9: the mount-effect fetch above only ever runs once, so a correction
+      // filed during THIS session never showed up in "Already recorded for
+      // this run" until the page reloaded. Re-fetch once the backend confirms
+      // this one actually landed — display only, not the storage check (that
+      // is `outcome`, already read above).
+      if (ok && workflowId) {
+        api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`)
+          .then(b => setRecorded(Array.isArray(b?.corrections) ? b.corrections : []))
+          .catch(() => { /* silence is the honest degradation here, same as the mount fetch */ })
+      }
       setResult({
         ok,
         message: body?.message || (ok

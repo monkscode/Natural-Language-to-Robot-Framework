@@ -41,6 +41,11 @@ class _RecordingWriteQueue:
         self.submitted.append(getattr(fn, "__name__", repr(fn)))
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        self.submitted.append(getattr(fn, "__name__", repr(fn)))
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 class _DeferredWriteQueue:
     """FIFO, drained on demand — the real queue's ordering without its thread."""
@@ -51,10 +56,40 @@ class _DeferredWriteQueue:
     def submit(self, fn, *args, **kwargs):
         self.jobs.append((fn, args, kwargs))
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        # Not reached by any test in this file today (every test that uses
+        # this double never gets past the poll to Step 4), so there is no
+        # deferral behaviour to preserve here — run inline like the other
+        # doubles' submit_and_wait, per the Step 1d default.
+        fn(*args, **kwargs)
+        return ("ok", None)
+
     def drain(self):
         jobs, self.jobs = self.jobs, []
         for fn, args, kwargs in jobs:
             fn(*args, **kwargs)
+
+
+class _VerdictWriteQueue:
+    """submit() runs inline; submit_and_wait() returns a scripted verdict
+    without running the job at all.
+
+    Exists to unit-test process_user_feedback's OUTCOME MAPPING (Step 1b) in
+    isolation from the real timing/threading mechanics of submit_and_wait
+    itself, which test_write_queue_wait.py already covers against the real
+    LearningWriteQueue.
+    """
+
+    def __init__(self, verdict):
+        self._verdict = verdict
+        self.waited = []
+
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        self.waited.append((fn, args, kwargs))
+        return self._verdict
 
 
 class _MockEngine:
@@ -113,10 +148,16 @@ def _build_loop(conn, write_queue=None):
     return fl, em
 
 
-def _store(fl, workflow_id, *, status="failed", code="v1"):
+def _store(fl, workflow_id, *, status="failed", code="v1", org_id="org-ordering"):
+    # org_id defaults non-None: these records feed the NL-engine routing step,
+    # and an org-less record now reports "no_org" and skips that write (T9 /
+    # Task 1 mode a) — a case this file's poll/ordering tests are not about.
+    # test_org_less_record_reports_no_org... below is the one that sets None
+    # on purpose.
     fl.process_execution(
         workflow_id=workflow_id, user_query="click the login button",
         url="https://example.com", robot_code=code, test_status=status,
+        org_id=org_id,
     )
 
 
@@ -290,6 +331,68 @@ class TestOutcomes:
         assert triage["outcome"] == "processed"
         assert sleeps == []
         assert fl.nl_engine.feedback_calls[0][0].robot_code == "v1 code"
+
+
+class TestNLEngineVerdictOutcomes:
+    """Task 1 (feedback integrity remediation): `outcome` now reflects the
+    NL engine write's real verdict, not just whether the execution record was
+    found. Only the NL engine's learn_from_feedback is awaited — structural,
+    keyword and anti-pattern engines define no override (LearningEngine's
+    no-op `pass`), so their write can never speak for "the correction was
+    stored"."""
+
+    def test_org_less_record_reports_no_org_and_skips_the_nl_write(self, in_memory_db):
+        queue = _RecordingWriteQueue()
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        _store(fl, "wf-no-org", org_id=None)
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-no-org", "wrong login locator", "completely_wrong")
+
+        assert triage["outcome"] == "no_org"
+        assert fl.nl_engine.feedback_calls == [], (
+            "the NL job must never be submitted for an org-less record"
+        )
+        assert fl.structural_engine.feedback_calls, (
+            "the other three engines still route normally — only the NL "
+            "engine's write is gated on org_id"
+        )
+
+    def test_nl_engine_write_failure_reports_error(self, in_memory_db):
+        exc = RuntimeError("writer thread blew up")
+        queue = _VerdictWriteQueue(("failed", exc))
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        _store(fl, "wf-nl-fail")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-nl-fail", "wrong login locator", "completely_wrong")
+
+        assert triage["outcome"] == "error"
+        assert queue.waited, "the NL job must have been submitted via submit_and_wait"
+
+    def test_nl_engine_write_timeout_reports_queued(self, in_memory_db):
+        queue = _VerdictWriteQueue(("timeout", None))
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        _store(fl, "wf-nl-timeout")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-nl-timeout", "wrong login locator", "completely_wrong")
+
+        assert triage["outcome"] == "queued"
+
+    def test_nl_engine_write_ok_keeps_processed(self, in_memory_db):
+        queue = _VerdictWriteQueue(("ok", None))
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        _store(fl, "wf-nl-ok")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-nl-ok", "wrong login locator", "completely_wrong")
+
+        assert triage["outcome"] == "processed"
 
 
 # ---------------------------------------------------------------------------
