@@ -466,9 +466,14 @@ class NLFeedbackEngine(LearningEngine):
             # org's identical text must create that org's own row — matching
             # cross-org would let one tenant's feedback strengthen, reactivate,
             # or unflag another tenant's hint (and silently drop its own).
-            # Each branch mirrors one uq_nlfc_dedup_*_v21 index exactly; a
-            # SELECT narrower than its index dies on the constraint instead of
+            # Each branch mirrors one uq_nlfc_dedup_*_v21 index: a SELECT
+            # narrower than its index dies on the constraint instead of
             # deduplicating, and the correction is lost rather than counted.
+            # `IS NOT DISTINCT FROM` and the index's COALESCE(x,'') agree on
+            # NULL and on every non-empty value, and would disagree on ''.
+            # `domain` cannot BE '' here: extract_domain returns 'unknown' for
+            # an unparseable url, and the `or` below turns an empty
+            # record.domain into that result or None.
             if scope == "url":
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "

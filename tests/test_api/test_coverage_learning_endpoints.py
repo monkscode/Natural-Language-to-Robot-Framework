@@ -578,7 +578,7 @@ class TestCreateHint:
     def test_url_scope_second_page_is_not_deduped_into_the_first(self, learning_client):
         """Two url-scoped hints with identical text+domain but different urls are
         distinct hints, one per page. The dedup SELECT must key on url for
-        scope='url' — the storage contract already does (uq_nlfc_dedup_url) and so
+        scope='url' — the storage contract already does (uq_nlfc_dedup_url_v21) and so
         does NLFeedbackEngine.learn_from_feedback. Omitting url here bumps evidence
         on the FIRST page's hint and the second page's hint is never created."""
         client, _, _, db_path = learning_client
