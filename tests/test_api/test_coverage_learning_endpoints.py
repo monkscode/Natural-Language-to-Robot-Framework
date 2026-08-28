@@ -692,6 +692,155 @@ class TestPatchHint:
         resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "scope": "invalid"})
         assert resp.status_code == 400
 
+    def test_a_colliding_scope_change_is_a_409_not_a_500(self, learning_client):
+        """The admin drawer sends scope/domain/url on every save, so an edit can
+        land on an existing hint's dedup key. That is a conflict the admin can
+        resolve, not a server fault: RFC 9110 reserves 409 for exactly this, and
+        `create_hint` already answers 409 for the same constraint. Answering 500
+        tells the admin nothing and hides the reason in the log.
+
+        v21 widened this case specifically: the global key no longer includes
+        `domain`, so any same-text global hint in the org now collides."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     domain="other.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 409, (
+            f"colliding scope change answered {resp.status_code}: {resp.json()}"
+        )
+        detail = resp.json()["detail"]
+        assert "already" in detail.lower(), detail
+        # The hint must be unchanged — a refused edit that half-applied would be
+        # worse than the 500 it replaces.
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT scope, domain FROM nl_feedback_corrections WHERE id = ?",
+            (target,),
+        ).fetchone()
+        conn.close()
+        assert row["scope"] == "domain" and row["domain"] == "shop.test"
+
+    def test_a_colliding_domain_change_is_a_409_too(self, learning_client):
+        """Not only scope. Moving a domain-scoped hint onto a domain that
+        already carries the same text hits uq_nlfc_dedup_general_v21. This half
+        is pre-existing — v21 neither created nor widened it — and the same
+        handler covers it because there is one UPDATE."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                     domain="taken.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "domain": "taken.test",
+        })
+
+        assert resp.status_code == 409, (
+            f"colliding domain change answered {resp.status_code}: {resp.json()}"
+        )
+
+    def test_a_non_colliding_scope_change_still_succeeds(self, learning_client):
+        """Anti-false-green: a handler that answered 409 unconditionally, or an
+        over-broad except that swallowed every failure, would pass the two tests
+        above and break every legitimate edit."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="a different correction",
+                     scope="global", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["scope"] == "global"
+
+    def test_another_orgs_identical_hint_does_not_block_the_change(self, learning_client):
+        """org_id is in every dedup key, so a second tenant holding the same
+        text at the same scope is not a conflict. If it were, one org's hints
+        could veto another org's admin edits."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     org_id="org-other")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 200, resp.json()
+
+    def test_a_refused_edit_writes_no_audit_row(self, learning_client):
+        """The audit row is written after the UPDATE, so a refused edit must
+        leave the timeline alone. A `patch` row for an edit that never happened
+        is the same class of untrue event T5 and T11 exist to prevent."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     domain="other.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        client.patch(f"/hints/{target}", json={"actor": "alice", "scope": "global"})
+
+        conn = _pg_conn(db_path)
+        rows = conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ?", (target,),
+        ).fetchall()
+        conn.close()
+        assert rows == [], f"a refused edit was audited: {[r[0] for r in rows]}"
+
+
+class TestCreateHintOrgIdIsAlreadyValidated:
+    """Pinning behaviour that already exists, because a review claimed it did
+    not: `HintCreateRequest.org_id` is a bare `str` with no `min_length`, so the
+    Pydantic model alone would accept "". The handler strips and rejects it,
+    matching what it already does for actor / feedback_text / anchor_query.
+
+    It matters because `COALESCE(org_id,'')` in all three dedup indexes maps ""
+    onto the same bucket as a legacy NULL org — so an empty org is the one
+    wrong org value that is not merely an orphan.
+    """
+
+    def _payload(self, org_id):
+        return {
+            "feedback_text": "use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "global", "actor": "alice", "org_id": org_id,
+        }
+
+    def test_an_empty_org_is_refused(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._payload(""))
+        assert resp.status_code == 400
+        assert "org_id" in resp.json()["detail"]
+
+    def test_a_whitespace_org_is_refused(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._payload("   "))
+        assert resp.status_code == 400
+
+    def test_a_padded_org_is_stored_stripped(self, learning_client):
+        """Not just refused-if-empty: the value is normalised, so "  org-a  "
+        cannot become a hint no token will ever match."""
+        client, _, _, db_path = learning_client
+        resp = client.post("/hints", json=self._payload("  org-padded  "))
+        assert resp.status_code == 201
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT org_id FROM nl_feedback_corrections WHERE id = ?",
+            (resp.json()["hint"]["id"],),
+        ).fetchone()
+        conn.close()
+        assert row["org_id"] == "org-padded"
+
 
 # ---------------------------------------------------------------------------
 # POST /hints/{id}/unflag

@@ -675,10 +675,28 @@ def patch_hint(
             return {"hint": row_dict, "changed": False}
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        conn.execute(
-            f"UPDATE nl_feedback_corrections SET {set_clause} WHERE id = ?",
-            list(updates.values()) + [hint_id],
-        )
+        try:
+            conn.execute(
+                f"UPDATE nl_feedback_corrections SET {set_clause} WHERE id = ?",
+                list(updates.values()) + [hint_id],
+            )
+        except sqlite3.IntegrityError:
+            # scope/domain/url ARE the dedup key, so an edit can land on another
+            # hint's key — reachable from the drawer, which sends all three on
+            # every save. That is a conflict the admin can resolve, not a server
+            # fault, and create_hint already answers 409 for these same indexes.
+            # The only IntegrityError this UPDATE can raise is one of them: it
+            # never touches the primary key, scope is validated to one of three
+            # literals above, and every other column it writes is nullable.
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Another hint in this org already matches this one's text "
+                    "and target. Retract the duplicate, or choose a different "
+                    "scope/domain/url."
+                ),
+            ) from None
         after = dict(updates)
         # A patch may change any combination of scope/url/domain/category — a
         # single action verb cannot name all of them, and before/after already
