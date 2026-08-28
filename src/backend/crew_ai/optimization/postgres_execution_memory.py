@@ -396,6 +396,11 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 if row["injected_hint_ids"] is not None else None
             ),
             model_version=row["model_version"],
+            # The owning org must survive the round trip: this is the record
+            # process_user_feedback hands to the engines, and T9's write guard
+            # refuses an org-less one. Dropping it here made every read-back
+            # record look untenanted.
+            org_id=row["org_id"],
             hint_attribution_done=row["hint_attribution_done"],
         )
 
@@ -508,12 +513,21 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def find_similar_executions(self, user_query: str, top_k: int = 5,
                                 org_id: str | None = None) -> list:
+        """Nearest past executions by embedding distance, scoped to one org.
+
+        A missing org returns [] (T9): the filter used to be dropped entirely,
+        which handed an org-less caller every org's executions.
+        """
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] similarity search refused: caller carries no org — "
+                "returning no executions rather than every org's")
+            return []
         vec = self._embed(user_query)
         if not vec:
             return []
-        where = "WHERE org_id = ? " if org_id is not None else ""
-        params = ([vec, org_id, vec, top_k] if org_id is not None
-                  else [vec, vec, top_k])
+        where = "WHERE org_id = ? "
+        params = [vec, org_id, vec, top_k]
         try:
             with self.read_conn() as conn:
                 rows = conn.execute(
