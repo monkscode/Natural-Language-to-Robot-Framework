@@ -1147,8 +1147,9 @@ class FeedbackLoop:
               "queued"          the NL write was submitted but did not confirm
                                 within the wait budget; it still runs to
                                 completion on the writer thread
-              "error"           the NL write raised, or an internal failure
-                                occurred; nothing here can be relied on
+              "error"           no NL engine is available, the NL write
+                                raised, or an internal failure occurred;
+                                nothing here can be relied on
         """
         _fallback_triage = {
             "category": "uncategorized",
@@ -1250,6 +1251,11 @@ class FeedbackLoop:
                     ),
                 )
 
+            safe_wid = (
+                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
+                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
+            )
+
             # Step 4: Route to engines via learn_from_feedback
             if record:
                 # Inject raw feedback text so engines can access it
@@ -1278,35 +1284,45 @@ class FeedbackLoop:
                 # speak for "the correction was stored." That is why only this
                 # call is awaited for a real verdict; the three above stay
                 # fire-and-forget, unchanged from before this task.
-                if self.nl_engine is not None:
-                    if record.org_id is None:
-                        # T9: nl_feedback_engine.py's own write refuses an
-                        # org-less record (a hint with no org could never be
-                        # read again) — checked again here so the caller
-                        # learns this now instead of after a queued job that
-                        # would only log a warning and do nothing.
-                        outcome = "no_org"
+                if self.nl_engine is None:
+                    # Mode (b): no NL engine means no correction write is even
+                    # possible — "processed" would claim a write that never
+                    # ran. NLFeedbackEngine unavailability is already logged
+                    # once at construction time (FeedbackLoop.__init__).
+                    outcome = "error"
+                elif record.org_id is None:
+                    # T9: nl_feedback_engine.py's own write refuses an
+                    # org-less record (a hint with no org could never be
+                    # read again) — checked again here so the caller learns
+                    # this now instead of after a queued job that would only
+                    # log a warning and do nothing. This early return happens
+                    # BEFORE that downstream warning could ever fire, so the
+                    # same "refused (no org)" token is logged here too —
+                    # every tenancy refusal shares it so one Loki query finds
+                    # them all.
+                    logger.warning(
+                        "[LEARNING] correction write refused (no org): run "
+                        "%s carries no org — the correction cannot be "
+                        "stored where it could be read again", safe_wid,
+                    )
+                    outcome = "no_org"
+                else:
+                    try:
+                        verdict, _detail = self.write_queue.submit_and_wait(
+                            self.nl_engine.learn_from_feedback, record, triage,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[LEARNING] Engine routing failed for %s: %s",
+                            type(self.nl_engine).__name__, e,
+                        )
+                        outcome = "error"
                     else:
-                        try:
-                            verdict, _detail = self.write_queue.submit_and_wait(
-                                self.nl_engine.learn_from_feedback, record, triage,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "[LEARNING] Engine routing failed for %s: %s",
-                                type(self.nl_engine).__name__, e,
-                            )
+                        if verdict == "failed":
                             outcome = "error"
-                        else:
-                            if verdict == "failed":
-                                outcome = "error"
-                            elif verdict == "timeout":
-                                outcome = "queued"
-                            # verdict == "ok": outcome stays "processed"
-            safe_wid = (
-                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
-                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
-            )
+                        elif verdict == "timeout":
+                            outcome = "queued"
+                        # verdict == "ok": outcome stays "processed"
 
             if not record:
                 logger.warning(

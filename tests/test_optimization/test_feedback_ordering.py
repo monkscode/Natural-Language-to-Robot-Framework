@@ -15,6 +15,7 @@ Pinned here: the poll's shape, the four outcomes it feeds back to the caller,
 and the rule that keeps the raw feedback text durable even when the poll gives
 up.
 """
+import logging
 from unittest.mock import MagicMock, patch
 
 from src.backend.crew_ai.optimization.feedback_loop import (
@@ -341,12 +342,13 @@ class TestNLEngineVerdictOutcomes:
     no-op `pass`), so their write can never speak for "the correction was
     stored"."""
 
-    def test_org_less_record_reports_no_org_and_skips_the_nl_write(self, in_memory_db):
+    def test_org_less_record_reports_no_org_and_skips_the_nl_write(self, in_memory_db, caplog):
         queue = _RecordingWriteQueue()
         fl, em = _build_loop(in_memory_db, write_queue=queue)
         _store(fl, "wf-no-org", org_id=None)
 
-        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT), \
+                caplog.at_level(logging.WARNING):
             triage = fl.process_user_feedback(
                 "wf-no-org", "wrong login locator", "completely_wrong")
 
@@ -357,6 +359,36 @@ class TestNLEngineVerdictOutcomes:
         assert fl.structural_engine.feedback_calls, (
             "the other three engines still route normally — only the NL "
             "engine's write is gated on org_id"
+        )
+        # The early return happens BEFORE nl_feedback_engine.py's own
+        # "refused (no org)" warning could ever fire (this branch never
+        # submits the job), so without a log line here the refusal is
+        # invisible to Loki entirely. Every tenancy refusal shares the same
+        # token so one query finds them all.
+        assert any("refused (no org)" in r.message for r in caplog.records
+                   if r.levelno >= logging.WARNING), (
+            "the no_org outcome must log the same 'refused (no org)' token "
+            "every other tenancy refusal uses"
+        )
+
+    def test_nl_engine_none_reports_error(self, in_memory_db):
+        """Mode (b): a NL engine that failed to construct
+        (FeedbackLoop.__init__'s except branch) means no correction write is
+        even possible. `outcome` must not stay "processed" — that would claim
+        a write that never ran."""
+        queue = _RecordingWriteQueue()
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        fl.nl_engine = None
+        _store(fl, "wf-nl-none")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-nl-none", "wrong login locator", "completely_wrong")
+
+        assert triage["outcome"] == "error"
+        assert fl.structural_engine.feedback_calls, (
+            "the other three engines still route normally when the NL "
+            "engine itself is absent"
         )
 
     def test_nl_engine_write_failure_reports_error(self, in_memory_db):
