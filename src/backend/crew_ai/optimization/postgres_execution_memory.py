@@ -520,22 +520,20 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         """
         if org_id is None:
             logger.warning(
-                "[LEARNING] similarity search refused: caller carries no org — "
+                "[LEARNING] execution similarity read refused (no org): "
                 "returning no executions rather than every org's")
             return []
         vec = self._embed(user_query)
         if not vec:
             return []
-        where = "WHERE org_id = ? "
-        params = [vec, org_id, vec, top_k]
         try:
             with self.read_conn() as conn:
                 rows = conn.execute(
                     "SELECT workflow_id, test_status, failure_category, domain, "
                     "       code_structure, 1 - (embedding <=> ?::vector) AS similarity "
-                    f"FROM execution_embeddings {where}"
+                    "FROM execution_embeddings WHERE org_id = ? "
                     "ORDER BY embedding <=> ?::vector LIMIT ?",
-                    params,
+                    [vec, org_id, vec, top_k],
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:

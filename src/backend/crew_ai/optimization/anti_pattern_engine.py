@@ -99,8 +99,8 @@ class AntiPatternEngine(LearningEngine):
         # passing-run branch below, whose lookup is an org-scoped read.
         if getattr(record, "org_id", None) is None:
             logger.warning(
-                "[LEARNING] anti-pattern learning refused: run %s carries no "
-                "org — the row could never be read again",
+                "[LEARNING] anti-pattern write refused (no org): run %s carries "
+                "no org — the row could never be read again",
                 getattr(record, "workflow_id", None))
             return
 
@@ -269,18 +269,15 @@ class AntiPatternEngine(LearningEngine):
         Called from learn() which already runs on the writer thread, so we
         read from _writer_conn to stay within the same transaction context.
         When org_id is set, only anti-patterns belonging to that org are
-        considered so cross-org failures never merge.  A missing org matches
-        nothing (T9): the predicate used to be dropped entirely, so an org-less
-        run could match — and then REINFORCE — another org's row.
+        considered so cross-org failures never merge.  The predicate used to be
+        dropped entirely when org_id was None, so an org-less run could match —
+        and then REINFORCE — another org's row.  It is unconditional now, which
+        fails closed by SQL semantics (`org_id = NULL` is never true) rather
+        than by a branch a future caller could route around.  learn() refuses an
+        org-less record before reaching here, so no WARNING is logged twice.
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        if org_id is None:
-            logger.warning(
-                "[LEARNING] anti-pattern merge lookup refused: record carries "
-                "no org — creating a new row rather than reinforcing another "
-                "org's")
-            return None
         rows = self._em._writer_conn.execute(
             "SELECT * FROM anti_patterns WHERE failure_category = ? "
             "AND org_id = ? ORDER BY score DESC",
@@ -325,8 +322,8 @@ class AntiPatternEngine(LearningEngine):
 
         if org_id is None:
             logger.warning(
-                "[LEARNING] anti-pattern lookup refused: caller carries no org "
-                "— returning no warnings rather than every org's")
+                "[LEARNING] anti-pattern read refused (no org): returning no "
+                "warnings rather than every org's")
             return []
 
         # Get high-scoring anti-patterns above the injection threshold.

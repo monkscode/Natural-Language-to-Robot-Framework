@@ -124,10 +124,11 @@ class TestHintReadsFailClosed:
         engine = NLFeedbackEngine(execution_memory=em_vec)
         with caplog.at_level(logging.WARNING):
             engine.get_hints_with_ids(_QUERY, _URL, "assembler", org_id=None)
-        assert any("org" in r.message.lower() for r in caplog.records
+        assert any("refused (no org)" in r.message for r in caplog.records
                    if r.levelno >= logging.WARNING), (
             "a fail-closed read that logs nothing is indistinguishable from "
-            "'there were no hints'")
+            "'there were no hints'; every tenancy refusal carries the same "
+            "'refused (no org)' token so one Loki query finds them all")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +149,12 @@ class TestAntiPatternReadsFailClosed:
 
     def test_the_dedup_lookup_matches_nothing_without_an_org(self, em_vec):
         """_find_similar_anti_pattern failing open let an org-less run REINFORCE
-        another org's row — a cross-org mutation, not only a read leak."""
+        another org's row — a cross-org mutation, not only a read leak.
+
+        There is no branch here to test: the predicate is unconditional and
+        `org_id = NULL` is never true in SQL, so this pins that the predicate
+        stays unconditional. Re-adding `if org_id is not None` fails it.
+        """
         _seed_anti(em_vec, "org-A")
         engine = AntiPatternEngine(execution_memory=em_vec)
         assert engine._find_similar_anti_pattern("A1", _QUERY, org_id=None) is None
@@ -223,7 +229,7 @@ class TestHintWriteFailsClosed:
                 {"category": "keyword", "feedback_text": "wait for the spinner",
                  "actor": "tester"})
         assert self._hints(in_memory_db) == []
-        assert any("org" in r.message.lower() for r in caplog.records
+        assert any("refused (no org)" in r.message for r in caplog.records
                    if r.levelno >= logging.WARNING)
 
     def test_an_org_bearing_record_still_creates_its_hint(self, in_memory_db):
@@ -264,7 +270,7 @@ class TestAntiPatternWriteFailsClosed:
         with caplog.at_level(logging.WARNING):
             engine.learn(_record(org_id=None))
         assert self._anti(in_memory_db) == []
-        assert any("org" in r.message.lower() for r in caplog.records
+        assert any("refused (no org)" in r.message for r in caplog.records
                    if r.levelno >= logging.WARNING)
 
     def test_an_org_bearing_record_still_creates_its_anti_pattern(self, in_memory_db):
@@ -321,7 +327,7 @@ class TestPatternWriteFailsClosed:
             assert kw_store.add_pattern(_QUERY, ["Get Text"], org_id=None) is None
         assert self._count(kw_store, "org_id IS NULL AND user_query = %s",
                            (_QUERY,)) == 0
-        assert any("org" in r.message.lower() for r in caplog.records
+        assert any("refused (no org)" in r.message for r in caplog.records
                    if r.levelno >= logging.WARNING)
 
     def test_add_pattern_with_an_org_still_stores(self, kw_store):
@@ -332,7 +338,7 @@ class TestPatternWriteFailsClosed:
         kw_store.add_pattern(_QUERY, ["Get Text"], org_id="org-A")
         with caplog.at_level(logging.WARNING):
             assert kw_store.search_patterns(_QUERY, org_id=None) == []
-        assert any("org" in r.message.lower() for r in caplog.records
+        assert any("refused (no org)" in r.message for r in caplog.records
                    if r.levelno >= logging.WARNING)
 
     def test_search_patterns_still_serves_the_owning_org(self, kw_store):

@@ -418,9 +418,9 @@ class NLFeedbackEngine(LearningEngine):
         # user's next legitimate correction from that run.
         if getattr(record, "org_id", None) is None:
             logger.warning(
-                "[LEARNING:NL] learn_from_feedback refused: run %s carries no "
-                "org — the correction cannot be stored where it could be read "
-                "again", getattr(record, "workflow_id", None))
+                "[LEARNING:NL] correction write refused (no org): run %s carries "
+                "no org — the correction cannot be stored where it could be "
+                "read again", getattr(record, "workflow_id", None))
             return
 
         feedback_text = feedback_insight.get("feedback_text")
@@ -710,15 +710,12 @@ class NLFeedbackEngine(LearningEngine):
         # "this caller has no org" from "there were no hints".
         if org_id is None:
             logger.warning(
-                "[LEARNING:NL] get_hints_with_ids refused: caller carries no "
-                "org — returning no hints rather than every org's")
+                "[LEARNING:NL] hint read refused (no org): returning no hints "
+                "rather than every org's")
             return [], []
 
         domain = extract_domain(url) if url else None
 
-        # Trailing space: the next literal is "ORDER BY", and the old value
-        # ended in ")" so it did not need one.
-        org_filter = " AND org_id = ? "
         params = (domain, url, org_id)
         try:
             with self._em.read_conn() as conn:
@@ -729,7 +726,7 @@ class NLFeedbackEngine(LearningEngine):
                     "WHERE is_active = 1 "
                     "AND conflict_flagged = 0 "
                     f"AND ({self._SCOPE_WHERE}) "
-                    f"{org_filter}"
+                    "AND org_id = ? "
                     "ORDER BY last_seen DESC, "
                     "         evidence_count DESC, "
                     "         success_count DESC "
@@ -854,15 +851,14 @@ class NLFeedbackEngine(LearningEngine):
             return []
         if org_id is None:
             logger.warning(
-                "[LEARNING:NL] get_active_hints_raw refused: caller carries no "
-                "org — returning no hints rather than every org's")
+                "[LEARNING:NL] trigger hint read refused (no org): returning no "
+                "hints rather than every org's")
             return []
         try:
-            org_filter = " AND org_id = ?"
-            params = (domain, url, org_id)
             return self._select_hints(
-                f"is_active = 1 AND conflict_flagged = 0 AND ({self._SCOPE_WHERE}){org_filter}",
-                params,
+                f"is_active = 1 AND conflict_flagged = 0 "
+                f"AND ({self._SCOPE_WHERE}) AND org_id = ?",
+                (domain, url, org_id),
             )
         except Exception as e:
             logger.warning("[LEARNING:NL] get_active_hints_raw failed: %s", e)

@@ -302,8 +302,8 @@ class KeywordVectorStore:
         """
         if org_id is None:
             logger.warning(
-                "Query pattern not stored: caller carries no org — an org-less "
-                "pattern can never be searched again")
+                "Query-pattern write refused (no org): an org-less pattern can "
+                "never be searched again")
             return None
         vec = embedding.embed_to_literal(user_query)
         if not vec:
@@ -333,8 +333,8 @@ class KeywordVectorStore:
         """
         if org_id is None:
             logger.warning(
-                "Query-pattern search refused: caller carries no org — "
-                "returning no patterns rather than every org's")
+                "Query-pattern read refused (no org): returning no patterns "
+                "rather than every org's")
             return []
         vec = embedding.embed_to_literal(user_query)
         if not vec:
@@ -342,13 +342,11 @@ class KeywordVectorStore:
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    where = "WHERE org_id = %s "
-                    params = [vec, org_id, vec, top_k]
                     cur.execute(
                         "SELECT keywords, embedding <-> %s::vector AS distance "
-                        f"FROM kw_query_patterns {where}"
+                        "FROM kw_query_patterns WHERE org_id = %s "
                         "ORDER BY embedding <-> %s::vector LIMIT %s",
-                        params)
+                        [vec, org_id, vec, top_k])
                     return [{"keywords": kw, "distance": float(d)} for kw, d in cur.fetchall()]
         except Exception as e:
             logger.warning("Query-pattern search failed: %s", e)
