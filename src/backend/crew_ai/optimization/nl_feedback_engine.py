@@ -542,6 +542,23 @@ class NLFeedbackEngine(LearningEngine):
                             now,
                         ),
                     )
+                # T11: the reinforcement is an event in this hint's life and
+                # left no trace unless it happened to clear a flag. Inside the
+                # claim gate above deliberately — a row written before it would
+                # record a reinforcement a gated duplicate never performed.
+                self._em._writer_conn.execute(
+                    "INSERT INTO hint_audit "
+                    "(hint_id, action, actor, reason, before_value, after_value, created_at) "
+                    "VALUES (?, 'reinforce', ?, ?, NULL, ?, ?)",
+                    (
+                        existing["id"],
+                        feedback_insight.get("actor") or "unknown",
+                        "User re-submitted this correction from another run",
+                        json.dumps(
+                            {"evidence_count": existing["evidence_count"] + 1}),
+                        now,
+                    ),
+                )
                 logger.info(
                     "[LEARNING:NL] Reinforced feedback '%s' for %s "
                     "(evidence=%d)",
@@ -572,6 +589,32 @@ class NLFeedbackEngine(LearningEngine):
                     self._claim_feedback_run(
                         new_hint_id, workflow_id, source_hash, now,
                     )
+                # T11: the hint's story starts here. The admin create has
+                # written this row since it shipped (learning_endpoints
+                # _write_hint_audit); an engine-created hint had none, so its
+                # timeline began at whatever happened to it later. Same
+                # transaction as the INSERT, so the row and the hint are
+                # exactly as durable as each other.
+                self._em._writer_conn.execute(
+                    "INSERT INTO hint_audit "
+                    "(hint_id, action, actor, reason, before_value, after_value, created_at) "
+                    "VALUES (?, 'create', ?, NULL, NULL, ?, ?)",
+                    (
+                        new_hint_id,
+                        feedback_insight.get("actor") or "unknown",
+                        json.dumps({
+                            "feedback_text": feedback_text.strip(),
+                            "category": category,
+                            "scope": scope,
+                            "domain": domain,
+                            "url": url,
+                            "created_via": "workflow",
+                            "source_workflow_id": workflow_id,
+                            "org_id": record.org_id,
+                        }),
+                        now,
+                    ),
+                )
                 logger.info(
                     "[LEARNING:NL] Stored new feedback correction: "
                     "'%s' scope=%s domain=%s",
@@ -591,6 +634,18 @@ class NLFeedbackEngine(LearningEngine):
                 self._em.add_anchor("nl", new_hint_id, anchor_query, org_id=record.org_id)
 
         except Exception as e:
+            # The writer connection is shared and long-lived, so an aborted
+            # transaction left open here outlives this submission: the NEXT
+            # correction off the write queue dies of InFailedSqlTransaction on
+            # its first statement and is swallowed by its own except. Every
+            # sibling write handler in this module already rolls back.
+            try:
+                self._em._writer_conn.rollback()
+            except Exception as rb_err:
+                logger.warning(
+                    "[LEARNING:NL] learn_from_feedback rollback failed: %s",
+                    rb_err,
+                )
             logger.warning(
                 "[LEARNING:NL] Failed to store feedback correction: %s", e,
             )

@@ -18,6 +18,7 @@ import type { HintDetailResp, TimelineEntry } from './types'
 
 const ACTION_LABELS: Record<string, string> = {
   create: 'created',
+  reinforce: 'reinforced',
   unflag: 'unflagged',
   retract: 'retracted',
   reactivate: 'reactivated',

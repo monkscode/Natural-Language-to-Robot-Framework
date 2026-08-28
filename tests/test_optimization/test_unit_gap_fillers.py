@@ -551,12 +551,13 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
     )
 
     audit_rows = conn.execute(
-        "SELECT action, actor FROM hint_audit WHERE hint_id = ?",
+        "SELECT action, actor FROM hint_audit WHERE hint_id = ? ORDER BY id",
         (hint_id,),
     ).fetchall()
-    assert len(audit_rows) == 1
-    assert audit_rows[0]["action"] == "unflag"
-    assert audit_rows[0]["actor"] == "alice@example.com"
+    # T11 writes a 'reinforce' row beside the pre-existing 'unflag' one. The
+    # actor is threaded to both, which is what this test is about.
+    assert [r["action"] for r in audit_rows] == ["unflag", "reinforce"]
+    assert {r["actor"] for r in audit_rows} == {"alice@example.com"}
 
 
 def test_fl_no_holdout_in_config():

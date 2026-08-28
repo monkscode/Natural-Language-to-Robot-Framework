@@ -523,7 +523,8 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT action, actor, reason FROM hint_audit WHERE hint_id = ?",
+            "SELECT action, actor, reason FROM hint_audit "
+            "WHERE hint_id = ? AND action = 'unflag'",
             (hint_id,),
         ).fetchall()
         assert len(audit_rows) == 1
@@ -552,14 +553,18 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT actor FROM hint_audit WHERE hint_id = ?",
+            "SELECT actor FROM hint_audit "
+            "WHERE hint_id = ? AND action = 'unflag'",
             (hint_id,),
         ).fetchall()
         assert len(audit_rows) == 1
         assert audit_rows[0]["actor"] == "unknown"
 
-    def test_upsert_unflagged_hint_writes_no_audit_row(self, in_memory_db):
-        """Re-submitting identical feedback on a non-flagged hint does NOT write hint_audit."""
+    def test_upsert_unflagged_hint_writes_no_unflag_row(self, in_memory_db):
+        """Re-submitting identical feedback on a non-flagged hint clears no flag,
+        so it writes no 'unflag' row. T11 added a 'reinforce' row on this path —
+        that one records the evidence event, not an override of an LLM verdict,
+        so the two must not be conflated."""
         conn = in_memory_db
         hint_id = self._store_hint(conn, conflict_flagged=0)
         engine = NLFeedbackEngine(conn)
@@ -578,10 +583,10 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT * FROM hint_audit WHERE hint_id = ?",
+            "SELECT action FROM hint_audit WHERE hint_id = ? ORDER BY id",
             (hint_id,),
         ).fetchall()
-        assert len(audit_rows) == 0
+        assert [r["action"] for r in audit_rows] == ["reinforce"]
         # Guard against passing for the wrong reason (e.g. the store failing
         # entirely): the resubmission must actually have reinforced the hint.
         row = conn.execute(
