@@ -446,6 +446,14 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
     `message` is the backend's own sentence for whichever case fired. */
 interface FeedbackResponse { status?: string; outcome?: string; message?: string }
 
+/** GET /api/feedback/{run_id}. The corrections this run has already
+    contributed — the hints it created AND the ones it reinforced. T5 makes a
+    second submission of the same text from the same run a no-op, and this is
+    the answer to that: the user sees their own words on file rather than a
+    warning about a duplicate the backend could not report anyway. */
+interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string }
+interface RecordedResponse { corrections?: RecordedCorrection[] }
+
 /* ── Feedback footer, rendered inside the result card (generated runs only).
    Pass: thumbs row — 👍 is a UI-only acknowledgment (passing runs already feed
    learning automatically at execution time; an empty positive carried no
@@ -460,9 +468,36 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   const [status, setStatus] = useState<'idle' | 'sending'>('idle')
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
+  const [recorded, setRecorded] = useState<RecordedCorrection[]>([])
+
+  // What this run already told the system. Fetched on mount rather than when
+  // the form opens: the list exists to be read BEFORE typing, and it must not
+  // arrive mid-sentence. Normally empty on a first run — the interesting case
+  // is a second run of the same code, which reuses the workflow id and so
+  // remounts this panel over the corrections the first run filed.
+  //
+  // Failures are swallowed on purpose. The panel adds a note when something is
+  // on file and is silent otherwise, so a failed read degrades to exactly the
+  // form that shipped before this feature — it never claims nothing was
+  // recorded, it just says nothing.
+  useEffect(() => {
+    if (!workflowId) return
+    let live = true
+    api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`)
+      .then(b => { if (live) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
+      .catch(() => { /* silence is the honest degradation here */ })
+    return () => { live = false }
+  }, [workflowId])
 
   // Nothing to attribute feedback to — don't render a dead form.
   if (!workflowId) return null
+
+  // Same text, same run: T5 gates it on the backend, so this is a courtesy
+  // notice and never a block. A plain compare is exactly as accurate as the
+  // gate — same text on the same run means the same triage category, hence
+  // the same scope and the same dedup key — and re-deriving that key here
+  // would put a second copy of it beside the first.
+  const alreadySent = recorded.some(c => c.feedback_text === text.trim())
 
   async function submit(feedbackText: string = text) {
     setStatus('sending'); setErr(''); setResult(null)
@@ -540,6 +575,14 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           <span>{result.message}</span>
         </div>
       )}
+      {recorded.length > 0 && (
+        <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
+          <div className="font-medium">Already recorded for this run</div>
+          <ul className="mt-1 space-y-0.5 text-muted-foreground">
+            {recorded.map(c => <li key={c.hint_id}>“{c.feedback_text}”</li>)}
+          </ul>
+        </div>
+      )}
       <div>
         <div className="text-sm font-semibold">
           {outcome === 'fail' ? '💡 Help us get it right next time' : 'What was off?'}
@@ -559,6 +602,11 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       />
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted-foreground">{text.length}/500</span>
+        {alreadySent && (
+          <span className="text-xs text-muted-foreground">
+            You already sent this for this run — it won’t be counted again.
+          </span>
+        )}
         {err && <span className="text-xs text-destructive">{err}</span>}
         <div className="flex gap-2">
           {outcome === 'pass' && (

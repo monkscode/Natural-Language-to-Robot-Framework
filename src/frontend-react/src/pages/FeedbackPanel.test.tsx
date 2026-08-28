@@ -41,6 +41,21 @@ const mockApi = vi.mocked(api)
 // answering the NEXT test's first call.
 afterEach(() => vi.resetAllMocks())
 
+/** The corrections GET the panel fires on mount, answered per test.
+    Routed on the request method rather than queued: the mount fetch is the
+    panel's FIRST api call, so a bare mockResolvedValueOnce meant for the POST
+    would be eaten by it. */
+function onFile(corrections: unknown[] = []) {
+  mockApi.mockImplementation(async (_path: string, opts?: { method?: string }) => {
+    if (opts?.method === 'POST') throw new Error('no POST answer queued')
+    return { status: 'success', applied_to: 'wf-1', corrections }
+  })
+}
+
+/** POST calls only — the mount GET is not part of any submission count. */
+const posts = () =>
+  mockApi.mock.calls.filter(([, o]) => (o as { method?: string } | undefined)?.method === 'POST')
+
 /** A failed run: the correction form is open from the start. */
 function renderFailPanel() {
   render(<FeedbackPanel outcome="fail" workflowId="wf-1" />)
@@ -50,12 +65,19 @@ function renderFailPanel() {
   }
 }
 
+/** Let the mount fetch settle before a test queues its POST answer. */
+async function mounted() {
+  await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/wf-1'))
+}
+
 async function answerWith(body: unknown) {
-  mockApi.mockResolvedValueOnce(body)
+  onFile()
   const { box, submit } = renderFailPanel()
+  await mounted()
+  mockApi.mockResolvedValueOnce(body)
   fireEvent.change(box, { target: { value: 'the search box locator was off' } })
   fireEvent.click(submit)
-  await waitFor(() => expect(mockApi).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(posts()).toHaveLength(1))
 }
 
 describe('a correction that reached the learning store', () => {
@@ -100,7 +122,7 @@ describe('an answer that says the correction did not land', () => {
     mockApi.mockResolvedValueOnce({ status: 'success', outcome: 'processed', message: THANKS })
     fireEvent.click(screen.getByRole('button', { name: /Submit feedback/ }))
 
-    await waitFor(() => expect(mockApi).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(posts()).toHaveLength(2))
     await screen.findByText(THANKS)
   })
 
@@ -119,12 +141,107 @@ describe('an answer that says the correction did not land', () => {
 
 describe('a request that never got an answer', () => {
   it('keeps the existing behaviour: inline error, form untouched', async () => {
-    mockApi.mockRejectedValueOnce(new Error('Network unreachable'))
+    onFile()
     const { box, submit } = renderFailPanel()
+    await mounted()
+    mockApi.mockRejectedValueOnce(new Error('Network unreachable'))
     fireEvent.change(box, { target: { value: 'anything' } })
     fireEvent.click(submit)
 
     await screen.findByText('Network unreachable')
     expect(screen.getByPlaceholderText(/it clicked the wrong button/)).toHaveValue('anything')
+  })
+})
+
+/* ── T8 Step 6: what this run has already contributed ───────────────────────
+   T5 made a second submission of the same correction from the same run a
+   no-op. The answer is not a warning about the ignored duplicate — nothing is
+   lost, and the endpoint cannot know the outcome anyway (the gate runs on the
+   writer thread after the response is sent). It is visible memory. */
+
+const RECORDED = [
+  { hint_id: 7, feedback_text: 'wait for the spinner', recorded_at: '2026-08-28T10:00:00Z' },
+  { hint_id: 9, feedback_text: 'the search box locator was off', recorded_at: '2026-08-28T10:05:00Z' },
+]
+
+describe('the corrections this run already contributed', () => {
+  it('lists them above the form, without retiring it', async () => {
+    onFile(RECORDED)
+    renderFailPanel()
+
+    await screen.findByText(/Already recorded for this run/)
+    expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
+    expect(screen.getByText(/the search box locator was off/)).toBeInTheDocument()
+    // The form is still the point of the panel — a user may have a second,
+    // different correction to make, and T5 counts that one too.
+    expect(screen.getByPlaceholderText(/it clicked the wrong button/)).toBeInTheDocument()
+  })
+
+  it('says nothing at all when the run contributed nothing', async () => {
+    onFile([])
+    renderFailPanel()
+    await mounted()
+
+    expect(screen.queryByText(/Already recorded for this run/)).toBeNull()
+  })
+
+  it('renders exactly today\u2019s form when the read fails', async () => {
+    // Learning off, an unreachable backend, a version-skewed body: the panel
+    // adds a note when there is something on file and is silent otherwise, so
+    // every failure degrades to the form the user had before this feature.
+    mockApi.mockImplementation(async (_path: string, opts?: { method?: string }) => {
+      if (opts?.method === 'POST') throw new Error('no POST answer queued')
+      throw new Error('Request failed (500)')
+    })
+    renderFailPanel()
+    await mounted()
+
+    expect(screen.queryByText(/Already recorded for this run/)).toBeNull()
+    expect(screen.getByPlaceholderText(/it clicked the wrong button/)).toBeInTheDocument()
+    expect(screen.queryByText(/Request failed/)).toBeNull()
+  })
+
+  it('warns before Submit when the typed text is already on file', async () => {
+    onFile(RECORDED)
+    const { box } = renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    fireEvent.change(box, { target: { value: '  wait for the spinner  ' } })
+
+    await screen.findByText(/won\u2019t be counted again/)
+  })
+
+  it('never blocks the submission it warns about', async () => {
+    // The backend gate is the authority. This compare is a courtesy, and a
+    // courtesy that refuses to send would be a second, weaker copy of the
+    // dedup key deciding the outcome.
+    onFile(RECORDED)
+    const { box } = renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+    fireEvent.change(box, { target: { value: 'wait for the spinner' } })
+    await screen.findByText(/won\u2019t be counted again/)
+
+    const submit = screen.getByRole('button', { name: /Submit feedback/ })
+    expect(submit).toBeEnabled()
+    mockApi.mockResolvedValueOnce({ status: 'success', outcome: 'processed', message: THANKS })
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(posts()).toHaveLength(1))
+  })
+
+  it('stays quiet for text that is merely similar', async () => {
+    onFile(RECORDED)
+    const { box } = renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    fireEvent.change(box, { target: { value: 'wait for the spinner to go' } })
+
+    expect(screen.queryByText(/won\u2019t be counted again/)).toBeNull()
+  })
+
+  it('asks for nothing when there is no run to ask about', () => {
+    render(<FeedbackPanel outcome="fail" workflowId={null} />)
+
+    expect(mockApi).not.toHaveBeenCalled()
   })
 })

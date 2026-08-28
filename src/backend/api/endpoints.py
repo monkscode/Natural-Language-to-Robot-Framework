@@ -469,6 +469,81 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         }
 
 
+@router.get('/api/feedback/{run_id}')
+async def get_run_corrections(run_id: str, user: dict | None = Depends(require_user)):
+    """The corrections this run has already contributed to the learning store.
+
+    T5 made a second submission of the same correction from the same run a
+    no-op. The answer to that is not a warning about the ignored duplicate —
+    nothing is lost, and this endpoint could not know the outcome anyway (the
+    gate runs on the writer thread inside a queued job, long after the
+    response is sent). It is visible memory: the user sees their own words on
+    file, which is the set of hints this run CREATED plus the ones it
+    REINFORCED.
+
+    Gated exactly as POST /api/feedback is, and for a stronger reason than the
+    POST has: correction text is user-authored content about a customer's
+    site, so a run-id-only read would leak it across orgs. Same unscoped
+    lookup, same caller_can_access refusal, same rerun_of redirect. See
+    submit_feedback for why the gate is caller_can_ACT and why is_grouped is
+    deliberately not passed — publishing a run into a folder publishes the
+    test, never the corrections filed against it. The two routes keep separate
+    copies of those few lines rather than a shared helper; the agreement is
+    pinned by a test that sends the same caller through both.
+
+    `applied_to` names the run these corrections are filed against — the
+    ORIGINAL when the requested run is a re-run, matching what the POST
+    mutates.
+
+    Degrades to an empty list rather than an error on every internal failure:
+    the SPA fetches this the moment a run finishes, and a run that succeeded
+    must not render as a broken page. An empty list adds nothing to the panel,
+    so silence claims nothing.
+    """
+    # Same lookup, same threading and the same fail-closed reason as the POST:
+    # a registry that cannot answer leaves owner_id/org_id None, which the gate
+    # refuses for everyone but a platform admin.
+    try:
+        run_row = await asyncio.to_thread(
+            lambda: get_run_registry().get_run(run_id))
+    except Exception:
+        run_row = None
+
+    admin = await asyncio.to_thread(is_validated_admin, user)
+    owner_id = run_row.get("user_id") if run_row else None
+    org_id = run_row.get("org_id") if run_row else None
+    if not caller_can_access(user, owner_id, org_id, is_platform_admin=admin):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot read feedback for this run",
+        )
+
+    target_id = await _gated_feedback_target(
+        run_row, run_id, user, is_platform_admin=admin)
+
+    feedback_loop = get_feedback_loop()
+    if not feedback_loop:
+        return {
+            "status": "disabled",
+            "message": "Learning system is not enabled",
+            "applied_to": target_id,
+            "corrections": [],
+        }
+
+    engine = getattr(feedback_loop, "nl_engine", None)
+    corrections = []
+    if engine is not None:
+        # Threaded: the read borrows a pooled connection, which blocks.
+        corrections = await asyncio.to_thread(
+            engine.get_corrections_for_run, target_id)
+
+    return {
+        "status": "success",
+        "applied_to": target_id,
+        "corrections": corrections,
+    }
+
+
 @router.get('/api/learning-stats', dependencies=[Depends(require_admin)])
 async def get_learning_stats():
     """

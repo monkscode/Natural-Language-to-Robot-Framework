@@ -244,6 +244,19 @@ for _name, _info in SEED_PATTERNS.items():
     }
 
 
+def run_source_hash(workflow_id: str) -> str:
+    """The hint_evidence key under which a run claims a correction (T5).
+
+    One definition for the two sides that must agree: _claim_feedback_run
+    writes it, get_corrections_for_run reads it. A second copy of the rule
+    would drift silently — the read would simply return nothing, and the panel
+    would report that a recorded correction was never recorded.
+
+    Referenced by: _claim_feedback_run, get_corrections_for_run (this module).
+    """
+    return hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # NLFeedbackEngine
 # ---------------------------------------------------------------------------
@@ -423,10 +436,7 @@ class NLFeedbackEngine(LearningEngine):
         # correction instead of deduplicating it. The product path always has
         # one (process_user_feedback reads the record back by workflow_id), so
         # this covers direct and API callers only.
-        source_hash = (
-            hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
-            if workflow_id else None
-        )
+        source_hash = run_source_hash(workflow_id) if workflow_id else None
 
         try:
             # Upsert: increment evidence if exists, else insert.
@@ -596,6 +606,55 @@ class NLFeedbackEngine(LearningEngine):
             "VALUES (?, 'workflow', ?, ?, 'evidence', ?) ON CONFLICT DO NOTHING",
             (hint_id, workflow_id, source_hash, now),
         ).rowcount == 1
+
+    def get_corrections_for_run(self, workflow_id: str) -> List[Dict]:
+        """The corrections this run has already contributed, oldest first.
+
+        Reads the claim rows _claim_feedback_run writes, so the set is exactly
+        the hints this run CREATED plus the ones it REINFORCED. Nothing else
+        expresses that: execution_records.user_feedback is one column and the
+        last submission wins, and nl_feedback_corrections.source_workflow_id
+        names the CREATING run forever.
+
+        Both halves of the claim's identity are in the predicate. T3 writes
+        credit rows into this same table under source_kind='query', and a
+        credit is not something the user typed.
+
+        Deliberately unfiltered on is_active / conflict_flagged: these are the
+        user's own words, and hiding a hint the LLM later flagged would report
+        "nothing on file" for a correction that was recorded — the exact lie
+        this task removes. What the LLM thought of it is not exposed here;
+        that is a product decision, not a UI one.
+
+        Uncapped on purpose: only the run's owner can create these rows and
+        only the run's owner can read them, so the length is self-inflicted,
+        and a silent LIMIT would under-report the user's own history.
+
+        Never raises — the panel calls this on mount for every finished run,
+        and an empty list renders as today's plain form.
+
+        Referenced by: api/endpoints.py (get_run_corrections).
+        Depends on: run_source_hash (this module), _claim_feedback_run.
+        """
+        if not self._em or not workflow_id:
+            return []
+        try:
+            with self._em.read_conn() as conn:
+                rows = conn.execute(
+                    "SELECT c.id AS hint_id, c.feedback_text, "
+                    "       e.created_at AS recorded_at "
+                    "FROM hint_evidence e "
+                    "JOIN nl_feedback_corrections c ON c.id = e.hint_id "
+                    "WHERE e.source_kind = 'workflow' AND e.bucket = 'evidence' "
+                    "  AND e.source_hash = ? "
+                    "ORDER BY e.created_at, e.id",
+                    (run_source_hash(workflow_id),),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.warning(
+                "[LEARNING:NL] get_corrections_for_run failed: %s", e)
+            return []
 
     def get_hints(
         self, user_query: str, url: str, agent_role: str,
