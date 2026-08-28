@@ -93,6 +93,17 @@ class AntiPatternEngine(LearningEngine):
             return
         _assert_writer_thread("AntiPatternEngine.learn")
 
+        # T9: fail the write closed where the reads now fail closed. An
+        # anti-pattern stored without an org can never be retrieved again, so
+        # storing one only grows an unreachable table. This also covers the
+        # passing-run branch below, whose lookup is an org-scoped read.
+        if getattr(record, "org_id", None) is None:
+            logger.warning(
+                "[LEARNING] anti-pattern learning refused: run %s carries no "
+                "org — the row could never be read again",
+                getattr(record, "workflow_id", None))
+            return
+
         if record.test_status != "failed":
             # Check if this passing execution resolves an existing anti-pattern
             self._check_for_correct_alternative(record)
@@ -258,22 +269,23 @@ class AntiPatternEngine(LearningEngine):
         Called from learn() which already runs on the writer thread, so we
         read from _writer_conn to stay within the same transaction context.
         When org_id is set, only anti-patterns belonging to that org are
-        considered so cross-org failures never merge.
+        considered so cross-org failures never merge.  A missing org matches
+        nothing (T9): the predicate used to be dropped entirely, so an org-less
+        run could match — and then REINFORCE — another org's row.
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        if org_id is not None:
-            rows = self._em._writer_conn.execute(
-                "SELECT * FROM anti_patterns WHERE failure_category = ? "
-                "AND org_id = ? ORDER BY score DESC",
-                (category, org_id),
-            ).fetchall()
-        else:
-            rows = self._em._writer_conn.execute(
-                "SELECT * FROM anti_patterns WHERE failure_category = ? "
-                "ORDER BY score DESC",
-                (category,),
-            ).fetchall()
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] anti-pattern merge lookup refused: record carries "
+                "no org — creating a new row rather than reinforcing another "
+                "org's")
+            return None
+        rows = self._em._writer_conn.execute(
+            "SELECT * FROM anti_patterns WHERE failure_category = ? "
+            "AND org_id = ? ORDER BY score DESC",
+            (category, org_id),
+        ).fetchall()
 
         query_words = set(user_query.lower().split())
         for row in rows:
@@ -299,11 +311,22 @@ class AntiPatternEngine(LearningEngine):
         Reads via read_conn(), so it is safe on any thread. The similarity
         filter never raises — on any ChromaDB problem it fails open (returns
         all gated rows), degrading to score/evidence gating only.
+
+        A missing org returns [] (T9). The org predicate is the SOLE
+        discriminator on this path — a NULL-org anchor satisfies the similarity
+        filter for every caller (see test_anti_pattern_org.py) — so dropping it
+        put every org's anti-patterns into an org-less caller's prompt.
         """
         # C5: an empty user_query carries no relevance signal and cannot be
         # embedded. The old word-overlap path was harmlessly empty for "";
         # guard explicitly so the semantic path is never asked to embed "".
         if not user_query or not user_query.strip():
+            return []
+
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] anti-pattern lookup refused: caller carries no org "
+                "— returning no warnings rather than every org's")
             return []
 
         # Get high-scoring anti-patterns above the injection threshold.
@@ -317,9 +340,8 @@ class AntiPatternEngine(LearningEngine):
             sql += " AND (domain = ? OR domain IS NULL)"
             params.append(domain)
 
-        if org_id is not None:
-            sql += " AND org_id = ?"
-            params.append(org_id)
+        sql += " AND org_id = ?"
+        params.append(org_id)
 
         sql += " ORDER BY score DESC LIMIT 10"
 

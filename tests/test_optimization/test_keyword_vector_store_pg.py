@@ -29,6 +29,9 @@ pytestmark = pytest.mark.integration
 
 _SCHEMA = "kw_store_test"
 
+# T9: query-pattern reads and writes fail closed without an org.
+_ORG = "org-A"
+
 _KEYWORDS = [
     {"name": "Click Button", "args": ["locator"], "doc": "Clicks a button on the page."},
     {"name": "Fill Text", "args": ["locator", "text"], "doc": "Types text into an input field."},
@@ -166,19 +169,24 @@ def test_ingest_library_keywords_uses_extracted_docs(store):
 
 def test_add_and_search_patterns_roundtrip(store):
     before = store.pattern_count()
-    pid = store.add_pattern("search for python on google", ["Open Browser", "Fill Text"])
+    pid = store.add_pattern("search for python on google",
+                            ["Open Browser", "Fill Text"], org_id=_ORG)
     assert pid and pid.startswith("pattern_")
     assert store.pattern_count() == before + 1
-    results = store.search_patterns("google search for python", top_k=3)
+    results = store.search_patterns("google search for python", top_k=3,
+                                    org_id=_ORG)
     assert results
     assert results[0]["keywords"] == ["Open Browser", "Fill Text"]  # jsonb round-trip
     assert isinstance(results[0]["distance"], float)
 
 
 def test_pattern_helpers_degrade_when_embedding_unavailable(store):
+    """The org is supplied so the EMBEDDER is the only reason these degrade —
+    without it T9's fail-closed guard would return the same values first and
+    the test would pass while asserting nothing about the embedder."""
     with patch.object(kvs_mod.embedding, "embed_to_literal", return_value=None):
-        assert store.add_pattern("q", ["K"]) is None
-        assert store.search_patterns("q") == []
+        assert store.add_pattern("q", ["K"], org_id=_ORG) is None
+        assert store.search_patterns("q", org_id=_ORG) == []
 
 
 # ---------------------------------------------------------------------------

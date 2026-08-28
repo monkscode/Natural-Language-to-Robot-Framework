@@ -84,6 +84,9 @@ class MockFailureAnalyzer:
         return self._result
 
 
+_ORG = "org-A"
+
+
 @dataclass
 class FakeRecord:
     """Minimal ExecutionRecord-like object for unit tests."""
@@ -93,7 +96,10 @@ class FakeRecord:
     failure_category: Optional[str] = None
     user_query: str = "click login button"
     test_status: str = "failed"
-    org_id: Optional[str] = None
+    # T9: hint writes and reads fail closed without an org, so the
+    # default record names one. Tenancy itself is covered by
+    # test_nl_correction_org.py and test_org_filter_fails_closed.py.
+    org_id: Optional[str] = _ORG
 
 
 def create_execution_memory(conn):
@@ -108,7 +114,8 @@ def create_execution_memory(conn):
 def _insert_hint(conn, text, scope="global", domain=None, url=None,
                  category="keyword", is_active=1, success_count=0,
                  evidence_count=1, failure_count=0, applied_count=0,
-                 original_failure_category=None, conflict_flagged=0):
+                 original_failure_category=None, conflict_flagged=0,
+                 org_id=_ORG):
     """Insert a hint row directly into nl_feedback_corrections."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -116,11 +123,12 @@ def _insert_hint(conn, text, scope="global", domain=None, url=None,
         "(feedback_text, category, scope, domain, url, "
         " original_failure_category, evidence_count, applied_count, "
         " success_count, failure_count, is_active, conflict_flagged, "
-        " created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " created_at, last_seen, org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (text, category, scope, domain, url,
          original_failure_category, evidence_count, applied_count,
-         success_count, failure_count, is_active, conflict_flagged, now, now),
+         success_count, failure_count, is_active, conflict_flagged, now, now,
+         org_id),
     )
     conn.commit()
 
@@ -304,21 +312,21 @@ class TestRetrieval:
     def test_hints_global_returned(self, in_memory_db):
         _insert_hint(in_memory_db, "Always wait before click", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is not None, "Expected hints, got None"
         assert any("Always wait before click" in h for h in hints)
 
     def test_hints_domain_match(self, in_memory_db):
         _insert_hint(in_memory_db, "Use id=login-btn", scope="domain", domain="example.com")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click login", "https://example.com/page", "assembler")
+        hints = engine.get_hints("click login", "https://example.com/page", "assembler", org_id=_ORG)
         assert hints is not None
         assert any("login-btn" in h for h in hints)
 
     def test_hints_domain_mismatch(self, in_memory_db):
         _insert_hint(in_memory_db, "Use other selector", scope="domain", domain="other.com")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click login", "https://example.com/page", "assembler")
+        hints = engine.get_hints("click login", "https://example.com/page", "assembler", org_id=_ORG)
         assert hints is None, "Should not match different domain"
 
     def test_hints_url_match(self, in_memory_db):
@@ -327,31 +335,31 @@ class TestRetrieval:
         engine = NLFeedbackEngine(in_memory_db)
         hints = engine.get_hints(
             "click login", "https://example.com/login", "assembler"
-        )
+        , org_id=_ORG)
         assert hints is not None
         assert any("Click exact button" in h for h in hints)
 
     def test_hints_inactive_excluded(self, in_memory_db):
         _insert_hint(in_memory_db, "Disabled hint", scope="global", is_active=0)
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None, "Inactive hints should not be returned"
 
     def test_hints_empty_db(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None
 
     def test_hints_no_db(self):
         engine = NLFeedbackEngine(None)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None
 
     def test_hints_max_5(self, in_memory_db):
         for i in range(10):
             _insert_hint(in_memory_db, f"Hint number {i}", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://example.com", "assembler")
+        hints = engine.get_hints("click", "https://example.com", "assembler", org_id=_ORG)
         assert hints is not None
         assert len(hints) <= 5, f"Expected max 5 hints, got {len(hints)}"
 
@@ -359,7 +367,7 @@ class TestRetrieval:
         _insert_hint(in_memory_db, "Low success", scope="global", success_count=1)
         _insert_hint(in_memory_db, "High success", scope="global", success_count=10)
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://x.com", "assembler")
+        hints = engine.get_hints("click", "https://x.com", "assembler", org_id=_ORG)
         assert hints is not None
         # High success should come first
         assert "High success" in hints[0]
@@ -367,7 +375,7 @@ class TestRetrieval:
     def test_hints_formatted_with_prefix(self, in_memory_db):
         _insert_hint(in_memory_db, "Test prefix", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://x.com", "assembler")
+        hints = engine.get_hints("click", "https://x.com", "assembler", org_id=_ORG)
         assert hints is not None
         assert hints[0].startswith("\u26a0\ufe0f USER FEEDBACK")
         assert "Test prefix" in hints[0]
@@ -466,7 +474,7 @@ class TestIntegration:
         fl.process_execution(
             workflow_id="wf-int1", user_query="click login",
             url="https://example.com", robot_code="*** Test Cases ***",
-            test_status="failed",
+            test_status="failed", org_id=_ORG,
         )
         # Now provide feedback
         fl.process_user_feedback(
@@ -540,7 +548,7 @@ class TestEndToEnd:
         # Now retrieve hints for same url
         hints = engine.get_hints(
             "find login button", "https://example.com/login", "assembler"
-        )
+        , org_id=_ORG)
         assert hints is not None, "Expected hints to be returned"
         assert any("data-testid" in h for h in hints), (
             f"Expected feedback text in hints, got: {hints}"
@@ -611,7 +619,7 @@ class TestEndToEnd:
         assert row["is_active"] == 0, "Hint should be auto-disabled"
 
         # Disabled hint must NOT appear in get_hints.
-        hints = engine.get_hints("some query", "https://example.com", "assembler")
+        hints = engine.get_hints("some query", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None, "Disabled hint should not appear in hints"
 
 

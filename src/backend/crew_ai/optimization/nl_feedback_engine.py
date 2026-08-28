@@ -409,6 +409,20 @@ class NLFeedbackEngine(LearningEngine):
             return
         _assert_writer_thread("NLFeedbackEngine.learn_from_feedback")
 
+        # T9: fail the write closed where the reads now fail closed. A hint
+        # created without an org can never be retrieved again, so storing one
+        # only grows an unreachable table. Placement is load-bearing: this must
+        # precede the dedup SELECT and T5's claim INSERT, or a refused
+        # correction leaves an uncommitted claim on the long-lived writer
+        # connection that the NEXT job's commit() makes durable — gating the
+        # user's next legitimate correction from that run.
+        if getattr(record, "org_id", None) is None:
+            logger.warning(
+                "[LEARNING:NL] learn_from_feedback refused: run %s carries no "
+                "org — the correction cannot be stored where it could be read "
+                "again", getattr(record, "workflow_id", None))
+            return
+
         feedback_text = feedback_insight.get("feedback_text")
         if not feedback_text or not feedback_text.strip():
             return
@@ -690,10 +704,20 @@ class NLFeedbackEngine(LearningEngine):
         if not user_query or not user_query.strip():
             return [], []
 
+        # T9: fail closed. A missing org used to drop the predicate entirely and
+        # return every org's hints, which made tenancy advisory. Refusing here
+        # also skips the query; the WARNING is the only signal that separates
+        # "this caller has no org" from "there were no hints".
+        if org_id is None:
+            logger.warning(
+                "[LEARNING:NL] get_hints_with_ids refused: caller carries no "
+                "org — returning no hints rather than every org's")
+            return [], []
+
         domain = extract_domain(url) if url else None
 
-        org_filter = " AND (org_id = ? OR is_shared = 1)" if org_id is not None else ""
-        params = (domain, url) if org_id is None else (domain, url, org_id)
+        org_filter = " AND (org_id = ? OR is_shared = 1)"
+        params = (domain, url, org_id)
         try:
             with self._em.read_conn() as conn:
                 rows = conn.execute(
@@ -821,13 +845,19 @@ class NLFeedbackEngine(LearningEngine):
         raw text plus hint id to flag specific rows by id.  Returns [] (never None).
 
         When org_id is set, only the caller's org hints plus is_shared=1 hints
-        are returned (privacy gate).
+        are returned (privacy gate).  A missing org returns [] — see T9's note
+        on get_hints_with_ids.
         """
         if not self._em:
             return []
+        if org_id is None:
+            logger.warning(
+                "[LEARNING:NL] get_active_hints_raw refused: caller carries no "
+                "org — returning no hints rather than every org's")
+            return []
         try:
-            org_filter = " AND (org_id = ? OR is_shared = 1)" if org_id is not None else ""
-            params = (domain, url) if org_id is None else (domain, url, org_id)
+            org_filter = " AND (org_id = ? OR is_shared = 1)"
+            params = (domain, url, org_id)
             return self._select_hints(
                 f"is_active = 1 AND conflict_flagged = 0 AND ({self._SCOPE_WHERE}){org_filter}",
                 params,

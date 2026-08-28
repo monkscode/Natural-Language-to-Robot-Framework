@@ -31,7 +31,11 @@ _NOW = datetime.now(timezone.utc)
 _TEXT = "wait for the spinner to disappear before asserting"
 
 
-def _record(workflow_id, *, url="https://shop.test/dash", org_id=None):
+# T9: hint writes fail closed without an org, so records here name one.
+_ORG = "org-A"
+
+
+def _record(workflow_id, *, url="https://shop.test/dash", org_id=_ORG):
     return ExecutionRecord(
         workflow_id=workflow_id, timestamp=_NOW,
         user_query="verify the dashboard loads", url=url, domain="shop.test",
@@ -71,10 +75,10 @@ def _seed_hint(conn, text=_TEXT, *, conflict_flagged=0):
     cur = conn.execute(
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, domain, evidence_count, is_active, "
-        " conflict_flagged, created_at, last_seen) "
-        "VALUES (?, 'keyword', 'global', 'shop.test', 1, 1, ?, ?, ?) "
+        " conflict_flagged, created_at, last_seen, org_id) "
+        "VALUES (?, 'keyword', 'global', 'shop.test', 1, 1, ?, ?, ?, ?) "
         "RETURNING id",
-        (text, conflict_flagged, _NOW.isoformat(), _NOW.isoformat()),
+        (text, conflict_flagged, _NOW.isoformat(), _NOW.isoformat(), _ORG),
     )
     hid = cur.fetchone()["id"]
     conn.commit()

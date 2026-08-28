@@ -36,7 +36,11 @@ _TEXT = "wait for the spinner to disappear before asserting"
 _OTHER = "the search box locator was off"
 
 
-def _record(workflow_id, *, url="https://shop.test/dash", org_id=None):
+# T9: hint writes fail closed without an org, so records here name one.
+_ORG = "org-A"
+
+
+def _record(workflow_id, *, url="https://shop.test/dash", org_id=_ORG):
     return ExecutionRecord(
         workflow_id=workflow_id, timestamp=_NOW,
         user_query="verify the dashboard loads", url=url, domain="shop.test",

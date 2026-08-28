@@ -14,6 +14,11 @@ from src.backend.crew_ai.optimization.learning_config import (
 )
 from src.backend.crew_ai.optimization.anti_pattern_engine import AntiPatternEngine
 
+# T9: every org-scoped anti-pattern read and write fails closed without an
+# org, so this file names one. Tenancy itself is covered by
+# test_anti_pattern_org.py and test_org_filter_fails_closed.py.
+_ORG = "org-A"
+
 
 # ---------------------------------------------------------------------------
 # Test Helpers
@@ -25,7 +30,7 @@ class MockRecord:
     def __init__(self, user_query="test query", robot_code=None,
                  test_status="failed", failure_category=None,
                  failed_keyword=None, error_message=None,
-                 domain=None, org_id=None):
+                 domain=None, org_id=_ORG):
         self.user_query = user_query
         self.robot_code = robot_code
         self.test_status = test_status
@@ -111,19 +116,20 @@ def _seed_anti_pattern(conn, **overrides):
         "score": 0.5,
         "evidence_count": 3,
         "last_seen": "2026-02-19 12:00:00",
+        "org_id": _ORG,
     }
     defaults.update(overrides)
     conn.execute("""
         INSERT INTO anti_patterns
         (failure_category, query_pattern, bad_code_snippet, error_message,
-         correct_alternative, domain, score, evidence_count, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         correct_alternative, domain, score, evidence_count, last_seen, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         defaults["failure_category"], defaults["query_pattern"],
         defaults["bad_code_snippet"], defaults["error_message"],
         defaults["correct_alternative"], defaults["domain"],
         defaults["score"], defaults["evidence_count"],
-        defaults["last_seen"],
+        defaults["last_seen"], defaults["org_id"],
     ))
     conn.commit()
 
@@ -554,7 +560,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             f"get_hints() returns hints for planner: count={len(hints) if hints else 0}"
 
@@ -571,7 +577,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "assembler")
+                                 "https://demoqa.com", "assembler", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "get_hints() returns hints for assembler"
 
@@ -588,7 +594,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "identifier")
+                                 "https://demoqa.com", "identifier", org_id=_ORG)
         assert hints is None, \
             "get_hints() returns None for identifier"
 
@@ -605,7 +611,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "identifier")
+                                 "https://demoqa.com", "identifier", org_id=_ORG)
         assert hints is None, \
             "get_hints() returns None for identifier"
 
@@ -627,7 +633,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and any("A1" in h for h in hints), \
             "Planner hint contains failure_category"
 
@@ -649,7 +655,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "assembler")
+                                 "https://demoqa.com", "assembler", org_id=_ORG)
         assert hints is not None and any("A1" in h for h in hints), \
             "Assembler hint (no alt) contains error message"
 
@@ -677,7 +683,7 @@ class TestGetHints:
         conn.commit()
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "assembler")
+                                 "https://demoqa.com", "assembler", org_id=_ORG)
         assert hints is not None and any("Instead use" in h for h in hints), \
             "Assembler hint WITH correct_alternative shows 'Instead use'"
 
@@ -695,7 +701,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is None, \
             "Below evidence threshold: no hints returned"
 
@@ -713,7 +719,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is None, \
             "Below score threshold: no hints returned"
 
@@ -731,7 +737,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "Exactly at threshold: hints returned"
 
@@ -749,7 +755,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "Above threshold: hints returned"
 
@@ -768,7 +774,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com/test", "planner")
+                                 "https://demoqa.com/test", "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "Domain match: hints returned"
 
@@ -787,7 +793,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://example.com/test", "planner")
+                                 "https://example.com/test", "planner", org_id=_ORG)
         assert hints is None, \
             "Wrong domain: no hints returned"
 
@@ -806,7 +812,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://any-site.com", "planner")
+                                 "https://any-site.com", "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "NULL domain anti-pattern matches any domain"
 
@@ -825,7 +831,7 @@ class TestGetHints:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 None, "planner")
+                                 None, "planner", org_id=_ORG)
         assert hints is not None and len(hints) > 0, \
             "No URL: NULL domain anti-pattern still matches"
 
@@ -892,7 +898,7 @@ class TestInternals:
             query_pattern="verify all rows in the table",
         )
 
-        result = engine._find_similar_anti_pattern("A1", "verify all rows in the table")
+        result = engine._find_similar_anti_pattern("A1", "verify all rows in the table", org_id=_ORG)
         assert result is not None, \
             "Exact overlap: matches"
 
@@ -908,7 +914,7 @@ class TestInternals:
             query_pattern="verify all rows in the table",
         )
 
-        result = engine._find_similar_anti_pattern("A1", "verify all rows from the grid")
+        result = engine._find_similar_anti_pattern("A1", "verify all rows from the grid", org_id=_ORG)
         assert result is not None, \
             "4-word overlap: matches"
 
@@ -924,7 +930,7 @@ class TestInternals:
             query_pattern="verify all rows in the table",
         )
 
-        result = engine._find_similar_anti_pattern("A1", "check the buttons")
+        result = engine._find_similar_anti_pattern("A1", "check the buttons", org_id=_ORG)
         assert result is None, \
             "2-word overlap: no match"
 
@@ -940,7 +946,7 @@ class TestInternals:
             query_pattern="verify all rows in the table",
         )
 
-        result = engine._find_similar_anti_pattern("B1", "verify all rows in the table")
+        result = engine._find_similar_anti_pattern("B1", "verify all rows in the table", org_id=_ORG)
         assert result is None, \
             "Wrong category: no match despite word overlap"
 
@@ -967,7 +973,7 @@ class TestInternals:
             score=0.6,
         )
 
-        result = engine._find_matching_anti_patterns("verify the table")
+        result = engine._find_matching_anti_patterns("verify the table", org_id=_ORG)
         assert {r["failure_category"] for r in result} == {"A1", "B1"}
 
         conn.close()
@@ -990,7 +996,7 @@ class TestInternals:
             score=0.9,
         )
 
-        result = engine._find_matching_anti_patterns("verify all rows in the table")
+        result = engine._find_matching_anti_patterns("verify all rows in the table", org_id=_ORG)
         assert len(result) >= 2 and result[0]["score"] >= result[1]["score"], \
             f"Results sorted by score DESC: scores={[r['score'] for r in result]}"
 
@@ -1011,8 +1017,8 @@ class TestInternals:
             score=0.8,
         )
 
-        assert engine._find_matching_anti_patterns("") == []
-        assert engine._find_matching_anti_patterns("   ") == []
+        assert engine._find_matching_anti_patterns("", org_id=_ORG) == []
+        assert engine._find_matching_anti_patterns("   ", org_id=_ORG) == []
 
         conn.close()
 
@@ -1228,7 +1234,7 @@ class TestEdgeCases:
         )
 
         hints = engine.get_hints("verify all rows in the table",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and all(len(h) < 500 for h in hints), \
             "Long error message truncated in hints"
         conn.close()
@@ -1255,7 +1261,7 @@ class TestEdgeCases:
         """Verify empty DB get_hints returns None."""
         conn = _create_test_db()
         engine = AntiPatternEngine(conn)
-        hints = engine.get_hints("any query", "https://any.com", "planner")
+        hints = engine.get_hints("any query", "https://any.com", "planner", org_id=_ORG)
         assert hints is None, \
             "Empty DB: get_hints returns None"
         conn.close()
@@ -1307,7 +1313,7 @@ class TestEdgeCases:
         )
 
         hints = engine.get_hints("verify the table rows",
-                                 "https://demoqa.com", "planner")
+                                 "https://demoqa.com", "planner", org_id=_ORG)
         assert hints is not None and len(hints) == 3
 
         conn.close()

@@ -62,6 +62,8 @@ def _make_provider(em, holdout=False):
         pattern_matcher=pattern_matcher,
         vector_store=MagicMock(),
         execution_memory=em,
+        # T9: the provider's learning reads fail closed without an org.
+        org_id=_ORG,
     )
     provider._holdout_decision = holdout
     return provider
@@ -83,14 +85,19 @@ def _seed_metric(em, *, hints_injected, was_holdout, test_passed, n,
     em._writer_conn.commit()
 
 
+# T9: hint reads fail closed without an org, so these fixtures name one.
+_ORG = "org-A"
+
+
 def _insert_nl_hint(em, hint_id, feedback_text, anchor_query,
-                    scope="global", domain=None):
+                    scope="global", domain=None, org_id=_ORG):
     em._writer_conn.execute(
         "INSERT INTO nl_feedback_corrections "
-        "(id, feedback_text, anchor_query, scope, domain, created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(id, feedback_text, anchor_query, scope, domain, created_at, "
+        " last_seen, org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (hint_id, feedback_text, anchor_query, scope, domain,
-         "2026-01-01", "2026-01-01"),
+         "2026-01-01", "2026-01-01", org_id),
     )
     em._writer_conn.commit()
 
@@ -184,7 +191,7 @@ class TestBank1Retrieval:
         eng = NLFeedbackEngine(in_memory_em)
         _insert_nl_hint(in_memory_em, 1, "a hint", "anchor text here")
         hints, ids = eng.get_hints_with_ids(
-            "any query at all", "http://x.com", "planner")
+            "any query at all", "http://x.com", "planner", org_id=_ORG)
         assert ids == [1]
 
 
@@ -213,7 +220,7 @@ class TestBank1SelectionTrace:
         in_memory_em._writer_conn.commit()
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert ids == [1]                            # id 1 (newer) wins
         assert trace[1]["available"] == 1
         assert trace[2]["available"] == 0
@@ -234,7 +241,7 @@ class TestBank1SelectionTrace:
         in_memory_em._writer_conn.commit()
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert set(ids) == {1, 2, 3, 4, 5}
         assert trace[6]["drop_reason"] == "cap"
         assert trace[6]["available"] == 0
@@ -246,7 +253,7 @@ class TestBank1SelectionTrace:
         _insert_nl_hint(in_memory_em, 1, "a single distinct hint", "anchor a")
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert ids == [1]
         assert trace[1]["available"] == 1
         assert trace[1]["drop_reason"] is None

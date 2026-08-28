@@ -280,6 +280,7 @@ class TestAutoRetireNeedsDistinctSources:
                 user_query="check the dashboard", url="https://shop.test/dash",
                 domain="shop.test", test_status="failed",
                 user_feedback="wait for the spinner to disappear",
+                org_id="org-A",  # T9: hint writes fail closed without an org
             )
 
         triage = {"feedback_text": _record("x").user_feedback, "category": "keyword"}

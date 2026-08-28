@@ -528,9 +528,9 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, domain, url, "
         " original_failure_category, evidence_count, "
-        " source_workflow_id, created_at, last_seen, conflict_flagged) "
+        " source_workflow_id, created_at, last_seen, conflict_flagged, org_id) "
         "VALUES (?, 'uncategorized', 'domain', 'example.com', NULL, NULL, 1, "
-        "        NULL, datetime('now'), datetime('now'), 1)",
+        "        NULL, datetime('now'), datetime('now'), 1, 'org-A')",
         (feedback_text,),
     )
     conn.commit()
@@ -539,7 +539,7 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
     fl.process_execution(
         workflow_id="wf-actor-thread", user_query="check the page",
         url="https://example.com", robot_code="*** Test Cases ***",
-        test_status="failed",
+        test_status="failed", org_id="org-A",  # T9: hint writes need an org
     )
     # SynchronousWriteQueue runs each submit inline, so the engine's audit write
     # has completed by the time process_user_feedback returns -- no drain needed.
@@ -655,14 +655,14 @@ def test_ci_ape_warm_db_returns_warning(in_memory_db):
     conn.execute(
         "INSERT INTO anti_patterns "
         "(failure_category, query_pattern, bad_code_snippet, "
-        " error_message, domain, score, evidence_count, last_seen) "
+        " error_message, domain, score, evidence_count, last_seen, org_id) "
         "VALUES ('A1', 'check all rows', 'Get Text  id=cell', "
-        " 'Missing FOR loop construct', 'example.com', 0.83, 5, ?)",
+        " 'Missing FOR loop construct', 'example.com', 0.83, 5, ?, 'org-A')",
         (now,),
     )
     conn.commit()
     hints = ape.get_hints("check all rows in table",
-                          "https://example.com", "planner")
+                          "https://example.com", "planner", org_id="org-A")
     assert hints is not None, "Warm DB should return hints"
     assert len(hints) > 0
 

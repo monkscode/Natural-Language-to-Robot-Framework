@@ -492,9 +492,10 @@ class TestUpsertHintAuditUnflag:
             "INSERT INTO nl_feedback_corrections "
             "(feedback_text, category, scope, domain, url, "
             " original_failure_category, evidence_count, "
-            " source_workflow_id, created_at, last_seen, conflict_flagged) "
+            " source_workflow_id, created_at, last_seen, conflict_flagged, "
+            " org_id) "
             "VALUES (?, 'structural', 'domain', 'example.com', NULL, NULL, 1, NULL, "
-            "        datetime('now'), datetime('now'), ?)",
+            "        datetime('now'), datetime('now'), ?, 'org-A')",
             ("Use data-testid for all selectors", conflict_flagged),
         )
         conn.commit()
@@ -513,7 +514,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -543,7 +544,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -569,7 +570,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
