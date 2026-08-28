@@ -600,13 +600,15 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
         placeholder="e.g. it clicked the wrong button; the search box locator was off…"
         className="min-h-[72px] text-sm"
       />
+      {/* Its own row, not a third item in the counter/buttons flex below: at
+          this width the sentence wraps and collides with the 0/500 counter. */}
+      {alreadySent && (
+        <p className="text-xs text-muted-foreground">
+          You already sent this for this run — it won’t be counted again.
+        </p>
+      )}
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted-foreground">{text.length}/500</span>
-        {alreadySent && (
-          <span className="text-xs text-muted-foreground">
-            You already sent this for this run — it won’t be counted again.
-          </span>
-        )}
         {err && <span className="text-xs text-destructive">{err}</span>}
         <div className="flex gap-2">
           {outcome === 'pass' && (
