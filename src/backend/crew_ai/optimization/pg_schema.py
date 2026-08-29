@@ -774,8 +774,9 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          -- narrows it to the pairs this merge actually collides, so a session
          -- the merge does not touch keeps whatever it had. Priority:
          --   1. a row with admin_decision IS NOT NULL outranks one with NULL;
-         --   2. within a rank, the row already pointing at the survivor wins;
-         --   3. otherwise the lowest id wins.
+         --   2. applied = 0 outranks applied = 1;
+         --   3. within a rank, the row already pointing at the survivor wins;
+         --   4. otherwise the lowest id wins.
          -- Everything below rank 1 is DELETED, and the survivor is the one
          -- kept row's new hint_id.
          --
@@ -787,9 +788,22 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          -- outrank an approved decision on an absorbed hint would discard the
          -- admin's decision in silence — the exact defect this CTE exists to
          -- fix, in a narrower case. A human verdict is the scarcest thing in
-         -- the group, so it survives; step 2 only breaks ties between rows of
-         -- equal standing, where the survivor's own is the safer keep because
-         -- its reason text describes the hint that will remain.
+         -- the group, so it survives.
+         --
+         -- PENDING WORK OUTRANKS FINISHED WORK for the same reason one step
+         -- down. apply_review_session acts only on
+         -- `admin_decision = 'approved' AND applied = 0`, so an unapplied
+         -- approval is a decision the admin made that has not run yet, while
+         -- an applied one has already had its effect and will never be read
+         -- again. Deleting the pending row to keep the spent one is the same
+         -- defect a third time: the approved action simply never executes.
+         -- This sits ABOVE the survivor's own claim deliberately — preserving
+         -- an unexecuted decision matters more than which hint the row
+         -- happened to name.
+         --
+         -- Step 3 only breaks ties between rows of equal standing, where the
+         -- survivor's own is the safer keep because its reason text describes
+         -- the hint that will remain.
          --
          -- The delete set (rn > 1) and the re-point set (rn = 1 AND
          -- on_absorbed) are complementary predicates over ONE snapshot of
@@ -811,15 +825,15 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                     row_number() OVER (
                         PARTITION BY session_id, survivor_id
                         ORDER BY (admin_decision IS NULL),
-                                 on_absorbed, id) AS rn
+                                 applied, on_absorbed, id) AS rn
              FROM (
-                 SELECT r.id, r.session_id, r.admin_decision, b.survivor_id,
-                        TRUE AS on_absorbed
+                 SELECT r.id, r.session_id, r.admin_decision, r.applied,
+                        b.survivor_id, TRUE AS on_absorbed
                  FROM hint_review_recommendations r
                  JOIN absorbed b ON b.id = r.hint_id
                  UNION ALL
-                 SELECT r.id, r.session_id, r.admin_decision, g.survivor_id,
-                        FALSE AS on_absorbed
+                 SELECT r.id, r.session_id, r.admin_decision, r.applied,
+                        g.survivor_id, FALSE AS on_absorbed
                  FROM hint_review_recommendations r
                  JOIN rec_groups g ON g.session_id = r.session_id
                                   AND g.survivor_id = r.hint_id

@@ -1087,6 +1087,56 @@ class TestTheCollapseRulePrefersADecision:
         assert recs[0]["admin_decision"] == "rejected"
 
 
+    def test_pending_approved_work_outranks_an_applied_survivor_rec(self, pg):
+        """apply_review_session only acts on `admin_decision = 'approved' AND
+        applied = 0`, so an unapplied approval is work still owed to the admin
+        and an applied one is work already done. Keeping the finished row and
+        deleting the pending one means the admin's approved action never
+        executes — M6's defect once more."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        already_done = recommendation(pg, 11, keep, applied=1,
+                                      reason="approved and already applied")
+        still_pending = recommendation(pg, 11, gone, applied=0,
+                                       reason="approved, never executed")
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["hint_id"]) for r in recs] == [
+            (still_pending, keep)], (
+            f"the pending approval {still_pending} was deleted in favour of "
+            f"the already-applied {already_done}, so it will never execute"
+        )
+        assert (recs[0]["admin_decision"], recs[0]["applied"]) == ("approved", 0)
+        # The deletion is still recorded, one row per dropped recommendation.
+        audit = dropped_audit(pg)
+        assert [json.loads(r["before_value"])["id"] for r in audit] == [already_done]
+        assert [r["hint_id"] for r in audit] == [keep]
+        assert json.loads(audit[0]["before_value"])["applied"] == 1
+
+    def test_an_applied_absorbed_rec_does_not_beat_a_pending_survivor(self, pg):
+        """The mirror. `applied` is a rank, not a preference for absorbed rows:
+        with the survivor's own still pending it keeps its own claim, even
+        though the absorbed row was inserted first and holds the lower id."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        absorbed_done = recommendation(pg, 11, gone, applied=1,
+                                       reason="approved and already applied")
+        survivors_pending = recommendation(pg, 11, keep, applied=0,
+                                           reason="approved, never executed")
+        assert absorbed_done < survivors_pending
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["hint_id"]) for r in recs] == [
+            (survivors_pending, keep)]
+        assert (recs[0]["admin_decision"], recs[0]["applied"]) == ("approved", 0)
+
+
 class TestTheDroppedRecommendationIsRecorded:
     """The statement's whole premise is that a merge must be recorded. A
     deleted recommendation is the one thing it destroys outright, so it gets
