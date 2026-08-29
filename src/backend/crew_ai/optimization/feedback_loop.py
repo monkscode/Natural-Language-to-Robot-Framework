@@ -1135,9 +1135,11 @@ class FeedbackLoop:
               "processed"       the record was found and the correction write
                                 ran to completion without raising. This is also
                                 the honest outcome for every legitimate
-                                no-store path — empty text, category=
-                                "positive", and a T5-gated duplicate all reach
-                                a clean return.
+                                no-store path — category="positive" and a
+                                T5-gated duplicate both reach a clean return.
+              "no_text"         feedback_text was empty or whitespace-only, so
+                                there was nothing to route to the engines; the
+                                raw feedback write still ran
               "no_record"       no learning record for this run within the
                                 poll's budget — triage ran, engines did not
               "learning_paused" the circuit breaker is open; nothing was written
@@ -1323,6 +1325,15 @@ class FeedbackLoop:
                         elif verdict == "timeout":
                             outcome = "queued"
                         # verdict == "ok": outcome stays "processed"
+
+            # Step 4b: "no_text" narrows the success path only. Every other
+            # outcome from Step 4 (learning_paused, no_record, error, no_org,
+            # queued) describes a failure or an indeterminate state and must
+            # keep winning — only "processed" is refined further, since it is
+            # the one case where the engines had nothing to route because the
+            # submission itself carried no words.
+            if outcome == "processed" and not feedback_text.strip():
+                outcome = "no_text"
 
             if not record:
                 logger.warning(

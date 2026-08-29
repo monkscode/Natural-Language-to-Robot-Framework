@@ -248,6 +248,10 @@ class FeedbackRequest(BaseModel):
 # shows.
 _FEEDBACK_OUTCOME_MESSAGES = {
     "processed": "Thanks — your feedback helps the system learn.",
+    "no_text": (
+        "This run is recorded as unhelpful, but since no description was "
+        "given, nothing was learned — a description can still be sent."
+    ),
     "no_record": (
         "We could not find the learning record this belongs to, so nothing "
         "was learned from it. Please send it again in a moment."

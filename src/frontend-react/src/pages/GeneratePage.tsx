@@ -460,13 +460,14 @@ interface RecordedResponse { corrections?: RecordedCorrection[] }
    signal, so it no longer calls the backend). 👎 expands an inline correction
    form — the corrective text is the signal that actually trains the system.
    Fail: form open by default; Skip still records an empty completely_wrong
-   (N0) label on the execution record. ── */
+   label on the execution record, but nothing is learned from it (outcome
+   "no_text") — the empty text carries nothing for any engine to route. ── */
 export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
   const [status, setStatus] = useState<'idle' | 'sending'>('idle')
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [result, setResult] = useState<{ ok: boolean; neutral: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
   const [recorded, setRecorded] = useState<RecordedCorrection[]>([])
 
@@ -516,6 +517,11 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       // off — while the text was discarded. The sentence itself is the
       // backend's, so one place says what the system did.
       const ok = body?.outcome === 'processed'
+      // Skip submits empty text, which every engine treats as a free no-op —
+      // nothing was learned, but the user already declined to say more, so
+      // "send it again" (the amber notice below) is advice they cannot act
+      // on. This is its own terminal state, distinct from `ok`.
+      const neutral = body?.outcome === 'no_text'
       // M9: the mount-effect fetch above only ever runs once, so a correction
       // filed during THIS session never showed up in "Already recorded for
       // this run" until the page reloaded. Re-fetch once the backend confirms
@@ -528,6 +534,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       }
       setResult({
         ok,
+        neutral,
         message: body?.message || (ok
           ? 'Thanks — your feedback helps the system learn.'
           : 'Your feedback was sent, but the system did not confirm it was recorded.'),
@@ -552,10 +559,22 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // have to survive — replacing them with the message would be advice the UI
   // makes impossible to follow. Rendered like `err` below: a notice beside a
   // still-usable form, not a terminal state.
+  //
+  // no_text is the one exception: the user clicked Skip, so "send it again"
+  // is advice they already declined. It retires the form too, but with a
+  // neutral presentation — no green check (nothing was learned) and no amber
+  // warning (nothing failed).
   if (result?.ok) {
     return (
       <div className="flex items-center gap-2 text-sm">
         <Check className="h-4 w-4 text-green-600" /> {result.message}
+      </div>
+    )
+  }
+  if (result?.neutral) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {result.message}
       </div>
     )
   }
@@ -628,7 +647,9 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           )}
           {outcome === 'fail' && (
             // Legacy-UI behaviour: skipping still records a completely_wrong
-            // signal (empty text) so the failure feeds the learning system.
+            // signal (empty text) on the execution record, but the backend
+            // answers "no_text" — empty text carries nothing for any engine
+            // to learn from.
             <Button variant="ghost" size="sm" onClick={() => submit('')} disabled={status === 'sending'}>
               Skip →
             </Button>

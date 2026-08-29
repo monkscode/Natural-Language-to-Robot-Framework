@@ -139,6 +139,49 @@ describe('an answer that says the correction did not land', () => {
   })
 })
 
+/* ── Task 8: Skip's empty text carries nothing for any engine to learn from.
+   `outcome: "no_text"` retires the form (the user already declined to say
+   more, so "send it again" is not advice they can follow), but with a
+   NEUTRAL presentation — not the green "Thanks" check, not the amber
+   warning. ── */
+const NO_TEXT =
+  'This run is recorded as unhelpful, but since no description was given, ' +
+  'nothing was learned — a description can still be sent.'
+
+describe('no_text — Skip carried no words to store', () => {
+  async function skipWith(body: unknown) {
+    onFile()
+    render(<FeedbackPanel outcome="fail" workflowId="wf-1" />)
+    await mounted()
+    mockApi.mockResolvedValueOnce(body)
+    fireEvent.click(screen.getByRole('button', { name: /Skip/ }))
+    await waitFor(() => expect(posts()).toHaveLength(1))
+  }
+
+  it('retires the form and shows the backend message', async () => {
+    await skipWith({ status: 'success', outcome: 'no_text', message: NO_TEXT })
+
+    await screen.findByText(NO_TEXT)
+    expect(screen.queryByPlaceholderText(/it clicked the wrong button/)).toBeNull()
+  })
+
+  it('does not render the green "Thanks" state', async () => {
+    await skipWith({ status: 'success', outcome: 'no_text', message: NO_TEXT })
+
+    await screen.findByText(NO_TEXT)
+    expect(screen.queryByText(THANKS)).toBeNull()
+  })
+})
+
+describe('processed is unchanged', () => {
+  it('still retires the form with the green "Thanks" state', async () => {
+    await answerWith({ status: 'success', outcome: 'processed', message: THANKS })
+
+    await screen.findByText(THANKS)
+    expect(screen.queryByPlaceholderText(/it clicked the wrong button/)).toBeNull()
+  })
+})
+
 describe('a request that never got an answer', () => {
   it('keeps the existing behaviour: inline error, form untouched', async () => {
     onFile()

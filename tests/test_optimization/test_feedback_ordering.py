@@ -427,6 +427,91 @@ class TestNLEngineVerdictOutcomes:
         assert triage["outcome"] == "processed"
 
 
+class TestNoTextOutcome:
+    """Task 8 (feedback integrity remediation): the SPA's Skip button submits
+    empty text, which `learn_from_feedback` treats as a free no-op on every
+    engine — no correction row, no evidence row, no audit row. `outcome`
+    stayed "processed" anyway, so the panel thanked the user for teaching the
+    system something that was never stored.
+
+    "no_text" is resolved AFTER Step 4, and only when the outcome would
+    otherwise have been "processed" — every failure/indeterminate outcome
+    from Step 4 (learning_paused, no_record, error, no_org, queued) still
+    describes something the user can act on and must keep winning.
+    """
+
+    def test_empty_text_on_a_healthy_path_reports_no_text(self, in_memory_db):
+        fl, em = _build_loop(in_memory_db)
+        _store(fl, "wf-empty")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-empty", "", "completely_wrong")
+
+        assert triage["outcome"] == "no_text"
+
+    def test_whitespace_only_text_reports_no_text(self, in_memory_db):
+        fl, em = _build_loop(in_memory_db)
+        _store(fl, "wf-whitespace")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-whitespace", "   ", "completely_wrong")
+
+        assert triage["outcome"] == "no_text"
+
+    def test_no_text_still_submits_the_raw_feedback_write(self, in_memory_db):
+        """The empty-text write to execution_records.user_feedback is kept —
+        the run still records that the user was asked and declined to
+        explain. Only the outcome the caller is told changes."""
+        queue = _RecordingWriteQueue()
+        fl, em = _build_loop(in_memory_db, write_queue=queue)
+        _store(fl, "wf-empty-write")
+        queue.submitted.clear()
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            fl.process_user_feedback(
+                "wf-empty-write", "", "completely_wrong")
+
+        assert "update_user_feedback" in queue.submitted
+
+    def test_non_empty_text_keeps_processed(self, in_memory_db):
+        fl, em = _build_loop(in_memory_db)
+        _store(fl, "wf-nonempty")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-nonempty", "wrong button", "completely_wrong")
+
+        assert triage["outcome"] == "processed"
+
+    def test_empty_text_with_no_org_still_reports_no_org(self, in_memory_db):
+        """Precedence: no_org describes an indeterminate state the user can
+        act on (nothing here works until the run has an org) and must keep
+        winning over the empty-text refinement."""
+        fl, em = _build_loop(in_memory_db)
+        _store(fl, "wf-empty-no-org", org_id=None)
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-empty-no-org", "", "completely_wrong")
+
+        assert triage["outcome"] == "no_org"
+
+    def test_empty_text_with_nl_engine_absent_still_reports_error(self, in_memory_db):
+        """Precedence: error describes a failure the user can act on (send it
+        again) and must keep winning over the empty-text refinement."""
+        fl, em = _build_loop(in_memory_db)
+        fl.nl_engine = None
+        _store(fl, "wf-empty-error")
+
+        with patch(_SLEEP, lambda _s: None), patch(_FIRE_CONFLICT):
+            triage = fl.process_user_feedback(
+                "wf-empty-error", "", "completely_wrong")
+
+        assert triage["outcome"] == "error"
+
+
 # ---------------------------------------------------------------------------
 # S2 — the raw text stays durable even when the poll gives up
 # ---------------------------------------------------------------------------

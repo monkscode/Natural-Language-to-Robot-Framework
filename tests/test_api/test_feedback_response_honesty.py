@@ -157,6 +157,27 @@ class TestTheFourOutcomes:
         assert "helps the system learn" not in body["message"]
         assert "do not need to send it again" in body["message"].lower()
 
+    def test_no_text_says_it_was_recorded_but_nothing_was_learned(self, client_and_loop):
+        """Task 8: Skip submits empty text, which every engine treats as a
+        free no-op — no correction, no evidence, no audit row. The message
+        must not repeat the "helps the system learn" claim that used to run
+        unconditionally."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_text")
+
+        body = _post(client, text="")
+
+        body = body.json()
+        assert body["outcome"] == "no_text"
+        assert body["status"] == "success", (
+            "nothing failed — the run was recorded, just without a learned "
+            "correction"
+        )
+        assert "helps the system learn" not in body["message"]
+        assert "unhelpful" in body["message"].lower()
+        assert "no description" in body["message"].lower() or \
+            "nothing was learned" in body["message"].lower()
+
     def test_no_org_says_the_run_has_no_organisation(self, client_and_loop):
         """Task 1, mode (a): an org-less run's correction can never be filed
         where it could be read again, so the NL write is never submitted."""
