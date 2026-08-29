@@ -702,14 +702,20 @@ def patch_hint(
             if not final_domain:
                 raise HTTPException(
                     status_code=400,
-                    detail="domain is required for scope 'domain' — cannot be blank",
+                    detail=(
+                        "this hint is domain-scoped but has no domain — "
+                        "the patch must supply one"
+                    ),
                 )
         elif resolved_scope == "url":
             final_url = updates["url"] if "url" in updates else row_dict.get("url")
             if not final_url:
                 raise HTTPException(
                     status_code=400,
-                    detail="url is required for scope 'url' — cannot be blank",
+                    detail=(
+                        "this hint is url-scoped but has no url — "
+                        "the patch must supply one"
+                    ),
                 )
 
         if not updates:

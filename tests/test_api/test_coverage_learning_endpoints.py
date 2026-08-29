@@ -961,6 +961,89 @@ class TestPatchHintDomainUrlValidation:
         assert resp.json()["hint"]["scope"] == "domain"
         assert resp.json()["hint"]["domain"] == "shop.test"
 
+    def test_legacy_domain_scoped_row_with_null_domain_rejects_a_category_only_patch(
+        self, learning_client,
+    ):
+        """Reachable, not hypothetical: extract_url_from_query returns None
+        when the query names no URL, process_execution then stores
+        domain=None, and several triage categories map to scope='domain'
+        (_SCOPE_BY_CATEGORY) — so NLFeedbackEngine itself can create a
+        domain-scoped row with domain=NULL. The unconditional F5 validation
+        means ANY patch on such a row — even one that never touches
+        domain — is refused until the row is repaired, because the
+        resolved row would otherwise still violate its own scope."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "timing",
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "domain-scoped" in detail and "no domain" in detail, (
+            f"message must name the row's scope and its missing field, got: {detail!r}"
+        )
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT category FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["category"] != "timing", "a refused patch must not partially apply"
+
+    def test_legacy_domain_scoped_row_is_repaired_by_supplying_domain_in_the_same_patch(
+        self, learning_client,
+    ):
+        """The 400 above is repairable in the same request: supplying a
+        domain alongside the unrelated field satisfies the check and both
+        changes land together."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "timing", "domain": "example.com",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["category"] == "timing"
+        assert resp.json()["hint"]["domain"] == "example.com"
+
+    def test_legacy_url_scoped_row_with_null_url_rejects_a_category_only_patch(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", url=None,
+                               category="uncategorized", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "locator",
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "url-scoped" in detail and "no url" in detail, (
+            f"message must name the row's scope and its missing field, got: {detail!r}"
+        )
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT category FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["category"] == "uncategorized", "a refused patch must not partially apply"
+
+    def test_legacy_url_scoped_row_is_repaired_by_supplying_url_in_the_same_patch(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", url=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "locator", "url": "https://shop.test/cart",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["category"] == "locator"
+        assert resp.json()["hint"]["url"] == "https://shop.test/cart"
+
 
 class TestEngineCollisionRegression:
     """The brief's own repro (Q1-Q3): PATCH {"domain": ""} on a domain-scoped
