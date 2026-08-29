@@ -1814,29 +1814,48 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
             conn, [h["id"] for h in hints if (h["success_count"] or 0) == 0]
         )
 
-        # Build chunk plan: 1 globals chunk + 1 per distinct domain.
-        global_hints = [h for h in hints if h["scope"] == "global"]
-        non_global_hints = [h for h in hints if h["scope"] != "global"]
-
-        domain_groups: dict = {}
-        for h in non_global_hints:
-            domain_groups.setdefault(h["domain"], []).append(h)
+        # Build chunk plan: 1 globals chunk + 1 per distinct domain, PER ORG.
+        # F2: two orgs with identical hint text (mandatory, not accidental,
+        # under T10's copy-on-promote design) must never share a chunk — one
+        # org's LLM verdict must never decide another org's hint lifecycle,
+        # and one org's correction text must never enter a prompt about
+        # another org. Group by org_id FIRST, then split each org's hints
+        # into a global chunk + per-domain chunks exactly as before.
+        # org_id IS NULL hints (pre-org-partitioning legacy rows) get their
+        # own group — they are unreachable by any org's read anyway (T9/P6:
+        # org_id = NULL yields NULL for every row), so they must never be
+        # merged into a real org's chunk.
+        org_groups: dict = {}
+        for h in hints:
+            org_groups.setdefault(h["org_id"], []).append(h)
 
         chunks: list[dict] = []
-        if global_hints:
-            chunks.append({
-                "scope_type": "global",
-                "scope_value": None,
-                "decision_hints": global_hints,
-                "context_global_hints": None,
-            })
-        for domain_key in sorted(domain_groups.keys(), key=lambda d: d or ""):
-            chunks.append({
-                "scope_type": "domain",
-                "scope_value": domain_key,
-                "decision_hints": domain_groups[domain_key],
-                "context_global_hints": global_hints if global_hints else None,
-            })
+        for org_key in sorted(org_groups.keys(), key=lambda o: o or ""):
+            org_hints = org_groups[org_key]
+            global_hints = [h for h in org_hints if h["scope"] == "global"]
+            non_global_hints = [h for h in org_hints if h["scope"] != "global"]
+
+            domain_groups: dict = {}
+            for h in non_global_hints:
+                domain_groups.setdefault(h["domain"], []).append(h)
+
+            if global_hints:
+                chunks.append({
+                    "org_id": org_key,
+                    "scope_type": "global",
+                    "scope_value": None,
+                    "decision_hints": global_hints,
+                    "context_global_hints": None,
+                })
+            for domain_key in sorted(domain_groups.keys(), key=lambda d: d or ""):
+                chunks.append({
+                    "org_id": org_key,
+                    "scope_type": "domain",
+                    "scope_value": domain_key,
+                    "decision_hints": domain_groups[domain_key],
+                    # This org's globals only — never another org's.
+                    "context_global_hints": global_hints if global_hints else None,
+                })
 
         # Pre-insert all page rows so the UI sees the full chunk plan immediately.
         page_start = _now()
@@ -1844,10 +1863,10 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
         for chunk in chunks:
             conn.execute(
                 "INSERT INTO hint_review_pages "
-                "(session_id, scope_type, scope_value, status, hint_count, created_at) "
-                "VALUES (?, ?, ?, 'pending', ?, ?)",
+                "(session_id, scope_type, scope_value, status, hint_count, created_at, org_id) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
                 (session_id, chunk["scope_type"], chunk["scope_value"],
-                 len(chunk["decision_hints"]), page_start),
+                 len(chunk["decision_hints"]), page_start, chunk["org_id"]),
             )
             page_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         conn.commit()
@@ -2182,7 +2201,8 @@ def apply_review_session(
 
         approved_recs = conn.execute(
             "SELECT r.*, h.feedback_text, h.scope, h.domain, h.applied_count, "
-            "       h.success_count, h.failure_count, h.is_active, h.conflict_flagged "
+            "       h.success_count, h.failure_count, h.is_active, h.conflict_flagged, "
+            "       h.org_id "
             "FROM hint_review_recommendations r "
             "JOIN nl_feedback_corrections h ON h.id = r.hint_id "
             "WHERE r.session_id = ? AND r.admin_decision = 'approved' AND r.applied = 0",
@@ -2213,11 +2233,19 @@ def apply_review_session(
             audit_reason = f"{note}  —  [LLM: {llm_reason}]" if note else llm_reason
             actor = _audit_actor(admin)
 
+            # Defence in depth (F2), all three UPDATEs below: constrain to the
+            # hint's own org, captured from the JOIN above. Not the
+            # correctness fix — the chunk-plan grouping in _run_hint_review
+            # is — on correct data this predicate changes nothing; it only
+            # guards against a hint whose org no longer matches what this
+            # approved recommendation was selected against.
+            hint_org = rec["org_id"]
+
             if recommendation == "disable":
                 conn.execute(
                     "UPDATE nl_feedback_corrections "
-                    "SET is_active=0, disabled_at=? WHERE id=?",
-                    (now, hint_id),
+                    "SET is_active=0, disabled_at=? WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (now, hint_id, hint_org),
                 )
                 _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
                                   audit_reason, before,
@@ -2229,8 +2257,9 @@ def apply_review_session(
                     "SET is_active=1, conflict_flagged=0, conflict_flagged_at=NULL, "
                     # Step 4b: LLM-review reactivation is a fresh chance — reset
                     # unused_count so the hint is not immediately re-retired.
-                    "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 WHERE id=?",
-                    (hint_id,),
+                    "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 "
+                    "WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (hint_id, hint_org),
                 )
                 _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
                                   audit_reason, before,
@@ -2242,8 +2271,8 @@ def apply_review_session(
                 conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET conflict_flagged=0, conflict_flagged_at=NULL, "
-                    "    conflict_flag_reason=NULL WHERE id=?",
-                    (hint_id,),
+                    "    conflict_flag_reason=NULL WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (hint_id, hint_org),
                 )
                 _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
                                   audit_reason, before,
