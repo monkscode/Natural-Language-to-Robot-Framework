@@ -1335,6 +1335,11 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
+                    -- Redundant today — 'unflag' already excludes 'merge', an
+                    -- action can't be both. Kept per M5 (both EXISTS clauses
+                    -- get this predicate) so it is load-bearing the day the
+                    -- 'unflag' restriction above is ever widened; not evidence
+                    -- that an 'unflag' row can carry a 'merge' action.
                     AND ha.action <> 'merge'
                     AND ha.created_at > te.created_at
               )
