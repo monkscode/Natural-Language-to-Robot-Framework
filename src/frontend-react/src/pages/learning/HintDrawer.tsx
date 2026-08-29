@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils'
 import { HINT_CATEGORIES, FAILURE_CATEGORIES, fmtWhen } from './types'
 import type { HintDetailResp, TimelineEntry } from './types'
 
-const ACTION_LABELS: Record<string, string> = {
+export const ACTION_LABELS: Record<string, string> = {
   create: 'created',
   reinforce: 'reinforced',
   unflag: 'unflagged',
@@ -36,6 +36,8 @@ const ACTION_LABELS: Record<string, string> = {
   llm_review_unflag: 'unflagged via LLM review',
   llm_review_keep: 'kept via LLM review',
   llm_review_flagged: 'flagged for review via LLM review',
+  merge: 'absorbed a duplicate hint',
+  merge_recommendation_dropped: 'dropped a superseded review recommendation',
 }
 
 /** "{a:1} → {a:2}" detail for audit rows that carry before/after values. */
@@ -49,17 +51,98 @@ function beforeAfter(e: TimelineEntry): string {
   } catch { return '' }
 }
 
+/** A patch touches at most scope/url/domain/category/original_failure_category
+ *  (5 fields) — this is the ceiling for what "compact" was ever designed to
+ *  read. A migration-21 merge row's union runs to 27 fields (23-column
+ *  absorbed hint + 4 survivor-only keys); merge_recommendation_dropped's to
+ *  13 (11-column recommendation + 2 summary-only keys). Both need the
+ *  expandable detail view instead of one inline line. */
+export const COMPACT_FIELD_LIMIT = 6
+
+export interface FieldRow { key: string; before: string; after: string; changed: boolean }
+
+function parseObject(v: string | null | undefined): Record<string, unknown> | null {
+  if (!v) return null
+  try {
+    const parsed = JSON.parse(v)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+  } catch { return null }
+}
+
+/** No truncation anywhere: String(v) is the whole value, never sliced. */
+const fmtFieldVal = (v: unknown): string => (v === null || v === undefined ? '—' : String(v))
+
+/** Union of before_value/after_value keys, one row per key with a before
+ *  string, an after string, and whether the two differ. [] when either side
+ *  is missing or unparseable — matches beforeAfter()'s existing gate, so a
+ *  bare create/reinforce/unflag (only one side populated) renders nothing
+ *  extra, same as before this change. */
+export function diffFields(e: TimelineEntry): FieldRow[] {
+  const before = parseObject(e.before_value)
+  const after = parseObject(e.after_value)
+  if (!before || !after) return []
+  const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]))
+  return keys.map(key => {
+    const hasBefore = Object.prototype.hasOwnProperty.call(before, key)
+    const hasAfter = Object.prototype.hasOwnProperty.call(after, key)
+    return {
+      key,
+      before: hasBefore ? fmtFieldVal(before[key]) : '—',
+      after: hasAfter ? fmtFieldVal(after[key]) : '—',
+      changed: !hasBefore || !hasAfter || JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+    }
+  })
+}
+
+/** True for the small payloads the inline beforeAfter() string was designed
+ *  for; false once the union of keys outgrows COMPACT_FIELD_LIMIT (a merge
+ *  or merge_recommendation_dropped row), which switches to <ChangeDetail>. */
+export function isCompactChange(e: TimelineEntry): boolean {
+  const fields = diffFields(e)
+  return fields.length <= COMPACT_FIELD_LIMIT
+}
+
+/** Expandable detail for a large before/after payload — every recorded
+ *  field stays reachable (union, not just the changed ones), with changed
+ *  keys marked so the reader isn't left to spot them by eye. Native
+ *  <details> needs no extra state and stays keyboard/screen-reader usable. */
+function ChangeDetail({ e }: { e: TimelineEntry }) {
+  const fields = diffFields(e)
+  const changedCount = fields.filter(f => f.changed).length
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-xs text-muted-foreground">
+        {changedCount} of {fields.length} fields changed — view detail
+      </summary>
+      <dl className="mt-1 space-y-1 rounded-md bg-muted/40 p-2 text-xs">
+        {fields.map(f => (
+          <div key={f.key} className="flex flex-wrap items-baseline gap-x-1">
+            <dt className={cn('font-mono', f.changed ? 'font-semibold' : 'text-muted-foreground')}>
+              {f.key}:
+            </dt>
+            <dd className="break-all">{f.before}</dd>
+            <dd className="text-muted-foreground">→</dd>
+            <dd className="break-all">{f.after}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  )
+}
+
 function TimelineRow({ e }: { e: TimelineEntry }) {
   // trigger_events rows have no actor — show the trigger type instead.
   const actor = e.actor || (e.source === 'trigger_events' ? (e.trigger_type || 'trigger') : 'system')
+  const compact = isCompactChange(e)
   return (
     <li className="relative border-l-2 pb-4 pl-4 last:pb-0">
       <span className="absolute -left-[5px] top-1 h-2 w-2 rounded-full bg-border" />
       <p className="text-xs text-muted-foreground">{fmtWhen(e.created_at)}</p>
       <p className="mt-0.5 text-sm">
         <span className="font-medium">{actor}</span>{' '}
-        {ACTION_LABELS[e.action] ?? e.action}{beforeAfter(e)}
+        {ACTION_LABELS[e.action] ?? e.action}{compact ? beforeAfter(e) : ''}
       </p>
+      {!compact && <ChangeDetail e={e} />}
       {e.reason && <p className="mt-0.5 text-xs italic text-muted-foreground">{e.reason}</p>}
       {e.workflow_id && <p className="mt-0.5 text-xs text-muted-foreground">workflow: <code>{e.workflow_id}</code></p>}
     </li>
