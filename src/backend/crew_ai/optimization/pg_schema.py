@@ -764,44 +764,112 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          -- (session_id, hint_id) — only the plain idx_hrr_session and
          -- idx_hrr_hint — so a naive re-point raises nothing and instead
          -- leaves one session holding TWO live recommendations for one hint,
-         -- which apply_review_session would then act on twice. The collapse
-         -- rule, mirroring moved_evidence's ON CONFLICT DO NOTHING:
-         --   * the survivor's own recommendation wins — an absorbed one in a
-         --     session that already reviewed the survivor is DELETED;
-         --   * among absorbed recommendations for one survivor in one session
-         --     holding none of its own, the lowest id is kept and the rest are
-         --     DELETED;
-         --   * the kept one is re-pointed at the survivor.
-         -- The delete set and the re-point set are complementary predicates
-         -- over ONE snapshot of absorbed_recs, so they are disjoint by
-         -- construction: nothing here depends on the order in which the two
-         -- data-modifying CTEs happen to touch the table.
+         -- which apply_review_session would then act on twice. Exactly one
+         -- recommendation per (session, survivor) therefore has to survive,
+         -- and WHICH one is a judgement about admin intent, not a tidy-up.
+         --
+         -- The candidate set for a (session, survivor) is the survivor's own
+         -- recommendation, if any, plus every recommendation that session
+         -- holds on a hint being absorbed into that survivor. `rec_groups`
+         -- narrows it to the pairs this merge actually collides, so a session
+         -- the merge does not touch keeps whatever it had. Priority:
+         --   1. a row with admin_decision IS NOT NULL outranks one with NULL;
+         --   2. within a rank, the row already pointing at the survivor wins;
+         --   3. otherwise the lowest id wins.
+         -- Everything below rank 1 is DELETED, and the survivor is the one
+         -- kept row's new hint_id.
+         --
+         -- A DECISION OUTRANKS THE SURVIVOR'S CLAIM because recommendations
+         -- are born with admin_decision NULL (learning_endpoints.py creates
+         -- them that way; only the PATCH endpoint decides one), so "the
+         -- session holds one for the survivor" usually means "the LLM
+         -- proposed something and nobody has looked at it yet". Letting that
+         -- outrank an approved decision on an absorbed hint would discard the
+         -- admin's decision in silence — the exact defect this CTE exists to
+         -- fix, in a narrower case. A human verdict is the scarcest thing in
+         -- the group, so it survives; step 2 only breaks ties between rows of
+         -- equal standing, where the survivor's own is the safer keep because
+         -- its reason text describes the hint that will remain.
+         --
+         -- The delete set (rn > 1) and the re-point set (rn = 1 AND
+         -- on_absorbed) are complementary predicates over ONE snapshot of
+         -- rec_candidates, so they are disjoint by construction: nothing here
+         -- depends on the order in which the data-modifying CTEs happen to
+         -- touch the table.
          --
          -- No org predicate is needed. Every branch of `ranked` partitions on
          -- COALESCE(org_id, ''), so a survivor and its absorbed rows always
          -- share an org and the re-point cannot cross a tenant; a redundant
          -- predicate here would imply the partitioning is not trusted.
-         absorbed_recs AS (
-             SELECT r.id, b.survivor_id,
-                    row_number() OVER (PARTITION BY r.session_id, b.survivor_id
-                                       ORDER BY r.id) AS rn,
-                    EXISTS (SELECT 1 FROM hint_review_recommendations o
-                            WHERE o.session_id = r.session_id
-                              AND o.hint_id = b.survivor_id) AS survivor_reviewed
+         rec_groups AS (
+             SELECT DISTINCT r.session_id, b.survivor_id
              FROM hint_review_recommendations r
              JOIN absorbed b ON b.id = r.hint_id
          ),
+         rec_candidates AS (
+             SELECT id, session_id, survivor_id, on_absorbed,
+                    row_number() OVER (
+                        PARTITION BY session_id, survivor_id
+                        ORDER BY (admin_decision IS NULL),
+                                 on_absorbed, id) AS rn
+             FROM (
+                 SELECT r.id, r.session_id, r.admin_decision, b.survivor_id,
+                        TRUE AS on_absorbed
+                 FROM hint_review_recommendations r
+                 JOIN absorbed b ON b.id = r.hint_id
+                 UNION ALL
+                 SELECT r.id, r.session_id, r.admin_decision, g.survivor_id,
+                        FALSE AS on_absorbed
+                 FROM hint_review_recommendations r
+                 JOIN rec_groups g ON g.session_id = r.session_id
+                                  AND g.survivor_id = r.hint_id
+             ) c
+         ),
+         kept_rec AS (
+             SELECT id, session_id, survivor_id
+             FROM rec_candidates WHERE rn = 1
+         ),
          dropped_recs AS (
              DELETE FROM hint_review_recommendations
-             WHERE id IN (SELECT id FROM absorbed_recs
-                          WHERE survivor_reviewed OR rn > 1)
-             RETURNING 1
+             WHERE id IN (SELECT id FROM rec_candidates WHERE rn > 1)
+             RETURNING *
          ),
          repointed_recs AS (
              UPDATE hint_review_recommendations r
-             SET hint_id = a.survivor_id
-             FROM absorbed_recs a
-             WHERE r.id = a.id AND NOT a.survivor_reviewed AND a.rn = 1
+             SET hint_id = c.survivor_id
+             FROM rec_candidates c
+             WHERE r.id = c.id AND c.rn = 1 AND c.on_absorbed
+             RETURNING 1
+         ),
+         -- The one thing this statement destroys outright is the one thing it
+         -- would otherwise not record. Without this row an admin opening the
+         -- session on Wednesday finds their Monday decision simply absent,
+         -- and no query can say it ever existed. RETURNING * above is what
+         -- makes before_value the whole deleted recommendation; `to_jsonb(d)`
+         -- needs no key subtraction because dropped_recs adds no column of
+         -- its own. Same actor and same timestamp expression as the merge row
+         -- so both land on one readable timeline.
+         audited_recs AS (
+             INSERT INTO hint_audit
+                 (hint_id, action, actor, reason, before_value, after_value, created_at)
+             SELECT c.survivor_id, 'merge_recommendation_dropped',
+                    'migration_v21',
+                    'Review recommendation ' || d.id || ' named hint '
+                        || d.hint_id || ' and was dropped by migration 21: '
+                        || 'session ' || d.session_id || ' collapses onto '
+                        || 'recommendation ' || k.id || ' for survivor '
+                        || c.survivor_id,
+                    to_jsonb(d)::text,
+                    jsonb_build_object(
+                        'session_id', d.session_id,
+                        'survivor_id', c.survivor_id,
+                        'surviving_recommendation_id', k.id)::text,
+                    to_char(now() AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US+00:00')
+             FROM dropped_recs d
+             JOIN rec_candidates c ON c.id = d.id
+             JOIN kept_rec k ON k.session_id = c.session_id
+                            AND k.survivor_id = c.survivor_id
              RETURNING 1
          ),
          -- Preserve-when-uncertain, one expression per column: served if ANY

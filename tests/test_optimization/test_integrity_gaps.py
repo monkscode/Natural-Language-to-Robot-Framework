@@ -965,3 +965,217 @@ class TestTheMergeKeepsTheAdminsReviewDecision:
 
         assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
             (recs_before[0], a), (recs_before[1], b)]
+
+
+def undecided(conn, session_id, hint_id, **over):
+    """A recommendation the LLM proposed and nobody has ruled on yet — the
+    state every recommendation is created in."""
+    return recommendation(conn, session_id, hint_id, admin_decision=None,
+                          decided_at=None, **over)
+
+
+def dropped_audit(conn):
+    return q(conn, "SELECT hint_id, actor, reason, before_value, after_value, "
+                   "created_at FROM hint_audit "
+                   "WHERE action = 'merge_recommendation_dropped' ORDER BY id")
+
+
+class TestTheCollapseRulePrefersADecision:
+    """Only one recommendation per (session, survivor) may survive, and which
+    one is a judgement about admin intent. Recommendations are created with
+    admin_decision NULL and only decided later, so "the session already holds
+    one for the survivor" usually means "the LLM proposed something nobody has
+    read". Letting that outrank an approved decision on an absorbed hint would
+    discard the admin's decision in silence — the very thing the re-point
+    exists to prevent.
+
+    Priority: a decided row outranks an undecided one; within a rank the row
+    already pointing at the survivor wins; otherwise the lowest id."""
+
+    def test_an_approved_decision_outranks_an_undecided_survivor_rec(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        survivors_undecided = undecided(pg, 11, keep, recommendation="keep",
+                                        reason="nobody has read this yet")
+        approved = recommendation(pg, 11, gone, recommendation="disable",
+                                  reason="admin approved on Monday",
+                                  admin_notes="agreed, disable it")
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["session_id"], r["hint_id"]) for r in recs] == [
+            (approved, 11, keep)], (
+            f"the approved decision {approved} was discarded in favour of the "
+            f"undecided survivor recommendation {survivors_undecided}"
+        )
+        assert recs[0]["admin_decision"] == "approved", (
+            "the surviving row lost the decision it was kept for"
+        )
+
+    def test_the_survivor_wins_when_both_are_decided(self, pg):
+        """Rule 2, made load-bearing: the absorbed recommendation is inserted
+        FIRST, so it holds the lower id. A rule that fell through to id would
+        keep it; the survivor's own must win instead, because its reason text
+        describes the hint that will still exist."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        absorbed_first = recommendation(pg, 11, gone, reason="on the duplicate")
+        survivors_own = recommendation(pg, 11, keep, recommendation="keep",
+                                       reason="on the survivor")
+        assert absorbed_first < survivors_own
+
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (survivors_own, keep)]
+
+    def test_the_survivor_wins_when_neither_is_decided(self, pg):
+        """Same tie-break one rank down: with no decision anywhere the
+        survivor's own is still the safer keep, and again it holds the HIGHER
+        id so the outcome cannot come from id order."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        absorbed_first = undecided(pg, 11, gone, reason="on the duplicate")
+        survivors_own = undecided(pg, 11, keep, reason="on the survivor")
+        assert absorbed_first < survivors_own
+
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (survivors_own, keep)]
+
+    def test_two_undecided_absorbed_recommendations_keep_the_lowest_id(self, pg):
+        """Rule 3 with nothing above it to appeal to: no decision anywhere and
+        no recommendation on the survivor, so the only deterministic answer
+        left is the lowest id."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone_a = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        gone_b = hint(pg, domain=None, created_at="2026-03-01T00:00:00+00:00")
+        first = undecided(pg, 11, gone_a)
+        second = undecided(pg, 11, gone_b)
+        assert second > first
+
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (first, keep)]
+
+    def test_a_decision_beats_a_lower_id_with_no_decision(self, pg):
+        """Rank before tie-break: the decided row is inserted SECOND, so a rule
+        that ordered on id alone would throw the admin's verdict away and keep
+        the untouched one."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone_a = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        gone_b = hint(pg, domain=None, created_at="2026-03-01T00:00:00+00:00")
+        never_read = undecided(pg, 11, gone_a, reason="nobody has read this")
+        decided = recommendation(pg, 11, gone_b, admin_decision="rejected",
+                                 reason="admin said no")
+        assert decided > never_read
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["hint_id"]) for r in recs] == [(decided, keep)], (
+            "the lower id won and the admin's decision was thrown away"
+        )
+        assert recs[0]["admin_decision"] == "rejected"
+
+
+class TestTheDroppedRecommendationIsRecorded:
+    """The statement's whole premise is that a merge must be recorded. A
+    deleted recommendation is the one thing it destroys outright, so it gets
+    its own hint_audit row on the survivor's timeline."""
+
+    def test_every_dropped_recommendation_gets_an_audit_row(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone_a = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        gone_b = hint(pg, domain=None, created_at="2026-03-01T00:00:00+00:00")
+        survivors_own = recommendation(pg, 11, keep, reason="on the survivor")
+        dropped_a = recommendation(pg, 11, gone_a, reason="on duplicate a")
+        dropped_b = recommendation(pg, 11, gone_b, reason="on duplicate b")
+
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (survivors_own, keep)]
+        audit = dropped_audit(pg)
+        assert len(audit) == 2, (
+            f"expected one audit row per dropped recommendation, got {len(audit)}"
+        )
+        assert {r["hint_id"] for r in audit} == {keep}, (
+            "the record must live on the survivor's timeline — that is where a "
+            "reader looking for the missing recommendation will be"
+        )
+        assert {r["actor"] for r in audit} == {"migration_v21"}
+        before = [json.loads(r["before_value"]) for r in audit]
+        assert [b["id"] for b in before] == [dropped_a, dropped_b]
+        assert [b["hint_id"] for b in before] == [gone_a, gone_b]
+        assert [b["reason"] for b in before] == ["on duplicate a", "on duplicate b"]
+        # The whole row, the same treatment before_value gets on the merge row.
+        assert set(before[0]) == {r["column_name"] for r in q(
+            pg, "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = "
+                "'hint_review_recommendations'", (_SCHEMA,))}
+        after = [json.loads(r["after_value"]) for r in audit]
+        assert {a["surviving_recommendation_id"] for a in after} == {survivors_own}
+        assert {a["session_id"] for a in after} == {11}
+        for r in audit:
+            assert "session 11" in r["reason"]
+            assert str(survivors_own) in r["reason"]
+
+    def test_the_dropped_row_sorts_with_the_isoformat_rows(self, pg):
+        """Same timestamp expression as the merge row, for the same reason —
+        one lexicographic timeline, not two."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        recommendation(pg, 11, keep, reason="on the survivor")
+        recommendation(pg, 11, gone, reason="on the duplicate")
+        pg.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (%s, 'llm_review_disable', 'admin@test', 'older', %s)",
+            (keep, _NOW.isoformat()),
+        )
+
+        pg_schema.ensure_schema(pg)
+
+        stamps = [r["created_at"] for r in q(
+            pg, "SELECT created_at FROM hint_audit")]
+        dropped_stamp = dropped_audit(pg)[0]["created_at"]
+        merge_stamp = q(
+            pg, "SELECT created_at FROM hint_audit WHERE action = 'merge'"
+        )[0]["created_at"]
+        assert " " not in dropped_stamp
+        assert dropped_stamp == merge_stamp, (
+            "the two rows this one statement writes must carry one timestamp, "
+            "not two formats"
+        )
+        assert sorted(stamps, reverse=True)[0] == dropped_stamp
+
+    def test_a_merge_that_drops_nothing_writes_no_such_row(self, pg):
+        """Idempotence and anti-false-green: the retry must not manufacture a
+        second record of a deletion that happened once."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        recommendation(pg, 11, keep, reason="on the survivor")
+        recommendation(pg, 11, gone, reason="on the duplicate")
+
+        pg_schema.ensure_schema(pg)
+        first_dropped = len(dropped_audit(pg))
+        first_merge = len(merge_audit(pg))
+        assert first_dropped == 1
+
+        pg.execute("DELETE FROM schema_version WHERE version = 21")
+        pg_schema.ensure_schema(pg)
+
+        assert len(dropped_audit(pg)) == first_dropped
+        assert len(merge_audit(pg)) == first_merge
