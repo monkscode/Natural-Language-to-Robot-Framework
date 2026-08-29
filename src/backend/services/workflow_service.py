@@ -34,6 +34,7 @@ from src.backend.core.config import settings
 # ---------------------------------------------------------------------------
 
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 
 # Hint metadata cache — bridges generation phase (crew.py) and execution phase
 # (_process_learning_record). Keyed by workflow_id, consumed via .pop() in
@@ -352,7 +353,7 @@ def _build_merged_attribution_prompt(
 
 def _process_learning_record(
     run_id: str, user_query: str, robot_code: str, result: dict
-) -> tuple | None:
+) -> tuple[ExecutionRecord | None, str] | None:
     """Store this run's execution record and route it to the learning engines.
 
     The fast half of learning. Runs the moment the result SSE has been sent, so

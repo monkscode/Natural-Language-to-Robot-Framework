@@ -65,7 +65,7 @@ def _get_with_retry(
     ceiling_ms: int = 3000,
     base_ms: int = 100,
     max_step_ms: int = 500,
-):
+) -> tuple[ExecutionRecord | None, str]:
     """Poll for this run's execution record until it exists or the budget ends.
 
     Postgres is the only party that can answer "does this run have a learning
