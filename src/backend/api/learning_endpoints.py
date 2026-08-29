@@ -521,7 +521,7 @@ def create_hint(
                     {"conflict_flagged": 1}, {"conflict_flagged": 0},
                 )
             _write_hint_audit(
-                conn, existing["id"], "create", actor,
+                conn, existing["id"], "reinforce", actor,
                 "Admin re-submitted existing hint — evidence incremented",
                 None, {"evidence_count": existing["evidence_count"] + 1},
             )

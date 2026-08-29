@@ -519,7 +519,9 @@ class TestCreateHint:
         # Flag must be cleared in the API response
         assert data["hint"]["conflict_flagged"] == 0
 
-        # Both an 'unflag' and a 'create' audit row must be persisted to hint_audit
+        # M8: the duplicate-create path bumps evidence on an EXISTING hint —
+        # it must write 'reinforce', not a second 'create'. A hint that was
+        # never freshly created twice must never show two 'create' rows.
         conn = _pg_conn(db_path)
         actions = [
             r[0]
@@ -530,7 +532,11 @@ class TestCreateHint:
         ]
         conn.close()
         assert "unflag" in actions, f"expected unflag audit row, got {actions}"
-        assert "create" in actions, f"expected create audit row, got {actions}"
+        assert "reinforce" in actions, f"expected reinforce audit row, got {actions}"
+        assert actions.count("create") == 0, (
+            f"duplicate-create path wrote a 'create' row instead of "
+            f"'reinforce' — got {actions}"
+        )
 
     def test_run_triage_calls_nl_engine(self, learning_client):
         client, _, mock_fb, _ = learning_client
