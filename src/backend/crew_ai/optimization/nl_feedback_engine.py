@@ -694,7 +694,8 @@ class NLFeedbackEngine(LearningEngine):
         return self._em._writer_conn.execute(
             "INSERT INTO hint_evidence "
             "(hint_id, source_kind, source_key, source_hash, bucket, created_at) "
-            "VALUES (?, 'workflow', ?, ?, 'evidence', ?) ON CONFLICT DO NOTHING",
+            "VALUES (?, 'workflow', ?, ?, 'evidence', ?) "
+            "ON CONFLICT (hint_id, source_kind, source_hash, bucket) DO NOTHING",
             (hint_id, workflow_id, source_hash, now),
         ).rowcount == 1
 
@@ -1381,7 +1382,9 @@ class NLFeedbackEngine(LearningEngine):
                     "INSERT INTO hint_evidence "
                     "(hint_id, source_kind, source_key, source_hash, bucket, "
                     " created_at) "
-                    "VALUES (?, 'query', ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    "VALUES (?, 'query', ?, ?, ?, ?) "
+                    "ON CONFLICT (hint_id, source_kind, source_hash, bucket) "
+                    "DO NOTHING",
                     (hint_id, source_key, source_hash, kind, now),
                 )
                 self._maybe_auto_disable_or_retire(

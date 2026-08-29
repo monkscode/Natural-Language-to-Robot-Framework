@@ -247,3 +247,54 @@ class TestGateToken:
             "no run, no token: an empty source_hash would gate every "
             "run-less caller against every other one"
         )
+
+
+class TestClaimConflictTarget:
+    """M12: the claim's ON CONFLICT DO NOTHING had no explicit target, so
+    Postgres applied it to a violation of ANY unique index on hint_evidence,
+    not just uq_hint_evidence's own (hint_id, source_kind, source_hash,
+    bucket) key. Simulate an unrelated unique index (a plausible future
+    index, or a bug) and confirm a genuinely NEW claim is never silently
+    read as 'already claimed' because of it.
+
+    Real Postgres via in_memory_db — the collision has to be a real
+    constraint violation, not something a mock can fake.
+    """
+
+    def test_unrelated_index_collision_does_not_silently_gate_a_new_claim(
+        self, in_memory_db,
+    ):
+        engine = NLFeedbackEngine(in_memory_db)
+        hid1 = _seed_hint(in_memory_db, text="hint one")
+        hid2 = _seed_hint(in_memory_db, text="hint two")
+
+        in_memory_db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS test_m12_uq_source_key "
+            "ON hint_evidence (source_key)"
+        )
+        in_memory_db.commit()
+        try:
+            assert engine._claim_feedback_run(
+                hid1, "wf-shared", "hashA", _NOW.isoformat()) is True
+
+            # hid2's (hint_id, source_kind, source_hash, bucket) tuple has
+            # NEVER been claimed — it must not be gated. It shares
+            # source_key ('wf-shared') with hid1's row, which collides with
+            # the unrelated index above but not with uq_hint_evidence.
+            try:
+                claimed2 = engine._claim_feedback_run(
+                    hid2, "wf-shared", "hashB", _NOW.isoformat())
+            except Exception:
+                # An explicit conflict target makes Postgres raise on a
+                # collision it was never told to swallow — loud, not silent.
+                in_memory_db.rollback()
+            else:
+                assert claimed2 is True, (
+                    "hid2's first-ever claim was silently gated by an "
+                    "unrelated unique-index collision — ON CONFLICT had no "
+                    "explicit target"
+                )
+        finally:
+            in_memory_db.rollback()
+            in_memory_db.execute("DROP INDEX IF EXISTS test_m12_uq_source_key")
+            in_memory_db.commit()

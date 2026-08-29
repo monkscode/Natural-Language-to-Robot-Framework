@@ -132,6 +132,57 @@ class TestOneSourcePerQuery:
         assert len({r["source_hash"] for r in rows}) == 1  # one source, two buckets
 
 
+class TestEvidenceConflictTarget:
+    """M12: this INSERT's ON CONFLICT DO NOTHING had no explicit target
+    either — same defect as _claim_feedback_run's, on the T3 credit path.
+    Two DIFFERENT hints credited by the SAME query share source_key (the
+    normalised query text), so an unrelated unique index on source_key is a
+    realistic collision to simulate: it must never silently drop one hint's
+    evidence row while its counters still update, and it must never do so
+    quietly if it can't be inserted at all.
+    """
+
+    def test_unrelated_index_collision_does_not_silently_drop_a_credited_hints_evidence(
+        self, in_memory_db,
+    ):
+        hid1 = _insert_hint(in_memory_db, "hint one")
+        hid2 = _insert_hint(in_memory_db, "hint two")
+        _insert_exec(in_memory_db, "wf-m12", "search for shoes")
+        in_memory_db.commit()
+
+        in_memory_db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS test_m12_uq_source_key "
+            "ON hint_evidence (source_key)"
+        )
+        in_memory_db.commit()
+        try:
+            engine = NLFeedbackEngine(in_memory_db)
+            result = engine.apply_hint_attribution("wf-m12", [hid1, hid2], [], [])
+
+            if result is None:
+                # Explicit-target fix: the unrelated collision is no longer
+                # silently absorbed, so Postgres raises and the whole
+                # transaction rolls back atomically — verify it actually did
+                # (no half-credited hint left behind).
+                assert _counters(in_memory_db, hid1) == (0, 0, 0, 0)
+                assert _counters(in_memory_db, hid2) == (0, 0, 0, 0)
+            else:
+                # Both hints were credited (counters updated for both, per
+                # the UPDATE that runs before this INSERT) — both must also
+                # have an evidence row. A bare, targetless DO NOTHING drops
+                # hid2's row here while its counters still update.
+                assert len(_evidence(in_memory_db, hid1)) == 1
+                assert len(_evidence(in_memory_db, hid2)) == 1, (
+                    "hid2's evidence row was silently swallowed by an "
+                    "unrelated unique-index collision — ON CONFLICT had no "
+                    "explicit target"
+                )
+        finally:
+            in_memory_db.rollback()
+            in_memory_db.execute("DROP INDEX IF EXISTS test_m12_uq_source_key")
+            in_memory_db.commit()
+
+
 class TestInsertOrdering:
 
     def test_evidence_lands_after_the_shield_and_before_the_disable_check(
