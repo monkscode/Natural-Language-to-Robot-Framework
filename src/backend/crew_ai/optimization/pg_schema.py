@@ -620,20 +620,39 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          # be: a counter UPDATE that commits before a failing DELETE leaves the
          # survivors holding the sum AND the absorbed rows in place, and the
          # 300s retry adds the sum again.
+         #
+         # WHAT THE MERGE RECORDS was fixed after this statement first shipped.
+         # A database already at v21 never re-runs the migration, so every
+         # change below is PROSPECTIVE: it improves what a not-yet-upgraded
+         # deployment records and rewrites no existing history (the live
+         # database holds zero action='merge' rows).
+         #   * `ranked` selects `*`, so `absorbed` carries every column of the
+         #     row that is about to be DELETED and before_value can be
+         #     `to_jsonb(b) - 'survivor_id'`. It recorded 9 of 23 columns
+         #     before — feedback_text, domain, url, scope, org_id, category,
+         #     created_at, created_via, anchor_query, source_workflow_id,
+         #     original_failure_category, disabled_at and conflict_flag_reason
+         #     were all unrecoverable once the row was gone. An enumerated
+         #     list of 23 names would silently go back to being partial the
+         #     day a later migration adds column 24; `to_jsonb` picks it up.
+         #   * after_value carries post-merge SOURCE diversity alongside the
+         #     counters. The merge SUMs event counters but UNIONs evidence
+         #     sources, and T4 reads lifecycle from both, so a merge can put a
+         #     hint in a state neither input was in (measured: two hints each
+         #     with unused=3 merge into a disable-eligible one). Without the
+         #     source counts the record cannot explain that.
+         #   * hint_review_recommendations rows are re-pointed off the
+         #     absorbed ids before the DELETE — see the CTE comment below.
          """
          WITH ranked AS (
-             SELECT id, evidence_count, applied_count, success_count,
-                    failure_count, unused_count, last_seen, is_active,
-                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+             SELECT *,
                     first_value(id) OVER (
                         PARTITION BY feedback_text, COALESCE(domain, ''), scope,
                                      COALESCE(org_id, '')
                         ORDER BY created_at, id) AS survivor_id
              FROM nl_feedback_corrections WHERE scope NOT IN ('url', 'global')
              UNION ALL
-             SELECT id, evidence_count, applied_count, success_count,
-                    failure_count, unused_count, last_seen, is_active,
-                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+             SELECT *,
                     first_value(id) OVER (
                         PARTITION BY feedback_text, COALESCE(domain, ''),
                                      COALESCE(url, ''), scope,
@@ -641,9 +660,7 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                         ORDER BY created_at, id) AS survivor_id
              FROM nl_feedback_corrections WHERE scope = 'url'
              UNION ALL
-             SELECT id, evidence_count, applied_count, success_count,
-                    failure_count, unused_count, last_seen, is_active,
-                    conflict_flagged, conflict_flagged_at, conflict_flag_reason,
+             SELECT *,
                     first_value(id) OVER (
                         PARTITION BY feedback_text, COALESCE(org_id, '')
                         ORDER BY created_at, id) AS survivor_id
@@ -688,7 +705,44 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                     e.bucket, e.created_at
              FROM hint_evidence e JOIN absorbed b ON b.id = e.hint_id
              ON CONFLICT DO NOTHING
-             RETURNING 1
+             RETURNING hint_id, source_kind, source_hash, bucket
+         ),
+         -- Post-merge diversity, defined exactly as _source_counts defines it
+         -- (nl_feedback_engine.py): distinct source_hash per bucket over
+         -- source_kind='query' ONLY, with `used` counting a source once across
+         -- the used AND failure buckets. Anything else would describe a number
+         -- no reader computes.
+         --
+         -- These counts may NOT come from a CTE that re-reads hint_evidence:
+         -- every CTE sees the PRE-statement snapshot, so such a read reports
+         -- the survivor's own sources and misses the ones this very statement
+         -- is moving in (measured on the real shape: used_src=2 where the
+         -- truth is 3 — worse than the old omission, because a reader would
+         -- trust it). The survivor's pre-statement rows plus the rows
+         -- moved_evidence actually INSERTED are exactly its post-statement
+         -- rows: the copies land on the survivor, dropped_evidence removes
+         -- only absorbed ids, and a moved row suppressed by ON CONFLICT is
+         -- absent from the RETURNING precisely because the survivor already
+         -- holds it. That is why RETURNING names columns instead of `1`, and
+         -- why this is UNION rather than UNION ALL.
+         post_sources AS (
+             SELECT hint_id, source_kind, source_hash, bucket
+             FROM hint_evidence
+             WHERE hint_id IN (SELECT survivor_id FROM absorbed)
+             UNION
+             SELECT hint_id, source_kind, source_hash, bucket FROM moved_evidence
+         ),
+         post_counts AS (
+             SELECT hint_id AS survivor_id,
+                    COUNT(DISTINCT CASE WHEN bucket IN ('used', 'failure')
+                                        THEN source_hash END) AS used_src,
+                    COUNT(DISTINCT CASE WHEN bucket = 'failure'
+                                        THEN source_hash END) AS failure_src,
+                    COUNT(DISTINCT CASE WHEN bucket = 'unused'
+                                        THEN source_hash END) AS unused_src
+             FROM post_sources
+             WHERE source_kind = 'query'
+             GROUP BY hint_id
          ),
          dropped_evidence AS (
              DELETE FROM hint_evidence
@@ -698,6 +752,56 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          dropped_anchors AS (
              DELETE FROM learning_anchors
              WHERE kind = 'nl' AND record_id IN (SELECT id FROM absorbed)
+             RETURNING 1
+         ),
+         -- An admin's approved review decision must not die with the hint it
+         -- names. apply_review_session (learning_endpoints.py) INNER JOINs
+         -- nl_feedback_corrections, so a recommendation pointing at an
+         -- absorbed id silently drops out of its result set, keeps applied=0,
+         -- and the session is marked 'completed' anyway.
+         --
+         -- hint_review_recommendations has NO unique key on
+         -- (session_id, hint_id) — only the plain idx_hrr_session and
+         -- idx_hrr_hint — so a naive re-point raises nothing and instead
+         -- leaves one session holding TWO live recommendations for one hint,
+         -- which apply_review_session would then act on twice. The collapse
+         -- rule, mirroring moved_evidence's ON CONFLICT DO NOTHING:
+         --   * the survivor's own recommendation wins — an absorbed one in a
+         --     session that already reviewed the survivor is DELETED;
+         --   * among absorbed recommendations for one survivor in one session
+         --     holding none of its own, the lowest id is kept and the rest are
+         --     DELETED;
+         --   * the kept one is re-pointed at the survivor.
+         -- The delete set and the re-point set are complementary predicates
+         -- over ONE snapshot of absorbed_recs, so they are disjoint by
+         -- construction: nothing here depends on the order in which the two
+         -- data-modifying CTEs happen to touch the table.
+         --
+         -- No org predicate is needed. Every branch of `ranked` partitions on
+         -- COALESCE(org_id, ''), so a survivor and its absorbed rows always
+         -- share an org and the re-point cannot cross a tenant; a redundant
+         -- predicate here would imply the partitioning is not trusted.
+         absorbed_recs AS (
+             SELECT r.id, b.survivor_id,
+                    row_number() OVER (PARTITION BY r.session_id, b.survivor_id
+                                       ORDER BY r.id) AS rn,
+                    EXISTS (SELECT 1 FROM hint_review_recommendations o
+                            WHERE o.session_id = r.session_id
+                              AND o.hint_id = b.survivor_id) AS survivor_reviewed
+             FROM hint_review_recommendations r
+             JOIN absorbed b ON b.id = r.hint_id
+         ),
+         dropped_recs AS (
+             DELETE FROM hint_review_recommendations
+             WHERE id IN (SELECT id FROM absorbed_recs
+                          WHERE survivor_reviewed OR rn > 1)
+             RETURNING 1
+         ),
+         repointed_recs AS (
+             UPDATE hint_review_recommendations r
+             SET hint_id = a.survivor_id
+             FROM absorbed_recs a
+             WHERE r.id = a.id AND NOT a.survivor_reviewed AND a.rn = 1
              RETURNING 1
          ),
          -- Preserve-when-uncertain, one expression per column: served if ANY
@@ -743,16 +847,9 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                  (hint_id, action, actor, reason, before_value, after_value, created_at)
              SELECT b.survivor_id, 'merge', 'migration_v21',
                     'Duplicate hint absorbed by migration 21 (dedup key realigned)',
-                    jsonb_build_object(
-                        'id', b.id,
-                        'evidence_count', b.evidence_count,
-                        'applied_count', b.applied_count,
-                        'success_count', b.success_count,
-                        'failure_count', b.failure_count,
-                        'unused_count', b.unused_count,
-                        'is_active', b.is_active,
-                        'conflict_flagged', b.conflict_flagged,
-                        'last_seen', b.last_seen)::text,
+                    -- The whole absorbed row, minus the merge's own working
+                    -- column. `ranked` selects *, so this is 23 of 23.
+                    (to_jsonb(b) - 'survivor_id')::text,
                     jsonb_build_object(
                         'survivor_id', m.survivor_id,
                         'evidence_count', m.evidence_count,
@@ -761,9 +858,24 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                         'failure_count', m.failure_count,
                         'unused_count', m.unused_count,
                         'is_active', m.is_active,
-                        'conflict_flagged', m.conflict_flagged)::text,
-                    now()::text
-             FROM absorbed b JOIN merged m ON m.survivor_id = b.survivor_id
+                        'conflict_flagged', m.conflict_flagged,
+                        'used_src', COALESCE(p.used_src, 0),
+                        'failure_src', COALESCE(p.failure_src, 0),
+                        'unused_src', COALESCE(p.unused_src, 0))::text,
+                    -- hint_audit.created_at is TEXT and the hint timeline
+                    -- sorts it lexicographically (learning_endpoints.py).
+                    -- now()::text separates date and time with a SPACE, and
+                    -- ' ' (0x20) < 'T' (0x54), so a merge row stamped 13:17
+                    -- rendered BELOW an isoformat row from 09:00. Emit what
+                    -- every other hint_audit write site emits.
+                    to_char(now() AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US+00:00')
+             FROM absorbed b
+             JOIN merged m ON m.survivor_id = b.survivor_id
+             -- LEFT: a merged group whose evidence is all source_kind
+             -- 'workflow' produces no post_counts row, and an inner join would
+             -- drop its audit record entirely.
+             LEFT JOIN post_counts p ON p.survivor_id = m.survivor_id
              RETURNING 1
          )
          DELETE FROM nl_feedback_corrections WHERE id IN (SELECT id FROM absorbed)

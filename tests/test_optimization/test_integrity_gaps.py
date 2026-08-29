@@ -671,3 +671,297 @@ class TestTheMerge:
 
         assert {r["id"] for r in rows(pg)} == {a, b}
         assert all(r["evidence_count"] == 1 for r in rows(pg))
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — what the merge RECORDS (F4), how that record sorts (M4), and the
+# admin decisions it must not discard (M6)
+# ---------------------------------------------------------------------------
+
+def nlfc_columns(conn):
+    return {r["column_name"] for r in q(
+        conn,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = 'nl_feedback_corrections'",
+        (_SCHEMA,),
+    )}
+
+
+def recommendation(conn, session_id, hint_id, **over):
+    """One hint_review_recommendations row, returning its id."""
+    col = {
+        "session_id": session_id, "hint_id": hint_id,
+        "recommendation": "disable", "reason": "no independent evidence",
+        "exoneration_count": 0, "admin_decision": "approved",
+        "admin_notes": None, "decided_at": _NOW.isoformat(), "applied": 0,
+        "created_at": _NOW.isoformat(),
+    }
+    col.update(over)
+    names = ", ".join(col)
+    marks = ", ".join(["%s"] * len(col))
+    return conn.execute(
+        f"INSERT INTO hint_review_recommendations ({names}) "
+        f"VALUES ({marks}) RETURNING id",
+        tuple(col.values()),
+    ).fetchone()[0]
+
+
+def recommendations(conn):
+    return q(conn, "SELECT id, session_id, hint_id, admin_decision, applied "
+                   "FROM hint_review_recommendations ORDER BY id")
+
+
+def source_counts(conn, hint_id):
+    """T4's diversity, read exactly the way NLFeedbackEngine._source_counts
+    reads it — the independent truth the audit record must agree with."""
+    return dict(q(
+        conn,
+        "SELECT "
+        "  COUNT(DISTINCT CASE WHEN bucket IN ('used', 'failure') "
+        "                      THEN source_hash END) AS used_src, "
+        "  COUNT(DISTINCT CASE WHEN bucket = 'failure' "
+        "                      THEN source_hash END) AS failure_src, "
+        "  COUNT(DISTINCT CASE WHEN bucket = 'unused' "
+        "                      THEN source_hash END) AS unused_src "
+        "FROM hint_evidence WHERE hint_id = %s AND source_kind = 'query'",
+        (hint_id,),
+    )[0])
+
+
+class TestTheMergeRecordsWhatItChanged:
+    """F4. The merge is correct; its RECORD was not. `before_value` captured 9
+    of 23 columns, so after the DELETE the absorbed hint's text, domain, scope,
+    org, category, provenance and flag reason were unrecoverable — and the
+    merge changes lifecycle state (a merged pair can go active -> disabled, or
+    become flaggable), which T4 reads from evidence SOURCES, a dimension the
+    record did not mention at all."""
+
+    def test_the_whole_absorbed_row_is_recorded_not_nine_columns(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(
+            pg, domain=None, created_at="2026-02-01T00:00:00+00:00",
+            category="timing", created_via="admin", source_workflow_id="wf-77",
+            anchor_query="search for shoes",
+            original_failure_category="locator_not_found",
+            conflict_flagged=1, conflict_flagged_at="2026-04-01T00:00:00+00:00",
+            conflict_flag_reason="Trigger 1 said it caused the failure",
+        )
+
+        pg_schema.ensure_schema(pg)
+
+        audit = merge_audit(pg)
+        assert [r["hint_id"] for r in audit] == [keep]
+        before = json.loads(audit[0]["before_value"])
+        assert set(before) == nlfc_columns(pg), (
+            "before_value does not capture the whole absorbed row — after the "
+            "DELETE these columns are unrecoverable: "
+            f"{sorted(nlfc_columns(pg) - set(before))}"
+        )
+        assert "survivor_id" not in before, (
+            "survivor_id is a merge artefact, not a column of the absorbed row"
+        )
+        assert before["id"] == gone
+        assert before["feedback_text"] == "wait for the spinner"
+        assert before["domain"] is None
+        assert before["scope"] == "domain"
+        assert before["org_id"] == _ORG
+        assert before["category"] == "timing"
+        assert before["created_via"] == "admin"
+        assert before["source_workflow_id"] == "wf-77"
+        assert before["anchor_query"] == "search for shoes"
+        assert before["original_failure_category"] == "locator_not_found"
+        assert before["created_at"] == "2026-02-01T00:00:00+00:00"
+        assert "Trigger 1" in before["conflict_flag_reason"]
+
+    def test_the_record_carries_the_post_merge_source_diversity(self, pg):
+        """The counters are quality; SOURCES are diversity, and T4 reads the
+        two together. A record that says only "evidence_count is now 8" cannot
+        explain why the merged hint became disable-eligible.
+
+        The snapshot trap is what this pins: a CTE that re-reads hint_evidence
+        inside the same statement sees the PRE-statement rows, so it would
+        report the survivor's own two sources and miss the third the merge just
+        moved in. Recording that would be worse than recording nothing."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        # Survivor's own sources: one used, one failure.
+        add_evidence(pg, keep, "query", "search shoes", "h-shoes", "used")
+        add_evidence(pg, keep, "query", "book a flight", "h-flight", "failure")
+        # The absorbed hint brings a third, previously unseen source...
+        add_evidence(pg, gone, "query", "add to cart", "h-cart", "used")
+        # ...an unused one...
+        add_evidence(pg, gone, "query", "open checkout", "h-checkout", "unused")
+        # ...a source the survivor already has (must not double-count)...
+        add_evidence(pg, gone, "query", "search shoes", "h-shoes", "used")
+        # ...and a per-run claim, which carries no diversity at all.
+        add_evidence(pg, gone, "workflow", "wf-9", "h-wf-9", "evidence")
+
+        pg_schema.ensure_schema(pg)
+
+        after = json.loads(merge_audit(pg)[0]["after_value"])
+        truth = source_counts(pg, keep)
+        assert truth == {"used_src": 3, "failure_src": 1, "unused_src": 1}, (
+            f"test setup: unexpected post-merge truth {truth}"
+        )
+        recorded = {k: after.get(k) for k in truth}
+        assert recorded == truth, (
+            f"after_value records {recorded}, the merged hint really has {truth}"
+        )
+
+    def test_the_record_reports_zero_sources_rather_than_vanishing(self, pg):
+        """A merged group with no query-kind evidence at all still gets its
+        audit row. An inner join onto the diversity CTE would silently drop
+        it — losing the whole record for the very hints with no evidence."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        add_evidence(pg, gone, "workflow", "wf-9", "h-wf-9", "evidence")
+
+        pg_schema.ensure_schema(pg)
+
+        audit = merge_audit(pg)
+        assert [json.loads(r["before_value"])["id"] for r in audit] == [gone]
+        after = json.loads(audit[0]["after_value"])
+        assert after["survivor_id"] == keep
+        assert (after["used_src"], after["failure_src"], after["unused_src"]) == (0, 0, 0)
+
+
+class TestTheMergeRowSortsOnTheTimeline:
+    """M4. `hint_audit.created_at` is TEXT and the hint-timeline endpoint sorts
+    it lexicographically. Every other write site uses `.isoformat()`
+    ('...T09:00:00.000000+00:00'); `now()::text` yields a SPACE separator, and
+    ' ' (0x20) < 'T' (0x54), so the newest row on the timeline rendered below
+    every older one."""
+
+    def test_the_merge_row_sorts_above_an_older_isoformat_row(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        # An ordinary audit row written the way every other site writes one,
+        # stamped BEFORE the migration runs.
+        pg.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (%s, 'llm_review_disable', 'admin@test', 'older', %s)",
+            (keep, _NOW.isoformat()),
+        )
+
+        pg_schema.ensure_schema(pg)
+
+        stamps = [r["created_at"] for r in q(
+            pg, "SELECT action, created_at FROM hint_audit")]
+        merge_stamp = q(
+            pg, "SELECT created_at FROM hint_audit WHERE action = 'merge'"
+        )[0]["created_at"]
+        assert " " not in merge_stamp, (
+            f"the merge row is stamped {merge_stamp!r} — a space separator "
+            "sorts below every isoformat row on the same timeline"
+        )
+        newest_first = sorted(stamps, reverse=True)
+        assert newest_first[0] == merge_stamp, (
+            f"lexicographic sort puts {newest_first[0]!r} above the merge row "
+            f"{merge_stamp!r}, though the merge happened later"
+        )
+
+
+class TestTheMergeKeepsTheAdminsReviewDecision:
+    """M6. The merge DELETEs absorbed hints. `apply_review_session` INNER JOINs
+    `nl_feedback_corrections`, so an approved recommendation naming an absorbed
+    hint drops out of the result set, keeps `applied = 0`, and the session is
+    marked `completed` anyway — the admin's decision is discarded in silence.
+
+    `hint_review_recommendations` has no unique key on (session_id, hint_id),
+    so a naive re-point raises nothing and quietly creates two live
+    recommendations for one hint in one session. The collapse rule:
+    the survivor's own recommendation wins; among absorbed ones for a survivor
+    in a session that holds none of its own, exactly the lowest id is kept."""
+
+    def test_a_recommendation_on_an_absorbed_hint_follows_the_survivor(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        rec_id = recommendation(pg, 7, gone, admin_notes="reviewed by hand")
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["session_id"], r["hint_id"]) for r in recs] == [
+            (rec_id, 7, keep)], (
+            "the approved recommendation still names the deleted hint, so "
+            "apply_review_session's INNER JOIN will drop it silently"
+        )
+        assert recs[0]["admin_decision"] == "approved"
+
+    def test_the_survivors_own_recommendation_wins_in_the_same_session(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        survivors_own = recommendation(pg, 7, keep, recommendation="keep",
+                                       reason="the survivor's own review")
+        recommendation(pg, 7, gone, recommendation="disable",
+                       reason="absorbed duplicate")
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["session_id"], r["hint_id"]) for r in recs] == [
+            (survivors_own, 7, keep)], (
+            "session 7 must end with exactly the survivor's own recommendation"
+        )
+
+    def test_two_absorbed_recommendations_collapse_to_the_lowest_id(self, pg):
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone_a = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        gone_b = hint(pg, domain=None, created_at="2026-03-01T00:00:00+00:00")
+        first = recommendation(pg, 7, gone_a)
+        second = recommendation(pg, 7, gone_b)
+        assert second > first
+
+        pg_schema.ensure_schema(pg)
+
+        recs = recommendations(pg)
+        assert [(r["id"], r["session_id"], r["hint_id"]) for r in recs] == [
+            (first, 7, keep)], (
+            "two absorbed recommendations were re-pointed to one hint in one "
+            "session — apply_review_session would act on the hint twice"
+        )
+
+    def test_each_session_is_collapsed_on_its_own(self, pg):
+        """Two sessions reviewed the same group. One holds only the absorbed
+        hint's recommendation (re-point); the other holds both (delete the
+        absorbed one). The rule is per session, not per hint."""
+        rewind_to_v20(pg)
+        keep = hint(pg, domain=None, created_at="2026-01-01T00:00:00+00:00")
+        gone = hint(pg, domain=None, created_at="2026-02-01T00:00:00+00:00")
+        bystander = hint(pg, domain="alone.test")
+        only_absorbed = recommendation(pg, 7, gone)
+        survivors_own = recommendation(pg, 8, keep)
+        recommendation(pg, 8, gone)
+        untouched = recommendation(pg, 8, bystander)
+
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["session_id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (only_absorbed, 7, keep),
+            (survivors_own, 8, keep),
+            (untouched, 8, bystander),
+        ]
+
+    def test_a_merge_that_absorbs_nothing_leaves_recommendations_alone(self, pg):
+        """Anti-false-green and the idempotence leg: with no duplicates the
+        re-point and its delete must be no-ops, so the 300s retry loop cannot
+        erode the review queue."""
+        rewind_to_v20(pg)
+        a = hint(pg, domain=None, org_id="org-A")
+        b = hint(pg, domain=None, org_id="org-B")
+        recs_before = [recommendation(pg, 7, a), recommendation(pg, 7, b)]
+
+        pg_schema.ensure_schema(pg)
+        pg.execute("DELETE FROM schema_version WHERE version = 21")
+        pg_schema.ensure_schema(pg)
+
+        assert [(r["id"], r["hint_id"]) for r in recommendations(pg)] == [
+            (recs_before[0], a), (recs_before[1], b)]
