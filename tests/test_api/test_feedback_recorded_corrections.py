@@ -169,6 +169,28 @@ class TestTheGate:
         assert body["applied_to"] == "run-1"
         c._engine.get_corrections_for_run.assert_called_once_with("run-1")
 
+    def test_a_rerun_denied_on_the_original_says_cannot_read_not_submit(self):
+        """M3: _gated_feedback_target's inner 403 was hardcoded 'cannot
+        submit feedback' regardless of caller. On THIS route (a GET, gated
+        by the same-worded 'cannot read feedback' three lines above it) a
+        stranger redirected to an original they don't own must see a
+        message that matches what this route actually does."""
+        c = _client(_ON_FILE, caller=_STRANGER, runs={
+            "copy-1": _run("copy-1", owner=_STRANGER, rerun_of="run-1"),
+            "run-1": _run("run-1", owner=_OWNER),
+        })
+        try:
+            resp = c.get("/api/feedback/copy-1")
+        finally:
+            for p in c._patchers:
+                p.stop()
+            c.close()
+
+        assert resp.status_code == 403
+        detail = resp.json()["detail"].lower()
+        assert "read" in detail, f"expected 'cannot read', got: {detail!r}"
+        assert "submit" not in detail, f"leaked the POST route's wording: {detail!r}"
+
     def test_the_read_gate_agrees_with_the_write_gate(self):
         """Anti-drift. The two routes carry separate copies of the gate (the
         read is not worth a refactor of the shipped POST), so a caller either

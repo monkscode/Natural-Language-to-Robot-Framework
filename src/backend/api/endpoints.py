@@ -277,6 +277,7 @@ async def _gated_feedback_target(
     user: dict | None,
     *,
     is_platform_admin: bool,
+    action: str = "submit",
 ) -> str:
     """The run whose learning record this feedback mutates — gated.
 
@@ -310,7 +311,7 @@ async def _gated_feedback_target(
     the gate as owner_id=None/org_id=None — refused by the same line that
     refuses an unknown run.
 
-    Referenced by: submit_feedback (this module).
+    Referenced by: submit_feedback, get_run_corrections (this module).
     Depends on: core/run_registry.py, auth/ownership.py.
     """
     rerun_of = run_row.get("rerun_of") if run_row else None
@@ -336,7 +337,7 @@ async def _gated_feedback_target(
     ):
         raise HTTPException(
             status_code=403,
-            detail="You cannot submit feedback for this run",
+            detail=f"You cannot {action} feedback for this run",
         )
 
     logging.info(
@@ -527,7 +528,7 @@ async def get_run_corrections(run_id: str, user: dict | None = Depends(require_u
         )
 
     target_id = await _gated_feedback_target(
-        run_row, run_id, user, is_platform_admin=admin)
+        run_row, run_id, user, is_platform_admin=admin, action="read")
 
     feedback_loop = get_feedback_loop()
     if not feedback_loop:
