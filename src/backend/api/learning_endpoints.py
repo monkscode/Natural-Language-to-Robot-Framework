@@ -2239,20 +2239,32 @@ def apply_review_session(
             # is — on correct data this predicate changes nothing; it only
             # guards against a hint whose org no longer matches what this
             # approved recommendation was selected against.
+            #
+            # guard_blocked tracks whether that predicate actually filtered
+            # the row out (rowcount==0) so the code below can stop treating
+            # a write the guard refused as though it happened: no audit row
+            # asserting a state change that didn't occur, no applied=1, no
+            # applied_count credit. Fix round 1 (reviewer Important finding):
+            # without this, a guard-blocked UPDATE still fabricated its audit
+            # trail and marked the recommendation permanently applied.
             hint_org = rec["org_id"]
+            guard_blocked = False
 
             if recommendation == "disable":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET is_active=0, disabled_at=? WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
                     (now, hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
-                                  audit_reason, before,
-                                  {**before, "is_active": 0, "disabled_at": now})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
+                                      audit_reason, before,
+                                      {**before, "is_active": 0, "disabled_at": now})
 
             elif recommendation == "reactivate":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET is_active=1, conflict_flagged=0, conflict_flagged_at=NULL, "
                     # Step 4b: LLM-review reactivation is a fresh chance — reset
@@ -2261,23 +2273,29 @@ def apply_review_session(
                     "WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
                     (hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
-                                  audit_reason, before,
-                                  {**before, "is_active": 1, "conflict_flagged": 0,
-                                   "conflict_flagged_at": None, "conflict_flag_reason": None,
-                                   "disabled_at": None})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
+                                      audit_reason, before,
+                                      {**before, "is_active": 1, "conflict_flagged": 0,
+                                       "conflict_flagged_at": None, "conflict_flag_reason": None,
+                                       "disabled_at": None})
 
             elif recommendation == "unflag":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET conflict_flagged=0, conflict_flagged_at=NULL, "
                     "    conflict_flag_reason=NULL WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
                     (hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
-                                  audit_reason, before,
-                                  {**before, "conflict_flagged": 0,
-                                   "conflict_flagged_at": None, "conflict_flag_reason": None})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
+                                      audit_reason, before,
+                                      {**before, "conflict_flagged": 0,
+                                       "conflict_flagged_at": None, "conflict_flag_reason": None})
 
             elif recommendation == "keep":
                 _write_hint_audit(conn, hint_id, "llm_review_keep", actor,
@@ -2286,6 +2304,18 @@ def apply_review_session(
             elif recommendation == "flag_review":
                 _write_hint_audit(conn, hint_id, "llm_review_flagged", actor,
                                   audit_reason, before, before)
+
+            if guard_blocked:
+                # Leave applied=0 deliberately — the recommendation stays
+                # visible as unapplied rather than silently disappearing, so
+                # it can be retried once the org state is sorted out.
+                logger.warning(
+                    "[REVIEW] Session %d: hint %d's org no longer matches "
+                    "the org this recommendation was approved against "
+                    "(expected %r) — %s skipped, recommendation %d left unapplied",
+                    session_id, hint_id, hint_org, recommendation, rec["id"],
+                )
+                continue
 
             conn.execute(
                 "UPDATE hint_review_recommendations SET applied=1 WHERE id=?",

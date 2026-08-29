@@ -650,10 +650,21 @@ class TestApplyReviewSessionOrgGuard:
     approved_recs SELECT and its UPDATE, inside the same transaction —
     Postgres READ COMMITTED means that intervening commit is visible to the
     next statement in this transaction.
+
+    Fix round 1 (coordinator Important finding): a guard-blocked UPDATE
+    (0 rows matched) must not also fabricate a hint_audit row claiming the
+    change happened, must not mark the recommendation applied=1, and must
+    not count toward the response's applied_count — otherwise the guard is
+    SQL-correct but the system's own record of what it did is false, and the
+    recommendation can never be retried. All three tests below (one per
+    guarded branch, per the coordinator's Minor finding) assert on all four
+    of: the hint's row state, hint_audit contents, the recommendation's
+    `applied` column, and the response body — not just the row state that
+    the first round's single disable-only test covered.
     """
 
     @staticmethod
-    def _setup_db(conn) -> tuple[int, int]:
+    def _setup_disable(conn) -> tuple[int, int]:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -674,28 +685,67 @@ class TestApplyReviewSessionOrgGuard:
         conn.commit()
         return 1, 1
 
-    def test_org_reassigned_mid_transaction_blocks_the_update(self, in_memory_em):
-        from src.backend.api.learning_endpoints import (
-            apply_review_session,
-            _audit_actor as real_audit_actor,
+    @staticmethod
+    def _setup_reactivate(conn) -> tuple[int, int]:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(id, feedback_text, scope, domain, is_active, applied_count, "
+            " success_count, failure_count, conflict_flagged, conflict_flagged_at, "
+            " conflict_flag_reason, disabled_at, org_id, created_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "Use explicit waits", "global", None, 0, 10, 8, 2,
+             1, now, "Conflicts with hint 2", now, "org-a", now, now),
         )
+        conn.execute(
+            "INSERT INTO hint_review_sessions (id, status, hint_count, created_at) "
+            "VALUES (1, 'pending_review', 1, ?)", (now,),
+        )
+        conn.execute(
+            "INSERT INTO hint_review_recommendations "
+            "(id, session_id, hint_id, recommendation, reason, admin_decision, applied, created_at) "
+            "VALUES (1, 1, 1, 'reactivate', 'looks fine now', 'approved', 0, ?)", (now,),
+        )
+        conn.commit()
+        return 1, 1
 
-        dsn = in_memory_em.dsn
-        setup_conn = pg_compat.connect(dsn)
-        session_id, hint_id = self._setup_db(setup_conn)
-        setup_conn.close()
+    @staticmethod
+    def _setup_unflag(conn) -> tuple[int, int]:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO nl_feedback_corrections "
+            "(id, feedback_text, scope, domain, is_active, applied_count, "
+            " success_count, failure_count, conflict_flagged, conflict_flagged_at, "
+            " conflict_flag_reason, org_id, created_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "Use explicit waits", "global", None, 1, 10, 8, 2,
+             1, now, "Trigger 2 flagged this", "org-a", now, now),
+        )
+        conn.execute(
+            "INSERT INTO hint_review_sessions (id, status, hint_count, created_at) "
+            "VALUES (1, 'pending_review', 1, ?)", (now,),
+        )
+        conn.execute(
+            "INSERT INTO hint_review_recommendations "
+            "(id, session_id, hint_id, recommendation, reason, admin_decision, applied, created_at) "
+            "VALUES (1, 1, 1, 'unflag', 'flag looks wrong', 'approved', 0, ?)", (now,),
+        )
+        conn.commit()
+        return 1, 1
 
-        def admin_conn_factory():
-            return pg_compat.connect(dsn)
-
+    @staticmethod
+    def _make_racy_audit_actor(dsn, hint_id):
+        """_audit_actor side effect: on its first call only, a SECOND
+        connection commits hint_id's org_id org-a -> org-b, then closes —
+        simulating a race between the approved_recs SELECT (already done by
+        the time apply_review_session reaches this call) and the current
+        branch's guarded UPDATE (the very next statement). Delegates to the
+        real _audit_actor so the rest of the call behaves normally.
+        """
+        from src.backend.api.learning_endpoints import _audit_actor as real_audit_actor
         raced = {"done": False}
 
         def racy_audit_actor(admin, request_actor=None):
-            # Fires once, between the approved_recs SELECT (already done by the
-            # time apply_review_session reaches this call) and the disable
-            # UPDATE (the very next statement in the disable branch) — the
-            # narrowest possible window to prove the guard, not a contrived
-            # earlier point.
             if not raced["done"]:
                 raced["done"] = True
                 race_conn = pg_compat.connect(dsn)
@@ -707,14 +757,71 @@ class TestApplyReviewSessionOrgGuard:
                 race_conn.close()
             return real_audit_actor(admin, request_actor)
 
+        return racy_audit_actor
+
+    def _run_racy_apply(self, in_memory_em, caplog, setup_fn):
+        """Shared drive: seed via setup_fn, race the hint to org-b mid-apply,
+        call apply_review_session, return (result, hint_id, dsn) for the
+        caller's branch-specific assertions."""
+        from src.backend.api.learning_endpoints import apply_review_session
+
+        dsn = in_memory_em.dsn
+        setup_conn = pg_compat.connect(dsn)
+        session_id, hint_id = setup_fn(setup_conn)
+        setup_conn.close()
+
+        def admin_conn_factory():
+            return pg_compat.connect(dsn)
+
         mock_fb = MagicMock()
         with (
             patch("src.backend.api.learning_endpoints._admin_conn",
                   side_effect=admin_conn_factory),
             patch("src.backend.api.learning_endpoints._audit_actor",
-                  side_effect=racy_audit_actor),
+                  side_effect=self._make_racy_audit_actor(dsn, hint_id)),
+            caplog.at_level("WARNING", logger="src.backend.api.learning_endpoints"),
         ):
-            apply_review_session(session_id, fb=mock_fb)
+            result = apply_review_session(session_id, fb=mock_fb)
+
+        return result, session_id, hint_id, dsn
+
+    def _assert_guard_blocked_bookkeeping(self, dsn, session_id, hint_id, result, caplog):
+        """The four assertions the coordinator's Important finding requires,
+        shared by all three branch tests below."""
+        assert result["applied_count"] == 0, (
+            "a guard-blocked write must not count toward applied_count"
+        )
+
+        check_conn = pg_compat.connect(dsn)
+        try:
+            audit_rows = check_conn.execute(
+                "SELECT action FROM hint_audit WHERE hint_id=?", (hint_id,),
+            ).fetchall()
+            assert audit_rows == [], (
+                "a blocked write must not fabricate an audit row, got "
+                f"{[r['action'] for r in audit_rows]}"
+            )
+
+            rec = check_conn.execute(
+                "SELECT applied FROM hint_review_recommendations "
+                "WHERE session_id=? AND hint_id=?",
+                (session_id, hint_id),
+            ).fetchone()
+            assert rec["applied"] == 0, (
+                "recommendation must stay unapplied (applied=0) so it can be retried"
+            )
+        finally:
+            check_conn.close()
+
+        warnings = [r.message for r in caplog.records if r.levelno >= 30]  # WARNING=30
+        assert any(str(session_id) in m and str(hint_id) in m for m in warnings), (
+            f"expected a warning naming the session and hint id, got: {warnings}"
+        )
+
+    def test_disable_org_reassigned_mid_transaction_blocks_everything(self, in_memory_em, caplog):
+        result, session_id, hint_id, dsn = self._run_racy_apply(
+            in_memory_em, caplog, self._setup_disable
+        )
 
         check_conn = pg_compat.connect(dsn)
         try:
@@ -729,3 +836,49 @@ class TestApplyReviewSessionOrgGuard:
             )
         finally:
             check_conn.close()
+
+        self._assert_guard_blocked_bookkeeping(dsn, session_id, hint_id, result, caplog)
+
+    def test_reactivate_org_reassigned_mid_transaction_blocks_everything(self, in_memory_em, caplog):
+        result, session_id, hint_id, dsn = self._run_racy_apply(
+            in_memory_em, caplog, self._setup_reactivate
+        )
+
+        check_conn = pg_compat.connect(dsn)
+        try:
+            hint = check_conn.execute(
+                "SELECT is_active, conflict_flagged, org_id "
+                "FROM nl_feedback_corrections WHERE id=?",
+                (hint_id,),
+            ).fetchone()
+            assert hint["org_id"] == "org-b", "the race should have moved the hint to org-b"
+            assert hint["is_active"] == 0, (
+                "the reactivate must be blocked once the hint's org no longer matches"
+            )
+            assert hint["conflict_flagged"] == 1, (
+                "reactivate's conflict-clearing side effects must be blocked too"
+            )
+        finally:
+            check_conn.close()
+
+        self._assert_guard_blocked_bookkeeping(dsn, session_id, hint_id, result, caplog)
+
+    def test_unflag_org_reassigned_mid_transaction_blocks_everything(self, in_memory_em, caplog):
+        result, session_id, hint_id, dsn = self._run_racy_apply(
+            in_memory_em, caplog, self._setup_unflag
+        )
+
+        check_conn = pg_compat.connect(dsn)
+        try:
+            hint = check_conn.execute(
+                "SELECT conflict_flagged, org_id FROM nl_feedback_corrections WHERE id=?",
+                (hint_id,),
+            ).fetchone()
+            assert hint["org_id"] == "org-b", "the race should have moved the hint to org-b"
+            assert hint["conflict_flagged"] == 1, (
+                "the unflag must be blocked once the hint's org no longer matches"
+            )
+        finally:
+            check_conn.close()
+
+        self._assert_guard_blocked_bookkeeping(dsn, session_id, hint_id, result, caplog)
