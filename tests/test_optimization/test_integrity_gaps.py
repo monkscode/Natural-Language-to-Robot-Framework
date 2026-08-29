@@ -358,7 +358,7 @@ class TestTheIndexSwapIsCreateFirst:
         assert "uq_nlfc_dedup_general" in before and "uq_nlfc_dedup_url" in before
         assert not any(n in before for n in _V21_NAMES)
 
-        assert pg_schema.ensure_schema(pg) == 21
+        assert pg_schema.ensure_schema(pg) == pg_schema.SCHEMA_VERSION
 
         after = indexes(pg)
         assert set(_V21_NAMES) <= set(after)

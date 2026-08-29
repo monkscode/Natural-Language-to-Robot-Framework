@@ -11,10 +11,15 @@ FRESH database (baseline DDL) and an EXISTING v18 database (the migration).
 baseline-only test passes even when the migration entry is missing entirely.
 
 The index set is asserted exactly. `uq_hint_evidence` leads with `hint_id`, so
-it already serves every planned lookup (`_source_counts`, T5's ON CONFLICT
-probe, T12's `hint_id IN (...)`) — index-only for the hot COUNT(DISTINCT). A
-second `(hint_id)` index would be pure write cost for a worse plan, and the
-test fails if one is added back.
+it already serves every `hint_id`-leading lookup (`_source_counts`, T5's ON
+CONFLICT probe, T12's `hint_id IN (...)`) — index-only for the hot
+COUNT(DISTINCT). `idx_hint_evidence_source` (schema v22) is a second, partial
+index on `(source_hash, bucket) WHERE source_kind = 'workflow'`, added because
+`get_corrections_for_run` (`nl_feedback_engine.py`) filters on
+`source_hash`/`bucket`/`source_kind` with no `hint_id` and was seq-scanning on
+every FeedbackPanel mount — `uq_hint_evidence` cannot serve that lookup since
+it does not lead with those columns. Beyond these two, the test fails if a
+redundant index is added back.
 
 Referenced by: docs/superpowers/plans/2026-08-26-feedback-integrity-and-org-isolation.md (T2)
 Depends on: src/backend/crew_ai/optimization/pg_schema.py
@@ -67,8 +72,8 @@ def _insert(conn, hint_id, kind, key, hash_, bucket):
     )
 
 
-def test_schema_version_is_21():
-    assert pg_schema.SCHEMA_VERSION == 21
+def test_schema_version_is_22():
+    assert pg_schema.SCHEMA_VERSION == 22
 
 
 def test_fresh_database_has_hint_evidence():
@@ -76,7 +81,7 @@ def test_fresh_database_has_hint_evidence():
     try:
         conn = _schema_conn(admin, _FRESH_SCHEMA)
         try:
-            assert pg_schema.ensure_schema(conn) == 21
+            assert pg_schema.ensure_schema(conn) == 22
             assert _columns(conn, _FRESH_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
         finally:
             conn.close()
@@ -101,7 +106,7 @@ def test_existing_v18_database_gains_hint_evidence_via_migration():
                 "WHERE table_schema = %s", (_UPGRADE_SCHEMA,),
             ).fetchall()}
 
-            assert pg_schema.ensure_schema(conn) == 21
+            assert pg_schema.ensure_schema(conn) == 22
 
             assert _columns(conn, _UPGRADE_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
             assert 19 in {r[0] for r in conn.execute(
@@ -138,18 +143,29 @@ def test_one_source_counts_once_per_bucket_but_buckets_are_independent():
         admin.close()
 
 
-def test_index_set_is_exactly_the_primary_key_and_the_unique_key():
-    """Pins the 'no redundant secondary index' decision (2026-08-27)."""
+def test_index_set_is_exactly_the_primary_key_and_the_two_named_indexes():
+    """Pins the index-set decision (2026-08-27, revised 2026-08-28 for F3):
+    the pkey, the `hint_id`-leading unique index, and the v22 partial index
+    that serves `get_corrections_for_run`'s hint_id-less lookup. No other
+    index is allowed to reappear."""
     admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
     try:
         conn = _schema_conn(admin, _FRESH_SCHEMA)
         try:
             pg_schema.ensure_schema(conn)
             idx = _indexes(conn, _FRESH_SCHEMA, "hint_evidence")
-            assert set(idx) == {"hint_evidence_pkey", "uq_hint_evidence"}
+            assert set(idx) == {
+                "hint_evidence_pkey", "uq_hint_evidence",
+                "idx_hint_evidence_source",
+            }
             definition = idx["uq_hint_evidence"]
             assert "UNIQUE" in definition
             assert "(hint_id, source_kind, source_hash, bucket)" in definition
+
+            source_idx = idx["idx_hint_evidence_source"]
+            assert "(source_hash, bucket)" in source_idx
+            assert "WHERE" in source_idx
+            assert "source_kind = 'workflow'" in source_idx
         finally:
             conn.close()
     finally:
