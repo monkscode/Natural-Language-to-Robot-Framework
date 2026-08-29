@@ -1320,6 +1320,7 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.created_at > te.created_at
+                    AND ha.action <> 'merge'
               )
         """, (cutoff_30d,)).fetchone()["n"]
 
@@ -1334,6 +1335,7 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
+                    AND ha.action <> 'merge'
                     AND ha.created_at > te.created_at
               )
         """, (cutoff_30d,)).fetchone()["n"]

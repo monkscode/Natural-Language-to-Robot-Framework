@@ -1459,6 +1459,40 @@ class TestGetDashboardStats:
         assert accuracy["engagement_rate"] is None
         assert accuracy["reversal_rate"] is None
 
+    def test_a_migration_merge_row_does_not_count_as_a_human_review(
+        self, learning_client,
+    ):
+        """M5: reviewed_events/reversed_events used to count ANY hint_audit
+        row newer than the trigger — a migration-driven 'merge' row (no human
+        looked at the flag) inflated engagement_rate with no real review."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path)
+        conn = _pg_conn(db_path)
+        conn.execute(
+            "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
+            "flagged_hint_ids, active_hint_ids, created_at) "
+            "VALUES ('trigger_1', 'wf-merge', 'succeeded', ?, '[]', "
+            "        datetime('now', '-1 hour'))",
+            (json.dumps([hint_id]),),
+        )
+        conn.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (?, 'merge', 'migration_v21', 'test merge', datetime('now'))",
+            (hint_id,),
+        )
+        conn.close()
+
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        acc = resp.json()["llm_accuracy"]
+        assert acc["flagged_events"] == 1
+        assert acc["reviewed_events"] == 0, (
+            "a 'merge' row counted as a human review of the flagged hint"
+        )
+        assert acc["reversed_events"] == 0
+        assert acc["engagement_rate"] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # GET /stats — Part 2 usage-attribution panels
