@@ -27,6 +27,7 @@ Tests grouped by function/endpoint:
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -631,6 +632,63 @@ class TestCreateHint:
         assert data["hint"]["evidence_count"] == 2
 
 
+class TestCreateHintDomainUrlNormalisation:
+    """F5: create_hint must normalise whitespace-only domain/url to NULL and
+    validate the resulting row against its own scope. Closes create_hint's
+    own residual gap: whitespace (truthy in Python) bypassed the `not
+    request.domain`/`not request.url` checks, and scope='url' never
+    validated domain at all, so domain='' passed straight through to
+    storage unnormalised."""
+
+    def _valid_payload(self, **overrides):
+        base = {
+            "feedback_text": "Use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "global",
+            "actor": "alice",
+            "org_id": "org-admin",
+        }
+        base.update(overrides)
+        return base
+
+    def test_domain_scope_whitespace_only_domain_returns_400(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(scope="domain", domain="   "))
+        assert resp.status_code == 400
+        assert "domain" in resp.json()["detail"].lower()
+
+    def test_url_scope_whitespace_only_url_returns_400(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(scope="url", url="   "))
+        assert resp.status_code == 400
+        assert "url" in resp.json()["detail"].lower()
+
+    def test_url_scope_blank_domain_is_normalised_to_null(self, learning_client):
+        """create_hint validates url for scope='url' but never touched
+        domain, so domain='' passed straight through to storage. This is
+        item 3 of the F5 fix: normalisation covers it."""
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="url", url="https://shop.test/cart", domain=""))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] is None
+
+    def test_domain_scope_domain_is_stripped_of_padding(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="domain", domain="  shop.test  "))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "shop.test"
+
+    def test_global_scope_blank_domain_and_url_normalised_to_null(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="global", domain="   ", url="   "))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] is None
+        assert resp.json()["hint"]["url"] is None
+
+
 # ---------------------------------------------------------------------------
 # PATCH /hints/{id}
 # ---------------------------------------------------------------------------
@@ -796,6 +854,195 @@ class TestPatchHint:
         ).fetchall()
         conn.close()
         assert rows == [], f"a refused edit was audited: {[r[0] for r in rows]}"
+
+
+class TestPatchHintDomainUrlValidation:
+    """F5: the admin API could silently destroy a user's stored correction.
+    patch_hint validated scope/target consistency only when `scope` was
+    itself in the request body (learning_endpoints.py:635), so patching
+    domain/url alone — the drawer's normal single-field edit — bypassed it
+    entirely: `domain=''`/`url=''` (or whitespace) landed straight in
+    storage. See TestEngineCollisionRegression below for what that then did
+    to a later correction on the same hint."""
+
+    def test_domain_scope_patched_to_empty_string_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 400
+        assert "domain" in resp.json()["detail"].lower()
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        audit_rows = conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ?", (hint_id,),
+        ).fetchall()
+        conn.close()
+        assert row["domain"] == "shop.test", "a refused patch must not blank the domain"
+        assert audit_rows == [], "a refused patch must not write an audit row"
+
+    def test_domain_scope_patched_to_whitespace_only_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": "   "})
+        assert resp.status_code == 400
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["domain"] == "shop.test"
+
+    def test_url_scope_patched_to_empty_string_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", domain="shop.test",
+                               url="https://shop.test/cart", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": ""})
+        assert resp.status_code == 400
+        assert "url" in resp.json()["detail"].lower()
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT url FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["url"] == "https://shop.test/cart"
+
+    def test_url_scope_patched_to_whitespace_only_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", domain="shop.test",
+                               url="https://shop.test/cart", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": "   "})
+        assert resp.status_code == 400
+
+    def test_global_scope_patched_domain_to_blank_is_accepted_and_normalised(
+        self, learning_client,
+    ):
+        """global scope doesn't need a domain — blanking it is a legitimate
+        edit, not F5's bug, and must not be swept up by the new check."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["domain"] is None
+
+    def test_global_scope_patched_url_to_whitespace_is_accepted_and_normalised(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", url="https://shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": "   "})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["url"] is None
+
+    def test_scope_change_to_domain_with_whitespace_domain_falls_through_to_stored_value(
+        self, learning_client,
+    ):
+        """When `scope` is ALSO in the request, a whitespace-only domain is
+        the create_hint-style 'no new value given' signal, not a blanking
+        request — it must fall through to the hint's existing domain rather
+        than being stored literally (pre-fix, `"   " or row_dict.get(...)`
+        used "   " verbatim because a non-empty string is truthy)."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "scope": "domain", "domain": "   ",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["scope"] == "domain"
+        assert resp.json()["hint"]["domain"] == "shop.test"
+
+
+class TestEngineCollisionRegression:
+    """The brief's own repro (Q1-Q3): PATCH {"domain": ""} on a domain-scoped
+    hint used to succeed, leaving a domain='' row. uq_nlfc_dedup_general_v21
+    keys on COALESCE(domain,''), so that row and a domain=NULL row occupy the
+    SAME unique-index bucket — but NLFeedbackEngine.learn_from_feedback's own
+    dedup SELECT uses `domain IS NOT DISTINCT FROM ?`, which does NOT treat
+    '' and NULL as equal. A later correction on the same text/scope/org,
+    arriving with domain=None (extract_url_from_query found no URL), missed
+    the '' row on the SELECT, then hit it on the INSERT's unique index,
+    raised IntegrityError, and was silently dropped — rollback + one
+    WARNING, nl_feedback_engine.py's `except Exception` block. This proves
+    that path is closed: the PATCH that used to create the '' row is now
+    refused, so the engine's write lands cleanly instead of colliding."""
+
+    def test_patch_can_no_longer_create_the_colliding_row_so_the_correction_survives(
+        self, learning_client, caplog,
+    ):
+        client, em, mock_fb, db_path = learning_client
+        hint_id = _insert_hint(
+            db_path, feedback_text="Dismiss the cookie banner first",
+            scope="domain", domain="shop.test", org_id="org-admin",
+        )
+
+        # Q1 (brief): PATCH {"domain": ""} — must now be refused.
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 400
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["domain"] == "shop.test", "the '' row from Q1 must never be created"
+
+        # Q2 (brief): the SAME text arrives again through the NL engine, this
+        # time with domain=None. Run it on the writer thread — the engine's
+        # own _assert_writer_thread guard requires it.
+        from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+        from src.backend.crew_ai.optimization.learning_config import WRITER_THREAD_NAME
+
+        engine = NLFeedbackEngine(execution_memory=em)
+        record = MagicMock()
+        record.workflow_id = "wf-collision-check"
+        record.domain = None
+        record.url = None
+        record.failure_category = None
+        record.org_id = "org-admin"
+        record.user_query = "dismiss the cookie banner"
+
+        old_name = threading.current_thread().name
+        threading.current_thread().name = WRITER_THREAD_NAME
+        try:
+            with caplog.at_level(
+                "WARNING", logger="src.backend.crew_ai.optimization.nl_feedback_engine",
+            ):
+                engine.learn_from_feedback(record, {
+                    "feedback_text": "Dismiss the cookie banner first",
+                    "category": "structural",  # -> scope 'domain' (_SCOPE_BY_CATEGORY)
+                    "actor": "engine",
+                })
+        finally:
+            threading.current_thread().name = old_name
+
+        assert "Failed to store feedback correction" not in caplog.text, (
+            f"the engine write was silently dropped: {caplog.text}"
+        )
+
+        conn = _pg_conn(db_path)
+        rows = conn.execute(
+            "SELECT domain, evidence_count FROM nl_feedback_corrections "
+            "WHERE feedback_text = ? ORDER BY id",
+            ("Dismiss the cookie banner first",),
+        ).fetchall()
+        conn.close()
+        # The original (domain='shop.test') hint is untouched, and the
+        # domain=NULL correction landed as its own row instead of vanishing
+        # into a swallowed IntegrityError.
+        assert len(rows) == 2, f"expected 2 rows (original + surviving correction), got {rows}"
+        by_domain = {r["domain"]: r["evidence_count"] for r in rows}
+        assert by_domain.get("shop.test") == 1
+        assert by_domain.get(None) == 1
 
 
 class TestCreateHintOrgIdIsAlreadyValidated:

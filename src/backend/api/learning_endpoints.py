@@ -430,9 +430,15 @@ def create_hint(
         raise HTTPException(status_code=400, detail="anchor_query must be ≤500 characters")
     if request.scope not in ("url", "domain", "global"):
         raise HTTPException(status_code=400, detail="scope must be url, domain, or global")
-    if request.scope == "url" and not request.url:
+    # F5: normalise before validating — whitespace-only is truthy in Python,
+    # so `not request.domain`/`not request.url` alone let "   " through, and
+    # scope='url' never validated domain at all, so domain='' passed
+    # straight to storage unnormalised.
+    domain = (request.domain or "").strip() or None
+    url = (request.url or "").strip() or None
+    if request.scope == "url" and not url:
         raise HTTPException(status_code=400, detail="url is required when scope is 'url'")
-    if request.scope == "domain" and not request.domain:
+    if request.scope == "domain" and not domain:
         raise HTTPException(status_code=400, detail="domain is required when scope is 'domain'")
 
     category = request.category or "uncategorized"
@@ -477,7 +483,7 @@ def create_hint(
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
                 "AND url IS NOT DISTINCT FROM ? AND scope = ? "
                 "AND org_id IS NOT DISTINCT FROM ?",
-                (text, request.domain, request.url, request.scope, org_id),
+                (text, domain, url, request.scope, org_id),
             ).fetchone()
         elif request.scope == "global":
             existing = conn.execute(
@@ -491,7 +497,7 @@ def create_hint(
                 "SELECT * FROM nl_feedback_corrections "
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
                 "AND org_id IS NOT DISTINCT FROM ?",
-                (text, request.domain, request.scope, org_id),
+                (text, domain, request.scope, org_id),
             ).fetchone()
 
         if existing:
@@ -533,7 +539,7 @@ def create_hint(
                 " created_via, org_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?)",
                 (
-                    text, category, request.scope, request.domain, request.url,
+                    text, category, request.scope, domain, url,
                     request.original_failure_category, anchor, now, now, org_id,
                 ),
             )
@@ -553,7 +559,7 @@ def create_hint(
             conn, hint_id, "create", actor, None, None,
             {
                 "feedback_text": text, "scope": request.scope,
-                "domain": request.domain, "url": request.url,
+                "domain": domain, "url": url,
                 "category": category, "created_via": "admin",
                 "org_id": org_id,
             },
@@ -632,12 +638,25 @@ def patch_hint(
         updates: dict = {}
         before: dict = {}
 
+        # F5: normalise before anything below reads request.domain/request.url —
+        # whitespace-only is truthy in Python, so the scope branch's
+        # `resolved_url = request.url or row_dict.get("url")` fallback (and
+        # the equivalent for domain) must see the normalised value or a
+        # whitespace-only input overwrites the stored value with blank
+        # instead of falling through to it.
+        norm_domain = None
+        if request.domain is not None:
+            norm_domain = (request.domain or "").strip() or None
+        norm_url = None
+        if request.url is not None:
+            norm_url = (request.url or "").strip() or None
+
         if request.scope is not None:
             if request.scope not in ("url", "domain", "global"):
                 raise HTTPException(status_code=400, detail="scope must be url, domain, or global")
             # Narrower-scope validation with column retention
             if request.scope == "url":
-                resolved_url = request.url or row_dict.get("url")
+                resolved_url = norm_url or row_dict.get("url")
                 if not resolved_url:
                     raise HTTPException(
                         status_code=400,
@@ -646,7 +665,7 @@ def patch_hint(
                 before["url"] = row_dict.get("url")
                 updates["url"] = resolved_url
             elif request.scope == "domain":
-                resolved_domain = request.domain or row_dict.get("domain")
+                resolved_domain = norm_domain or row_dict.get("domain")
                 if not resolved_domain:
                     raise HTTPException(
                         status_code=400,
@@ -660,16 +679,38 @@ def patch_hint(
         # Explicit field updates (only if provided and not already set via scope logic)
         if request.url is not None and "url" not in updates:
             before["url"] = row_dict.get("url")
-            updates["url"] = request.url
+            updates["url"] = norm_url
         if request.domain is not None and "domain" not in updates:
             before["domain"] = row_dict.get("domain")
-            updates["domain"] = request.domain
+            updates["domain"] = norm_domain
         if request.category is not None:
             before["category"] = row_dict.get("category")
             updates["category"] = request.category
         if request.original_failure_category is not None:
             before["original_failure_category"] = row_dict.get("original_failure_category")
             updates["original_failure_category"] = request.original_failure_category
+
+        # F5: the scope/target consistency check create_hint already has
+        # (learning_endpoints.py:431-436) — the scope branch above already
+        # enforces it when `scope` is itself in the request, but a domain/url
+        # edit that leaves the CURRENT scope unchanged took the explicit-field
+        # branch above and skipped it entirely. Validate the resulting row
+        # regardless of which branch produced it.
+        resolved_scope = request.scope if request.scope is not None else row_dict["scope"]
+        if resolved_scope == "domain":
+            final_domain = updates["domain"] if "domain" in updates else row_dict.get("domain")
+            if not final_domain:
+                raise HTTPException(
+                    status_code=400,
+                    detail="domain is required for scope 'domain' — cannot be blank",
+                )
+        elif resolved_scope == "url":
+            final_url = updates["url"] if "url" in updates else row_dict.get("url")
+            if not final_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail="url is required for scope 'url' — cannot be blank",
+                )
 
         if not updates:
             return {"hint": row_dict, "changed": False}
