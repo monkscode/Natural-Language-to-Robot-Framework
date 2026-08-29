@@ -14,6 +14,7 @@ _with_dbname helpers installed by the DB isolation guard).
 
 import os
 import logging
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import psycopg
@@ -126,3 +127,53 @@ def test_stale_sweep_does_not_drop_a_database_with_active_backends():
             held_conn.close()
         admin.execute(f'DROP DATABASE IF EXISTS "{guard_db}"')
         admin.close()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", "yes", "YES", " 1 "])
+def test_live_db_opt_out_var_truthy_values_skip_the_redirect(monkeypatch, value):
+    """NLRF_TEST_LIVE_DB set to any truthy spelling must skip the
+    throwaway-database redirect entirely — _create_throwaway_database must
+    never be called, and DATABASE_URL must be left exactly as it was."""
+    from tests import conftest as c
+
+    monkeypatch.setenv(c._LIVE_DB_OPT_OUT_VAR, value)
+    sentinel_dsn = "postgresql://sentinel:sentinel@localhost:5432/sentinel_untouched"
+    monkeypatch.setenv("DATABASE_URL", sentinel_dsn)
+
+    with patch.object(c, "_create_throwaway_database") as mock_create:
+        result = c._apply_database_url_override(sentinel_dsn)
+
+    assert result is False
+    mock_create.assert_not_called()
+    assert os.environ["DATABASE_URL"] == sentinel_dsn
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "", "banana"])
+def test_live_db_opt_out_var_falsy_values_do_not_skip_the_redirect(monkeypatch, value):
+    """Anything that isn't a recognized truthy spelling must NOT opt out —
+    the redirect logic must still run (i.e. _create_throwaway_database gets
+    called). Mocked to return None so this doesn't touch a real database;
+    only the dispatch decision is under test here."""
+    from tests import conftest as c
+
+    monkeypatch.setenv(c._LIVE_DB_OPT_OUT_VAR, value)
+
+    with patch.object(c, "_create_throwaway_database", return_value=None) as mock_create:
+        result = c._apply_database_url_override("postgresql://x:x@localhost:5432/x")
+
+    assert result is False  # the mock simulates throwaway-creation failure
+    mock_create.assert_called_once()
+
+
+def test_live_db_opt_out_var_unset_does_not_skip_the_redirect(monkeypatch):
+    """No NLRF_TEST_LIVE_DB in the environment at all must behave exactly
+    like a falsy value — the redirect logic still runs."""
+    from tests import conftest as c
+
+    monkeypatch.delenv(c._LIVE_DB_OPT_OUT_VAR, raising=False)
+
+    with patch.object(c, "_create_throwaway_database", return_value=None) as mock_create:
+        result = c._apply_database_url_override("postgresql://x:x@localhost:5432/x")
+
+    assert result is False
+    mock_create.assert_called_once()

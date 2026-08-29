@@ -27,6 +27,8 @@ import time
 import pytest
 import requests
 
+from tests.conftest import DB_ISOLATION_ACTIVE
+
 pytestmark = pytest.mark.integration
 
 SERVICE_URL = "http://localhost:5000"
@@ -49,6 +51,16 @@ def _auth_headers() -> dict:
     token, instead of hand-minting through the one production mint site
     without them. The old version of this helper skipped that step and was
     the sole source of every NULL-org_id row on test_runs (T1 Part A).
+
+    This writes to whatever database the pytest session is currently pointed
+    at via settings.DATABASE_URL — the already-running backend on :5000 can
+    only see that write if it is pointed at the same database, which is why
+    callers of this helper are skipped unless NLRF_TEST_LIVE_DB opted the
+    session out of the throwaway-database isolation guard (see
+    tests/conftest.py). Before that guard existed, this write landed in the
+    live `nlrf` database on every run: `nlrf.public.users` carries a real
+    `live-test@bench.local` row dated 2026-08-27 — direct evidence, left in
+    place, not this task's to remove.
     """
     import psycopg
     from src.backend.auth.jwt_utils import create_access_token
@@ -131,6 +143,18 @@ class TestWorkflowStreamEvents:
                 os.environ["GEMINI_API_KEY"] = original
 
 
+@pytest.mark.skipif(
+    DB_ISOLATION_ACTIVE,
+    reason=(
+        "_auth_headers() writes a real users row through settings.DATABASE_URL, "
+        "but the pytest session is isolated in its own throwaway database while "
+        "the already-running backend on :5000 authenticates against the "
+        "database it was started with — the minted token can never validate "
+        "there. Set NLRF_TEST_LIVE_DB=1 to opt this session out of the "
+        "isolation guard and run these against a shared live database "
+        "intentionally."
+    ),
+)
 class TestWorkflowApiEndpoints:
     """Verify the NL backend API endpoints for workflow submission."""
 

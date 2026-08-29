@@ -11,7 +11,10 @@ block below `_BASE_DATABASE_URL = _base_database_url()`): before anything
 imports src.backend, it points DATABASE_URL at a throwaway `nlrf_test_<pid>`
 database so the ~26 hard-coded-schema DB fixtures across the suite (which all
 build their DSNs from settings.DATABASE_URL) can never collide with, or
-silently fall through to, the live `nlrf` database.
+silently fall through to, the live `nlrf` database. `DB_ISOLATION_ACTIVE`
+(module-level bool) tells importers whether the redirect actually happened;
+it is False when NLRF_TEST_LIVE_DB opted out, or when throwaway-database
+creation itself failed.
 """
 
 import logging
@@ -75,9 +78,23 @@ os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 # os.environ["DATABASE_URL"] later would have no further effect. For the same
 # reason, the helpers below resolve the base DSN by reading os.environ / the
 # .env file directly and never import src.backend.core.config.
+#
+# Opt-out: NLRF_TEST_LIVE_DB=1 (or true/yes, case-insensitive) skips the
+# throwaway-database redirect entirely and leaves DATABASE_URL exactly as
+# configured — no database is created or swept in that mode. Its one
+# intended use is the Tier-2 "live workflow" tests
+# (tests/test_integration/test_live_workflow.py), which authenticate against
+# an already-running, separately-started backend process on :5000 by writing
+# a real users row through settings.DATABASE_URL — that only works if pytest
+# and that backend process are pointed at the same database, and the
+# already-running process cannot be redirected from here. Using it means
+# accepting that writes can reach whatever database is live, live nlrf
+# included — it is opt-in for exactly that reason.
 
 _ADMIN_CONNECT_TIMEOUT_S = 5
 _TEST_DB_PREFIX = "nlrf_test_"
+_LIVE_DB_OPT_OUT_VAR = "NLRF_TEST_LIVE_DB"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes"}
 
 # Populated by _create_throwaway_database() on success; used by
 # pytest_sessionfinish to drop the throwaway database again. None means no
@@ -86,6 +103,12 @@ _TEST_DB_PREFIX = "nlrf_test_"
 # untouched and there is nothing to tear down.
 _throwaway_db_name: str | None = None
 _throwaway_admin_dsn: str | None = None
+
+
+def _truthy_env(value: str | None) -> bool:
+    """True for "1"/"true"/"yes", case-insensitive; False for anything else,
+    including None/empty/unset."""
+    return (value or "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def _repo_backend_env_path() -> Path:
@@ -261,10 +284,38 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
         admin.close()
 
 
+def _apply_database_url_override(base_dsn: str) -> bool:
+    """Decide between the NLRF_TEST_LIVE_DB opt-out and the throwaway-database
+    redirect, and apply the result to os.environ. Returns True iff the
+    redirect was actually applied (DATABASE_URL now names a throwaway
+    database) — False for the opt-out, and False if throwaway-database
+    creation itself failed (Postgres unreachable, no CREATEDB, no vector
+    extension), in which case DATABASE_URL is left untouched either way.
+
+    Split out from the module-level call below so tests can exercise this
+    decision directly (e.g. with NLRF_TEST_LIVE_DB set and
+    _create_throwaway_database patched to prove it's never invoked) without
+    re-importing this module or touching the real throwaway database this
+    session already created.
+    """
+    if _truthy_env(os.environ.get(_LIVE_DB_OPT_OUT_VAR)):
+        logger.warning(
+            "DB isolation: %s is set — using the configured DATABASE_URL as-is "
+            "for this session; writes can reach whatever database that points "
+            "at, live nlrf included. Intended only for the Tier-2 live-workflow "
+            "tests (tests/test_integration/test_live_workflow.py).",
+            _LIVE_DB_OPT_OUT_VAR,
+        )
+        return False
+    dsn = _create_throwaway_database(base_dsn)
+    if dsn is None:
+        return False
+    os.environ["DATABASE_URL"] = dsn
+    return True
+
+
 _BASE_DATABASE_URL = _base_database_url()
-_throwaway_dsn = _create_throwaway_database(_BASE_DATABASE_URL)
-if _throwaway_dsn is not None:
-    os.environ["DATABASE_URL"] = _throwaway_dsn
+DB_ISOLATION_ACTIVE = _apply_database_url_override(_BASE_DATABASE_URL)
 
 
 def pytest_sessionfinish(session, exitstatus):
