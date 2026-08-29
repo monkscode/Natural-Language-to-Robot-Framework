@@ -183,3 +183,65 @@ def test_ensure_schema_upgrades_existing_v16_db():
     finally:
         admin.execute(f"DROP SCHEMA IF EXISTS {_UPGRADE_SCHEMA} CASCADE")
         admin.close()
+
+
+def test_ensure_schema_upgrades_existing_v21_db_hint_review_pages_gains_org_id():
+    """Migration 22 adds hint_review_pages.org_id the same way v17 added
+    org_id to the five Phase-1c tables above: baseline DDL for fresh
+    installs, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for a database that
+    already has the table. Existing pages predate org partitioning and have
+    no correct org to backfill — the column must land NULL on them, not
+    backfilled to '' or any sentinel, and stay nullable."""
+    admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+    try:
+        admin.execute(f"DROP SCHEMA IF EXISTS {_UPGRADE_SCHEMA} CASCADE")
+        admin.execute(f"CREATE SCHEMA {_UPGRADE_SCHEMA}")
+        dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_UPGRADE_SCHEMA},public"
+        raw = psycopg.connect(dsn, autocommit=True)
+        try:
+            # 1) Build the current schema, then rewind hint_review_pages to a
+            #    faithful v21 state: drop org_id and un-record migration 22.
+            #    `CREATE TABLE IF NOT EXISTS` never touches an existing table,
+            #    so from here only migration 22's ALTER can restore the column.
+            pg_schema.ensure_schema(raw)
+            raw.execute("ALTER TABLE hint_review_pages DROP COLUMN IF EXISTS org_id")
+            raw.execute("DELETE FROM schema_version WHERE version >= 22")
+            assert "org_id" not in _columns(raw, "hint_review_pages"), (
+                "test setup: org_id should be gone"
+            )
+
+            # 2) Seed a pre-upgrade page — the row a real deployment already
+            #    has, with no org to backfill.
+            raw.execute(
+                "INSERT INTO hint_review_pages "
+                "(session_id, scope_type, status, hint_count, created_at) "
+                "VALUES (1, 'domain', 'completed', 3, now()::text)"
+            )
+
+            # 3) The upgrade.
+            pg_schema.ensure_schema(raw)
+
+            # 4) Column regrown, nullable, existing row left NULL (no backfill).
+            assert "org_id" in _columns(raw, "hint_review_pages"), (
+                "migration 22 did not add org_id to an existing hint_review_pages table"
+            )
+            nullable = raw.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = 'hint_review_pages' "
+                "AND column_name = 'org_id'",
+                (_UPGRADE_SCHEMA,),
+            ).fetchone()[0]
+            assert nullable == "YES", "hint_review_pages.org_id must stay nullable (no backfill)"
+            org_value = raw.execute(
+                "SELECT org_id FROM hint_review_pages WHERE scope_type = 'domain'"
+            ).fetchone()[0]
+            assert org_value is None, (
+                "migration 22 must not backfill org_id on pre-existing pages"
+            )
+            versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}
+            assert 22 in versions, f"schema_version did not advance to 22 (got {sorted(versions)})"
+        finally:
+            raw.close()
+    finally:
+        admin.execute(f"DROP SCHEMA IF EXISTS {_UPGRADE_SCHEMA} CASCADE")
+        admin.close()
