@@ -27,11 +27,24 @@ import time
 import pytest
 import requests
 
-from tests.conftest import DB_ISOLATION_ACTIVE
+from tests.conftest import LIVE_DB_OPT_OUT
 
 pytestmark = pytest.mark.integration
 
 SERVICE_URL = "http://localhost:5000"
+
+
+def _tier2_live_db_tests_should_skip(live_db_opt_out: bool) -> bool:
+    """Fail-safe skip rule for TestWorkflowApiEndpoints: run ONLY when the
+    operator explicitly opted this session out of the isolation guard
+    (NLRF_TEST_LIVE_DB truthy) — skip in every other case, INCLUDING a
+    throwaway-database guard failure (e.g. Postgres reachable but the role
+    lacks CREATEDB). A guard failure must never be read as permission to
+    write to whatever database is live; the only signal that grants that
+    permission is an explicit opt-out. Deliberately a pure function of one
+    input so the rule itself is directly testable without needing to vary
+    real environment state or reimport tests.conftest."""
+    return not live_db_opt_out
 
 
 LIVE_TEST_EMAIL = "live-test@bench.local"
@@ -144,15 +157,17 @@ class TestWorkflowStreamEvents:
 
 
 @pytest.mark.skipif(
-    DB_ISOLATION_ACTIVE,
+    _tier2_live_db_tests_should_skip(LIVE_DB_OPT_OUT),
     reason=(
         "_auth_headers() writes a real users row through settings.DATABASE_URL, "
-        "but the pytest session is isolated in its own throwaway database while "
-        "the already-running backend on :5000 authenticates against the "
-        "database it was started with — the minted token can never validate "
-        "there. Set NLRF_TEST_LIVE_DB=1 to opt this session out of the "
-        "isolation guard and run these against a shared live database "
-        "intentionally."
+        "but the already-running backend on :5000 authenticates against the "
+        "database it was started with — the minted token can only validate "
+        "there if this pytest session is pointed at that same database. Set "
+        "NLRF_TEST_LIVE_DB=1 to opt this session out of the isolation guard and "
+        "run these against a shared live database intentionally. Skipped in "
+        "every other case — including a throwaway-database guard failure — "
+        "since a guard failure is not an opt-out and must never be read as "
+        "permission to write to whatever database happens to be live."
     ),
 )
 class TestWorkflowApiEndpoints:

@@ -8,17 +8,22 @@ Provides:
 
 Also installs a whole-session Postgres isolation guard (see the module-level
 block below `_BASE_DATABASE_URL = _base_database_url()`): before anything
-imports src.backend, it points DATABASE_URL at a throwaway `nlrf_test_<pid>`
-database so the ~26 hard-coded-schema DB fixtures across the suite (which all
-build their DSNs from settings.DATABASE_URL) can never collide with, or
+imports src.backend, it points DATABASE_URL at a throwaway
+`nlrf_test_<pid>_<random>` database so the ~26 hard-coded-schema DB fixtures
+across the suite (which all build their DSNs from settings.DATABASE_URL) can
+never collide with, or
 silently fall through to, the live `nlrf` database. `DB_ISOLATION_ACTIVE`
 (module-level bool) tells importers whether the redirect actually happened;
 it is False when NLRF_TEST_LIVE_DB opted out, or when throwaway-database
-creation itself failed.
+creation itself failed — so it must never be read as "safe to touch live
+data" (a guard failure is not an opt-out). `LIVE_DB_OPT_OUT` (module-level
+bool) is the one true signal for that: True only when NLRF_TEST_LIVE_DB was
+explicitly truthy, independent of whether the guard itself succeeded.
 """
 
 import logging
 import os
+import secrets
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -59,7 +64,8 @@ os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 # tables. This has already put real rows into the live database once.
 #
 # Fix: point the whole pytest session at a per-session throwaway database
-# (`nlrf_test_<pid>`) instead of touching any of those 26 schema constants.
+# (`nlrf_test_<pid>_<random>`) instead of touching any of those 26 schema
+# constants.
 # With a throwaway database, `public` starts empty, so any future
 # fall-through raises UndefinedTable loudly instead of corrupting data — and
 # two concurrent sessions can no longer share a namespace at all, because
@@ -103,6 +109,16 @@ _TRUTHY_ENV_VALUES = {"1", "true", "yes"}
 # untouched and there is nothing to tear down.
 _throwaway_db_name: str | None = None
 _throwaway_admin_dsn: str | None = None
+
+# One long-lived connection to the session's own throwaway database, opened
+# once in _create_throwaway_database() and held for the life of the session.
+# Its only job is to make "zero backends" a sound staleness signal in
+# sweep_stale_test_databases: without it, this session's own database also
+# sits at zero backends between fixtures (every connection this file opens
+# elsewhere is closed immediately after use), so a sweep call made while
+# idle would see it as indistinguishable from an actually-stale leftover.
+# Closed in pytest_sessionfinish before the DROP DATABASE.
+_keeper_conn = None
 
 
 def _truthy_env(value: str | None) -> bool:
@@ -176,10 +192,25 @@ def sweep_stale_test_databases(admin_dsn: str) -> None:
     concurrent session's own in-use throwaway database is simply refused by
     Postgres (a database with active backends can't be dropped without
     FORCE) instead of killing that session. Best-effort: every failure
-    (connect, list, per-database drop) is swallowed, since this is a
-    courtesy cleanup, not the primary teardown path.
+    (import, connect, list, per-database drop) is swallowed, since this is a
+    courtesy cleanup, not the primary teardown path — it must never fail
+    collection.
+
+    "Zero backends" alone is NOT a sound staleness test: it is also
+    momentarily true of a live session's own throwaway database between
+    fixtures, and of THIS session's own database before its keeper
+    connection (see _keeper_conn) exists. So this function unconditionally
+    excludes _throwaway_db_name — the calling session's own current database,
+    if it has one — from the candidate list, regardless of backend count.
+    That exclusion must hold on its own, independent of whether a keeper
+    connection happens to be open, because this function is reachable
+    directly from a test.
     """
-    import psycopg
+    try:
+        import psycopg
+    except Exception as exc:  # noqa: BLE001 — never fail collection over a broken psycopg import
+        logger.info("DB isolation: stale-database sweep skipped, psycopg unavailable: %s", exc)
+        return
 
     try:
         conn = psycopg.connect(
@@ -200,6 +231,10 @@ def sweep_stale_test_databases(admin_dsn: str) -> None:
             logger.info("DB isolation: stale-database sweep could not list databases: %s", exc)
             return
         for datname in stale_candidates:
+            if datname == _throwaway_db_name:
+                # Never the calling session's own database, no matter its
+                # backend count — see the docstring above.
+                continue
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -208,7 +243,11 @@ def sweep_stale_test_databases(admin_dsn: str) -> None:
                     )
                     (backend_count,) = cur.fetchone()
                 if backend_count == 0:
-                    conn.execute(f'DROP DATABASE "{datname}"')
+                    conn.execute(
+                        psycopg.sql.SQL("DROP DATABASE {}").format(
+                            psycopg.sql.Identifier(datname)
+                        )
+                    )
             except Exception as exc:  # noqa: BLE001 — one bad candidate must not stop the rest
                 logger.info("DB isolation: stale-database sweep skipped %s: %s", datname, exc)
                 continue
@@ -217,16 +256,29 @@ def sweep_stale_test_databases(admin_dsn: str) -> None:
 
 
 def _create_throwaway_database(base_dsn: str) -> str | None:
-    """Create a fresh nlrf_test_<pid> database with pgvector enabled and
-    return its DSN, or None on any failure. Callers must degrade
-    gracefully — Postgres unreachable, the role lacking CREATEDB, and the
-    vector extension being unavailable are all expected, non-fatal outcomes
-    (the existing DB-backed fixtures already pytest.skip when Postgres is
-    unavailable; that must keep working)."""
-    import psycopg
+    """Create a fresh nlrf_test_<pid>_<random> database with pgvector
+    enabled and return its DSN, or None on any failure. Callers must
+    degrade gracefully — Postgres unreachable, the role lacking CREATEDB,
+    the vector extension being unavailable, and psycopg itself failing to
+    import are all expected, non-fatal outcomes (the existing DB-backed
+    fixtures already pytest.skip when Postgres is unavailable; that must
+    keep working)."""
+    try:
+        import psycopg
+    except Exception as exc:  # noqa: BLE001 — never fail collection over a broken psycopg import
+        logger.warning(
+            "DB isolation: psycopg unavailable, tests will use DATABASE_URL as "
+            "configured: %s", exc,
+        )
+        return None
 
     admin_dsn = _with_dbname(base_dsn, "postgres")
-    dbname = f"{_TEST_DB_PREFIX}{os.getpid()}"
+    # os.getpid() alone is only unique within one OS/PID-namespace instance —
+    # two sessions started in separate containers on the same Postgres server
+    # could compute the same PID. The random suffix makes the full name
+    # unique regardless; the nlrf_test_ prefix is kept so the sweep above
+    # still matches it.
+    dbname = f"{_TEST_DB_PREFIX}{os.getpid()}_{secrets.token_hex(4)}"
 
     # Best-effort courtesy cleanup of earlier crashed sessions before we
     # create our own — never lets a sweep failure block database creation.
@@ -246,7 +298,10 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
 
     try:
         try:
-            # A reused PID from a crashed run should start clean.
+            # Defensive pre-clean: the random suffix already makes an exact
+            # name collision with a leftover vanishingly unlikely, but this
+            # is a harmless no-op in the normal case and a safety net if one
+            # ever did happen (e.g. a reused PID and a repeated suffix).
             admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
             admin.execute(f'CREATE DATABASE "{dbname}"')
         except Exception as exc:  # noqa: BLE001 — e.g. role lacks CREATEDB
@@ -276,15 +331,39 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
                 pass
             return None
 
-        global _throwaway_db_name, _throwaway_admin_dsn
+        # Open and hold one connection to our own database for the life of
+        # the session (see _keeper_conn). Without this, sweep_stale_test_
+        # databases' "zero backends" check cannot distinguish this session's
+        # own idle database from an actually-stale leftover — a real,
+        # reproduced defect this keeper connection exists to close. If we
+        # can't get one, treat it exactly like any other guard failure:
+        # drop what we just created and degrade rather than proceed with an
+        # unsound invariant.
+        try:
+            keeper = psycopg.connect(
+                target_dsn, autocommit=True, connect_timeout=_ADMIN_CONNECT_TIMEOUT_S
+            )
+        except Exception as exc:  # noqa: BLE001 — graceful degrade, never fail collection
+            logger.warning(
+                "DB isolation: could not open a keeper connection to %s, dropping it and "
+                "using DATABASE_URL as configured: %s", dbname, exc,
+            )
+            try:
+                admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+            except Exception:  # noqa: BLE001 — best-effort cleanup of our own failed attempt
+                pass
+            return None
+
+        global _throwaway_db_name, _throwaway_admin_dsn, _keeper_conn
         _throwaway_db_name = dbname
         _throwaway_admin_dsn = admin_dsn
+        _keeper_conn = keeper
         return target_dsn
     finally:
         admin.close()
 
 
-def _apply_database_url_override(base_dsn: str) -> bool:
+def _apply_database_url_override(base_dsn: str, opted_out: bool) -> bool:
     """Decide between the NLRF_TEST_LIVE_DB opt-out and the throwaway-database
     redirect, and apply the result to os.environ. Returns True iff the
     redirect was actually applied (DATABASE_URL now names a throwaway
@@ -292,13 +371,18 @@ def _apply_database_url_override(base_dsn: str) -> bool:
     creation itself failed (Postgres unreachable, no CREATEDB, no vector
     extension), in which case DATABASE_URL is left untouched either way.
 
+    `opted_out` is passed in rather than re-read from os.environ here so
+    LIVE_DB_OPT_OUT (computed once, below) is the single source of truth —
+    tests, and the Tier-2 live-workflow tests' own skip condition, must key
+    off that same value rather than risk drifting from what this function
+    actually used.
+
     Split out from the module-level call below so tests can exercise this
-    decision directly (e.g. with NLRF_TEST_LIVE_DB set and
-    _create_throwaway_database patched to prove it's never invoked) without
-    re-importing this module or touching the real throwaway database this
-    session already created.
+    decision directly (e.g. with opted_out=True and _create_throwaway_database
+    patched to prove it's never invoked) without re-importing this module or
+    touching the real throwaway database this session already created.
     """
-    if _truthy_env(os.environ.get(_LIVE_DB_OPT_OUT_VAR)):
+    if opted_out:
         logger.warning(
             "DB isolation: %s is set — using the configured DATABASE_URL as-is "
             "for this session; writes can reach whatever database that points "
@@ -315,11 +399,27 @@ def _apply_database_url_override(base_dsn: str) -> bool:
 
 
 _BASE_DATABASE_URL = _base_database_url()
-DB_ISOLATION_ACTIVE = _apply_database_url_override(_BASE_DATABASE_URL)
+
+# Whether NLRF_TEST_LIVE_DB was explicitly truthy for this session — the
+# single source of truth for "the operator opted this session out of the
+# isolation guard on purpose." Computed once here, independent of whether
+# the throwaway-database guard itself succeeds or fails, so that anything
+# gating on "is it safe to write to whatever DATABASE_URL resolves to"
+# (e.g. the Tier-2 live-workflow tests) can key off this value directly
+# instead of DB_ISOLATION_ACTIVE, which conflates "opted out" with "guard
+# failed" and must never be read as permission to touch live data.
+LIVE_DB_OPT_OUT = _truthy_env(os.environ.get(_LIVE_DB_OPT_OUT_VAR))
+
+DB_ISOLATION_ACTIVE = _apply_database_url_override(_BASE_DATABASE_URL, LIVE_DB_OPT_OUT)
 
 
 def pytest_sessionfinish(session, exitstatus):
     """Drop this session's throwaway database.
+
+    Closes the keeper connection first (see _keeper_conn) — otherwise it
+    would itself be one of the "pooled connections outliving the fixtures"
+    below, and there is no reason to make FORCE terminate a connection we
+    opened and control ourselves.
 
     Pooled connections (psycopg_pool.ConnectionPool, used by several
     fixtures) often outlive the fixtures that opened them, so a plain DROP
@@ -330,7 +430,23 @@ def pytest_sessionfinish(session, exitstatus):
     """
     if _throwaway_db_name is None:
         return
-    import psycopg
+
+    global _keeper_conn
+    if _keeper_conn is not None:
+        try:
+            _keeper_conn.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+        _keeper_conn = None
+
+    try:
+        import psycopg
+    except Exception as exc:  # noqa: BLE001 — never fail teardown over a broken psycopg import
+        logger.warning(
+            "DB isolation: psycopg unavailable, could not drop throwaway database %s: %s",
+            _throwaway_db_name, exc,
+        )
+        return
 
     try:
         admin = psycopg.connect(

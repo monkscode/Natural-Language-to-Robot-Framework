@@ -95,8 +95,19 @@ def test_stale_sweep_does_not_drop_a_database_with_active_backends():
     Exercises the helper directly against a database created (and held open)
     by this test, named distinctly from any real session's own
     nlrf_test_<pid> database so the two cannot collide.
+
+    Also asserts the session's OWN throwaway database survives this same
+    sweep call — this is the exact call shape the task-0 review used to
+    reproduce the Critical defect: this test's guard_db-specific assertion
+    passed even while the sweep silently destroyed the calling session's own
+    database in the same call, because nothing here was checking for that.
     """
-    from tests.conftest import _BASE_DATABASE_URL, _with_dbname, sweep_stale_test_databases
+    from tests.conftest import (
+        _BASE_DATABASE_URL, _throwaway_db_name, _with_dbname, sweep_stale_test_databases,
+    )
+
+    own_db = _throwaway_db_name
+    assert own_db is not None, "expected an active session throwaway database"
 
     admin_dsn = _with_dbname(_BASE_DATABASE_URL, "postgres")
     guard_db = f"nlrf_test_guard_{os.getpid()}"
@@ -122,6 +133,18 @@ def test_stale_sweep_does_not_drop_a_database_with_active_backends():
             "sweep_stale_test_databases dropped a database with an active "
             "backend — it must only drop databases with zero backends"
         )
+
+        with admin.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
+                (own_db,),
+            )
+            (own_db_still_exists,) = cur.fetchone()
+        assert own_db_still_exists, (
+            "sweep_stale_test_databases dropped the session's own throwaway "
+            "database while handling this same call — this is the exact "
+            "Critical defect reproduced live in the task-0 review"
+        )
     finally:
         if held_conn is not None:
             held_conn.close()
@@ -130,50 +153,128 @@ def test_stale_sweep_does_not_drop_a_database_with_active_backends():
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", "yes", "YES", " 1 "])
-def test_live_db_opt_out_var_truthy_values_skip_the_redirect(monkeypatch, value):
-    """NLRF_TEST_LIVE_DB set to any truthy spelling must skip the
-    throwaway-database redirect entirely — _create_throwaway_database must
-    never be called, and DATABASE_URL must be left exactly as it was."""
+def test_truthy_env_recognizes_truthy_spellings(value):
+    """_truthy_env is the single source of truth LIVE_DB_OPT_OUT is computed
+    from at module-import time — test the spelling rules directly rather
+    than only indirectly through an env var + reimport."""
+    from tests.conftest import _truthy_env
+
+    assert _truthy_env(value) is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "", "banana", None])
+def test_truthy_env_rejects_everything_else(value):
+    from tests.conftest import _truthy_env
+
+    assert _truthy_env(value) is False
+
+
+def test_apply_database_url_override_opted_out_skips_the_redirect(monkeypatch):
+    """opted_out=True must skip the throwaway-database redirect entirely —
+    _create_throwaway_database must never be called, and DATABASE_URL must
+    be left exactly as it was."""
     from tests import conftest as c
 
-    monkeypatch.setenv(c._LIVE_DB_OPT_OUT_VAR, value)
     sentinel_dsn = "postgresql://sentinel:sentinel@localhost:5432/sentinel_untouched"
     monkeypatch.setenv("DATABASE_URL", sentinel_dsn)
 
     with patch.object(c, "_create_throwaway_database") as mock_create:
-        result = c._apply_database_url_override(sentinel_dsn)
+        result = c._apply_database_url_override(sentinel_dsn, opted_out=True)
 
     assert result is False
     mock_create.assert_not_called()
     assert os.environ["DATABASE_URL"] == sentinel_dsn
 
 
-@pytest.mark.parametrize("value", ["0", "false", "no", "", "banana"])
-def test_live_db_opt_out_var_falsy_values_do_not_skip_the_redirect(monkeypatch, value):
-    """Anything that isn't a recognized truthy spelling must NOT opt out —
-    the redirect logic must still run (i.e. _create_throwaway_database gets
-    called). Mocked to return None so this doesn't touch a real database;
-    only the dispatch decision is under test here."""
+def test_apply_database_url_override_not_opted_out_runs_the_redirect_logic():
+    """opted_out=False must still run the redirect logic (i.e.
+    _create_throwaway_database gets called). Mocked to return None so this
+    doesn't touch a real database; only the dispatch decision is under
+    test here."""
     from tests import conftest as c
 
-    monkeypatch.setenv(c._LIVE_DB_OPT_OUT_VAR, value)
-
     with patch.object(c, "_create_throwaway_database", return_value=None) as mock_create:
-        result = c._apply_database_url_override("postgresql://x:x@localhost:5432/x")
+        result = c._apply_database_url_override(
+            "postgresql://x:x@localhost:5432/x", opted_out=False
+        )
 
     assert result is False  # the mock simulates throwaway-creation failure
     mock_create.assert_called_once()
 
 
-def test_live_db_opt_out_var_unset_does_not_skip_the_redirect(monkeypatch):
-    """No NLRF_TEST_LIVE_DB in the environment at all must behave exactly
-    like a falsy value — the redirect logic still runs."""
+def test_keeper_connection_is_open_for_the_sessions_own_database():
+    """Critical-fix requirement 1: a long-lived connection to the session's
+    own database must exist for the life of the session — this is what
+    makes "zero backends" a sound staleness signal for every OTHER database
+    the sweep considers. Sanity-checks the module state directly (existence
+    and liveness of the connection) rather than re-deriving the
+    pg_stat_activity math already covered by the sweep tests below."""
     from tests import conftest as c
 
-    monkeypatch.delenv(c._LIVE_DB_OPT_OUT_VAR, raising=False)
+    assert c._keeper_conn is not None, (
+        "expected a keeper connection to the session's own throwaway database"
+    )
+    with c._keeper_conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        assert cur.fetchone() == (1,)
 
-    with patch.object(c, "_create_throwaway_database", return_value=None) as mock_create:
-        result = c._apply_database_url_override("postgresql://x:x@localhost:5432/x")
 
-    assert result is False
-    mock_create.assert_called_once()
+def test_sweep_never_drops_the_sessions_own_database_even_when_idle():
+    """Critical-fix requirement 2: the sweep must exclude the session's own
+    current database by name, unconditionally — that exclusion must hold on
+    its own, not only because the keeper connection happens to keep the
+    backend count above zero, because this function is reachable directly
+    from a test (as here) and must be safe regardless.
+
+    This reproduces, exactly, the scenario the task-0 review used to prove
+    the Critical defect live: calling sweep_stale_test_databases() from
+    inside a test, against the session's own database, and finding it gone
+    afterward.
+    """
+    from tests import conftest as c
+
+    own_db = c._throwaway_db_name
+    assert own_db is not None, "expected an active session throwaway database"
+
+    admin_dsn = c._with_dbname(c._BASE_DATABASE_URL, "postgres")
+    c.sweep_stale_test_databases(admin_dsn)
+
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
+                (own_db,),
+            )
+            (still_exists,) = cur.fetchone()
+        assert still_exists, (
+            "sweep_stale_test_databases dropped the session's own throwaway "
+            "database — this is the exact Critical defect reproduced live "
+            "in the task-0 review"
+        )
+    finally:
+        admin.close()
+
+
+def test_tier2_live_db_tests_skip_is_driven_by_opt_out_not_guard_success():
+    """Fail-safe requirement: whether the Tier-2 live-workflow tests
+    (tests/test_integration/test_live_workflow.py::TestWorkflowApiEndpoints)
+    run must be driven ONLY by whether the operator explicitly opted out via
+    NLRF_TEST_LIVE_DB, never by whether the throwaway-database guard itself
+    happened to succeed.
+
+    _tier2_live_db_tests_should_skip is a pure function of exactly one
+    boolean (the opt-out signal) — guard success/failure isn't even a
+    parameter it can see — so this proves the wiring by construction rather
+    than by trying to reproduce a guard failure (Postgres up but role lacks
+    CREATEDB, or similar) against the real server.
+    """
+    from tests.test_integration.test_live_workflow import _tier2_live_db_tests_should_skip
+
+    # Explicitly opted in (NLRF_TEST_LIVE_DB truthy) -> must run, full stop.
+    assert _tier2_live_db_tests_should_skip(live_db_opt_out=True) is False
+    # Not opted in -> must skip, REGARDLESS of whether the throwaway-database
+    # guard succeeded or failed. This is the fail-safe property itself: a
+    # guard failure (e.g. Postgres up but CREATEDB denied) must never be
+    # interpreted as permission to write to whatever database is live.
+    assert _tier2_live_db_tests_should_skip(live_db_opt_out=False) is True
