@@ -790,16 +790,24 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          -- fix, in a narrower case. A human verdict is the scarcest thing in
          -- the group, so it survives.
          --
-         -- PENDING WORK OUTRANKS FINISHED WORK for the same reason one step
-         -- down. apply_review_session acts only on
-         -- `admin_decision = 'approved' AND applied = 0`, so an unapplied
-         -- approval is a decision the admin made that has not run yet, while
-         -- an applied one has already had its effect and will never be read
-         -- again. Deleting the pending row to keep the spent one is the same
-         -- defect a third time: the approved action simply never executes.
+         -- PENDING WORK OUTRANKS SPENT WORK, but not because the merge
+         -- decides whether the action executes. `applied = 1` is written in
+         -- the SAME transaction as `hint_review_sessions.status = 'completed'`
+         -- (learning_endpoints.py, end of apply_review_session), and nothing
+         -- ever moves a session back to 'pending_review' — apply_review_session
+         -- itself refuses to run on anything but 'pending_review' (409). Since
+         -- rec_groups partitions by session_id, an `applied = 0` row that ties
+         -- against an `applied = 1` row is always in that SAME session, which
+         -- is therefore already completed: the pending row was never going to
+         -- execute either way, merge or no merge. What the merge actually
+         -- decides is which row the audit trail keeps. The spent row's effect
+         -- is already permanent in `hint_audit`, written when it applied; the
+         -- pending row's approved-but-never-run decision has no record
+         -- anywhere else. Discarding it would erase the only evidence that an
+         -- approved action was left stranded, so the pending row survives.
          -- This sits ABOVE the survivor's own claim deliberately — preserving
-         -- an unexecuted decision matters more than which hint the row
-         -- happened to name.
+         -- that evidence matters more than which hint the row happened to
+         -- name.
          --
          -- Step 3 only breaks ties between rows of equal standing, where the
          -- survivor's own is the safer keep because its reason text describes

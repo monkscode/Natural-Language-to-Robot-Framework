@@ -473,7 +473,11 @@ class NLFeedbackEngine(LearningEngine):
             # NULL and on every non-empty value, and would disagree on ''.
             # `domain` cannot BE '' here: extract_domain returns 'unknown' for
             # an unparseable url, and the `or` below turns an empty
-            # record.domain into that result or None.
+            # record.domain into that result or None. True everywhere now, not
+            # only on this engine path — F5 made the admin write sites
+            # (create_hint, patch_hint in learning_endpoints.py) normalise the
+            # same way: `(request.domain or "").strip() or None`, so '' can no
+            # longer reach storage from either origin.
             if scope == "url":
                 existing = self._em._writer_conn.execute(
                     "SELECT id, evidence_count, conflict_flagged "

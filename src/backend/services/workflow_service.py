@@ -1303,10 +1303,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         release_slot()
 
         # Learning, half 1 of 2: submit this run's execution record NOW, before
-        # the artifact work below. The user can hit Submit on the feedback panel
-        # milliseconds after the result SSE, and /api/feedback looks the record
-        # up by run_id — every step this write sits behind is a step it can lose
-        # that race by.
+        # the artifact work below. In practice the SPA cannot race this: the
+        # generator holds the stream open through _process_learning_attribution
+        # and GeneratePage.tsx gates the feedback panel on !busy, so the
+        # measured gap between the result SSE and Submit being clickable is
+        # 606ms and 478ms on two real runs, not milliseconds. The reorder is
+        # still worth having for API callers that poll rather than gate on the
+        # stream, and for disconnect robustness — every step this write sits
+        # behind is a step it can lose a race by, for those callers.
         learning_ctx = await asyncio.to_thread(
             _process_learning_record, run_id, user_query, robot_code, result)
 

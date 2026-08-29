@@ -211,6 +211,16 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             if "workflow_id" in str(e).lower() and record.test_status == "passed":
                 self._update_to_passing_state(record.workflow_id, record.robot_code)
             else:
+                # F6 (recorded, not fixed): a FAILED re-run of the same
+                # workflow_id falls here instead — the guard above only
+                # handles "passed" — and leaves the v1 row untouched. Feedback
+                # on this workflow_id then reads v1's robot_code and
+                # error_message, and Trigger 2 judges active hints against
+                # code older than the run the user is giving feedback on. The
+                # v1 row also already has hint_attribution_done = 1, so the
+                # re-run's hint usage is never credited. /execute accepts a
+                # caller-supplied workflow_id, so the path is reachable;
+                # mechanism confirmed by reading, reachability not executed.
                 raise
         except Exception:
             self._writer_conn.rollback()
