@@ -1137,9 +1137,10 @@ class FeedbackLoop:
                                 the honest outcome for every legitimate
                                 no-store path — category="positive" and a
                                 T5-gated duplicate both reach a clean return.
-              "no_text"         feedback_text was empty or whitespace-only, so
-                                there was nothing to route to the engines; the
-                                raw feedback write still ran
+              "no_text"         feedback_text was empty or whitespace-only.
+                                Every engine still ran and no-opped on it — the
+                                call was not skipped, it just stored nothing;
+                                the raw feedback write still ran
               "no_record"       no learning record for this run within the
                                 poll's budget — triage ran, engines did not
               "learning_paused" the circuit breaker is open; nothing was written

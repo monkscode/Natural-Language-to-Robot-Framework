@@ -161,7 +161,10 @@ class TestTheFourOutcomes:
         """Task 8: Skip submits empty text, which every engine treats as a
         free no-op — no correction, no evidence, no audit row. The message
         must not repeat the "helps the system learn" claim that used to run
-        unconditionally."""
+        unconditionally, and — fix round 1 — must not editorialise a verdict
+        either: this outcome is also reachable from a PASSING run (Submit
+        feedback has no empty-text guard on the close_enough path), so the
+        message cannot say "unhelpful" or otherwise imply completely_wrong."""
         client, loop = client_and_loop
         loop.process_user_feedback.return_value = _triage(outcome="no_text")
 
@@ -174,9 +177,36 @@ class TestTheFourOutcomes:
             "correction"
         )
         assert "helps the system learn" not in body["message"]
-        assert "unhelpful" in body["message"].lower()
+        assert "unhelpful" not in body["message"].lower()
         assert "no description" in body["message"].lower() or \
             "nothing was learned" in body["message"].lower()
+
+    @pytest.mark.parametrize("feedback_type", ["close_enough", "completely_wrong"])
+    def test_no_text_message_does_not_vary_by_feedback_type(self, client_and_loop, feedback_type):
+        """Fix round 1: the reviewer found the passing (👎 -> close_enough)
+        path can also reach `no_text` — "Submit feedback" has no empty-text
+        guard on either outcome, only Skip is fail-only. The Step 4b gate in
+        feedback_loop.py never reads feedback_type, so the outcome/status
+        half of this combination was already correct before this round; only
+        the WORDING was wrong ("recorded as unhelpful" on a run that may have
+        passed). `_FEEDBACK_OUTCOME_MESSAGES` stays a flat dict keyed by
+        outcome alone — the message must be identical for both types."""
+        from src.backend.api.endpoints import _FEEDBACK_OUTCOME_MESSAGES
+
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_text")
+
+        resp = client.post("/api/feedback", json={
+            "workflow_id": "wf-honesty",
+            "feedback_type": feedback_type,
+            "feedback_text": "",
+        })
+        body = resp.json()
+
+        assert body["outcome"] == "no_text"
+        assert body["status"] == "success"
+        assert body["message"] == _FEEDBACK_OUTCOME_MESSAGES["no_text"]
+        assert "unhelpful" not in body["message"].lower()
 
     def test_no_org_says_the_run_has_no_organisation(self, client_and_loop):
         """Task 1, mode (a): an org-less run's correction can never be filed
