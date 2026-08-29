@@ -165,6 +165,16 @@ class TestAntiPatternReadsFailClosed:
         found = engine._find_similar_anti_pattern("A1", _QUERY, org_id="org-A")
         assert found is not None and found["id"] == aid
 
+    def test_the_dedup_lookup_refusal_is_logged(self, em_vec, caplog):
+        engine = AntiPatternEngine(execution_memory=em_vec)
+        with caplog.at_level(logging.WARNING):
+            engine._find_similar_anti_pattern("A1", _QUERY, org_id=None)
+        assert any("refused (no org)" in r.message for r in caplog.records
+                   if r.levelno >= logging.WARNING), (
+            "a fail-closed dedup lookup that logs nothing is indistinguishable from "
+            "'nothing matched'; every tenancy refusal carries the same "
+            "'refused (no org)' token so one Loki query finds them all")
+
 
 # ---------------------------------------------------------------------------
 # READS — keyword patterns and execution embeddings

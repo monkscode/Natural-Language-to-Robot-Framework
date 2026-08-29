@@ -273,11 +273,19 @@ class AntiPatternEngine(LearningEngine):
         dropped entirely when org_id was None, so an org-less run could match —
         and then REINFORCE — another org's row.  It is unconditional now, which
         fails closed by SQL semantics (`org_id = NULL` is never true) rather
-        than by a branch a future caller could route around.  learn() refuses an
-        org-less record before reaching here, so no WARNING is logged twice.
+        than by a branch a future caller could route around.  learn()'s own
+        guard means org_id is never None on that path, so the WARNING below is
+        unreachable via learn() and only fires for a caller that reaches this
+        method directly — kept anyway so this refusal carries the same
+        `refused (no org)` token as every other one and one Loki query still
+        finds it.
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] anti-pattern dedup lookup refused (no org): treating "
+                "as no match rather than reinforcing every org's")
         rows = self._em._writer_conn.execute(
             "SELECT * FROM anti_patterns WHERE failure_category = ? "
             "AND org_id = ? ORDER BY score DESC",
