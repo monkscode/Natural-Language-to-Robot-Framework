@@ -222,15 +222,25 @@ class TestTheFourOutcomes:
         assert "organisation" in body["message"].lower()
 
     def test_every_outcome_carries_its_own_message(self, client_and_loop):
+        """Derived from the shipped dict, never from a hand-written tuple.
+
+        A tuple here is the drift this pin exists to stop, one level up: the
+        branch added `no_text` and the enumeration was not extended, so a
+        change that gave `no_text` `processed`'s sentence passed. The sibling
+        scan at the end of this file catches a MISSING key; only this test
+        catches a DUPLICATED message, and it can only do that if it walks
+        every key the endpoint actually ships.
+        """
+        from src.backend.api.endpoints import _FEEDBACK_OUTCOME_MESSAGES
+
         client, loop = client_and_loop
         seen = {}
-        for outcome in (
-            "processed", "no_record", "learning_paused", "queued", "no_org", "error",
-        ):
+        for outcome in sorted(_FEEDBACK_OUTCOME_MESSAGES):
             loop.process_user_feedback.return_value = _triage(outcome=outcome)
             seen[outcome] = _post(client).json()["message"]
 
-        assert len(set(seen.values())) == 6, seen
+        assert len(seen) == len(_FEEDBACK_OUTCOME_MESSAGES)
+        assert len(set(seen.values())) == len(_FEEDBACK_OUTCOME_MESSAGES), seen
 
 
 class TestTheOutcomeHasExactlyOneHome:
