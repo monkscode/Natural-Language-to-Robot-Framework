@@ -36,6 +36,9 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import psycopg
+import pytest
+
 from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
 
@@ -228,6 +231,10 @@ class TestAFailedCorrectionDoesNotPoisonTheNextOne:
     one did not, so an aborted transaction outlived the submission that caused
     it: the next correction off the write queue hit `InFailedSqlTransaction` on
     its very first statement and was swallowed by its own except.
+
+    C1 later made that except re-raise after the rollback, so the caller is
+    told the correction was lost instead of being thanked for it. The rollback
+    still has to happen FIRST — the raise must not cost the connection.
     """
 
     def test_the_next_correction_still_stores(self, in_memory_db):
@@ -244,7 +251,10 @@ class TestAFailedCorrectionDoesNotPoisonTheNextOne:
         with patch.object(
             NLFeedbackEngine, "_claim_feedback_run", _abort_the_transaction,
         ):
-            engine.learn_from_feedback(_record("wf-doomed"), _triage())
+            # C1: the failure is reported, not swallowed — but only after the
+            # rollback the rest of this test depends on.
+            with pytest.raises(psycopg.errors.DivisionByZero):
+                engine.learn_from_feedback(_record("wf-doomed"), _triage())
 
         engine.learn_from_feedback(
             _record("wf-next"), _triage(text="use an explicit wait"))

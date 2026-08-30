@@ -447,8 +447,8 @@ class NLFeedbackEngine(LearningEngine):
         now = datetime.now(timezone.utc).isoformat()
         # T5: the run is the idempotency key. Hashed before any SQL runs — a
         # record with no workflow_id has no run to be idempotent about and
-        # proceeds ungated: sha256(None) raises, and the except below swallows
-        # everything, so gating on a missing id would silently DISCARD the
+        # proceeds ungated: sha256(None) raises, and the except below rolls
+        # back and re-raises, so gating on a missing id would DISCARD the
         # correction instead of deduplicating it. The product path always has
         # one (process_user_feedback reads the record back by workflow_id), so
         # this covers direct and API callers only.
@@ -656,8 +656,23 @@ class NLFeedbackEngine(LearningEngine):
             # missed doc is healed by the next reconcile. Reinforced hints
             # (the UPSERT branch) keep their original anchor unchanged —
             # single-anchor design.
+            #
+            # Its own try/except, deliberately: the correction is already
+            # COMMITTED by the line above, and the embed call sits outside
+            # add_anchor's internal try, so a broken embedder raises out of
+            # it. Left to the outer handler that exception would re-raise
+            # (see below) and report a stored correction as lost — the exact
+            # inverse of the lie this method was fixed to stop telling.
             if new_hint_id is not None:
-                self._em.add_anchor("nl", new_hint_id, anchor_query, org_id=record.org_id)
+                try:
+                    self._em.add_anchor(
+                        "nl", new_hint_id, anchor_query, org_id=record.org_id)
+                except Exception as anchor_err:
+                    logger.warning(
+                        "[LEARNING:NL] add_anchor failed for hint %s "
+                        "(correction is stored; reconcile heals the anchor): %s",
+                        new_hint_id, anchor_err,
+                    )
 
         except Exception as e:
             # The writer connection is shared and long-lived, so an aborted
@@ -675,6 +690,17 @@ class NLFeedbackEngine(LearningEngine):
             logger.warning(
                 "[LEARNING:NL] Failed to store feedback correction: %s", e,
             )
+            # Re-raise AFTER the rollback, so the caller learns the correction
+            # was not stored. Swallowing it here made `submit_and_wait` — which
+            # can only report what escapes the job — answer ("ok", None) for a
+            # write that rolled back, and /api/feedback thank the user for a
+            # correction that does not exist. The one awaited caller
+            # (feedback_loop.process_user_feedback) maps this to outcome
+            # "error"; every fire-and-forget path stays exactly as visible as
+            # before, because LearningWriteQueue._process_writes logs and
+            # continues. The pipeline is untouched: this runs on the writer
+            # thread, inside that same handler.
+            raise
 
     def _claim_feedback_run(
         self, hint_id: int, workflow_id: str, source_hash: str, now: str,

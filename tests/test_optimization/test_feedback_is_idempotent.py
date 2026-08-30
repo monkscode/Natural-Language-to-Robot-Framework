@@ -228,10 +228,11 @@ class TestGateToken:
         """A record with no workflow_id has no run to be idempotent about.
 
         The honest default is to proceed ungated: sha256(None) raises, and
-        learn_from_feedback swallows every exception, so gating on a missing id
-        would discard the correction entirely behind one WARNING. The product
-        path always has an id (the record is read back by workflow_id), so this
-        covers direct/API callers only.
+        learn_from_feedback rolls back and re-raises, so gating on a missing id
+        would discard the correction entirely — reported now rather than
+        silent, but discarded either way. The product path always has an id
+        (the record is read back by workflow_id), so this covers direct/API
+        callers only.
         """
         engine = NLFeedbackEngine(in_memory_db)
         engine.learn_from_feedback(_record(None), _triage())
