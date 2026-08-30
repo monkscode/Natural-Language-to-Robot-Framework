@@ -444,7 +444,8 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
     correction ("processed" | "no_text" | "no_record" | "learning_paused" |
     "no_org" | "queued" | "error"); it is absent when learning is switched off,
     which is equally not a success. `message` is the backend's own sentence for
-    whichever case fired — this panel never writes its own. */
+    whichever case fired; the panel writes its own only when the body carries
+    none (FeedbackPanel's `submit`). */
 interface FeedbackResponse { status?: string; outcome?: string; message?: string }
 
 /** GET /api/feedback/{run_id}. The corrections this run has already
