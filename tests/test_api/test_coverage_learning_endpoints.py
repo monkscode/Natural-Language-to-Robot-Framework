@@ -1459,12 +1459,33 @@ class TestGetDashboardStats:
         assert accuracy["engagement_rate"] is None
         assert accuracy["reversal_rate"] is None
 
-    def test_a_migration_merge_row_does_not_count_as_a_human_review(
-        self, learning_client,
+    # Every machine writer of hint_audit, with the action and actor it
+    # writes. reviewed_events counts "a human looked at this flag", so none
+    # of these may satisfy it:
+    #   pg_schema.py migration 21          -> merge, merge_recommendation_dropped
+    #   nl_feedback_engine._flag_hints_no_commit -> trigger_N_flag
+    #   nl_feedback_engine._auto_disable_hint    -> auto_disable
+    _MACHINE_AUDIT_ROWS = [
+        ("merge", "migration_v21"),
+        ("merge_recommendation_dropped", "migration_v21"),
+        ("trigger_1_flag", "trigger_1"),
+        ("trigger_2_flag", "trigger_2"),
+        ("auto_disable", "system"),
+    ]
+
+    @pytest.mark.parametrize("action,actor", _MACHINE_AUDIT_ROWS)
+    def test_a_machine_written_row_does_not_count_as_a_human_review(
+        self, learning_client, action, actor,
     ):
-        """M5: reviewed_events/reversed_events used to count ANY hint_audit
-        row newer than the trigger — a migration-driven 'merge' row (no human
-        looked at the flag) inflated engagement_rate with no real review."""
+        """M5/I1: reviewed_events/reversed_events used to count ANY hint_audit
+        row newer than the trigger, then only excluded the literal 'merge'.
+
+        Migration 21 writes TWO verbs on the same survivor hint with the same
+        actor, and the engine writes two more of its own, so an action list
+        was always going to be one verb behind. The invariant is the actor: a
+        row no person wrote is not a review, and 'Pending review' on the
+        dashboard is flagged_events - reviewed_events, so counting one hides
+        a flag nobody has looked at."""
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path)
         conn = _pg_conn(db_path)
@@ -1478,8 +1499,8 @@ class TestGetDashboardStats:
         conn.execute(
             "INSERT INTO hint_audit "
             "(hint_id, action, actor, reason, created_at) "
-            "VALUES (?, 'merge', 'migration_v21', 'test merge', datetime('now'))",
-            (hint_id,),
+            "VALUES (?, ?, ?, 'machine-written', datetime('now'))",
+            (hint_id, action, actor),
         )
         conn.close()
 
@@ -1488,10 +1509,42 @@ class TestGetDashboardStats:
         acc = resp.json()["llm_accuracy"]
         assert acc["flagged_events"] == 1
         assert acc["reviewed_events"] == 0, (
-            "a 'merge' row counted as a human review of the flagged hint"
+            f"a machine-written {action!r} row by {actor!r} counted as a "
+            "human review of the flagged hint"
         )
         assert acc["reversed_events"] == 0
         assert acc["engagement_rate"] == 0.0
+        assert acc["pending_review"] == 1
+
+    def test_a_human_row_after_the_trigger_still_counts_as_a_review(
+        self, learning_client,
+    ):
+        """The other half of I1: the exclusion must not silence real reviews.
+        An admin unflagging the hint is exactly what engagement_rate is for."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path)
+        conn = _pg_conn(db_path)
+        conn.execute(
+            "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
+            "flagged_hint_ids, active_hint_ids, created_at) "
+            "VALUES ('trigger_1', 'wf-human', 'succeeded', ?, '[]', "
+            "        datetime('now', '-1 hour'))",
+            (json.dumps([hint_id]),),
+        )
+        conn.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (?, 'unflag', 'alice@example.com', 'the hint is fine', "
+            "        datetime('now'))",
+            (hint_id,),
+        )
+        conn.close()
+
+        acc = client.get("/stats").json()["llm_accuracy"]
+        assert acc["reviewed_events"] == 1
+        assert acc["reversed_events"] == 1
+        assert acc["engagement_rate"] == 1.0
+        assert acc["pending_review"] == 0
 
 
 # ---------------------------------------------------------------------------

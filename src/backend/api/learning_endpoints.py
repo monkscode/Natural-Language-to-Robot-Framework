@@ -1309,6 +1309,20 @@ def get_dashboard_stats(
               AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) <> '[]'::jsonb
         """, (cutoff_30d,)).fetchone()["n"]
 
+        # Excluded by ACTOR, not by an action list. The invariant is "a HUMAN
+        # reviewed this flag" — 'Pending review' on the dashboard is
+        # flagged_events - reviewed_events, so a machine-written row counted
+        # here hides a flag nobody has looked at. An action list was always
+        # going to be one verb behind: migration 21 alone writes two ('merge'
+        # and 'merge_recommendation_dropped') onto the same survivor hint.
+        # These four are every machine writer of hint_audit:
+        #   'migration_v21'          pg_schema.py migration 21 (both verbs)
+        #   'trigger_1'/'trigger_2'  _flag_hints_no_commit's own flag row
+        #   'system'                 _auto_disable_hint
+        # Every other writer takes its actor from a verified token
+        # (_audit_actor, or feedback_insight['actor'] on the engine paths), so
+        # a person can never arrive under one of these names. A NEW machine
+        # actor must be added here.
         reviewed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
@@ -1320,7 +1334,8 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.created_at > te.created_at
-                    AND ha.action <> 'merge'
+                    AND ha.actor NOT IN
+                        ('migration_v21', 'system', 'trigger_1', 'trigger_2')
               )
         """, (cutoff_30d,)).fetchone()["n"]
 
@@ -1335,12 +1350,13 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
-                    -- Redundant today — 'unflag' already excludes 'merge', an
-                    -- action can't be both. Kept per M5 (both EXISTS clauses
-                    -- get this predicate) so it is load-bearing the day the
-                    -- 'unflag' restriction above is ever widened; not evidence
-                    -- that an 'unflag' row can carry a 'merge' action.
-                    AND ha.action <> 'merge'
+                    -- Redundant today — no machine writer emits 'unflag', so
+                    -- the actor test cannot subtract anything here. Kept per
+                    -- M5 (both EXISTS clauses get this predicate) so it is
+                    -- load-bearing the day the 'unflag' restriction above is
+                    -- ever widened; not evidence that a machine can write one.
+                    AND ha.actor NOT IN
+                        ('migration_v21', 'system', 'trigger_1', 'trigger_2')
                     AND ha.created_at > te.created_at
               )
         """, (cutoff_30d,)).fetchone()["n"]
