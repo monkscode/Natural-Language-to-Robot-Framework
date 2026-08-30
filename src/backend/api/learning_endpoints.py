@@ -2377,8 +2377,15 @@ def apply_review_session(
 
             if guard_blocked:
                 # Leave applied=0 deliberately — the recommendation stays
-                # visible as unapplied rather than silently disappearing, so
-                # it can be retried once the org state is sorted out.
+                # visible as unapplied rather than silently disappearing.
+                # There is no retry, and this comment used to claim one: the
+                # only writers of hint_review_sessions.status are this
+                # function's 'completed' below, _run_hint_review's
+                # 'completed' on an empty page and its 'pending_review' /
+                # 'failed' at creation. Nothing moves a session back to
+                # 'pending_review', and the guard above 409s on any other
+                # status, so the approved action is stranded — an admin has to
+                # apply it to the hint directly through the hints UI.
                 logger.warning(
                     "[REVIEW] Session %d: hint %d's org no longer matches "
                     "the org this recommendation was approved against "
