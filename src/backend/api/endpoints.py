@@ -239,8 +239,8 @@ class FeedbackRequest(BaseModel):
 # What the response is allowed to claim, keyed by the outcome the learning loop
 # reported (process_user_feedback's own vocabulary — one set of strings, no
 # translation layer to get wrong). Every one of these paths used to answer
-# "Thanks — your feedback helps the system learn", including the two where the
-# correction was discarded outright.
+# "Thanks — your feedback helps the system learn", including the four where the
+# correction is discarded outright: no_record, learning_paused, no_org, error.
 #
 # The wording is the backend's, not the SPA's, for the same reason the
 # "disabled" and error branches below already carry a `message`: one place says
@@ -267,11 +267,16 @@ _FEEDBACK_OUTCOME_MESSAGES = {
     ),
     "no_org": (
         "This run is not associated with an organisation, so the correction "
-        "could not be filed and was not recorded."
+        "could not be filed in the learning store, though this submission is "
+        "recorded against the run."
     ),
+    # Deliberately says less than "no_org" above: process_user_feedback's own
+    # outer except also answers "error", and it can fire at Step 1 before the
+    # raw-feedback submit has run — so this must not promise the text is on
+    # the run. "Did not reach the learning store" is true on every path here.
     "error": (
-        "Something went wrong, so this correction was not recorded. "
-        "Please send it again."
+        "Something went wrong, so this correction did not reach the learning "
+        "store — please send it again."
     ),
 }
 
@@ -363,8 +368,10 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     Two fields, two jobs:
 
       * `outcome` is the only authority on what happened to the CORRECTION —
-        "processed" | "no_record" | "learning_paused" | "no_org" | "queued" |
-        "error", straight from process_user_feedback. Read this one.
+        "processed" | "no_text" | "no_record" | "learning_paused" | "no_org" |
+        "queued" | "error", straight from process_user_feedback. Read this
+        one. `_FEEDBACK_OUTCOME_MESSAGES` above is the full list; the two are
+        pinned together by test_feedback_response_honesty.py.
       * `status` keeps the meaning it has across this router: could the
         endpoint give an account at all. It is "error" only for the outcome of
         the same name, which is the same class of event the handler's own

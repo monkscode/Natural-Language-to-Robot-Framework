@@ -441,9 +441,10 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
 }
 
 /** POST /api/feedback. `outcome` is the only authority on what happened to the
-    correction ("processed" | "no_record" | "learning_paused" | "error"); it is
-    absent when learning is switched off, which is equally not a success.
-    `message` is the backend's own sentence for whichever case fired. */
+    correction ("processed" | "no_text" | "no_record" | "learning_paused" |
+    "no_org" | "queued" | "error"); it is absent when learning is switched off,
+    which is equally not a success. `message` is the backend's own sentence for
+    whichever case fired — this panel never writes its own. */
 interface FeedbackResponse { status?: string; outcome?: string; message?: string }
 
 /** GET /api/feedback/{run_id}. The corrections this run has already

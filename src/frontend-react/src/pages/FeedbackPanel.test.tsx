@@ -93,7 +93,7 @@ describe('an answer that says the correction did not land', () => {
   it.each([
     ['no_record', { status: 'success', outcome: 'no_record', message: NO_RECORD }, NO_RECORD],
     ['learning_paused', { status: 'success', outcome: 'learning_paused', message: PAUSED }, PAUSED],
-    ['error', { status: 'error', outcome: 'error', message: 'Something went wrong, so this correction was not recorded. Please send it again.' }, /Something went wrong/],
+    ['error', { status: 'error', outcome: 'error', message: 'Something went wrong, so this correction did not reach the learning store — please send it again.' }, /Something went wrong/],
     // Learning switched off answers with a message and no outcome at all. It
     // is not a success either, and it used to render as "Thanks".
     ['learning off', { status: 'disabled', message: 'Learning system is not enabled' }, 'Learning system is not enabled'],

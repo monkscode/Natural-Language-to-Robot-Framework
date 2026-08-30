@@ -221,6 +221,54 @@ class TestTheFourOutcomes:
         assert "helps the system learn" not in body["message"]
         assert "organisation" in body["message"].lower()
 
+    def test_no_org_does_not_deny_the_submission_it_just_stored(
+        self, client_and_loop,
+    ):
+        """Step 2's `update_user_feedback` submit is unconditional and runs
+        BEFORE the org check, so an org-less run's raw text really is on
+        `execution_records.user_feedback`. "was not recorded" contradicts a
+        row the owner can go and read; only the CORRECTION is missing."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_org")
+
+        message = _post(client).json()["message"]
+
+        assert "was not recorded" not in message, message
+        assert "recorded against the run" in message, message
+        assert "learning store" in message, message
+
+    def test_error_does_not_claim_the_submission_was_not_recorded(
+        self, client_and_loop,
+    ):
+        """Same overstatement on the error path — with one difference that
+        keeps the sentence narrower than no_org's: process_user_feedback's own
+        outer `except` also answers "error", and it can fire at Step 1 before
+        the raw-feedback submit has happened. So this message says what is
+        true on EVERY error path — the correction did not reach the learning
+        store — and claims nothing about the run."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="error")
+
+        message = _post(client).json()["message"]
+
+        assert "was not recorded" not in message, message
+        assert "learning store" in message, message
+        assert "recorded against the run" not in message, message
+
+    def test_learning_paused_still_says_nothing_was_recorded(
+        self, client_and_loop,
+    ):
+        """The contrast that proves the two rewordings above are not blanket
+        edits: the breaker check returns BEFORE the raw-feedback submit, so
+        for this outcome nothing at all was written and the flat sentence is
+        the true one."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="learning_paused")
+
+        message = _post(client).json()["message"]
+
+        assert "was not recorded" in message, message
+
     def test_every_outcome_carries_its_own_message(self, client_and_loop):
         """Derived from the shipped dict, never from a hand-written tuple.
 
