@@ -534,8 +534,24 @@ class SemanticStore(ABC):
         ...
 
     @abstractmethod
-    def search_similar(self, query: str, top_k: int) -> list:
-        """Find semantically similar entries."""
+    def search_similar(self, query: str, top_k: int = 5, *,
+                       org_id: str | None) -> list:
+        """Find semantically similar entries within one org.
+
+        org_id is REQUIRED (keyword-only, no default) while its type still
+        admits None. The two halves are deliberate:
+
+        - Omitting it is a TypeError on the first call, not an empty list. The
+          reads behind this fail closed (T9), so a default would turn a
+          programmer's slip into "learning silently returns nothing" — the
+          failure class this whole area exists to remove.
+        - Passing None explicitly is still legal and still fails closed, for a
+          caller that genuinely has no org (an AUTH_ENFORCED=false run).
+
+        The sibling reads (find_similar_executions, get_hints_with_ids,
+        get_warnings) DO default to None because None is a real runtime state
+        on the generation path they serve. This one has no such path.
+        """
         ...
 
 

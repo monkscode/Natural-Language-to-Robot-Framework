@@ -222,10 +222,26 @@ class TestVectorFailurePaths:
             assert in_memory_em.find_similar_executions("anything") == []
 
     def test_search_similar_delegates(self, in_memory_em):
+        # org_id must reach find_similar_executions. Without it that method
+        # fails closed (T9) and every search_similar caller silently gets [].
         with patch.object(in_memory_em, "find_similar_executions",
                           return_value=[{"workflow_id": "x"}]) as f:
-            assert in_memory_em.search_similar("q", top_k=2) == [{"workflow_id": "x"}]
-        f.assert_called_once_with("q", 2)
+            assert in_memory_em.search_similar(
+                "q", top_k=2, org_id="org-1") == [{"workflow_id": "x"}]
+        f.assert_called_once_with("q", 2, org_id="org-1")
+
+    def test_search_similar_refuses_to_be_called_without_an_org(self, in_memory_em):
+        # org_id is keyword-only with NO default, so forgetting it is a
+        # TypeError on the first call rather than a silent []. Pins that a
+        # default is never re-added out of misplaced symmetry with the sibling
+        # reads, which default to None because None is a real state for them.
+        with pytest.raises(TypeError):
+            in_memory_em.search_similar("q", top_k=2)
+
+    def test_search_similar_still_fails_closed_on_an_explicit_none(self, in_memory_em):
+        # A caller that genuinely has no org may say so, and gets the same
+        # refusal find_similar_executions gives — no rows, not an exception.
+        assert in_memory_em.search_similar("q", top_k=2, org_id=None) == []
 
     def test_store_embedding_skips_when_embedder_down(self, in_memory_em):
         in_memory_em.store_embedding("text", {"workflow_id": "wf-emb-skip"})

@@ -605,8 +605,12 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             except Exception:
                 pass
 
-    def search_similar(self, query: str, top_k: int = 5) -> list:
-        return self.find_similar_executions(query, top_k)
+    def search_similar(self, query: str, top_k: int = 5, *,
+                       org_id: str | None) -> list:
+        # Keyword-only and required — see SemanticStore.search_similar. The
+        # forward matters: find_similar_executions fails closed without an org,
+        # so dropping it here would return [] for every caller.
+        return self.find_similar_executions(query, top_k, org_id=org_id)
 
     def filter_by_query_similarity(self, user_query, candidate_ids, kind,
                                    threshold=0.55, score_sink=None,
