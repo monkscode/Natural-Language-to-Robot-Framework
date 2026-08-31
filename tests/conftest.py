@@ -312,33 +312,19 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
             return None
 
         target_dsn = _with_dbname(base_dsn, dbname)
-        try:
-            target = psycopg.connect(
-                target_dsn, autocommit=True, connect_timeout=_ADMIN_CONNECT_TIMEOUT_S
-            )
-            try:
-                target.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            finally:
-                target.close()
-        except Exception as exc:  # noqa: BLE001 — e.g. vector extension unavailable
-            logger.warning(
-                "DB isolation: could not enable pgvector in %s, dropping it and using "
-                "DATABASE_URL as configured: %s", dbname, exc,
-            )
-            try:
-                admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
-            except Exception:  # noqa: BLE001 — best-effort cleanup of our own failed attempt
-                pass
-            return None
 
         # Open and hold one connection to our own database for the life of
-        # the session (see _keeper_conn). Without this, sweep_stale_test_
+        # the session (see _keeper_conn), immediately after CREATE DATABASE —
+        # before anything else runs on it. Without this, sweep_stale_test_
         # databases' "zero backends" check cannot distinguish this session's
         # own idle database from an actually-stale leftover — a real,
-        # reproduced defect this keeper connection exists to close. If we
-        # can't get one, treat it exactly like any other guard failure:
-        # drop what we just created and degrade rather than proceed with an
-        # unsound invariant.
+        # reproduced defect this keeper connection exists to close. Opening
+        # it here rather than after a separate setup connection closes the
+        # window where the database exists with zero backends and a peer
+        # session's sweep could drop it out from under us. If we can't get
+        # one, treat it exactly like any other guard failure: drop what we
+        # just created and degrade rather than proceed with an unsound
+        # invariant.
         try:
             keeper = psycopg.connect(
                 target_dsn, autocommit=True, connect_timeout=_ADMIN_CONNECT_TIMEOUT_S
@@ -348,6 +334,22 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
                 "DB isolation: could not open a keeper connection to %s, dropping it and "
                 "using DATABASE_URL as configured: %s", dbname, exc,
             )
+            try:
+                admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+            except Exception:  # noqa: BLE001 — best-effort cleanup of our own failed attempt
+                pass
+            return None
+
+        try:
+            keeper.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        except Exception as exc:  # noqa: BLE001 — e.g. vector extension unavailable
+            logger.warning(
+                "DB isolation: could not enable pgvector in %s, dropping it and using "
+                "DATABASE_URL as configured: %s", dbname, exc,
+            )
+            # The keeper is still open on dbname — DROP DATABASE would be
+            # refused (and the database leaked) if it stayed open.
+            keeper.close()
             try:
                 admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
             except Exception:  # noqa: BLE001 — best-effort cleanup of our own failed attempt
