@@ -456,10 +456,12 @@ def create_hint(
     now = _now()
     conn = _admin_conn()
     try:
-        # BEGIN IMMEDIATE acquires the SQLite RESERVED lock before the SELECT so a
-        # concurrent request blocks here rather than racing to a lost UPDATE or a
-        # UNIQUE-constraint 500. Mirrors start_hint_review (same TOCTOU pattern).
-        # Readers are never blocked — WAL allows concurrent reads throughout.
+        # BEGIN IMMEDIATE takes no lock on Postgres — pg_compat._is_noop
+        # swallows it — so this SELECT does NOT block a concurrent identical
+        # create, and the dedup check below is advisory only. The real guard
+        # is the uq_nlfc_dedup_* unique index, which the INSERT's
+        # IntegrityError handler turns into a retriable 409 (see there). The
+        # line stays for SQLite-dialect fidelity, as elsewhere in this module.
         conn.execute("BEGIN IMMEDIATE")
         # Dedup within the TARGET org, matching uq_nlfc_dedup_* and the engine's
         # own key. Identical text in another org is a separate hint by design —
@@ -2103,10 +2105,15 @@ def start_hint_review(
     # _run_hint_review updates the session to 'pending_review' or 'failed', which
     # clears the pending_llm row and allows future reviews to start.
     #
-    # BEGIN IMMEDIATE acquires the SQLite RESERVED lock before the COUNT, so a
-    # second concurrent request blocks until this one commits. Without it the
-    # COUNT-then-INSERT pair has a TOCTOU window where two clicks could both
-    # observe count=0 and both INSERT a pending_llm row.
+    # KNOWN, OPEN: the COUNT-then-INSERT pair below is NOT serialised on
+    # Postgres. BEGIN IMMEDIATE is swallowed by pg_compat._is_noop, and a
+    # COUNT has no row to lock, so two simultaneous clicks can both observe
+    # count=0, both INSERT a pending_llm row and both spawn _run_hint_review
+    # — two sessions and duplicated LLM spend. Closing it needs a unique partial
+    # index on status='pending_llm' (a migration) or an advisory lock;
+    # apply_review_session's sibling race, which corrupts the audit trail, was
+    # closed with FOR UPDATE because it had a row to lock. This one only costs
+    # a duplicate session, both of which are visible in the sessions list.
     conn = _admin_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -2251,13 +2258,25 @@ def apply_review_session(
 ):
     conn = _admin_conn()
     try:
-        # BEGIN IMMEDIATE takes the SQLite write lock before the status check, so
-        # the check-then-apply sequence is atomic. Without it two concurrent
-        # "Apply" clicks can both observe status='pending_review' and both
-        # process the same recommendations, writing duplicate hint_audit rows.
+        # FOR UPDATE is what makes the check-then-apply sequence atomic, NOT
+        # the BEGIN IMMEDIATE below it: pg_compat._is_noop swallows any
+        # statement starting with BEGIN, so on Postgres that line reaches no
+        # connection and takes no lock. Without the row lock two concurrent
+        # "Apply" clicks both observe status='pending_review' and both run the
+        # whole loop — measured, on a real stack and in
+        # TestConcurrentApplyIsSerialised: both returned applied_count and
+        # hint_audit held two llm_review_* rows per approved recommendation.
+        # Hint state survives that (the UPDATEs are idempotent) and so does the
+        # engagement KPI (its clauses are EXISTS, not COUNT); the audit trail
+        # does not, and that is the record this endpoint exists to keep honest.
+        #
+        # The loser blocks here, then re-reads the committed row under READ
+        # COMMITTED, sees 'completed' and takes the 409 below. The BEGIN line
+        # stays for SQLite-dialect fidelity, as elsewhere in this module.
         conn.execute("BEGIN IMMEDIATE")
         session = conn.execute(
-            "SELECT * FROM hint_review_sessions WHERE id = ?", (session_id,)
+            "SELECT * FROM hint_review_sessions WHERE id = ? FOR UPDATE",
+            (session_id,),
         ).fetchone()
         if not session:
             conn.rollback()

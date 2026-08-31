@@ -882,3 +882,125 @@ class TestApplyReviewSessionOrgGuard:
             check_conn.close()
 
         self._assert_guard_blocked_bookkeeping(dsn, session_id, hint_id, result, caplog)
+
+
+# ---------------------------------------------------------------------------
+# Two admins clicking "Apply" at the same instant
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentApplyIsSerialised:
+    """`apply_review_session` must apply an approved recommendation ONCE.
+
+    The check-then-apply pair (read status='pending_review', then write the
+    hints and the audit rows) had no lock behind it on Postgres. The function
+    opens with `conn.execute("BEGIN IMMEDIATE")`, which pg_compat turns into a
+    no-op (`_is_noop`), so the SELECT took no row lock and two concurrent
+    callers could both observe 'pending_review' and both run the whole loop.
+
+    Reproduced against a real stack before the fix: two requests released off
+    one barrier BOTH returned {"applied_count": 6} and `hint_audit` went from
+    6 `llm_review_*` rows to 12 — every hint's timeline recording one approved
+    decision twice. Hint state survives it (the UPDATEs are idempotent) and
+    the engagement KPI survives it (both clauses are EXISTS, not COUNT), so
+    the damage is confined to the audit trail — which is exactly the record
+    this area exists to keep honest.
+
+    The fix is `FOR UPDATE` on the session SELECT: the second caller blocks
+    there, and re-reads the committed 'completed' status when released, so it
+    takes the 409 the endpoint already had.
+    """
+
+    @staticmethod
+    def _seed(conn) -> int:
+        """One session, two approved recommendations covering both branches:
+        'keep' (writes an audit row only) and 'disable' (also mutates state)."""
+        now = datetime.now(timezone.utc).isoformat()
+        for hint_id, text in ((1, "Use explicit waits"), (2, "Prefer role locators")):
+            conn.execute(
+                "INSERT INTO nl_feedback_corrections "
+                "(id, feedback_text, scope, domain, is_active, applied_count, "
+                " success_count, failure_count, conflict_flagged, org_id, "
+                " created_at, last_seen) "
+                "VALUES (?, ?, 'global', NULL, 1, 0, 0, 0, 0, 'org-a', ?, ?)",
+                (hint_id, text, now, now),
+            )
+        conn.execute(
+            "INSERT INTO hint_review_sessions (id, status, hint_count, created_at) "
+            "VALUES (1, 'pending_review', 2, ?)", (now,),
+        )
+        for rec_id, hint_id, rec in ((1, 1, "keep"), (2, 2, "disable")):
+            conn.execute(
+                "INSERT INTO hint_review_recommendations "
+                "(id, session_id, hint_id, recommendation, reason, "
+                " admin_decision, applied, created_at) "
+                "VALUES (?, 1, ?, ?, 'llm said so', 'approved', 0, ?)",
+                (rec_id, hint_id, rec, now),
+            )
+        conn.commit()
+        return 1
+
+    def test_two_concurrent_applies_write_one_audit_row_per_recommendation(
+        self, in_memory_em,
+    ):
+        import threading
+
+        from fastapi import HTTPException
+
+        from src.backend.api.learning_endpoints import apply_review_session
+
+        dsn = in_memory_em.dsn
+        setup_conn = pg_compat.connect(dsn)
+        session_id = self._seed(setup_conn)
+        setup_conn.close()
+
+        barrier = threading.Barrier(2)
+        outcomes: list = [None, None]
+
+        def fire(slot: int):
+            barrier.wait()          # both threads enter apply at the same instant
+            try:
+                outcomes[slot] = ("ok", apply_review_session(
+                    session_id, fb=MagicMock()))
+            except HTTPException as exc:
+                outcomes[slot] = ("http", exc.status_code)
+            except Exception as exc:                     # noqa: BLE001
+                outcomes[slot] = ("err", repr(exc))
+
+        with patch("src.backend.api.learning_endpoints._admin_conn",
+                   side_effect=lambda: pg_compat.connect(dsn)):
+            threads = [threading.Thread(target=fire, args=(i,)) for i in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+
+        kinds = sorted(kind for kind, _ in outcomes)
+        assert kinds == ["http", "ok"], (
+            f"exactly one apply must win and one must be refused, got {outcomes}"
+        )
+        winner = next(payload for kind, payload in outcomes if kind == "ok")
+        loser = next(payload for kind, payload in outcomes if kind == "http")
+        assert winner["applied_count"] == 2
+        assert loser == 409, f"the second apply must 409, got {loser}"
+
+        check_conn = pg_compat.connect(dsn)
+        try:
+            rows = check_conn.execute(
+                "SELECT action FROM hint_audit WHERE action LIKE 'llm_review%' "
+                "ORDER BY id"
+            ).fetchall()
+            actions = sorted(r["action"] for r in rows)
+            assert actions == ["llm_review_disable", "llm_review_keep"], (
+                "one audit row per approved recommendation — a duplicate here "
+                f"means the second apply ran the loop too, got {actions}"
+            )
+            assert check_conn.execute(
+                "SELECT status FROM hint_review_sessions WHERE id=?", (session_id,),
+            ).fetchone()["status"] == "completed"
+            assert [r["applied"] for r in check_conn.execute(
+                "SELECT applied FROM hint_review_recommendations "
+                "WHERE session_id=? ORDER BY id", (session_id,),
+            ).fetchall()] == [1, 1]
+        finally:
+            check_conn.close()
