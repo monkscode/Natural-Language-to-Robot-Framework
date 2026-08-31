@@ -216,11 +216,27 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 # handles "passed" — and leaves the v1 row untouched. Feedback
                 # on this workflow_id then reads v1's robot_code and
                 # error_message, and Trigger 2 judges active hints against
-                # code older than the run the user is giving feedback on. The
-                # v1 row also already has hint_attribution_done = 1, so the
-                # re-run's hint usage is never credited. /execute accepts a
-                # caller-supplied workflow_id, so the path is reachable;
-                # mechanism confirmed by reading, reachability not executed.
+                # code older than the run the user is giving feedback on. If
+                # v1 credited hints its row also carries
+                # hint_attribution_done = 1, so the re-run's usage is never
+                # credited either.
+                #
+                # This is the ORDINARY path, not an API-caller edge case, and
+                # it has been executed: GeneratePage sends
+                # `workflow_id: workflowId.current`, which is set once when
+                # the code is generated and cleared only by "New Test" or by
+                # emptying the code box — so every repeat click of "Run Test"
+                # on the same generated code re-enters here. Driven through
+                # the real SPA, the second failing run logged
+                # "[LEARNING] Write failed (non-blocking): duplicate key ...
+                # execution_records_workflow_id_key" and the row kept the
+                # FIRST run's timestamp and error_message.
+                #
+                # Left as-is deliberately: workflow_id is UNIQUE, so the only
+                # alternatives are overwriting v1 (destroying the record
+                # feedback is filed against) or a schema change. Raising here
+                # is what keeps _process_learning_record's is_first_attempt
+                # honest — see the DEPENDENCY note at its pre_run_record read.
                 raise
         except Exception:
             self._writer_conn.rollback()
