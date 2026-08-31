@@ -472,6 +472,17 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   const [result, setResult] = useState<{ ok: boolean; neutral: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
   const [recorded, setRecorded] = useState<RecordedCorrection[]>([])
+  // Two fetches write `recorded`: this panel's mount read and the post-submit
+  // refresh below. Whichever STARTED last is the newer question, so a slow
+  // earlier response must not overwrite it.
+  //
+  // No regression test accompanies this, deliberately, and the reason is worth
+  // keeping: the overwrite is currently UNOBSERVABLE. The refresh runs only
+  // when `ok` is true, and an `ok` submission retires the form — the
+  // "Already recorded" list is not rendered in that terminal state, so a stale
+  // value cannot reach the screen. The guard is three lines of insurance
+  // against that render condition changing, not a fix for a live defect.
+  const recordedGen = useRef(0)
 
   // What this run already told the system. Fetched on mount rather than when
   // the form opens: the list exists to be read BEFORE typing, and it must not
@@ -486,8 +497,9 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   useEffect(() => {
     if (!workflowId) return
     let live = true
-    api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`)
-      .then(b => { if (live) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
+    const gen = ++recordedGen.current
+    api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`, { cache: 'no-store' })
+      .then(b => { if (live && gen === recordedGen.current) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
       .catch(() => { /* silence is the honest degradation here */ })
     return () => { live = false }
   }, [workflowId])
@@ -530,8 +542,9 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       // this one actually landed — display only, not the storage check (that
       // is `outcome`, already read above).
       if (ok && workflowId) {
-        api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`)
-          .then(b => setRecorded(Array.isArray(b?.corrections) ? b.corrections : []))
+        const gen = ++recordedGen.current
+        api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`, { cache: 'no-store' })
+          .then(b => { if (gen === recordedGen.current) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
           .catch(() => { /* silence is the honest degradation here, same as the mount fetch */ })
       }
       setResult({

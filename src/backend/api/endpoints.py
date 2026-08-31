@@ -5,7 +5,7 @@ import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -495,7 +495,8 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
 
 
 @router.get('/api/feedback/{run_id}')
-async def get_run_corrections(run_id: str, user: dict | None = Depends(require_user)):
+async def get_run_corrections(run_id: str, response: Response,
+                              user: dict | None = Depends(require_user)):
     """The corrections this run has already contributed to the learning store.
 
     T5 made a second submission of the same correction from the same run a
@@ -528,6 +529,20 @@ async def get_run_corrections(run_id: str, user: dict | None = Depends(require_u
     # Same lookup, same threading and the same fail-closed reason as the POST:
     # a registry that cannot answer leaves owner_id/org_id None, which the gate
     # refuses for everyone but a platform admin.
+    # Correction text is user-authored content about a customer's site and the
+    # gate below is per-caller, so this response must never sit in a private
+    # browser cache: after an org move the same run_id would be served from
+    # disk without caller_can_access ever running again. Set on the injected
+    # Response, which covers every RETURN path (the 'learning disabled' one
+    # included). It does NOT reach the 403 raise below — FastAPI's exception
+    # handler builds its own response and drops these headers (verified). That
+    # is fine and deliberately not worked around: 403 is not in the set of
+    # heuristically cacheable statuses (RFC 7231 6.1), and the refusal body
+    # carries nothing worth protecting. The header is enforced server-side
+    # rather than left to the SPA's fetch options, because the server is the
+    # half that binds every client, including one that forgets.
+    response.headers["Cache-Control"] = "no-store"
+
     try:
         run_row = await asyncio.to_thread(
             lambda: get_run_registry().get_run(run_id))

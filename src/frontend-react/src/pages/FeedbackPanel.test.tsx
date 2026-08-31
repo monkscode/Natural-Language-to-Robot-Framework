@@ -67,7 +67,8 @@ function renderFailPanel() {
 
 /** Let the mount fetch settle before a test queues its POST answer. */
 async function mounted() {
-  await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/wf-1'))
+  await waitFor(() =>
+    expect(mockApi).toHaveBeenCalledWith('/api/feedback/wf-1', { cache: 'no-store' }))
 }
 
 async function answerWith(body: unknown) {
@@ -295,8 +296,14 @@ describe('the corrections this run already contributed', () => {
    Re-fetching once the POST confirms `processed` closes that gap. ── */
 
 describe('M9: catching up after a correction lands', () => {
+  // The corrections GET carries { cache: 'no-store' } (the response is
+  // per-caller and must never sit in a private browser cache); the POST
+  // carries a method. Keying on "no method" keeps this filter honest if more
+  // fetch options are added later.
   const getCalls = () =>
-    mockApi.mock.calls.filter(([path, opts]) => path === '/api/feedback/wf-1' && opts === undefined)
+    mockApi.mock.calls.filter(([path, opts]) =>
+      path === '/api/feedback/wf-1' &&
+      (opts as { method?: string } | undefined)?.method === undefined)
 
   it('re-fetches the recorded list once a correction confirms processed', async () => {
     onFile([])
@@ -386,4 +393,5 @@ describe('Submit requires words; Skip does not', () => {
     expect(screen.getByRole('button', { name: /Spot on/ })).toBeInTheDocument()
     expect(posts()).toHaveLength(0)
   })
+
 })

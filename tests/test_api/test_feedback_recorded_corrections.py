@@ -107,6 +107,14 @@ class TestWhatTheOwnerSees:
             "wait for the spinner", "the search box locator was off"]
         owned._engine.get_corrections_for_run.assert_called_once_with("run-1")
 
+    def test_the_response_is_never_cached(self, owned):
+        """Correction text is user-authored content about a customer's site and
+        the gate is per-caller, so a private browser cache holding this would
+        re-serve it after an org move without caller_can_access running again.
+        Asserted on the header, not on the SPA's fetch options: the server is
+        the half that binds every client, including one that forgets."""
+        assert owned.get("/api/feedback/run-1").headers["cache-control"] == "no-store"
+
     def test_a_run_that_contributed_nothing_is_an_empty_list(self):
         """The store lands after the run finishes, so the panel's first fetch
         is normally empty. That is not an error and must never render as one."""
