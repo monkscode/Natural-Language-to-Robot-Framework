@@ -157,7 +157,7 @@ class TestTheFourOutcomes:
         assert "helps the system learn" not in body["message"]
         assert "do not need to send it again" in body["message"].lower()
 
-    def test_no_text_says_it_was_recorded_but_nothing_was_learned(self, client_and_loop):
+    def test_no_text_says_it_was_queued_but_nothing_was_learned(self, client_and_loop):
         """Task 8: Skip submits empty text, which every engine treats as a
         free no-op — no correction, no evidence, no audit row. The message
         must not repeat the "helps the system learn" claim that used to run
@@ -221,13 +221,15 @@ class TestTheFourOutcomes:
         assert "helps the system learn" not in body["message"]
         assert "organisation" in body["message"].lower()
 
-    def test_no_org_does_not_deny_the_submission_it_just_stored(
+    def test_no_org_does_not_deny_the_submission_it_just_queued(
         self, client_and_loop,
     ):
         """Step 2's `update_user_feedback` submit is unconditional and runs
-        BEFORE the org check, so an org-less run's raw text really is on
-        `execution_records.user_feedback`. "was not recorded" contradicts a
-        row the owner can go and read; only the CORRECTION is missing."""
+        BEFORE the org check, so an org-less run's raw text really was handed
+        to the write queue for `execution_records.user_feedback`. "was not
+        recorded" denies that outright; only the CORRECTION is missing. The
+        message stops at "was sent to be recorded" because that submit is
+        fire-and-forget — the endpoint never learns whether it landed."""
         client, loop = client_and_loop
         loop.process_user_feedback.return_value = _triage(outcome="no_org")
 
