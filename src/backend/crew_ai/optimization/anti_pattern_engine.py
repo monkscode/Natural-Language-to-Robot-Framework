@@ -115,14 +115,16 @@ class AntiPatternEngine(LearningEngine):
         if not record.error_message:
             return
 
-        # Check for existing anti-pattern with same category + similar query
-        existing = self._find_similar_anti_pattern(
-            record.failure_category, record.user_query,
-            org_id=getattr(record, 'org_id', None),
-        )
-
         new_anti_id = None
         try:
+            # Check for existing anti-pattern with same category + similar query.
+            # Inside the guard: this reads _writer_conn, and a failing SELECT
+            # aborts the transaction exactly like a failing UPDATE does.
+            existing = self._find_similar_anti_pattern(
+                record.failure_category, record.user_query,
+                org_id=getattr(record, 'org_id', None),
+            )
+
             if existing:
                 # Reinforce existing anti-pattern
                 new_evidence = existing["evidence_count"] + 1

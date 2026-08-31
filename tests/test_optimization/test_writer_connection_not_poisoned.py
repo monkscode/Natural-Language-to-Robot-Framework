@@ -41,6 +41,9 @@ from src.backend.crew_ai.optimization.keyword_correction_engine import (
     KeywordCorrectionEngine,
 )
 from src.backend.crew_ai.optimization.learning_config import LearningWriteQueue
+from src.backend.crew_ai.optimization.structural_rule_engine import (
+    StructuralRuleEngine,
+)
 
 # Mirrors conftest._PG_TEST_SCHEMA -- the isolated schema in_memory_em is bound to.
 _SCHEMA = "learning_test"
@@ -371,6 +374,174 @@ def test_write_trigger_event_failure_does_not_poison(
             status="succeeded",
             error_message=None,
         )
+        write_queue.submit(job)
+        write_queue.shutdown()
+
+    verify()
+
+
+# ---------------------------------------------------------------------------
+# structural_rule_engine.py -- StructuralRuleEngine.learn runs on EVERY
+# execution (feedback_loop.py:1025), one line above the two engine learns
+# above, and reaches the writer connection through four separate commits.
+# ---------------------------------------------------------------------------
+
+# "count the rows" matches exactly one seed pattern -- "counting" (trigger
+# "count"), whose only required keyword is "Get Element Count". No other
+# SEED_PATTERNS trigger is a substring of it, so each test below drives a
+# single, predictable intent.
+_SEED_QUERY = "count the rows"
+_SEED_INTENT = "counting"
+_SEED_KEYWORD_CODE = "*** Test Cases ***\n    ${n}=    Get Element Count    css=tr"
+
+
+def _seed_structural_rule(em):
+    """Pre-create the 'counting' rule so _get_or_create_rule takes its SELECT
+    path and learn() proceeds straight to the increment helpers."""
+    em._writer_conn.execute(
+        "INSERT INTO structural_rules "
+        "(rule_name, query_pattern, required_structure, required_keywords_json, "
+        " score, evidence_count, counter_evidence, last_updated, created_at) "
+        "VALUES (?, 'count', 'unknown', ?, 0.0, 0, 0, "
+        " datetime('now', 'localtime'), datetime('now', 'localtime'))",
+        (_SEED_INTENT, '["Get Element Count"]'),
+    )
+    em._writer_conn.commit()
+
+
+def test_migrate_seed_to_learned_failure_does_not_poison(
+    in_memory_em, write_queue, pg_probe_admin
+):
+    em = in_memory_em
+    engine = StructuralRuleEngine(em)
+    # intent_patterns is truncated per test, so extract_intents finds no learned
+    # pattern, falls through to the seed layer and migrates "counting".
+    failed = _record(user_query=_SEED_QUERY, test_status="failed",
+                     failure_category="B1")
+
+    _, job, verify = _canary(em)
+    with poison(pg_probe_admin, em, "intent_patterns",
+                "intent_name IS DISTINCT FROM 'counting'"):
+        write_queue.submit(engine.learn, failed)
+        write_queue.submit(job)
+        write_queue.shutdown()
+
+    verify()
+
+
+def test_get_or_create_rule_failure_does_not_poison(
+    in_memory_em, write_queue, pg_probe_admin
+):
+    em = in_memory_em
+    engine = StructuralRuleEngine(em)
+    # No rule exists yet, so _get_or_create_rule takes its INSERT branch.
+    # failure_category "B1" keeps learn() out of both increment helpers.
+    failed = _record(user_query=_SEED_QUERY, test_status="failed",
+                     failure_category="B1")
+
+    _, job, verify = _canary(em)
+    with poison(pg_probe_admin, em, "structural_rules",
+                "rule_name IS DISTINCT FROM 'counting'"):
+        write_queue.submit(engine.learn, failed)
+        write_queue.submit(job)
+        write_queue.shutdown()
+
+    verify()
+
+
+def test_increment_evidence_failure_does_not_poison(
+    in_memory_em, write_queue, pg_probe_admin
+):
+    em = in_memory_em
+    engine = StructuralRuleEngine(em)
+    _seed_structural_rule(em)
+    # Passed WITH the required keyword present -> _increment_evidence, which
+    # updates the seeded evidence_count 0 -> 1.
+    passing = _record(user_query=_SEED_QUERY, test_status="passed",
+                      robot_code=_SEED_KEYWORD_CODE)
+
+    _, job, verify = _canary(em)
+    with poison(pg_probe_admin, em, "structural_rules", "evidence_count <> 1"):
+        write_queue.submit(engine.learn, passing)
+        write_queue.submit(job)
+        write_queue.shutdown()
+
+    verify()
+
+
+def test_increment_counter_evidence_failure_does_not_poison(
+    in_memory_em, write_queue, pg_probe_admin
+):
+    em = in_memory_em
+    engine = StructuralRuleEngine(em)
+    _seed_structural_rule(em)
+    # Passed WITHOUT the required keyword -> _increment_counter_evidence, which
+    # updates the seeded counter_evidence 0 -> 1.
+    passing = _record(user_query=_SEED_QUERY, test_status="passed",
+                      robot_code="*** Test Cases ***\n    Log    hello")
+
+    _, job, verify = _canary(em)
+    with poison(pg_probe_admin, em, "structural_rules", "counter_evidence <> 1"):
+        write_queue.submit(engine.learn, passing)
+        write_queue.submit(job)
+        write_queue.shutdown()
+
+    verify()
+
+
+# ---------------------------------------------------------------------------
+# anti_pattern_engine.py -- the READ that runs before the write
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def hide_column(admin, em, table: str, column: str):
+    """Rename one column away and back, so a SELECT naming it fails 42703.
+
+    A CHECK constraint cannot fail a SELECT, and this database's role is a
+    superuser (so REVOKE SELECT is a no-op), which leaves renaming a single
+    column as the narrowest genuine server-side read failure available. No row
+    is touched; the finally puts the name back and then verifies it did.
+    """
+    hidden = f"{column}__hidden_by_test"
+    admin.execute(
+        f"ALTER TABLE {_SCHEMA}.{table} RENAME COLUMN {column} TO {hidden}"
+    )
+    try:
+        yield
+    finally:
+        try:
+            em._writer_conn.rollback()
+        except Exception:
+            pass
+        admin.execute(
+            f"ALTER TABLE {_SCHEMA}.{table} RENAME COLUMN {hidden} TO {column}"
+        )
+        restored = admin.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            (_SCHEMA, table, column),
+        ).fetchone()
+        assert restored is not None, (
+            f"{_SCHEMA}.{table}.{column} was not restored -- the shared test "
+            "schema is now broken for every later test"
+        )
+
+
+def test_find_similar_anti_pattern_failure_does_not_poison(
+    in_memory_em, write_queue, pg_probe_admin
+):
+    em = in_memory_em
+    engine = AntiPatternEngine(em)
+    failed = _record(test_status="failed", failure_category="A1",
+                     failed_keyword="Click", error_message="element not found")
+
+    _, job, verify = _canary(em)
+    # learn() reads through _find_similar_anti_pattern BEFORE it writes, on the
+    # same writer connection and inside the same transaction. A failing SELECT
+    # aborts that transaction exactly like a failing UPDATE does, so the read
+    # has to sit inside the guard too.
+    with hide_column(pg_probe_admin, em, "anti_patterns", "org_id"):
+        write_queue.submit(engine.learn, failed)
         write_queue.submit(job)
         write_queue.shutdown()
 
