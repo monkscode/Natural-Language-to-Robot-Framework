@@ -146,7 +146,7 @@ describe('an answer that says the correction did not land', () => {
    warning. ── */
 const NO_TEXT =
   'Nothing was learned because no description was given, though this ' +
-  'submission was sent to be recorded against the run — a description can still be sent.'
+  'submission was sent to be recorded against the run.'
 
 describe('no_text — Skip carried no words to store', () => {
   async function skipWith(body: unknown) {
@@ -328,5 +328,62 @@ describe('M9: catching up after a correction lands', () => {
     await screen.findByText('not confirmed')
 
     expect(getCalls()).toHaveLength(1)
+  })
+})
+
+/* ── An EMPTY "Submit feedback" is an attempt to correct, not a decline.
+
+   Skip deliberately sends empty text: the user said they have nothing to
+   add, and `no_text` retiring the form is the right answer to that. Submit
+   with an empty box produced the identical request, so the same retirement
+   fired — and because this panel is rendered in exactly one place and never
+   remounts for a run, the user lost every route back to giving feedback for
+   it. Measured in the real SPA on a passing run: after an empty Submit,
+   Skip / Submit / Spot on / Not quite were all gone and no textarea
+   remained.
+
+   The guard is on Submit only. Skip keeps sending empty text (it is the
+   decline), and the passing path keeps Cancel, so neither is a dead end. ── */
+describe('Submit requires words; Skip does not', () => {
+  it('disables Submit while the box is empty or whitespace', async () => {
+    onFile()
+    const { box, submit } = renderFailPanel()
+    await mounted()
+
+    expect(submit).toBeDisabled()
+
+    fireEvent.change(box, { target: { value: '   ' } })
+    expect(submit).toBeDisabled()
+
+    fireEvent.change(box, { target: { value: 'the locator was wrong' } })
+    expect(submit).toBeEnabled()
+  })
+
+  it('still lets Skip send the empty decline', async () => {
+    onFile()
+    render(<FeedbackPanel outcome="fail" workflowId="wf-1" />)
+    await mounted()
+    mockApi.mockResolvedValueOnce({
+      status: 'success', outcome: 'no_text', message: NO_TEXT,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Skip/ }))
+
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0][1]).toMatchObject({ method: 'POST' })
+    await screen.findByText(NO_TEXT)
+  })
+
+  it('does not strand a passing run — Cancel closes the form instead', async () => {
+    onFile()
+    render(<FeedbackPanel outcome="pass" workflowId="wf-1" />)
+    await mounted()
+    fireEvent.click(screen.getByRole('button', { name: /Not quite/ }))
+
+    expect(screen.getByRole('button', { name: /Submit feedback/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /Cancel/ }))
+
+    expect(screen.getByRole('button', { name: /Spot on/ })).toBeInTheDocument()
+    expect(posts()).toHaveLength(0)
   })
 })

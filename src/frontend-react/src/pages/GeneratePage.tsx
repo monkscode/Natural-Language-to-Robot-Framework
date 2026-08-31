@@ -656,7 +656,14 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
               Skip →
             </Button>
           )}
-          <Button size="sm" onClick={() => submit()} disabled={status === 'sending'}>
+          {/* Empty Submit is an ATTEMPT to correct, not a decline, but it
+              sent the identical empty-text request Skip does — so it drew the
+              same `no_text`, which retires this panel, and the panel is
+              rendered in one place and never remounts for a run. Measured in
+              the SPA: after an empty Submit every feedback control was gone.
+              Skip keeps sending the empty decline, and the passing path keeps
+              Cancel, so neither is a dead end. */}
+          <Button size="sm" onClick={() => submit()} disabled={status === 'sending' || !text.trim()}>
             {status === 'sending' ? 'Sending…' : 'Submit feedback'}
           </Button>
         </div>

@@ -248,10 +248,14 @@ class FeedbackRequest(BaseModel):
 # shows.
 _FEEDBACK_OUTCOME_MESSAGES = {
     "processed": "Thanks — your feedback helps the system learn.",
+    # No trailing "a description can still be sent": the SPA retires the
+    # feedback form on this outcome (GeneratePage's neutral branch renders a
+    # bare sentence, and the panel never remounts for the run), so that clause
+    # offered an action the UI had just removed — on both routes here, Skip
+    # included.
     "no_text": (
         "Nothing was learned because no description was given, though this "
-        "submission was sent to be recorded against the run — a description "
-        "can still be sent."
+        "submission was sent to be recorded against the run."
     ),
     "no_record": (
         "We could not find the learning record this belongs to, so nothing "

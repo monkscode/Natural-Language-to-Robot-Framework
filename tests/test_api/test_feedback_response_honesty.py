@@ -162,9 +162,11 @@ class TestTheFourOutcomes:
         free no-op — no correction, no evidence, no audit row. The message
         must not repeat the "helps the system learn" claim that used to run
         unconditionally, and — fix round 1 — must not editorialise a verdict
-        either: this outcome is also reachable from a PASSING run (Submit
-        feedback has no empty-text guard on the close_enough path), so the
-        message cannot say "unhelpful" or otherwise imply completely_wrong."""
+        either: this outcome is reachable with feedback_type=close_enough, so
+        the message cannot say "unhelpful" or otherwise imply completely_wrong.
+        The SPA now disables Submit on an empty box, so from the UI only Skip
+        reaches this — but the endpoint is not UI-only and must not assume a
+        verdict from an empty body."""
         client, loop = client_and_loop
         loop.process_user_feedback.return_value = _triage(outcome="no_text")
 
@@ -183,14 +185,19 @@ class TestTheFourOutcomes:
 
     @pytest.mark.parametrize("feedback_type", ["close_enough", "completely_wrong"])
     def test_no_text_message_does_not_vary_by_feedback_type(self, client_and_loop, feedback_type):
-        """Fix round 1: the reviewer found the passing (👎 -> close_enough)
-        path can also reach `no_text` — "Submit feedback" has no empty-text
-        guard on either outcome, only Skip is fail-only. The Step 4b gate in
-        feedback_loop.py never reads feedback_type, so the outcome/status
-        half of this combination was already correct before this round; only
-        the WORDING was wrong ("recorded as unhelpful" on a run that may have
-        passed). `_FEEDBACK_OUTCOME_MESSAGES` stays a flat dict keyed by
-        outcome alone — the message must be identical for both types."""
+        """The message must not vary with feedback_type.
+
+        Fix round 1 found the passing (👎 -> close_enough) path could reach
+        `no_text` too, and the wording was wrong there ("recorded as
+        unhelpful" on a run that may have passed). The Step 4b gate in
+        feedback_loop.py never reads feedback_type, so the outcome/status half
+        was already right; only the WORDING was not.
+
+        Still asserted after the SPA gained an empty-text guard on Submit:
+        that guard closed the UI route, not this one. `/api/feedback` takes
+        any caller's empty body with either type, and
+        `_FEEDBACK_OUTCOME_MESSAGES` stays a flat dict keyed by outcome alone,
+        so the message must be identical for both."""
         from src.backend.api.endpoints import _FEEDBACK_OUTCOME_MESSAGES
 
         client, loop = client_and_loop
@@ -207,6 +214,35 @@ class TestTheFourOutcomes:
         assert body["status"] == "success"
         assert body["message"] == _FEEDBACK_OUTCOME_MESSAGES["no_text"]
         assert "unhelpful" not in body["message"].lower()
+
+    def test_no_text_does_not_offer_a_description_the_form_no_longer_takes(
+        self, client_and_loop,
+    ):
+        """The SPA RETIRES the feedback form on this outcome, so the message
+        must not invite a follow-up.
+
+        GeneratePage's `result?.neutral` branch returns a bare sentence with
+        no textarea, no Skip and no Submit, and FeedbackPanel is rendered in
+        exactly one place and never remounts for the same run. A message
+        ending "a description can still be sent" therefore offered an action
+        the UI had just removed — on BOTH routes here (Skip, and Submit with
+        an empty box). That is the same defect as an outcome claiming a write
+        that did not happen: a sentence promising more than the code does.
+
+        Pins the phrasing as well as the shape: the sibling assertions above
+        compare against `_FEEDBACK_OUTCOME_MESSAGES`, so they follow the dict
+        wherever it goes and a revert of this one string would pass them."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_text")
+
+        message = _post(client, text="").json()["message"]
+
+        assert "can still be sent" not in message, (
+            "the form is gone by the time this renders — see the neutral "
+            "branch in GeneratePage.tsx and FeedbackPanel.test.tsx's own "
+            "'retires the form' assertion"
+        )
+        assert "send it again" not in message.lower()
 
     def test_no_org_says_the_run_has_no_organisation(self, client_and_loop):
         """Task 1, mode (a): an org-less run's correction can never be filed
