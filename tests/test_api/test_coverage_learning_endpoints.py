@@ -27,6 +27,7 @@ Tests grouped by function/endpoint:
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -109,7 +110,7 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
                  anchor_query="test query", is_active=1, conflict_flagged=0,
                  applied_count=0, success_count=0, failure_count=0,
                  original_failure_category=None, disabled_at=None,
-                 is_shared=0, org_id=None) -> int:
+                 org_id="org-admin") -> int:
     """Helper: insert a hint directly and return its id."""
     conn = _pg_conn(db_path)
     conn.row_factory = sqlite3.Row
@@ -120,11 +121,11 @@ def _insert_hint(db_path, feedback_text="use xpath", category="locator",
         "(feedback_text, category, scope, domain, url, original_failure_category, "
         " evidence_count, anchor_query, applied_count, success_count, failure_count, "
         " is_active, conflict_flagged, disabled_at, created_at, last_seen, "
-        " is_shared, org_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (feedback_text, category, scope, domain, url, original_failure_category,
          evidence, anchor_query, applied_count, success_count, failure_count,
-         is_active, conflict_flagged, disabled_at, now, now, is_shared, org_id),
+         is_active, conflict_flagged, disabled_at, now, now, org_id),
     )
     conn.commit()
     hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -391,6 +392,8 @@ class TestCreateHint:
             "anchor_query": "click the login button",
             "scope": "global",
             "actor": "alice",
+            # v20: every hint is owned by exactly one org.
+            "org_id": "org-admin",
         }
         base.update(overrides)
         return base
@@ -449,11 +452,12 @@ class TestCreateHint:
     def test_duplicate_hint_increments_evidence(self, learning_client):
         client, _, _, db_path = learning_client
         # Pre-insert the matching row directly so it's committed before the POST.
-        # Admin creates are global (is_shared=1) and dedup only against global
-        # rows, so the seeded duplicate must itself be shared.
+        # Admin creates dedup within the TARGET org, so the seeded duplicate must
+        # sit in the same org as the payload.
         _insert_hint(db_path,
                      feedback_text="Use xpath for stable selectors",
-                     scope="global", domain=None, evidence=1, is_shared=1)
+                     scope="global", domain=None, evidence=1,
+                     org_id="org-admin")
         payload = self._valid_payload()  # same text + scope + domain
         resp = client.post("/hints", json=payload)
         # Route decorator always returns 201; created=False signals the duplicate path
@@ -462,10 +466,49 @@ class TestCreateHint:
         assert data["created"] is False
         assert data["hint"]["evidence_count"] == 2
 
+    def test_a_global_duplicate_typed_on_another_domain_still_dedups(
+        self, learning_client,
+    ):
+        """T12: `domain` left the global dedup key, and this SELECT has to
+        follow it. If it kept filtering on domain it would miss the existing
+        row and the INSERT would hit uq_nlfc_dedup_global_v21 — a 409 saying
+        "an identical hint was just created" for a hint created long ago,
+        instead of the evidence bump the admin asked for."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path,
+                     feedback_text="Use xpath for stable selectors",
+                     scope="global", domain="shop.test", evidence=1,
+                     org_id="org-admin")
+
+        resp = client.post("/hints", json=self._valid_payload(domain=None))
+
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["created"] is False
+        assert resp.json()["hint"]["evidence_count"] == 2
+
+    def test_a_domain_scoped_duplicate_on_another_domain_is_a_new_hint(
+        self, learning_client,
+    ):
+        """Anti-false-green: only the GLOBAL key lost `domain`. A domain-scoped
+        hint is about its domain, so the same text on another site is a new
+        hint and must still be created."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path,
+                     feedback_text="Use xpath for stable selectors",
+                     scope="domain", domain="shop.test", evidence=1,
+                     org_id="org-admin")
+
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="domain", domain="other.test"))
+
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["created"] is True
+
     def test_duplicate_flagged_hint_clears_flag_and_logs_audit(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
-                               conflict_flagged=1, scope="global", is_shared=1)
+                               conflict_flagged=1, scope="global",
+                               org_id="org-admin")
 
         payload = self._valid_payload()  # same text + scope → matches existing
         resp = client.post("/hints", json=payload)
@@ -476,7 +519,9 @@ class TestCreateHint:
         # Flag must be cleared in the API response
         assert data["hint"]["conflict_flagged"] == 0
 
-        # Both an 'unflag' and a 'create' audit row must be persisted to hint_audit
+        # M8: the duplicate-create path bumps evidence on an EXISTING hint —
+        # it must write 'reinforce', not a second 'create'. A hint that was
+        # never freshly created twice must never show two 'create' rows.
         conn = _pg_conn(db_path)
         actions = [
             r[0]
@@ -487,7 +532,11 @@ class TestCreateHint:
         ]
         conn.close()
         assert "unflag" in actions, f"expected unflag audit row, got {actions}"
-        assert "create" in actions, f"expected create audit row, got {actions}"
+        assert "reinforce" in actions, f"expected reinforce audit row, got {actions}"
+        assert actions.count("create") == 0, (
+            f"duplicate-create path wrote a 'create' row instead of "
+            f"'reinforce' — got {actions}"
+        )
 
     def test_run_triage_calls_nl_engine(self, learning_client):
         client, _, mock_fb, _ = learning_client
@@ -498,51 +547,52 @@ class TestCreateHint:
         assert resp.status_code == 201
         assert resp.json()["hint"]["category"] == "timing"
 
-    def test_org_private_hint_does_not_capture_admin_global_create(self, learning_client):
-        """An org-private hint with identical text must NOT absorb an admin's
-        global create: the admin intends a hint for every org, so a new shared
-        row must be created and the org's private row left untouched."""
+    def test_another_orgs_hint_does_not_capture_an_admin_create(self, learning_client):
+        """Identical text in a DIFFERENT org must not absorb the create.
+
+        Before v20 this was about a shared row not being swallowed by a private
+        one; now it is simply that the dedup key includes org_id, so the two
+        rows coexist and keep their counters apart. Same defect, same test,
+        expressed on the axis that survived."""
         client, _, _, db_path = learning_client
-        org_hint_id = _insert_hint(
+        other_hint_id = _insert_hint(
             db_path, feedback_text="Dismiss the cookie banner first",
-            scope="domain", domain="shop.test", evidence=1,
-            is_shared=0, org_id="org-A",
+            scope="domain", domain="shop.test", evidence=1, org_id="org-A",
         )
 
         resp = client.post("/hints", json=self._valid_payload(
             feedback_text="Dismiss the cookie banner first",
-            scope="domain", domain="shop.test",
+            scope="domain", domain="shop.test", org_id="org-B",
         ))
         assert resp.status_code == 201
         data = resp.json()
         assert data["created"] is True, (
-            "admin global create was deduped into an org-private hint — "
-            "the intended shared hint was never created"
+            "the create was deduped into ANOTHER org's hint — org-B would "
+            "never get the hint, and org-A's evidence would be bumped by it"
         )
-        assert data["hint"]["is_shared"] == 1
-        assert data["hint"]["id"] != org_hint_id
+        assert data["hint"]["org_id"] == "org-B"
+        assert data["hint"]["id"] != other_hint_id
 
         conn = _pg_conn(db_path)
         org_row = conn.execute(
-            "SELECT evidence_count, is_shared, org_id FROM nl_feedback_corrections "
-            "WHERE id = ?", (org_hint_id,),
+            "SELECT evidence_count, org_id FROM nl_feedback_corrections "
+            "WHERE id = ?", (other_hint_id,),
         ).fetchone()
         conn.close()
-        assert org_row[0] == 1, "org hint's evidence must not be bumped by admin create"
-        assert org_row[1] == 0, "org hint must stay private"
-        assert org_row[2] == "org-A"
+        assert org_row[0] == 1, "org-A's evidence must not be bumped by an org-B create"
+        assert org_row[1] == "org-A"
 
     def test_url_scope_second_page_is_not_deduped_into_the_first(self, learning_client):
         """Two url-scoped hints with identical text+domain but different urls are
         distinct hints, one per page. The dedup SELECT must key on url for
-        scope='url' — the storage contract already does (uq_nlfc_dedup_url) and so
+        scope='url' — the storage contract already does (uq_nlfc_dedup_url_v21) and so
         does NLFeedbackEngine.learn_from_feedback. Omitting url here bumps evidence
         on the FIRST page's hint and the second page's hint is never created."""
         client, _, _, db_path = learning_client
         first_id = _insert_hint(
             db_path, feedback_text="Wait for the spinner to clear",
             scope="url", domain="shop.test", url="https://shop.test/checkout",
-            evidence=1, is_shared=1,
+            evidence=1, org_id="org-admin",
         )
 
         resp = client.post("/hints", json=self._valid_payload(
@@ -575,7 +625,7 @@ class TestCreateHint:
         _insert_hint(
             db_path, feedback_text="Wait for the spinner to clear",
             scope="url", domain="shop.test", url="https://shop.test/checkout",
-            evidence=1, is_shared=1,
+            evidence=1, org_id="org-admin",
         )
 
         resp = client.post("/hints", json=self._valid_payload(
@@ -586,6 +636,63 @@ class TestCreateHint:
         data = resp.json()
         assert data["created"] is False, "same-page resubmission must dedup, not duplicate"
         assert data["hint"]["evidence_count"] == 2
+
+
+class TestCreateHintDomainUrlNormalisation:
+    """F5: create_hint must normalise whitespace-only domain/url to NULL and
+    validate the resulting row against its own scope. Closes create_hint's
+    own residual gap: whitespace (truthy in Python) bypassed the `not
+    request.domain`/`not request.url` checks, and scope='url' never
+    validated domain at all, so domain='' passed straight through to
+    storage unnormalised."""
+
+    def _valid_payload(self, **overrides):
+        base = {
+            "feedback_text": "Use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "global",
+            "actor": "alice",
+            "org_id": "org-admin",
+        }
+        base.update(overrides)
+        return base
+
+    def test_domain_scope_whitespace_only_domain_returns_400(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(scope="domain", domain="   "))
+        assert resp.status_code == 400
+        assert "domain" in resp.json()["detail"].lower()
+
+    def test_url_scope_whitespace_only_url_returns_400(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(scope="url", url="   "))
+        assert resp.status_code == 400
+        assert "url" in resp.json()["detail"].lower()
+
+    def test_url_scope_blank_domain_is_normalised_to_null(self, learning_client):
+        """create_hint validates url for scope='url' but never touched
+        domain, so domain='' passed straight through to storage. This is
+        item 3 of the F5 fix: normalisation covers it."""
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="url", url="https://shop.test/cart", domain=""))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] is None
+
+    def test_domain_scope_domain_is_stripped_of_padding(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="domain", domain="  shop.test  "))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "shop.test"
+
+    def test_global_scope_blank_domain_and_url_normalised_to_null(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            scope="global", domain="   ", url="   "))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] is None
+        assert resp.json()["hint"]["url"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +755,427 @@ class TestPatchHint:
         hint_id = _insert_hint(db_path, scope="global")
         resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "scope": "invalid"})
         assert resp.status_code == 400
+
+    def test_a_colliding_scope_change_is_a_409_not_a_500(self, learning_client):
+        """The admin drawer sends scope/domain/url on every save, so an edit can
+        land on an existing hint's dedup key. That is a conflict the admin can
+        resolve, not a server fault: RFC 9110 reserves 409 for exactly this, and
+        `create_hint` already answers 409 for the same constraint. Answering 500
+        tells the admin nothing and hides the reason in the log.
+
+        v21 widened this case specifically: the global key no longer includes
+        `domain`, so any same-text global hint in the org now collides."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     domain="other.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 409, (
+            f"colliding scope change answered {resp.status_code}: {resp.json()}"
+        )
+        detail = resp.json()["detail"]
+        assert "already" in detail.lower(), detail
+        # The hint must be unchanged — a refused edit that half-applied would be
+        # worse than the 500 it replaces.
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT scope, domain FROM nl_feedback_corrections WHERE id = ?",
+            (target,),
+        ).fetchone()
+        conn.close()
+        assert row["scope"] == "domain" and row["domain"] == "shop.test"
+
+    def test_a_colliding_domain_change_is_a_409_too(self, learning_client):
+        """Not only scope. Moving a domain-scoped hint onto a domain that
+        already carries the same text hits uq_nlfc_dedup_general_v21. This half
+        is pre-existing — v21 neither created nor widened it — and the same
+        handler covers it because there is one UPDATE."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                     domain="taken.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "domain": "taken.test",
+        })
+
+        assert resp.status_code == 409, (
+            f"colliding domain change answered {resp.status_code}: {resp.json()}"
+        )
+
+    def test_a_non_colliding_scope_change_still_succeeds(self, learning_client):
+        """Anti-false-green: a handler that answered 409 unconditionally, or an
+        over-broad except that swallowed every failure, would pass the two tests
+        above and break every legitimate edit."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="a different correction",
+                     scope="global", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["scope"] == "global"
+
+    def test_another_orgs_identical_hint_does_not_block_the_change(self, learning_client):
+        """org_id is in every dedup key, so a second tenant holding the same
+        text at the same scope is not a conflict. If it were, one org's hints
+        could veto another org's admin edits."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     org_id="org-other")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        resp = client.patch(f"/hints/{target}", json={
+            "actor": "alice", "scope": "global",
+        })
+
+        assert resp.status_code == 200, resp.json()
+
+    def test_a_refused_edit_writes_no_audit_row(self, learning_client):
+        """The audit row is written after the UPDATE, so a refused edit must
+        leave the timeline alone. A `patch` row for an edit that never happened
+        is the same class of untrue event T5 and T11 exist to prevent."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, feedback_text="use xpath", scope="global",
+                     domain="other.test", org_id="org-admin")
+        target = _insert_hint(db_path, feedback_text="use xpath", scope="domain",
+                              domain="shop.test", org_id="org-admin")
+
+        client.patch(f"/hints/{target}", json={"actor": "alice", "scope": "global"})
+
+        conn = _pg_conn(db_path)
+        rows = conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ?", (target,),
+        ).fetchall()
+        conn.close()
+        assert rows == [], f"a refused edit was audited: {[r[0] for r in rows]}"
+
+
+class TestPatchHintDomainUrlValidation:
+    """F5: the admin API could silently destroy a user's stored correction.
+    patch_hint validated scope/target consistency only when `scope` was
+    itself in the request body (learning_endpoints.py:635), so patching
+    domain/url alone — the drawer's normal single-field edit — bypassed it
+    entirely: `domain=''`/`url=''` (or whitespace) landed straight in
+    storage. See TestEngineCollisionRegression below for what that then did
+    to a later correction on the same hint."""
+
+    def test_domain_scope_patched_to_empty_string_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 400
+        assert "domain" in resp.json()["detail"].lower()
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        audit_rows = conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ?", (hint_id,),
+        ).fetchall()
+        conn.close()
+        assert row["domain"] == "shop.test", "a refused patch must not blank the domain"
+        assert audit_rows == [], "a refused patch must not write an audit row"
+
+    def test_domain_scope_patched_to_whitespace_only_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": "   "})
+        assert resp.status_code == 400
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["domain"] == "shop.test"
+
+    def test_url_scope_patched_to_empty_string_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", domain="shop.test",
+                               url="https://shop.test/cart", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": ""})
+        assert resp.status_code == 400
+        assert "url" in resp.json()["detail"].lower()
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT url FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["url"] == "https://shop.test/cart"
+
+    def test_url_scope_patched_to_whitespace_only_is_refused(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", domain="shop.test",
+                               url="https://shop.test/cart", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": "   "})
+        assert resp.status_code == 400
+
+    def test_global_scope_patched_domain_to_blank_is_accepted_and_normalised(
+        self, learning_client,
+    ):
+        """global scope doesn't need a domain — blanking it is a legitimate
+        edit, not F5's bug, and must not be swept up by the new check."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["domain"] is None
+
+    def test_global_scope_patched_url_to_whitespace_is_accepted_and_normalised(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", url="https://shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "url": "   "})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["url"] is None
+
+    def test_scope_change_to_domain_with_whitespace_domain_falls_through_to_stored_value(
+        self, learning_client,
+    ):
+        """When `scope` is ALSO in the request, a whitespace-only domain is
+        the create_hint-style 'no new value given' signal, not a blanking
+        request — it must fall through to the hint's existing domain rather
+        than being stored literally (pre-fix, `"   " or row_dict.get(...)`
+        used "   " verbatim because a non-empty string is truthy)."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", domain="shop.test",
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "scope": "domain", "domain": "   ",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["scope"] == "domain"
+        assert resp.json()["hint"]["domain"] == "shop.test"
+
+    def test_legacy_domain_scoped_row_with_null_domain_rejects_a_category_only_patch(
+        self, learning_client,
+    ):
+        """Reachable, not hypothetical: extract_url_from_query returns None
+        when the query names no URL, process_execution then stores
+        domain=None, and several triage categories map to scope='domain'
+        (_SCOPE_BY_CATEGORY) — so NLFeedbackEngine itself can create a
+        domain-scoped row with domain=NULL. The unconditional F5 validation
+        means ANY patch on such a row — even one that never touches
+        domain — is refused until the row is repaired, because the
+        resolved row would otherwise still violate its own scope."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "timing",
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "domain-scoped" in detail and "no domain" in detail, (
+            f"message must name the row's scope and its missing field, got: {detail!r}"
+        )
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT category FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["category"] != "timing", "a refused patch must not partially apply"
+
+    def test_legacy_domain_scoped_row_is_repaired_by_supplying_domain_in_the_same_patch(
+        self, learning_client,
+    ):
+        """The 400 above is repairable in the same request: supplying a
+        domain alongside the unrelated field satisfies the check and both
+        changes land together."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "timing", "domain": "example.com",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["category"] == "timing"
+        assert resp.json()["hint"]["domain"] == "example.com"
+
+    def test_legacy_url_scoped_row_with_null_url_rejects_a_category_only_patch(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", url=None,
+                               category="uncategorized", org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "locator",
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "url-scoped" in detail and "no url" in detail, (
+            f"message must name the row's scope and its missing field, got: {detail!r}"
+        )
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT category FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["category"] == "uncategorized", "a refused patch must not partially apply"
+
+    def test_legacy_url_scoped_row_is_repaired_by_supplying_url_in_the_same_patch(
+        self, learning_client,
+    ):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="url", url=None,
+                               org_id="org-admin")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "category": "locator", "url": "https://shop.test/cart",
+        })
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["changed"] is True
+        assert resp.json()["hint"]["category"] == "locator"
+        assert resp.json()["hint"]["url"] == "https://shop.test/cart"
+
+
+class TestEngineCollisionRegression:
+    """The brief's own repro (Q1-Q3): PATCH {"domain": ""} on a domain-scoped
+    hint used to succeed, leaving a domain='' row. uq_nlfc_dedup_general_v21
+    keys on COALESCE(domain,''), so that row and a domain=NULL row occupy the
+    SAME unique-index bucket — but NLFeedbackEngine.learn_from_feedback's own
+    dedup SELECT uses `domain IS NOT DISTINCT FROM ?`, which does NOT treat
+    '' and NULL as equal. A later correction on the same text/scope/org,
+    arriving with domain=None (extract_url_from_query found no URL), missed
+    the '' row on the SELECT, then hit it on the INSERT's unique index,
+    raised IntegrityError, and was silently dropped — rollback + one
+    WARNING, nl_feedback_engine.py's `except Exception` block. This proves
+    that path is closed: the PATCH that used to create the '' row is now
+    refused, so the engine's write lands cleanly instead of colliding."""
+
+    def test_patch_can_no_longer_create_the_colliding_row_so_the_correction_survives(
+        self, learning_client, caplog,
+    ):
+        client, em, mock_fb, db_path = learning_client
+        hint_id = _insert_hint(
+            db_path, feedback_text="Dismiss the cookie banner first",
+            scope="domain", domain="shop.test", org_id="org-admin",
+        )
+
+        # Q1 (brief): PATCH {"domain": ""} — must now be refused.
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 400
+
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT domain FROM nl_feedback_corrections WHERE id = ?", (hint_id,),
+        ).fetchone()
+        conn.close()
+        assert row["domain"] == "shop.test", "the '' row from Q1 must never be created"
+
+        # Q2 (brief): the SAME text arrives again through the NL engine, this
+        # time with domain=None. Run it on the writer thread — the engine's
+        # own _assert_writer_thread guard requires it.
+        from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+        from src.backend.crew_ai.optimization.learning_config import WRITER_THREAD_NAME
+
+        engine = NLFeedbackEngine(execution_memory=em)
+        record = MagicMock()
+        record.workflow_id = "wf-collision-check"
+        record.domain = None
+        record.url = None
+        record.failure_category = None
+        record.org_id = "org-admin"
+        record.user_query = "dismiss the cookie banner"
+
+        old_name = threading.current_thread().name
+        threading.current_thread().name = WRITER_THREAD_NAME
+        try:
+            with caplog.at_level(
+                "WARNING", logger="src.backend.crew_ai.optimization.nl_feedback_engine",
+            ):
+                engine.learn_from_feedback(record, {
+                    "feedback_text": "Dismiss the cookie banner first",
+                    "category": "structural",  # -> scope 'domain' (_SCOPE_BY_CATEGORY)
+                    "actor": "engine",
+                })
+        finally:
+            threading.current_thread().name = old_name
+
+        assert "Failed to store feedback correction" not in caplog.text, (
+            f"the engine write was silently dropped: {caplog.text}"
+        )
+
+        conn = _pg_conn(db_path)
+        rows = conn.execute(
+            "SELECT domain, evidence_count FROM nl_feedback_corrections "
+            "WHERE feedback_text = ? ORDER BY id",
+            ("Dismiss the cookie banner first",),
+        ).fetchall()
+        conn.close()
+        # The original (domain='shop.test') hint is untouched, and the
+        # domain=NULL correction landed as its own row instead of vanishing
+        # into a swallowed IntegrityError.
+        assert len(rows) == 2, f"expected 2 rows (original + surviving correction), got {rows}"
+        by_domain = {r["domain"]: r["evidence_count"] for r in rows}
+        assert by_domain.get("shop.test") == 1
+        assert by_domain.get(None) == 1
+
+
+class TestCreateHintOrgIdIsAlreadyValidated:
+    """Pinning behaviour that already exists, because a review claimed it did
+    not: `HintCreateRequest.org_id` is a bare `str` with no `min_length`, so the
+    Pydantic model alone would accept "". The handler strips and rejects it,
+    matching what it already does for actor / feedback_text / anchor_query.
+
+    It matters because `COALESCE(org_id,'')` in all three dedup indexes maps ""
+    onto the same bucket as a legacy NULL org — so an empty org is the one
+    wrong org value that is not merely an orphan.
+    """
+
+    def _payload(self, org_id):
+        return {
+            "feedback_text": "use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "global", "actor": "alice", "org_id": org_id,
+        }
+
+    def test_an_empty_org_is_refused(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._payload(""))
+        assert resp.status_code == 400
+        assert "org_id" in resp.json()["detail"]
+
+    def test_a_whitespace_org_is_refused(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._payload("   "))
+        assert resp.status_code == 400
+
+    def test_a_padded_org_is_stored_stripped(self, learning_client):
+        """Not just refused-if-empty: the value is normalised, so "  org-a  "
+        cannot become a hint no token will ever match."""
+        client, _, _, db_path = learning_client
+        resp = client.post("/hints", json=self._payload("  org-padded  "))
+        assert resp.status_code == 201
+        conn = _pg_conn(db_path)
+        row = conn.execute(
+            "SELECT org_id FROM nl_feedback_corrections WHERE id = ?",
+            (resp.json()["hint"]["id"],),
+        ).fetchone()
+        conn.close()
+        assert row["org_id"] == "org-padded"
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1458,93 @@ class TestGetDashboardStats:
         accuracy = resp.json()["llm_accuracy"]
         assert accuracy["engagement_rate"] is None
         assert accuracy["reversal_rate"] is None
+
+    # Every machine writer of hint_audit, with the action and actor it
+    # writes. reviewed_events counts "a human looked at this flag", so none
+    # of these may satisfy it:
+    #   pg_schema.py migration 21          -> merge, merge_recommendation_dropped
+    #   nl_feedback_engine._flag_hints_no_commit -> trigger_N_flag
+    #   nl_feedback_engine._auto_disable_hint    -> auto_disable
+    _MACHINE_AUDIT_ROWS = [
+        ("merge", "migration_v21"),
+        ("merge_recommendation_dropped", "migration_v21"),
+        ("trigger_1_flag", "trigger_1"),
+        ("trigger_2_flag", "trigger_2"),
+        ("auto_disable", "system"),
+    ]
+
+    @pytest.mark.parametrize("action,actor", _MACHINE_AUDIT_ROWS)
+    def test_a_machine_written_row_does_not_count_as_a_human_review(
+        self, learning_client, action, actor,
+    ):
+        """M5/I1: reviewed_events/reversed_events used to count ANY hint_audit
+        row newer than the trigger, then only excluded the literal 'merge'.
+
+        Migration 21 writes TWO verbs on the same survivor hint with the same
+        actor, and the engine writes two more of its own, so an action list
+        was always going to be one verb behind. The invariant is the actor: a
+        row no person wrote is not a review, and 'Pending review' on the
+        dashboard is flagged_events - reviewed_events, so counting one hides
+        a flag nobody has looked at."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path)
+        conn = _pg_conn(db_path)
+        conn.execute(
+            "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
+            "flagged_hint_ids, active_hint_ids, created_at) "
+            "VALUES ('trigger_1', 'wf-merge', 'succeeded', ?, '[]', "
+            "        datetime('now', '-1 hour'))",
+            (json.dumps([hint_id]),),
+        )
+        conn.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (?, ?, ?, 'machine-written', datetime('now'))",
+            (hint_id, action, actor),
+        )
+        conn.close()
+
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        acc = resp.json()["llm_accuracy"]
+        assert acc["flagged_events"] == 1
+        assert acc["reviewed_events"] == 0, (
+            f"a machine-written {action!r} row by {actor!r} counted as a "
+            "human review of the flagged hint"
+        )
+        assert acc["reversed_events"] == 0
+        assert acc["engagement_rate"] == 0.0
+        assert acc["pending_review"] == 1
+
+    def test_a_human_row_after_the_trigger_still_counts_as_a_review(
+        self, learning_client,
+    ):
+        """The other half of I1: the exclusion must not silence real reviews.
+        An admin unflagging the hint is exactly what engagement_rate is for."""
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path)
+        conn = _pg_conn(db_path)
+        conn.execute(
+            "INSERT INTO trigger_events (trigger_type, workflow_id, status, "
+            "flagged_hint_ids, active_hint_ids, created_at) "
+            "VALUES ('trigger_1', 'wf-human', 'succeeded', ?, '[]', "
+            "        datetime('now', '-1 hour'))",
+            (json.dumps([hint_id]),),
+        )
+        conn.execute(
+            "INSERT INTO hint_audit "
+            "(hint_id, action, actor, reason, created_at) "
+            "VALUES (?, 'unflag', 'alice@example.com', 'the hint is fine', "
+            "        datetime('now'))",
+            (hint_id,),
+        )
+        conn.close()
+
+        acc = client.get("/stats").json()["llm_accuracy"]
+        assert acc["reviewed_events"] == 1
+        assert acc["reversed_events"] == 1
+        assert acc["engagement_rate"] == 1.0
+        assert acc["pending_review"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1346,8 +1961,15 @@ class TestApplyReviewSession:
         conn.close()
 
         rec_pairs = []
-        for cfg in rec_configs:
-            hint_id = _insert_hint(db_path, **cfg.get("hint_kwargs", {}))
+        for i, cfg in enumerate(rec_configs):
+            hint_kwargs = dict(cfg.get("hint_kwargs", {}))
+            # Every recommendation in a session is about a DIFFERENT hint, and
+            # _insert_hint defaults to one text at global scope. Two global
+            # hints with the same text in one org are the same hint since v21
+            # (domain left the global dedup key), so the seeds must differ —
+            # under the old NULL-distinct index they happened not to have to.
+            hint_kwargs.setdefault("feedback_text", f"use xpath {i}")
+            hint_id = _insert_hint(db_path, **hint_kwargs)
             conn = _pg_conn(db_path)
             conn.execute(
                 "INSERT INTO hint_review_recommendations "
@@ -1572,9 +2194,10 @@ class TestRunsEndpoints:
         assert r.status_code == 404
         assert "No run data" in r.json()["detail"]    # the endpoint's own 404
 
-    def test_run_detail_dedup_run_has_trace_but_no_record(self, learning_client):
-        # A deduped run writes NO execution_records row but DOES write a trace
-        # (no FK). The endpoint must still return the trace with run=null.
+    def test_run_detail_recordless_run_has_trace_but_no_record(self, learning_client):
+        # A run whose learning was skipped writes NO execution_records row but
+        # DOES write a trace (no FK). The endpoint must still return the trace
+        # with run=null.
         client, em, mock_fb, db_path = learning_client
         hid = _insert_hint(db_path)
         conn = _pg_conn(db_path)

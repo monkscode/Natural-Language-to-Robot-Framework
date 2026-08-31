@@ -93,6 +93,17 @@ class AntiPatternEngine(LearningEngine):
             return
         _assert_writer_thread("AntiPatternEngine.learn")
 
+        # T9: fail the write closed where the reads now fail closed. An
+        # anti-pattern stored without an org can never be retrieved again, so
+        # storing one only grows an unreachable table. This also covers the
+        # passing-run branch below, whose lookup is an org-scoped read.
+        if getattr(record, "org_id", None) is None:
+            logger.warning(
+                "[LEARNING] anti-pattern write refused (no org): run %s carries "
+                "no org — the row could never be read again",
+                getattr(record, "workflow_id", None))
+            return
+
         if record.test_status != "failed":
             # Check if this passing execution resolves an existing anti-pattern
             self._check_for_correct_alternative(record)
@@ -104,43 +115,49 @@ class AntiPatternEngine(LearningEngine):
         if not record.error_message:
             return
 
-        # Check for existing anti-pattern with same category + similar query
-        existing = self._find_similar_anti_pattern(
-            record.failure_category, record.user_query,
-            org_id=getattr(record, 'org_id', None),
-        )
-
         new_anti_id = None
-        if existing:
-            # Reinforce existing anti-pattern
-            new_evidence = existing["evidence_count"] + 1
-            new_score = EffectivenessScore.calculate(new_evidence, 0)
-            self._em._writer_conn.execute(
-                "UPDATE anti_patterns SET evidence_count = ?, score = ?, "
-                "last_seen = datetime('now', 'localtime') WHERE id = ?",
-                (new_evidence, new_score, existing["id"])
+        try:
+            # Check for existing anti-pattern with same category + similar query.
+            # Inside the guard: this reads _writer_conn, and a failing SELECT
+            # aborts the transaction exactly like a failing UPDATE does.
+            existing = self._find_similar_anti_pattern(
+                record.failure_category, record.user_query,
+                org_id=getattr(record, 'org_id', None),
             )
-        else:
-            # Create new anti-pattern
-            initial_score = EffectivenessScore.calculate(1, 0)
-            cursor = self._em._writer_conn.execute("""
-                INSERT INTO anti_patterns
-                (failure_category, query_pattern, bad_code_snippet, error_message,
-                 domain, org_id, score, evidence_count, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
-                RETURNING id
-            """, (
-                record.failure_category,
-                record.user_query,
-                self._extract_relevant_code(record.robot_code,
-                                            getattr(record, 'failed_keyword', None)),
-                record.error_message,
-                getattr(record, 'domain', None),
-                getattr(record, 'org_id', None),
-                initial_score,
-            ))
-            new_anti_id = cursor.fetchone()["id"]
-        self._em._writer_conn.commit()
+
+            if existing:
+                # Reinforce existing anti-pattern
+                new_evidence = existing["evidence_count"] + 1
+                new_score = EffectivenessScore.calculate(new_evidence, 0)
+                self._em._writer_conn.execute(
+                    "UPDATE anti_patterns SET evidence_count = ?, score = ?, "
+                    "last_seen = datetime('now', 'localtime') WHERE id = ?",
+                    (new_evidence, new_score, existing["id"])
+                )
+            else:
+                # Create new anti-pattern
+                initial_score = EffectivenessScore.calculate(1, 0)
+                cursor = self._em._writer_conn.execute("""
+                    INSERT INTO anti_patterns
+                    (failure_category, query_pattern, bad_code_snippet, error_message,
+                     domain, org_id, score, evidence_count, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
+                    RETURNING id
+                """, (
+                    record.failure_category,
+                    record.user_query,
+                    self._extract_relevant_code(record.robot_code,
+                                                getattr(record, 'failed_keyword', None)),
+                    record.error_message,
+                    getattr(record, 'domain', None),
+                    getattr(record, 'org_id', None),
+                    initial_score,
+                ))
+                new_anti_id = cursor.fetchone()["id"]
+            self._em._writer_conn.commit()
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
         # After the SQL commit, embed a newly created anti-pattern's anchor
         # (its query_pattern, which equals record.user_query) into
@@ -258,22 +275,28 @@ class AntiPatternEngine(LearningEngine):
         Called from learn() which already runs on the writer thread, so we
         read from _writer_conn to stay within the same transaction context.
         When org_id is set, only anti-patterns belonging to that org are
-        considered so cross-org failures never merge.
+        considered so cross-org failures never merge.  The predicate used to be
+        dropped entirely when org_id was None, so an org-less run could match —
+        and then REINFORCE — another org's row.  It is unconditional now, which
+        fails closed by SQL semantics (`org_id = NULL` is never true) rather
+        than by a branch a future caller could route around.  learn()'s own
+        guard means org_id is never None on that path, so the WARNING below is
+        unreachable via learn() and only fires for a caller that reaches this
+        method directly — kept anyway so this refusal carries the same
+        `refused (no org)` token as every other one and one Loki query still
+        finds it.
 
         Future: Replace word overlap with ChromaDB semantic similarity.
         """
-        if org_id is not None:
-            rows = self._em._writer_conn.execute(
-                "SELECT * FROM anti_patterns WHERE failure_category = ? "
-                "AND org_id = ? ORDER BY score DESC",
-                (category, org_id),
-            ).fetchall()
-        else:
-            rows = self._em._writer_conn.execute(
-                "SELECT * FROM anti_patterns WHERE failure_category = ? "
-                "ORDER BY score DESC",
-                (category,),
-            ).fetchall()
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] anti-pattern dedup lookup refused (no org): treating "
+                "as no match rather than reinforcing every org's")
+        rows = self._em._writer_conn.execute(
+            "SELECT * FROM anti_patterns WHERE failure_category = ? "
+            "AND org_id = ? ORDER BY score DESC",
+            (category, org_id),
+        ).fetchall()
 
         query_words = set(user_query.lower().split())
         for row in rows:
@@ -299,11 +322,22 @@ class AntiPatternEngine(LearningEngine):
         Reads via read_conn(), so it is safe on any thread. The similarity
         filter never raises — on any ChromaDB problem it fails open (returns
         all gated rows), degrading to score/evidence gating only.
+
+        A missing org returns [] (T9). The org predicate is the SOLE
+        discriminator on this path — a NULL-org anchor satisfies the similarity
+        filter for every caller (see test_anti_pattern_org.py) — so dropping it
+        put every org's anti-patterns into an org-less caller's prompt.
         """
         # C5: an empty user_query carries no relevance signal and cannot be
         # embedded. The old word-overlap path was harmlessly empty for "";
         # guard explicitly so the semantic path is never asked to embed "".
         if not user_query or not user_query.strip():
+            return []
+
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] anti-pattern read refused (no org): returning no "
+                "warnings rather than every org's")
             return []
 
         # Get high-scoring anti-patterns above the injection threshold.
@@ -317,9 +351,8 @@ class AntiPatternEngine(LearningEngine):
             sql += " AND (domain = ? OR domain IS NULL)"
             params.append(domain)
 
-        if org_id is not None:
-            sql += " AND org_id = ?"
-            params.append(org_id)
+        sql += " AND org_id = ?"
+        params.append(org_id)
 
         sql += " ORDER BY score DESC LIMIT 10"
 
@@ -368,30 +401,34 @@ class AntiPatternEngine(LearningEngine):
         )
 
         updated = False
-        for ap in anti_patterns:
-            if ap.get("correct_alternative"):
-                continue  # Already resolved
+        try:
+            for ap in anti_patterns:
+                if ap.get("correct_alternative"):
+                    continue  # Already resolved
 
-            # Only set correct_alternative if the bad snippet is NOT present
-            # in the passing code. This proves the failing pattern was actually
-            # replaced, rather than being a coincidental pass.
-            bad_snippet = ap.get("bad_code_snippet", "")
-            if self._bad_snippet_present(bad_snippet, record.robot_code):
-                logger.debug(
-                    "[LEARNING:ANTI_PATTERN] Skipping alternative for ap_id=%d: "
-                    "bad_code_snippet still present in passing code",
-                    ap["id"],
+                # Only set correct_alternative if the bad snippet is NOT present
+                # in the passing code. This proves the failing pattern was actually
+                # replaced, rather than being a coincidental pass.
+                bad_snippet = ap.get("bad_code_snippet", "")
+                if self._bad_snippet_present(bad_snippet, record.robot_code):
+                    logger.debug(
+                        "[LEARNING:ANTI_PATTERN] Skipping alternative for ap_id=%d: "
+                        "bad_code_snippet still present in passing code",
+                        ap["id"],
+                    )
+                    continue
+
+                self._em._writer_conn.execute(
+                    "UPDATE anti_patterns SET correct_alternative = ? WHERE id = ?",
+                    (record.robot_code[:500], ap["id"])
                 )
-                continue
+                updated = True
 
-            self._em._writer_conn.execute(
-                "UPDATE anti_patterns SET correct_alternative = ? WHERE id = ?",
-                (record.robot_code[:500], ap["id"])
-            )
-            updated = True
-
-        if updated:
-            self._em._writer_conn.commit()
+            if updated:
+                self._em._writer_conn.commit()
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     # -------------------------------------------------------------------
     # Private: Bad Snippet Detection

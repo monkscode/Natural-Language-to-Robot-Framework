@@ -65,6 +65,7 @@ interface ReviewPage {
   status: string
   hint_count?: number | null
   error_message?: string | null
+  org_id?: string | null
 }
 interface ReviewSessionDetail {
   session: ReviewSession
@@ -91,6 +92,14 @@ function hintStatus(h: Hint): { label: string; cls: string } {
   if (h.sort_priority === 4) return { label: 'Retracted', cls: 'bg-muted text-muted-foreground' }
   if (h.llm_review_disabled === 1) return { label: 'LLM-disabled', cls: 'bg-purple-100 text-purple-700 border-purple-200' }
   return { label: 'Auto-disabled', cls: 'bg-amber-50 text-amber-600 border-amber-200' }
+}
+
+// F2: a review session can hold pages from multiple orgs (see hint_review_pages.org_id,
+// Task 2/3) — two orgs sharing scope_type='global', or the same domain string, must not
+// render identical labels, or an admin cannot tell which page belongs to which tenant.
+export function reviewPageLabel(p: ReviewPage): string {
+  const scope = p.scope_type === 'global' ? 'Global hints' : (p.scope_value || 'No domain')
+  return `${scope} — ${p.org_id || 'no org'}`
 }
 
 function ErrorNote({ msg }: { msg: string }) {
@@ -579,7 +588,7 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
       {(data.pages?.length ?? 0) > 0 && (
         <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-0.5">
           {data.pages!.map(p => {
-            const label = p.scope_type === 'global' ? 'Global hints' : (p.scope_value || 'No domain')
+            const label = reviewPageLabel(p)
             const icon = p.status === 'succeeded' ? '✅' : p.status === 'failed' ? '❌' : session.status === 'pending_llm' ? '⟳' : '⏳'
             const note = p.status === 'succeeded' ? `${p.hint_count ?? 0} hints reviewed`
               : p.status === 'failed' ? (p.error_message || 'Failed')

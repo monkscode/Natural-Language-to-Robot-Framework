@@ -116,27 +116,25 @@ class ExecutionRecord:
     # JSON array of NL feedback hint IDs that were injected into this test's
     # prompt (e.g. '[5, 12]'). '[]' = optimization enabled but no NL hints
     # injected. NULL = row written before schema v10 (unknown, not empty).
-    # Written once on INSERT; never overwritten by the dedup UPDATE or Case B.
+    # Written once on INSERT; never overwritten by Case B.
     injected_hint_ids: Optional[str] = None
 
     # "{provider}/{model}" of the LLM that generated this workflow's code
     # (e.g. "gemini/gemini-2.5-flash"). A reporting dimension only — sliced
     # in metrics, never used to filter hint retrieval. NULL for rows written
-    # before schema v11. Refreshed on the dedup UPDATE (a current-state field,
-    # kept latest alongside robot_code/timestamp) — NOT write-once. The Case B
-    # passing-state UPDATE leaves it untouched (that path preserves the
-    # original failed run's context).
+    # before schema v11. Written once on INSERT; the Case B passing-state
+    # UPDATE leaves it untouched (that path preserves the original failed
+    # run's context).
     model_version: Optional[str] = None
 
     # Org that owns this execution (Phase 1c). NULL for rows written before
-    # schema v14 or for single-org deployments. The dedup path is scoped on
-    # COALESCE(org_id, '') so a NULL-org row and an org-A row never merge.
+    # schema v14 or for single-org deployments.
     org_id: Optional[str] = None
 
     # Per-workflow once-guard for pass-time usage attribution (Part 2 / C1).
     # The DB column DEFAULT is 1 (pre-v13 rows read already-attributed — N4);
     # this dataclass default is intentionally 0 and must NOT be unified with the
-    # DB default. _store_sqlite's INSERT writes 0 for new rows so they attribute;
+    # DB default. _store_relational's INSERT writes 0 for new rows so they attribute;
     # apply_hint_attribution's atomic claim flips the winner to 1. Read-only here
     # (the Step-4 attribution gate consumes it); no engine writes it via this field.
     hint_attribution_done: int = 0

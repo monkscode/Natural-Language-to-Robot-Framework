@@ -9,6 +9,7 @@ Tests: NLFeedbackEngine (learn_from_feedback, get_hints, update_hint_effectivene
 Uses in-memory SQLite with full Phase 1 schema via the ``in_memory_db`` fixture.
 """
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,6 +49,10 @@ class SynchronousWriteQueue:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 class MockEngine:
     """Minimal mock of a LearningEngine for FeedbackLoop tests."""
@@ -83,6 +88,9 @@ class MockFailureAnalyzer:
         return self._result
 
 
+_ORG = "org-A"
+
+
 @dataclass
 class FakeRecord:
     """Minimal ExecutionRecord-like object for unit tests."""
@@ -92,7 +100,10 @@ class FakeRecord:
     failure_category: Optional[str] = None
     user_query: str = "click login button"
     test_status: str = "failed"
-    org_id: Optional[str] = None
+    # T9: hint writes and reads fail closed without an org, so the
+    # default record names one. Tenancy itself is covered by
+    # test_nl_correction_org.py and test_org_filter_fails_closed.py.
+    org_id: Optional[str] = _ORG
 
 
 def create_execution_memory(conn):
@@ -107,7 +118,8 @@ def create_execution_memory(conn):
 def _insert_hint(conn, text, scope="global", domain=None, url=None,
                  category="keyword", is_active=1, success_count=0,
                  evidence_count=1, failure_count=0, applied_count=0,
-                 original_failure_category=None, conflict_flagged=0):
+                 original_failure_category=None, conflict_flagged=0,
+                 org_id=_ORG):
     """Insert a hint row directly into nl_feedback_corrections."""
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -115,11 +127,12 @@ def _insert_hint(conn, text, scope="global", domain=None, url=None,
         "(feedback_text, category, scope, domain, url, "
         " original_failure_category, evidence_count, applied_count, "
         " success_count, failure_count, is_active, conflict_flagged, "
-        " created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " created_at, last_seen, org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (text, category, scope, domain, url,
          original_failure_category, evidence_count, applied_count,
-         success_count, failure_count, is_active, conflict_flagged, now, now),
+         success_count, failure_count, is_active, conflict_flagged, now, now,
+         org_id),
     )
     conn.commit()
 
@@ -225,14 +238,18 @@ class TestStorage:
         )
 
     def test_store_dedup_increment(self, in_memory_db):
-        """Same feedback_text + domain + scope -> evidence_count incremented."""
+        """Same feedback_text + domain + scope -> evidence_count incremented.
+
+        One submission per run: T5 counts a correction once for the run that
+        produced it, so the three submissions here come from three runs — which
+        is what evidence_count was always meant to measure.
+        """
         engine = NLFeedbackEngine(in_memory_db)
-        record = FakeRecord()
         triage = {"feedback_text": "Use id=login-btn", "category": "locator"}
 
-        engine.learn_from_feedback(record, triage)
-        engine.learn_from_feedback(record, triage)
-        engine.learn_from_feedback(record, triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-1"), triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-2"), triage)
+        engine.learn_from_feedback(FakeRecord(workflow_id="wf-dedup-3"), triage)
 
         row = in_memory_db.execute("SELECT evidence_count FROM nl_feedback_corrections").fetchone()
         assert row["evidence_count"] == 3, f"Expected 3, got {row['evidence_count']}"
@@ -299,21 +316,21 @@ class TestRetrieval:
     def test_hints_global_returned(self, in_memory_db):
         _insert_hint(in_memory_db, "Always wait before click", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is not None, "Expected hints, got None"
         assert any("Always wait before click" in h for h in hints)
 
     def test_hints_domain_match(self, in_memory_db):
         _insert_hint(in_memory_db, "Use id=login-btn", scope="domain", domain="example.com")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click login", "https://example.com/page", "assembler")
+        hints = engine.get_hints("click login", "https://example.com/page", "assembler", org_id=_ORG)
         assert hints is not None
         assert any("login-btn" in h for h in hints)
 
     def test_hints_domain_mismatch(self, in_memory_db):
         _insert_hint(in_memory_db, "Use other selector", scope="domain", domain="other.com")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click login", "https://example.com/page", "assembler")
+        hints = engine.get_hints("click login", "https://example.com/page", "assembler", org_id=_ORG)
         assert hints is None, "Should not match different domain"
 
     def test_hints_url_match(self, in_memory_db):
@@ -322,31 +339,31 @@ class TestRetrieval:
         engine = NLFeedbackEngine(in_memory_db)
         hints = engine.get_hints(
             "click login", "https://example.com/login", "assembler"
-        )
+        , org_id=_ORG)
         assert hints is not None
         assert any("Click exact button" in h for h in hints)
 
     def test_hints_inactive_excluded(self, in_memory_db):
         _insert_hint(in_memory_db, "Disabled hint", scope="global", is_active=0)
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None, "Inactive hints should not be returned"
 
     def test_hints_empty_db(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None
 
     def test_hints_no_db(self):
         engine = NLFeedbackEngine(None)
-        hints = engine.get_hints("click button", "https://example.com", "assembler")
+        hints = engine.get_hints("click button", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None
 
     def test_hints_max_5(self, in_memory_db):
         for i in range(10):
             _insert_hint(in_memory_db, f"Hint number {i}", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://example.com", "assembler")
+        hints = engine.get_hints("click", "https://example.com", "assembler", org_id=_ORG)
         assert hints is not None
         assert len(hints) <= 5, f"Expected max 5 hints, got {len(hints)}"
 
@@ -354,7 +371,7 @@ class TestRetrieval:
         _insert_hint(in_memory_db, "Low success", scope="global", success_count=1)
         _insert_hint(in_memory_db, "High success", scope="global", success_count=10)
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://x.com", "assembler")
+        hints = engine.get_hints("click", "https://x.com", "assembler", org_id=_ORG)
         assert hints is not None
         # High success should come first
         assert "High success" in hints[0]
@@ -362,7 +379,7 @@ class TestRetrieval:
     def test_hints_formatted_with_prefix(self, in_memory_db):
         _insert_hint(in_memory_db, "Test prefix", scope="global")
         engine = NLFeedbackEngine(in_memory_db)
-        hints = engine.get_hints("click", "https://x.com", "assembler")
+        hints = engine.get_hints("click", "https://x.com", "assembler", org_id=_ORG)
         assert hints is not None
         assert hints[0].startswith("\u26a0\ufe0f USER FEEDBACK")
         assert "Test prefix" in hints[0]
@@ -461,7 +478,7 @@ class TestIntegration:
         fl.process_execution(
             workflow_id="wf-int1", user_query="click login",
             url="https://example.com", robot_code="*** Test Cases ***",
-            test_status="failed",
+            test_status="failed", org_id=_ORG,
         )
         # Now provide feedback
         fl.process_user_feedback(
@@ -506,7 +523,7 @@ class TestIntegration:
             test_status="passed",
         )
         # process_execution no longer credits NL hints — usage attribution moved
-        # to workflow_service._process_learning / apply_hint_attribution. It must
+        # to workflow_service._process_learning_record / apply_hint_attribution. It must
         # still complete and store the execution record without crashing.
         rec = conn.execute(
             "SELECT workflow_id FROM execution_records WHERE workflow_id = 'wf-int3'"
@@ -535,7 +552,7 @@ class TestEndToEnd:
         # Now retrieve hints for same url
         hints = engine.get_hints(
             "find login button", "https://example.com/login", "assembler"
-        )
+        , org_id=_ORG)
         assert hints is not None, "Expected hints to be returned"
         assert any("data-testid" in h for h in hints), (
             f"Expected feedback text in hints, got: {hints}"
@@ -575,11 +592,20 @@ class TestEndToEnd:
         hint_id = in_memory_db.execute(
             "SELECT id FROM nl_feedback_corrections"
         ).fetchone()["id"]
-        # Pre-seed failures just below the floor; one harmful verdict crosses it.
+        # Pre-seed failures just below the floor, each from its own query; one
+        # harmful verdict from a further query crosses it. The floor counts
+        # distinct sources (T4), so the evidence rows are part of the state.
         in_memory_db.execute(
             "UPDATE nl_feedback_corrections SET failure_count = ? WHERE id = ?",
             (AUTO_DISABLE_MIN_APPLICATIONS - 1, hint_id),
         )
+        for i in range(AUTO_DISABLE_MIN_APPLICATIONS - 1):
+            in_memory_db.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'failure', '2026-01-01T00:00:00+00:00')",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         in_memory_db.execute(
             "INSERT INTO execution_records (workflow_id, timestamp, user_query, "
             "test_status, hint_attribution_done) "
@@ -597,7 +623,7 @@ class TestEndToEnd:
         assert row["is_active"] == 0, "Hint should be auto-disabled"
 
         # Disabled hint must NOT appear in get_hints.
-        hints = engine.get_hints("some query", "https://example.com", "assembler")
+        hints = engine.get_hints("some query", "https://example.com", "assembler", org_id=_ORG)
         assert hints is None, "Disabled hint should not appear in hints"
 
 
@@ -609,7 +635,7 @@ class TestReactivationResetsUnusedCount:
 
     def test_resubmission_resets_unused_preserving_track_record(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
-        record = FakeRecord(domain="x.com", url="https://x.com")
+        record = FakeRecord(workflow_id="wf-orig", domain="x.com", url="https://x.com")
         triage = {"feedback_text": "always wait for the element to be visible",
                   "category": "keyword"}
         engine.learn_from_feedback(record, triage)  # create the hint
@@ -624,8 +650,14 @@ class TestReactivationResetsUnusedCount:
         )
         in_memory_db.commit()
 
-        # Re-submit identical feedback -> UPSERT branch (the fresh chance).
-        engine.learn_from_feedback(record, triage)
+        # Re-submit identical feedback from a LATER run -> UPSERT branch (the
+        # fresh chance). A different workflow_id on purpose: T5 counts one
+        # correction per run, and re-affirming a hint from a new run is exactly
+        # the recovery path that gate leaves open.
+        engine.learn_from_feedback(
+            FakeRecord(workflow_id="wf-resubmit", domain="x.com", url="https://x.com"),
+            triage,
+        )
 
         row = in_memory_db.execute(
             "SELECT unused_count, success_count, failure_count, is_active "

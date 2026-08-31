@@ -359,7 +359,7 @@ class TestStreamExecuteOnly:
     imported at module level: get_run_registry() writes a test_runs row
     (_record_run before it, _set_run_status inside it); get_artifact_store()
     writes a test.robot file under robot_tests/
-    (run_dir(run_id, create=True)); and, on the success path, _process_learning
+    (run_dir(run_id, create=True)); and, on the success path, _process_learning_record
     (:1222) calls get_feedback_loop() as the first statement in its try block
     (:361) — before the empty-user_query guard a few lines below it, so it
     runs even though these tests never reach the learning call itself. With
@@ -619,7 +619,8 @@ def test_stream_docker_execution_uses_runner_exec_client(tmp_path):
     with patch("src.backend.services.workflow_service.runner_exec_client") as rc, \
          patch("src.backend.services.workflow_service.get_artifact_store") as gas, \
          patch.object(workflow_service, "_set_run_status"), \
-         patch.object(workflow_service, "_process_learning"), \
+         patch.object(workflow_service, "_process_learning_record",
+                      return_value=None), \
          patch.object(workflow_service, "inline_report_screenshots", return_value=0), \
          patch.object(workflow_service, "_safe_evict_hint_metadata"):
         gas.return_value.run_dir.return_value = tmp_path

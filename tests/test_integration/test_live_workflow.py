@@ -3,7 +3,7 @@ Live integration tests for workflow_service streaming (Tier 2).
 
 Purpose: Verify the full workflow pipeline when the NL backend is running —
          generator yields, SSE event shapes, Docker execution, and the
-         _process_learning() side-effect against the real Postgres store.
+         _process_learning_record() side-effect against the real Postgres store.
 
 Requires:
   - NL backend running on localhost:5000
@@ -27,9 +27,24 @@ import time
 import pytest
 import requests
 
+from tests.conftest import LIVE_DB_OPT_OUT
+
 pytestmark = pytest.mark.integration
 
 SERVICE_URL = "http://localhost:5000"
+
+
+def _tier2_live_db_tests_should_skip(live_db_opt_out: bool) -> bool:
+    """Fail-safe skip rule for TestWorkflowApiEndpoints: run ONLY when the
+    operator explicitly opted this session out of the isolation guard
+    (NLRF_TEST_LIVE_DB truthy) — skip in every other case, INCLUDING a
+    throwaway-database guard failure (e.g. Postgres reachable but the role
+    lacks CREATEDB). A guard failure must never be read as permission to
+    write to whatever database is live; the only signal that grants that
+    permission is an explicit opt-out. Deliberately a pure function of one
+    input so the rule itself is directly testable without needing to vary
+    real environment state or reimport tests.conftest."""
+    return not live_db_opt_out
 
 
 LIVE_TEST_EMAIL = "live-test@bench.local"
@@ -49,6 +64,16 @@ def _auth_headers() -> dict:
     token, instead of hand-minting through the one production mint site
     without them. The old version of this helper skipped that step and was
     the sole source of every NULL-org_id row on test_runs (T1 Part A).
+
+    This writes to whatever database the pytest session is currently pointed
+    at via settings.DATABASE_URL — the already-running backend on :5000 can
+    only see that write if it is pointed at the same database, which is why
+    callers of this helper are skipped unless NLRF_TEST_LIVE_DB opted the
+    session out of the throwaway-database isolation guard (see
+    tests/conftest.py). Before that guard existed, this write landed in the
+    live `nlrf` database on every run: `nlrf.public.users` carries a real
+    `live-test@bench.local` row dated 2026-08-27 — direct evidence, left in
+    place, not this task's to remove.
     """
     import psycopg
     from src.backend.auth.jwt_utils import create_access_token
@@ -131,6 +156,20 @@ class TestWorkflowStreamEvents:
                 os.environ["GEMINI_API_KEY"] = original
 
 
+@pytest.mark.skipif(
+    _tier2_live_db_tests_should_skip(LIVE_DB_OPT_OUT),
+    reason=(
+        "_auth_headers() writes a real users row through settings.DATABASE_URL, "
+        "but the already-running backend on :5000 authenticates against the "
+        "database it was started with — the minted token can only validate "
+        "there if this pytest session is pointed at that same database. Set "
+        "NLRF_TEST_LIVE_DB=1 to opt this session out of the isolation guard and "
+        "run these against a shared live database intentionally. Skipped in "
+        "every other case — including a throwaway-database guard failure — "
+        "since a guard failure is not an opt-out and must never be read as "
+        "permission to write to whatever database happens to be live."
+    ),
+)
 class TestWorkflowApiEndpoints:
     """Verify the NL backend API endpoints for workflow submission."""
 
@@ -195,8 +234,8 @@ class TestHintMetadataCache:
     """Verify _hint_metadata_cache lifecycle during workflow run."""
 
     def test_cache_cleared_after_process_learning(self):
-        """After _process_learning() runs, the run_id is removed from cache."""
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        """After _process_learning_record() runs, the run_id is removed from cache."""
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         from unittest.mock import patch, MagicMock
 
         run_id = f"live-test-{int(time.time())}"
@@ -208,13 +247,13 @@ class TestHintMetadataCache:
         mock_fl = MagicMock()
         with patch("src.backend.services.workflow_service.get_feedback_loop", return_value=mock_fl):
             with patch("src.backend.services.workflow_service.extract_url_from_query", return_value="https://x.com"):
-                _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+                _process_learning_record(run_id, "test on x.com", "code", {"test_status": "passed"})
 
         assert run_id not in _hint_metadata_cache
 
     def test_cache_does_not_accumulate_stale_entries(self):
         """Multiple workflow runs do not leave stale cache entries."""
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         from unittest.mock import patch, MagicMock
 
         run_ids = [f"stale-test-{i}-{int(time.time())}" for i in range(3)]
@@ -228,7 +267,7 @@ class TestHintMetadataCache:
         with patch("src.backend.services.workflow_service.get_feedback_loop", return_value=mock_fl):
             with patch("src.backend.services.workflow_service.extract_url_from_query", return_value="https://x.com"):
                 for rid in run_ids:
-                    _process_learning(rid, "test on x.com", "code", {"test_status": "passed"})
+                    _process_learning_record(rid, "test on x.com", "code", {"test_status": "passed"})
 
         for rid in run_ids:
             assert rid not in _hint_metadata_cache
@@ -236,10 +275,10 @@ class TestHintMetadataCache:
     def test_process_learning_handles_nl_injected_ids_in_hint_metadata(self):
         """Regression (Finding 1 / F-10): hint_meta must reach process_execution
         with correct counts. Agent dicts live under hint_meta["agents"]; nl_injected_ids
-        is a sibling key. _process_learning iterates agents.values() — no isinstance
+        is a sibling key. _process_learning_record iterates agents.values() — no isinstance
         guard needed, no crash risk from the list entry.
         """
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         from unittest.mock import patch, MagicMock
 
         run_id = f"nl-ids-test-{int(time.time())}"
@@ -255,7 +294,7 @@ class TestHintMetadataCache:
         mock_fl.execution_memory.get.return_value = None  # first attempt
         with patch("src.backend.services.workflow_service.get_feedback_loop", return_value=mock_fl):
             with patch("src.backend.services.workflow_service.extract_url_from_query", return_value="https://x.com"):
-                _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+                _process_learning_record(run_id, "test on x.com", "code", {"test_status": "passed"})
 
         # The function must run to completion; process_execution must be called
         # with the correct injected_hint_ids JSON.

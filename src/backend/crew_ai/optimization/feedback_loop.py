@@ -56,38 +56,60 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# D3 — Write-queue drain helper
+# Ordering feedback behind the run's own learning write
 # ---------------------------------------------------------------------------
 
 def _get_with_retry(
     em,
     workflow_id: str,
-    max_attempts: int = 3,
+    ceiling_ms: int = 3000,
     base_ms: int = 100,
-):
-    """Retry em.get() to handle write-queue drain lag.
+    max_step_ms: int = 500,
+) -> tuple[ExecutionRecord | None, str]:
+    """Poll for this run's execution record until it exists or the budget ends.
+
+    Postgres is the only party that can answer "does this run have a learning
+    record?".  The answer outlives this process, and on more than one replica no
+    in-memory signal can speak for it — so the row itself is asked, repeatedly,
+    rather than a latch or a queue barrier (a barrier proves the queue drained,
+    which is not the same question).
 
     process_user_feedback is offloaded to an asyncio.to_thread worker by the
     async /api/feedback handler, so this runs on a worker thread (never the
-    event loop) — the sleep below is safe.  The execution record is written by
-    the learning-writer thread via write_queue.submit() inside
-    _process_learning(), which starts only AFTER the execution result SSE is
-    already sent to the client.  A user (or automated caller) can therefore
-    submit feedback before the INSERT is committed.
+    event loop) and the sleep below is safe.
 
-    Sleeping base_ms * 2^attempt between attempts gives the writer thread time
-    to drain.  Max wait: 100ms + 200ms = 300ms across 3 attempts — well within
-    the MAX_CONCURRENT_WORKFLOWS=10 worst-case queue depth of ~160ms.
-    Returns None after all attempts (same as the no-retry path), so the caller
-    degrades gracefully with an existing warning log.
+    The window covered is the store SUBMISSION plus its drain.  Since
+    _process_learning_record moved ahead of the artifact work, that submission
+    lands milliseconds behind the result SSE, so on the SPA path the first
+    attempt normally hits and nothing sleeps at all.  The full ceiling is spent
+    only on runs that have no record and never will — paste-and-execute,
+    errored and unknown runs — none of which the SPA can reach the feedback
+    panel from.
+
+    Neither LLM pipeline runs on the writer thread (fire_usage_attribution and
+    fire_conflict_detection both call the model on their caller's thread), so a
+    queued job is SQL plus a fastembed embed and the queue cannot stall this
+    poll for long.  The one case that can outlast the ceiling is the first embed
+    after boot loading the ONNX model; the caller then degrades to "no_record",
+    which still triages and still stores the raw text — strictly better than the
+    300ms budget this replaced.
+
+    Returns (record, outcome), where outcome is process_user_feedback's own
+    code: "processed" when the row was found, "no_record" when the budget ran
+    out.  One vocabulary, because the API layer renders these strings.
     """
-    for attempt in range(max_attempts):
+    waited_ms = 0
+    step_ms = max(1, base_ms)   # never 0: the loop's only exit is elapsed budget
+    while True:
         record = em.get(workflow_id)
         if record is not None:
-            return record
-        if attempt < max_attempts - 1:
-            time.sleep(base_ms / 1000 * (2 ** attempt))
-    return None
+            return record, "processed"
+        if waited_ms >= ceiling_ms:
+            return None, "no_record"
+        sleep_ms = min(step_ms, ceiling_ms - waited_ms)
+        time.sleep(sleep_ms / 1000)
+        waited_ms += sleep_ms
+        step_ms = min(step_ms * 2, max_step_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -299,36 +321,40 @@ class LearningMetricsTracker:
             return
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("LearningMetricsTracker.record_execution")
-        self._em._writer_conn.execute(
-            "INSERT INTO learning_metrics "
-            "(workflow_id, user_query, is_first_attempt, "
-            " is_retry_after_feedback, attempt_number, "
-            " hints_available, hints_injected, hint_sources, "
-            " llm_calls, llm_cost, hint_tokens, test_passed, was_holdout, "
-            " timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
-            (
-                workflow_id,
-                user_query,
-                1 if is_first_attempt else 0,
-                1 if is_retry_after_feedback else 0,
-                attempt_number,
-                hints_available,
-                hints_injected,
-                json.dumps(hint_sources),
-                llm_calls,
-                llm_cost,
-                hint_tokens,
-                1 if test_passed else 0,
-                1 if was_holdout else 0,
-            ),
-        )
-        self._em._writer_conn.commit()
-        logger.debug(
-            "[LEARNING:METRICS] Recorded execution %s: "
-            "hints_injected=%d, test_passed=%s",
-            workflow_id, hints_injected, test_passed,
-        )
+        try:
+            self._em._writer_conn.execute(
+                "INSERT INTO learning_metrics "
+                "(workflow_id, user_query, is_first_attempt, "
+                " is_retry_after_feedback, attempt_number, "
+                " hints_available, hints_injected, hint_sources, "
+                " llm_calls, llm_cost, hint_tokens, test_passed, was_holdout, "
+                " timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+                (
+                    workflow_id,
+                    user_query,
+                    1 if is_first_attempt else 0,
+                    1 if is_retry_after_feedback else 0,
+                    attempt_number,
+                    hints_available,
+                    hints_injected,
+                    json.dumps(hint_sources),
+                    llm_calls,
+                    llm_cost,
+                    hint_tokens,
+                    1 if test_passed else 0,
+                    1 if was_holdout else 0,
+                ),
+            )
+            self._em._writer_conn.commit()
+            logger.debug(
+                "[LEARNING:METRICS] Recorded execution %s: "
+                "hints_injected=%d, test_passed=%s",
+                workflow_id, hints_injected, test_passed,
+            )
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def get_effectiveness_report(self) -> dict:
         """
@@ -857,6 +883,7 @@ class FeedbackLoop:
                     cursor.rowcount,
                 )
         except Exception as e:
+            self.execution_memory._writer_conn.rollback()
             logger.warning(
                 "[LEARNING] stale-review-session recovery failed "
                 "(non-blocking): %s", e
@@ -915,7 +942,7 @@ class FeedbackLoop:
 
         # Engine-boundary enforcement of the CLAUDE.md invariant: learning
         # must be skipped when user_query is empty (paste-and-execute mode)
-        # to avoid polluting embeddings. Callers (workflow_service._process_learning
+        # to avoid polluting embeddings. Callers (workflow_service._process_learning_record
         # today) are expected to guard this first; reaching here means a
         # caller violated the invariant — surface it loudly so the violation
         # is fixed at its source rather than silently swallowed.
@@ -1049,7 +1076,7 @@ class FeedbackLoop:
             )
 
             # NL-hint usage attribution (Part 2) runs from
-            # workflow_service._process_learning AFTER process_execution, not
+            # workflow_service._process_learning_attribution AFTER process_execution, not
             # here: it credits only the hints actually used in passing code via
             # one LLM judgment per workflow. The old Step-7 all-injected
             # per-execution crediting was removed with that change.
@@ -1090,10 +1117,12 @@ class FeedbackLoop:
         Process user NL feedback from the feedback UI.
 
         Pipeline:
-        1. Store raw feedback in execution record
-        2. Run NL triage (seed patterns → category + confidence)
-        3. Route triaged insight to all engines via learn_from_feedback
-        4. Return triage result for frontend display
+        1. Find this run's execution record (bounded poll — this is what orders
+           feedback behind the run's own learning write)
+        2. Store raw feedback in that execution record
+        3. Run NL triage (seed patterns → category + confidence)
+        4. Route triaged insight to all engines via learn_from_feedback
+        5. Return the triage result, plus what actually happened
 
         Called from: /api/feedback endpoint (DAY_08).
 
@@ -1106,7 +1135,29 @@ class FeedbackLoop:
                 None (auth disabled) falls back to "unknown" at the audit write.
 
         Returns:
-            Triage result dict with category, confidence, taxonomy_code.
+            Triage result dict (category, confidence, taxonomy_code) plus an
+            "outcome" key the API layer renders honestly:
+              "processed"       the record was found and the correction write
+                                ran to completion without raising. This is also
+                                the honest outcome for every legitimate
+                                no-store path — category="positive" and a
+                                T5-gated duplicate both reach a clean return.
+              "no_text"         feedback_text was empty or whitespace-only.
+                                Every engine still ran and no-opped on it — the
+                                call was not skipped, it just stored nothing;
+                                the raw feedback write still ran
+              "no_record"       no learning record for this run within the
+                                poll's budget — triage ran, engines did not
+              "learning_paused" the circuit breaker is open; nothing was written
+              "no_org"          the run carries no organisation, so the NL
+                                write was never submitted — it would only be
+                                refused downstream (nl_feedback_engine.py, T9)
+              "queued"          the NL write was submitted but did not confirm
+                                within the wait budget; it still runs to
+                                completion on the writer thread
+              "error"           no NL engine is available, the NL write
+                                raised, or an internal failure occurred;
+                                nothing here can be relied on
         """
         _fallback_triage = {
             "category": "uncategorized",
@@ -1116,20 +1167,29 @@ class FeedbackLoop:
             "matched_patterns": [],
         }
 
+        # The outcome for a paused breaker is read HERE, from the one call the
+        # request makes. is_enabled() has side effects — it transitions
+        # CLOSED->OPEN and OPEN->HALF_OPEN, and HALF_OPEN admits exactly one
+        # probe — so a second call anywhere would consume that probe and bounce
+        # this check. get_stats() is the side-effect-free read if one is needed.
         if not self.circuit_breaker.is_enabled():
-            return _fallback_triage
+            return {**_fallback_triage, "outcome": "learning_paused"}
 
         try:
-            # Step 1: Store raw feedback
+            # Step 1: Find this run's execution record.
+            record, outcome = _get_with_retry(self.execution_memory, workflow_id)
+            error_message = (
+                record.error_message if record else None
+            )
+
+            # Step 2: Store the raw feedback text — AFTER the lookup, and
+            # ALWAYS. The UPDATE is a silent no-op on a missing row, so ahead of
+            # the lookup the FIFO queue ran it before the store that creates the
+            # row and the column stayed NULL forever. Behind the poll it lands
+            # even when the poll gave up, because the store was queued first.
             self.write_queue.submit(
                 self.execution_memory.update_user_feedback,
                 workflow_id, feedback_text, feedback_type,
-            )
-
-            # Step 2: Get execution record for context (retry handles write-queue lag)
-            record = _get_with_retry(self.execution_memory, workflow_id)
-            error_message = (
-                record.error_message if record else None
             )
 
             # Step 3: NL triage
@@ -1199,6 +1259,11 @@ class FeedbackLoop:
                     ),
                 )
 
+            safe_wid = (
+                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
+                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
+            )
+
             # Step 4: Route to engines via learn_from_feedback
             if record:
                 # Inject raw feedback text so engines can access it
@@ -1206,15 +1271,9 @@ class FeedbackLoop:
                 # who submitted — recorded by the NL engine's implicit-unflag audit row
                 triage["actor"] = actor
 
-                engines = [
-                    self.structural_engine,
-                    self.keyword_engine,
-                    self.anti_pattern_engine,
-                ]
-                if self.nl_engine is not None:
-                    engines.append(self.nl_engine)
-
-                for engine in engines:
+                for engine in (
+                    self.structural_engine, self.keyword_engine, self.anti_pattern_engine,
+                ):
                     try:
                         self.write_queue.submit(
                             engine.learn_from_feedback, record, triage,
@@ -1224,10 +1283,63 @@ class FeedbackLoop:
                             "[LEARNING] Engine routing failed for %s: %s",
                             type(engine).__name__, e,
                         )
-            safe_wid = (
-                workflow_id if re.match(r'^[a-zA-Z0-9_-]+$', workflow_id)
-                else "[b64]" + base64.b64encode(workflow_id.encode('UTF-8')).decode()
-            )
+
+                # Only the NL engine's write determines whether a correction
+                # row exists — verified: AntiPatternEngine, KeywordCorrection-
+                # Engine and StructuralRuleEngine define no learn_from_feedback
+                # of their own and inherit LearningEngine's no-op `pass`
+                # (learning_config.py:428-437), so their outcome can never
+                # speak for "the correction was stored." That is why only this
+                # call is awaited for a real verdict; the three above stay
+                # fire-and-forget, unchanged from before this task.
+                if self.nl_engine is None:
+                    # Mode (b): no NL engine means no correction write is even
+                    # possible — "processed" would claim a write that never
+                    # ran. NLFeedbackEngine unavailability is already logged
+                    # once at construction time (FeedbackLoop.__init__).
+                    outcome = "error"
+                elif record.org_id is None:
+                    # T9: nl_feedback_engine.py's own write refuses an
+                    # org-less record (a hint with no org could never be
+                    # read again) — checked again here so the caller learns
+                    # this now instead of after a queued job that would only
+                    # log a warning and do nothing. This early return happens
+                    # BEFORE that downstream warning could ever fire, so the
+                    # same "refused (no org)" token is logged here too —
+                    # every tenancy refusal shares it so one Loki query finds
+                    # them all.
+                    logger.warning(
+                        "[LEARNING] correction write refused (no org): run "
+                        "%s carries no org — the correction cannot be "
+                        "stored where it could be read again", safe_wid,
+                    )
+                    outcome = "no_org"
+                else:
+                    try:
+                        verdict, _detail = self.write_queue.submit_and_wait(
+                            self.nl_engine.learn_from_feedback, record, triage,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[LEARNING] Engine routing failed for %s: %s",
+                            type(self.nl_engine).__name__, e,
+                        )
+                        outcome = "error"
+                    else:
+                        if verdict == "failed":
+                            outcome = "error"
+                        elif verdict == "timeout":
+                            outcome = "queued"
+                        # verdict == "ok": outcome stays "processed"
+
+            # Step 4b: "no_text" narrows the success path only. Every other
+            # outcome from Step 4 (learning_paused, no_record, error, no_org,
+            # queued) describes a failure or an indeterminate state and must
+            # keep winning — only "processed" is refined further, since it is
+            # the one case where the engines had nothing to route because the
+            # submission itself carried no words.
+            if outcome == "processed" and not feedback_text.strip():
+                outcome = "no_text"
 
             if not record:
                 logger.warning(
@@ -1244,7 +1356,10 @@ class FeedbackLoop:
             )
 
             self.circuit_breaker.record_success()
-            return triage
+            # A COPY: `triage` was handed to the writer thread at Step 4 and is
+            # that thread's to read. Stamping the outcome into it here would be
+            # a cross-thread mutation whose visibility depends on drain timing.
+            return {**triage, "outcome": outcome}
 
         except Exception as e:
             self.circuit_breaker.record_error(e)
@@ -1252,7 +1367,7 @@ class FeedbackLoop:
                 "[LEARNING] process_user_feedback error (non-blocking): %s",
                 e,
             )
-            return _fallback_triage
+            return {**_fallback_triage, "outcome": "error"}
 
     # ------------------------------------------------------------------
     # Trigger Telemetry — write path used by Trigger 1 and Trigger 2
@@ -1317,30 +1432,34 @@ class FeedbackLoop:
         from datetime import datetime, timezone
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("FeedbackLoop.write_trigger_event")
-        self.execution_memory._writer_conn.execute(
-            """
-            INSERT INTO trigger_events (
-                trigger_type, workflow_id, domain, url, feedback_text,
-                active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
-                reason, llm_model,
-                input_tokens, output_tokens, llm_latency_ms,
-                status, error_message, used_hint_ids, unused_hint_ids, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trigger_type, workflow_id, domain, url, feedback_text,
-                json.dumps(active_hint_ids),
-                json.dumps(flagged_hint_ids),
-                json.dumps(actually_flagged_hint_ids),
-                reason, llm_model,
-                input_tokens, output_tokens, llm_latency_ms,
-                status, error_message,
-                json.dumps(used_hint_ids) if used_hint_ids is not None else None,
-                json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self.execution_memory._writer_conn.commit()
+        try:
+            self.execution_memory._writer_conn.execute(
+                """
+                INSERT INTO trigger_events (
+                    trigger_type, workflow_id, domain, url, feedback_text,
+                    active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
+                    reason, llm_model,
+                    input_tokens, output_tokens, llm_latency_ms,
+                    status, error_message, used_hint_ids, unused_hint_ids, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trigger_type, workflow_id, domain, url, feedback_text,
+                    json.dumps(active_hint_ids),
+                    json.dumps(flagged_hint_ids),
+                    json.dumps(actually_flagged_hint_ids),
+                    reason, llm_model,
+                    input_tokens, output_tokens, llm_latency_ms,
+                    status, error_message,
+                    json.dumps(used_hint_ids) if used_hint_ids is not None else None,
+                    json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self.execution_memory._writer_conn.commit()
+        except Exception:
+            self.execution_memory._writer_conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Stats & Monitoring

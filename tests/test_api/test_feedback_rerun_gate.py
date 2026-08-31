@@ -106,7 +106,9 @@ def _feedback(client, tok, run_id):
     from src.backend.core.run_registry import get_run_registry
 
     fake = MagicMock()
-    fake.process_user_feedback.return_value = {"action": "recorded"}
+    fake.process_user_feedback.return_value = {
+        "action": "recorded", "outcome": "processed",
+    }
 
     reg = get_run_registry()
     real_get_run = reg.get_run

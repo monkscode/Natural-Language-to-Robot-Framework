@@ -11,6 +11,7 @@ Tests:
 - get_active_hints_raw: no execution_memory → []
 """
 
+import hashlib
 import json
 import threading
 import pytest
@@ -183,7 +184,7 @@ class TestConflictFlagHintsRollbackOnException:
 # ---------------------------------------------------------------------------
 # update_hint_effectiveness was replaced by apply_hint_attribution (Part 2):
 # malformed/empty injected_hint_ids is now rejected by the F3 gate in
-# workflow_service._process_learning (no scope-wide fallback), and the no-em /
+# workflow_service._process_learning_record (no scope-wide fallback), and the no-em /
 # atomic-claim behaviour is covered by test_apply_hint_attribution.py.
 # ---------------------------------------------------------------------------
 
@@ -219,7 +220,8 @@ class TestConflictFlagHintsStrongHistoryGuard:
     def test_hint_above_threshold_with_high_success_rate_is_not_flagged(
         self, engine, in_memory_em
     ):
-        """Strong-history guard: applied>=5 AND success_rate>=0.70 → skip flag."""
+        """Strong-history guard: >=5 distinct used sources AND event
+        success_rate>=0.70 → skip flag."""
         in_memory_em._writer_conn.execute(
             "INSERT INTO nl_feedback_corrections "
             "(feedback_text, category, scope, domain, url, evidence_count, "
@@ -234,6 +236,16 @@ class TestConflictFlagHintsStrongHistoryGuard:
             "SELECT id FROM nl_feedback_corrections LIMIT 1"
         ).fetchone()
         hint_id = row["id"]
+        # The 9 successes came from 9 independent queries (T4: the shield counts
+        # distinct sources, so repetition alone cannot earn it).
+        for i in range(9):
+            in_memory_em._writer_conn.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'used', datetime('now'))",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
+        in_memory_em._writer_conn.commit()
 
         result = engine.conflict_flag_hints(
             {hint_id: "supposedly bad"}, trigger_type="trigger_1"

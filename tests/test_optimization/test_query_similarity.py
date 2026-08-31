@@ -62,6 +62,8 @@ def _make_provider(em, holdout=False):
         pattern_matcher=pattern_matcher,
         vector_store=MagicMock(),
         execution_memory=em,
+        # T9: the provider's learning reads fail closed without an org.
+        org_id=_ORG,
     )
     provider._holdout_decision = holdout
     return provider
@@ -83,14 +85,19 @@ def _seed_metric(em, *, hints_injected, was_holdout, test_passed, n,
     em._writer_conn.commit()
 
 
+# T9: hint reads fail closed without an org, so these fixtures name one.
+_ORG = "org-A"
+
+
 def _insert_nl_hint(em, hint_id, feedback_text, anchor_query,
-                    scope="global", domain=None):
+                    scope="global", domain=None, org_id=_ORG):
     em._writer_conn.execute(
         "INSERT INTO nl_feedback_corrections "
-        "(id, feedback_text, anchor_query, scope, domain, created_at, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(id, feedback_text, anchor_query, scope, domain, created_at, "
+        " last_seen, org_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (hint_id, feedback_text, anchor_query, scope, domain,
-         "2026-01-01", "2026-01-01"),
+         "2026-01-01", "2026-01-01", org_id),
     )
     em._writer_conn.commit()
 
@@ -124,63 +131,6 @@ class TestModelVersionColumn:
         in_memory_em.store(rec)
         got = in_memory_em.get("wf-mv-2")
         assert got is not None and got.model_version is None
-
-    def test_model_version_refreshed_on_dedup(self, in_memory_em):
-        # DEDUPLICATION_THRESHOLD identical runs → the next store triggers the
-        # dedup UPDATE, which must refresh model_version (a current-state
-        # field, kept latest like robot_code) — not leave it stale. A domain
-        # is required: the dedup match is keyed on (query, domain, status).
-        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
-        for i in range(thr):
-            in_memory_em.store(ExecutionRecord(
-                workflow_id=f"wf-dv-{i}",
-                timestamp=datetime(2026, 1, 1, 0, 0, i),
-                user_query="same query for dedup",
-                domain="dedup.com",
-                test_status="passed",
-                model_version="gemini/old-model",
-            ))
-        in_memory_em.store(ExecutionRecord(
-            workflow_id="wf-dv-new",
-            timestamp=datetime(2026, 1, 2),
-            user_query="same query for dedup",
-            domain="dedup.com",
-            test_status="passed",
-            model_version="gemini/new-model",
-        ))
-        rows = in_memory_em._writer_conn.execute(
-            "SELECT model_version FROM execution_records "
-            "WHERE user_query = 'same query for dedup'"
-        ).fetchall()
-        assert len(rows) == thr                # last store deduped, not inserted
-        latest = in_memory_em._writer_conn.execute(
-            "SELECT model_version FROM execution_records "
-            "WHERE user_query = 'same query for dedup' "
-            "ORDER BY timestamp DESC LIMIT 1"
-        ).fetchone()[0]
-        assert latest == "gemini/new-model"
-
-
-class TestUrlLessDeduplication:
-    """Regression: a workflow with no URL stores domain=NULL. The dedup match
-    keys on domain; a plain `domain = ''` never matched NULL, so URL-less
-    rows accumulated unbounded. COALESCE(domain,'') in the match fixes it."""
-
-    def test_url_less_workflows_deduplicate(self, in_memory_em):
-        thr = PostgresExecutionMemory.DEDUPLICATION_THRESHOLD
-        for i in range(thr + 1):          # thr inserts, then one more
-            in_memory_em.store(ExecutionRecord(
-                workflow_id=f"wf-nourl-{i}",
-                timestamp=datetime(2026, 1, 1, 0, 0, i),
-                user_query="a query with no url",
-                domain=None,               # URL-less → stored as NULL
-                test_status="passed",
-            ))
-        count = in_memory_em._writer_conn.execute(
-            "SELECT COUNT(*) FROM execution_records "
-            "WHERE user_query = 'a query with no url'"
-        ).fetchone()[0]
-        assert count == thr                # the last store deduped, not inserted
 
 
 # ===================================================================
@@ -241,7 +191,7 @@ class TestBank1Retrieval:
         eng = NLFeedbackEngine(in_memory_em)
         _insert_nl_hint(in_memory_em, 1, "a hint", "anchor text here")
         hints, ids = eng.get_hints_with_ids(
-            "any query at all", "http://x.com", "planner")
+            "any query at all", "http://x.com", "planner", org_id=_ORG)
         assert ids == [1]
 
 
@@ -270,7 +220,7 @@ class TestBank1SelectionTrace:
         in_memory_em._writer_conn.commit()
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert ids == [1]                            # id 1 (newer) wins
         assert trace[1]["available"] == 1
         assert trace[2]["available"] == 0
@@ -291,7 +241,7 @@ class TestBank1SelectionTrace:
         in_memory_em._writer_conn.commit()
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert set(ids) == {1, 2, 3, 4, 5}
         assert trace[6]["drop_reason"] == "cap"
         assert trace[6]["available"] == 0
@@ -303,7 +253,7 @@ class TestBank1SelectionTrace:
         _insert_nl_hint(in_memory_em, 1, "a single distinct hint", "anchor a")
         trace = {}
         hints, ids = eng.get_hints_with_ids(
-            "any query", "http://x.com", "planner", selection_trace=trace)
+            "any query", "http://x.com", "planner", selection_trace=trace, org_id=_ORG)
         assert ids == [1]
         assert trace[1]["available"] == 1
         assert trace[1]["drop_reason"] is None
@@ -909,7 +859,7 @@ class TestLearningEndpoints:
         from fastapi import HTTPException
         req = HintCreateRequest(
             feedback_text="a hint", anchor_query="ab",   # < 3 chars
-            scope="global", actor="admin",
+            scope="global", org_id=_ORG, actor="admin",
         )
         with pytest.raises(HTTPException) as exc:
             create_hint(req, fb=MagicMock())
@@ -925,7 +875,7 @@ class TestLearningEndpoints:
         req = HintCreateRequest(
             feedback_text="use Wait For Elements State, not Sleep",
             anchor_query="verify the product list loads after filtering",
-            scope="global", run_triage=False, actor="admin",
+            scope="global", org_id=_ORG, run_triage=False, actor="admin",
         )
         with patch("src.backend.api.learning_endpoints._admin_conn",
                    side_effect=lambda: pg_compat.connect(em.dsn)):

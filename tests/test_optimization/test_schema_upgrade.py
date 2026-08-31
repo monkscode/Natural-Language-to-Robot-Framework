@@ -103,8 +103,17 @@ def test_ensure_schema_upgrades_existing_v17_db_to_org_aware_dedup():
                 "WHERE schemaname = %s AND tablename = 'nl_feedback_corrections'",
                 (_UPGRADE_SCHEMA,),
             ).fetchall()}
-            assert "uq_nlfc_dedup_general" in indexes and "uq_nlfc_dedup_url" in indexes, (
-                f"v18 unique indexes missing after upgrade (got {sorted(indexes)})"
+            # v18 created uq_nlfc_dedup_general / _url; v21 replaces both with
+            # the *_v21 names (an IF NOT EXISTS create under the old name would
+            # have been a silent no-op, so the rename is load-bearing). What
+            # this step pins is that the upgrade ends with dedup uniqueness in
+            # place, whatever the current names are.
+            assert {"uq_nlfc_dedup_general_v21", "uq_nlfc_dedup_url_v21",
+                    "uq_nlfc_dedup_global_v21"} <= indexes, (
+                f"dedup unique indexes missing after upgrade (got {sorted(indexes)})"
+            )
+            assert "uq_nlfc_dedup_general" not in indexes, (
+                "v21 left the superseded v18 index behind"
             )
             versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}
             assert 18 in versions, f"schema_version did not advance to 18 (got {sorted(versions)})"
@@ -158,15 +167,79 @@ def test_ensure_schema_upgrades_existing_v16_db():
             #    CREATE INDEX on the missing org_id column.
             pg_schema.ensure_schema(raw)
 
-            # 3) Every scoped table regained org_id, hints regained is_shared,
-            #    and the schema advanced to 17.
+            # 3) Every scoped table regained org_id and the schema advanced
+            #    past 17. is_shared is added by v17 and dropped again by v20,
+            #    so the end state must NOT have it — asserting its presence
+            #    here would pin the column this plan removed.
             nlfc = _columns(raw, "nl_feedback_corrections")
             assert "org_id" in nlfc, "v17 migration did not add org_id to the existing nl_feedback_corrections"
-            assert "is_shared" in nlfc, "v17 migration did not add is_shared"
+            assert "is_shared" not in nlfc, "v20 migration did not drop is_shared"
             for table, _ in _V17_DROPS:
                 assert "org_id" in _columns(raw, table), f"v17 migration did not add org_id to existing {table}"
             versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}
             assert 17 in versions, f"schema_version did not advance to 17 (got {sorted(versions)})"
+        finally:
+            raw.close()
+    finally:
+        admin.execute(f"DROP SCHEMA IF EXISTS {_UPGRADE_SCHEMA} CASCADE")
+        admin.close()
+
+
+def test_ensure_schema_upgrades_existing_v21_db_hint_review_pages_gains_org_id():
+    """Migration 22 adds hint_review_pages.org_id the same way v17 added
+    org_id to the five Phase-1c tables above: baseline DDL for fresh
+    installs, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for a database that
+    already has the table. Existing pages predate org partitioning and have
+    no correct org to backfill — the column must land NULL on them, not
+    backfilled to '' or any sentinel, and stay nullable."""
+    admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
+    try:
+        admin.execute(f"DROP SCHEMA IF EXISTS {_UPGRADE_SCHEMA} CASCADE")
+        admin.execute(f"CREATE SCHEMA {_UPGRADE_SCHEMA}")
+        dsn = settings.DATABASE_URL + f"?options=-c%20search_path%3D{_UPGRADE_SCHEMA},public"
+        raw = psycopg.connect(dsn, autocommit=True)
+        try:
+            # 1) Build the current schema, then rewind hint_review_pages to a
+            #    faithful v21 state: drop org_id and un-record migration 22.
+            #    `CREATE TABLE IF NOT EXISTS` never touches an existing table,
+            #    so from here only migration 22's ALTER can restore the column.
+            pg_schema.ensure_schema(raw)
+            raw.execute("ALTER TABLE hint_review_pages DROP COLUMN IF EXISTS org_id")
+            raw.execute("DELETE FROM schema_version WHERE version >= 22")
+            assert "org_id" not in _columns(raw, "hint_review_pages"), (
+                "test setup: org_id should be gone"
+            )
+
+            # 2) Seed a pre-upgrade page — the row a real deployment already
+            #    has, with no org to backfill.
+            raw.execute(
+                "INSERT INTO hint_review_pages "
+                "(session_id, scope_type, status, hint_count, created_at) "
+                "VALUES (1, 'domain', 'completed', 3, now()::text)"
+            )
+
+            # 3) The upgrade.
+            pg_schema.ensure_schema(raw)
+
+            # 4) Column regrown, nullable, existing row left NULL (no backfill).
+            assert "org_id" in _columns(raw, "hint_review_pages"), (
+                "migration 22 did not add org_id to an existing hint_review_pages table"
+            )
+            nullable = raw.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = 'hint_review_pages' "
+                "AND column_name = 'org_id'",
+                (_UPGRADE_SCHEMA,),
+            ).fetchone()[0]
+            assert nullable == "YES", "hint_review_pages.org_id must stay nullable (no backfill)"
+            org_value = raw.execute(
+                "SELECT org_id FROM hint_review_pages WHERE scope_type = 'domain'"
+            ).fetchone()[0]
+            assert org_value is None, (
+                "migration 22 must not backfill org_id on pre-existing pages"
+            )
+            versions = {r[0] for r in raw.execute("SELECT version FROM schema_version").fetchall()}
+            assert 22 in versions, f"schema_version did not advance to 22 (got {sorted(versions)})"
         finally:
             raw.close()
     finally:

@@ -33,6 +33,10 @@ class SynchronousWriteQueue:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 class MockEngine:
     """Minimal mock of a LearningEngine for FeedbackLoop tests."""
@@ -827,7 +831,14 @@ class TestIntegration:
 # ===================================================================
 
 class TestGetWithRetry:
-    """Unit tests for the _get_with_retry write-queue drain helper (D3 fix)."""
+    """Unit tests for the bounded record poll.
+
+    T7 replaced the 3-attempt / 300ms drain retry with a budgeted poll that
+    returns (record, outcome).  ceiling_ms=300, base_ms=100 reproduces the old
+    shape exactly — two sleeps, three reads — so the arithmetic below stays
+    checkable by hand; the production defaults are pinned in
+    test_feedback_ordering.py.
+    """
 
     def test_returns_record_on_first_attempt(self):
         from unittest.mock import MagicMock
@@ -837,9 +848,10 @@ class TestGetWithRetry:
         em = MagicMock()
         em.get.return_value = record
 
-        result = _get_with_retry(em, "wf-001", max_attempts=3, base_ms=1)
+        result, outcome = _get_with_retry(em, "wf-001", ceiling_ms=300, base_ms=100)
 
         assert result is record
+        assert outcome == "processed"
         assert em.get.call_count == 1
 
     def test_retries_and_finds_record_on_second_attempt(self):
@@ -851,9 +863,11 @@ class TestGetWithRetry:
         em.get.side_effect = [None, record]
 
         with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
-            result = _get_with_retry(em, "wf-002", max_attempts=3, base_ms=1)
+            result, outcome = _get_with_retry(
+                em, "wf-002", ceiling_ms=300, base_ms=100)
 
         assert result is record
+        assert outcome == "processed"
         assert em.get.call_count == 2
 
     def test_retries_and_finds_record_on_third_attempt(self):
@@ -865,12 +879,14 @@ class TestGetWithRetry:
         em.get.side_effect = [None, None, record]
 
         with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
-            result = _get_with_retry(em, "wf-003", max_attempts=3, base_ms=1)
+            result, outcome = _get_with_retry(
+                em, "wf-003", ceiling_ms=300, base_ms=100)
 
         assert result is record
+        assert outcome == "processed"
         assert em.get.call_count == 3
 
-    def test_returns_none_after_all_attempts_exhausted(self):
+    def test_returns_no_record_after_the_budget_is_spent(self):
         from unittest.mock import MagicMock, patch
         from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
 
@@ -878,13 +894,16 @@ class TestGetWithRetry:
         em.get.return_value = None
 
         with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep"):
-            result = _get_with_retry(em, "wf-004", max_attempts=3, base_ms=1)
+            result, outcome = _get_with_retry(
+                em, "wf-004", ceiling_ms=300, base_ms=100)
 
         assert result is None
+        assert outcome == "no_record"
         assert em.get.call_count == 3
 
-    def test_sleep_called_only_between_attempts_not_after_last(self):
-        """sleep() must fire after attempt 0 and 1, never after the final attempt."""
+    def test_sleep_never_follows_the_last_read(self):
+        """The budget is spent between reads, never after the final one — an
+        extra sleep would add latency that can no longer change the answer."""
         from unittest.mock import MagicMock, patch, call
         from src.backend.crew_ai.optimization.feedback_loop import _get_with_retry
 
@@ -892,9 +911,10 @@ class TestGetWithRetry:
         em.get.return_value = None
 
         with patch("src.backend.crew_ai.optimization.feedback_loop.time.sleep") as mock_sleep:
-            _get_with_retry(em, "wf-005", max_attempts=3, base_ms=100)
+            _get_with_retry(em, "wf-005", ceiling_ms=300, base_ms=100)
 
         assert mock_sleep.call_count == 2
+        assert em.get.call_count == mock_sleep.call_count + 1
         # Exponential back-off: 100ms then 200ms
         mock_sleep.assert_has_calls([call(0.1), call(0.2)])
 

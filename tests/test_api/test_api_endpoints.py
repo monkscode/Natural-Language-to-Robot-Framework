@@ -137,7 +137,9 @@ class TestFeedbackEndpoints:
         client, _, mock_fb = api_client
         
         # Need to mock the return of process_user_feedback since get_feedback_loop returns mock_fb
-        mock_fb.process_user_feedback.return_value = {"action": "learning_recorded"}
+        mock_fb.process_user_feedback.return_value = {
+            "action": "learning_recorded", "outcome": "processed",
+        }
         
         resp = client.post("/api/feedback", json={
             "workflow_id": "wf-001",
@@ -160,7 +162,9 @@ class TestFeedbackEndpoints:
     def test_submit_feedback_exactly_500_chars_succeeds(self, api_client):
         """POST /api/feedback with feedback_text of exactly 500 chars is accepted."""
         client, _, mock_fb = api_client
-        mock_fb.process_user_feedback.return_value = {"action": "learning_recorded"}
+        mock_fb.process_user_feedback.return_value = {
+            "action": "learning_recorded", "outcome": "processed",
+        }
         resp = client.post("/api/feedback", json={
             "workflow_id": "wf-001",
             "feedback_type": "completely_wrong",

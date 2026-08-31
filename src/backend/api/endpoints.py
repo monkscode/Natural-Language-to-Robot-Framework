@@ -5,7 +5,7 @@ import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -236,12 +236,62 @@ class FeedbackRequest(BaseModel):
     feedback_type: str  # "close_enough" | "completely_wrong"
 
 
+# What the response is allowed to claim, keyed by the outcome the learning loop
+# reported (process_user_feedback's own vocabulary — one set of strings, no
+# translation layer to get wrong). Every one of these paths used to answer
+# "Thanks — your feedback helps the system learn", including the four where the
+# correction is discarded outright: no_record, learning_paused, no_org, error.
+#
+# The wording is the backend's, not the SPA's, for the same reason the
+# "disabled" and error branches below already carry a `message`: one place says
+# what the system did, and an API caller reads the same sentence the panel
+# shows.
+_FEEDBACK_OUTCOME_MESSAGES = {
+    "processed": "Thanks — your feedback helps the system learn.",
+    # No trailing "a description can still be sent": the SPA retires the
+    # feedback form on this outcome (GeneratePage's neutral branch renders a
+    # bare sentence, and the panel never remounts for the run), so that clause
+    # offered an action the UI had just removed — on both routes here, Skip
+    # included.
+    "no_text": (
+        "Nothing was learned because no description was given, though this "
+        "submission was sent to be recorded against the run."
+    ),
+    "no_record": (
+        "We could not find the learning record this belongs to, so nothing "
+        "was learned from it. Please send it again in a moment."
+    ),
+    "learning_paused": (
+        "Learning is paused right now, so this correction was not recorded. "
+        "Please send it again later."
+    ),
+    "queued": (
+        "Your correction was received and is still being saved. You do not "
+        "need to send it again."
+    ),
+    "no_org": (
+        "This run is not associated with an organisation, so the correction "
+        "could not be filed in the learning store, though this submission was "
+        "sent to be recorded against the run."
+    ),
+    # Deliberately says less than "no_org" above: process_user_feedback's own
+    # outer except also answers "error", and it can fire at Step 1 before the
+    # raw-feedback submit has run — so this must not promise the text is on
+    # the run. "Did not reach the learning store" is true on every path here.
+    "error": (
+        "Something went wrong, so this correction did not reach the learning "
+        "store — please send it again."
+    ),
+}
+
+
 async def _gated_feedback_target(
     run_row: dict | None,
     submitted_id: str,
     user: dict | None,
     *,
     is_platform_admin: bool,
+    action: str = "submit",
 ) -> str:
     """The run whose learning record this feedback mutates — gated.
 
@@ -275,7 +325,7 @@ async def _gated_feedback_target(
     the gate as owner_id=None/org_id=None — refused by the same line that
     refuses an unknown run.
 
-    Referenced by: submit_feedback (this module).
+    Referenced by: submit_feedback, get_run_corrections (this module).
     Depends on: core/run_registry.py, auth/ownership.py.
     """
     rerun_of = run_row.get("rerun_of") if run_row else None
@@ -301,7 +351,7 @@ async def _gated_feedback_target(
     ):
         raise HTTPException(
             status_code=403,
-            detail="You cannot submit feedback for this run",
+            detail=f"You cannot {action} feedback for this run",
         )
 
     logging.info(
@@ -318,6 +368,22 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
 
     Triages feedback via NL seed patterns and routes to
     learning engines. Returns triage result for frontend display.
+
+    Two fields, two jobs:
+
+      * `outcome` is the only authority on what happened to the CORRECTION —
+        "processed" | "no_text" | "no_record" | "learning_paused" | "no_org" |
+        "queued" | "error", straight from process_user_feedback. Read this
+        one. `_FEEDBACK_OUTCOME_MESSAGES` above is the full list; the two are
+        pinned together by test_feedback_response_honesty.py.
+      * `status` keeps the meaning it has across this router: could the
+        endpoint give an account at all. It is "error" only for the outcome of
+        the same name, which is the same class of event the handler's own
+        `except` already answers that way.
+
+    `applied_to` names the run this feedback TARGETED (the original, when the
+    submitted run is a re-run) — not a claim that anything was applied to it.
+    Only `outcome == "processed"` says that.
 
     Returns 200 with status="disabled" when learning system is off.
     """
@@ -395,18 +461,127 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
         # process_user_feedback runs a blocking conflict-detection LLM call
         # (up to 30s). Offload it so this async handler does not freeze the
         # event loop for every other request while it waits.
-        triage = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             feedback_loop.process_user_feedback,
             feedback_target_id, text, request.feedback_type,
             actor=actor,
         )
-        return {"status": "success", "triage": triage, "applied_to": feedback_target_id}
+
+        # An outcome this endpoint cannot describe is not evidence that the
+        # correction landed, so it is reported as an error rather than echoed
+        # back beside a message that contradicts it. Defaulting the other way
+        # would let the field go missing one refactor from now and silently
+        # restore the "thanks" this endpoint used to give unconditionally.
+        outcome = result.get("outcome")
+        if outcome not in _FEEDBACK_OUTCOME_MESSAGES:
+            outcome = "error"
+
+        # `outcome` is dropped from the triage view. `triage` is the category /
+        # confidence the SPA displays; publishing the same fact at two
+        # addresses would bind us to both contracts forever.
+        return {
+            "status": "error" if outcome == "error" else "success",
+            "outcome": outcome,
+            "message": _FEEDBACK_OUTCOME_MESSAGES[outcome],
+            "triage": {k: v for k, v in result.items() if k != "outcome"},
+            "applied_to": feedback_target_id,
+        }
     except Exception as e:
         logging.error(f"[FEEDBACK] Error processing feedback: {e}")
         return {
             "status": "error",
             "message": "Feedback received but triage failed",
         }
+
+
+@router.get('/api/feedback/{run_id}')
+async def get_run_corrections(run_id: str, response: Response,
+                              user: dict | None = Depends(require_user)):
+    """The corrections this run has already contributed to the learning store.
+
+    T5 made a second submission of the same correction from the same run a
+    no-op. The answer to that is not a warning about the ignored duplicate —
+    nothing is lost, and this endpoint could not know the outcome anyway (the
+    gate runs on the writer thread inside a queued job, long after the
+    response is sent). It is visible memory: the user sees their own words on
+    file, which is the set of hints this run CREATED plus the ones it
+    REINFORCED.
+
+    Gated exactly as POST /api/feedback is, and for a stronger reason than the
+    POST has: correction text is user-authored content about a customer's
+    site, so a run-id-only read would leak it across orgs. Same unscoped
+    lookup, same caller_can_access refusal, same rerun_of redirect. See
+    submit_feedback for why the gate is caller_can_ACT and why is_grouped is
+    deliberately not passed — publishing a run into a folder publishes the
+    test, never the corrections filed against it. The two routes keep separate
+    copies of those few lines rather than a shared helper; the agreement is
+    pinned by a test that sends the same caller through both.
+
+    `applied_to` names the run these corrections are filed against — the
+    ORIGINAL when the requested run is a re-run, matching what the POST
+    mutates.
+
+    Degrades to an empty list rather than an error on every internal failure:
+    the SPA fetches this the moment a run finishes, and a run that succeeded
+    must not render as a broken page. An empty list adds nothing to the panel,
+    so silence claims nothing.
+    """
+    # Same lookup, same threading and the same fail-closed reason as the POST:
+    # a registry that cannot answer leaves owner_id/org_id None, which the gate
+    # refuses for everyone but a platform admin.
+    # Correction text is user-authored content about a customer's site and the
+    # gate below is per-caller, so this response must never sit in a private
+    # browser cache: after an org move the same run_id would be served from
+    # disk without caller_can_access ever running again. Set on the injected
+    # Response, which covers every RETURN path (the 'learning disabled' one
+    # included). It does NOT reach the 403 raise below — FastAPI's exception
+    # handler builds its own response and drops these headers (verified). That
+    # is fine and deliberately not worked around: 403 is not in the set of
+    # heuristically cacheable statuses (RFC 7231 6.1), and the refusal body
+    # carries nothing worth protecting. The header is enforced server-side
+    # rather than left to the SPA's fetch options, because the server is the
+    # half that binds every client, including one that forgets.
+    response.headers["Cache-Control"] = "no-store"
+
+    try:
+        run_row = await asyncio.to_thread(
+            lambda: get_run_registry().get_run(run_id))
+    except Exception:
+        run_row = None
+
+    admin = await asyncio.to_thread(is_validated_admin, user)
+    owner_id = run_row.get("user_id") if run_row else None
+    org_id = run_row.get("org_id") if run_row else None
+    if not caller_can_access(user, owner_id, org_id, is_platform_admin=admin):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot read feedback for this run",
+        )
+
+    target_id = await _gated_feedback_target(
+        run_row, run_id, user, is_platform_admin=admin, action="read")
+
+    feedback_loop = get_feedback_loop()
+    if not feedback_loop:
+        return {
+            "status": "disabled",
+            "message": "Learning system is not enabled",
+            "applied_to": target_id,
+            "corrections": [],
+        }
+
+    engine = getattr(feedback_loop, "nl_engine", None)
+    corrections = []
+    if engine is not None:
+        # Threaded: the read borrows a pooled connection, which blocks.
+        corrections = await asyncio.to_thread(
+            engine.get_corrections_for_run, target_id)
+
+    return {
+        "status": "success",
+        "applied_to": target_id,
+        "corrections": corrections,
+    }
 
 
 @router.get('/api/learning-stats', dependencies=[Depends(require_admin)])

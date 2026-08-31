@@ -33,14 +33,13 @@ def test_learned_correction_carries_org(in_memory_em):
 
     with in_memory_em.read_conn() as conn:
         row = conn.execute(
-            "SELECT org_id, is_shared FROM nl_feedback_corrections "
+            "SELECT org_id FROM nl_feedback_corrections "
             "WHERE source_workflow_id = ?", (wid,)
         ).fetchone()
     assert row is not None, "Expected a correction row but none was found"
     assert row["org_id"] == "org-A", (
         f"Expected org_id='org-A' but got {row['org_id']!r} — INSERT missing org_id"
     )
-    assert row["is_shared"] == 0
 
 
 # ---------------------------------------------------------------------------

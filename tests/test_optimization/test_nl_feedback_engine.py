@@ -15,6 +15,7 @@ Tests:
   9. Engine Stats & ABC                    (~4  tests)
 """
 
+import hashlib
 import inspect
 import sqlite3
 
@@ -292,7 +293,10 @@ class TestFeedbackLoopIntegration:
         from src.backend.crew_ai.optimization.feedback_loop import FeedbackLoop
         src = inspect.getsource(FeedbackLoop.process_user_feedback)
         assert '_fallback_triage' in src, "Missing fallback triage dict"
-        assert 'return _fallback_triage' in src
+        # T7: the fallback is returned carrying the outcome that explains it —
+        # learning_paused on the breaker path, error from the outer except.
+        assert '{**_fallback_triage, "outcome": "learning_paused"}' in src
+        assert '{**_fallback_triage, "outcome": "error"}' in src
 
     def test_extracts_error_message_for_cross_ref(self):
         from src.backend.crew_ai.optimization.feedback_loop import FeedbackLoop
@@ -351,25 +355,25 @@ class TestAPIEndpoints:
 
 
 class TestUserQueryGuard:
-    """user_query guard in _process_learning."""
+    """user_query guard in _process_learning_record."""
 
     def test_process_learning_has_user_query_guard(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         assert 'not user_query' in src or "user_query.strip()" in src, \
             "Missing user_query guard"
         assert 'Skipping learning' in src or 'paste-and-execute' in src
 
     def test_guard_runs_before_process_execution(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         guard_pos = src.find("not user_query")
         process_pos = src.find("process_execution")
         assert guard_pos < process_pos, "Guard must be before process_execution call"
 
     def test_guard_returns_early_when_user_query_empty(self):
-        from src.backend.services.workflow_service import _process_learning
-        src = inspect.getsource(_process_learning)
+        from src.backend.services.workflow_service import _process_learning_record
+        src = inspect.getsource(_process_learning_record)
         # Find the guard block and confirm it has a return
         lines = src.split('\n')
         in_guard = False
@@ -488,9 +492,10 @@ class TestUpsertHintAuditUnflag:
             "INSERT INTO nl_feedback_corrections "
             "(feedback_text, category, scope, domain, url, "
             " original_failure_category, evidence_count, "
-            " source_workflow_id, created_at, last_seen, conflict_flagged) "
+            " source_workflow_id, created_at, last_seen, conflict_flagged, "
+            " org_id) "
             "VALUES (?, 'structural', 'domain', 'example.com', NULL, NULL, 1, NULL, "
-            "        datetime('now'), datetime('now'), ?)",
+            "        datetime('now'), datetime('now'), ?, 'org-A')",
             ("Use data-testid for all selectors", conflict_flagged),
         )
         conn.commit()
@@ -509,7 +514,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -518,7 +523,8 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT action, actor, reason FROM hint_audit WHERE hint_id = ?",
+            "SELECT action, actor, reason FROM hint_audit "
+            "WHERE hint_id = ? AND action = 'unflag'",
             (hint_id,),
         ).fetchall()
         assert len(audit_rows) == 1
@@ -539,7 +545,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -547,14 +553,18 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT actor FROM hint_audit WHERE hint_id = ?",
+            "SELECT actor FROM hint_audit "
+            "WHERE hint_id = ? AND action = 'unflag'",
             (hint_id,),
         ).fetchall()
         assert len(audit_rows) == 1
         assert audit_rows[0]["actor"] == "unknown"
 
-    def test_upsert_unflagged_hint_writes_no_audit_row(self, in_memory_db):
-        """Re-submitting identical feedback on a non-flagged hint does NOT write hint_audit."""
+    def test_upsert_unflagged_hint_writes_no_unflag_row(self, in_memory_db):
+        """Re-submitting identical feedback on a non-flagged hint clears no flag,
+        so it writes no 'unflag' row. T11 added a 'reinforce' row on this path —
+        that one records the evidence event, not an override of an LLM verdict,
+        so the two must not be conflated."""
         conn = in_memory_db
         hint_id = self._store_hint(conn, conflict_flagged=0)
         engine = NLFeedbackEngine(conn)
@@ -565,7 +575,7 @@ class TestUpsertHintAuditUnflag:
         record.domain = "example.com"
         record.url = None
         record.failure_category = None
-        record.org_id = None  # dedup key includes org; seeded hint is org-less
+        record.org_id = 'org-A'  # dedup key includes org; must match the seeded hint
 
         engine.learn_from_feedback(record, {
             "feedback_text": "Use data-testid for all selectors",
@@ -573,10 +583,10 @@ class TestUpsertHintAuditUnflag:
         })
 
         audit_rows = conn.execute(
-            "SELECT * FROM hint_audit WHERE hint_id = ?",
+            "SELECT action FROM hint_audit WHERE hint_id = ? ORDER BY id",
             (hint_id,),
         ).fetchall()
-        assert len(audit_rows) == 0
+        assert [r["action"] for r in audit_rows] == ["reinforce"]
         # Guard against passing for the wrong reason (e.g. the store failing
         # entirely): the resubmission must actually have reinforced the hint.
         row = conn.execute(
@@ -669,7 +679,7 @@ class TestConflictFlagHints:
 
     def _insert_hint(
         self, conn, text: str = "some hint",
-        applied: int = 0, success: int = 0,
+        applied: int = 0, success: int = 0, used_sources: int = 0,
     ) -> int:
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -680,8 +690,19 @@ class TestConflictFlagHints:
             "        datetime('now'), datetime('now'))",
             (text, applied, success),
         )
+        hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # used_sources: how many INDEPENDENT queries produced those successes.
+        # The strong-history shield counts distinct sources, not events (T4), so
+        # a protected hint needs its evidence rows as well as its counters.
+        for i in range(used_sources):
+            conn.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'used', datetime('now'))",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return hint_id
 
     def test_empty_dict_returns_without_db_write(self, in_memory_db):
         engine = NLFeedbackEngine(in_memory_db)
@@ -827,7 +848,8 @@ class TestConflictFlagHints:
     def test_conflict_flag_protected_high_history_hint(self, in_memory_db):
         """Hint with applied=10, success=8 (80%) must NOT be flagged by a single trigger."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8,
+                                    used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         engine.conflict_flag_hints({hint_id: "contradicts new approach"}, trigger_type="trigger_1")
@@ -863,7 +885,8 @@ class TestConflictFlagHints:
         the hint still queryable. The caller's trigger_events write is unaffected
         (caller path unchanged — not tested here)."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "high-history hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "high-history hint", applied=10,
+                                    success=8, used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         engine.conflict_flag_hints({hint_id: "trigger fired"}, trigger_type="trigger_1")
@@ -892,7 +915,7 @@ class TestConflictFlagHintsReturnValue:
 
     def _insert_hint(
         self, conn, text: str = "some hint",
-        applied: int = 0, success: int = 0,
+        applied: int = 0, success: int = 0, used_sources: int = 0,
     ) -> int:
         conn.execute(
             "INSERT INTO nl_feedback_corrections "
@@ -903,8 +926,19 @@ class TestConflictFlagHintsReturnValue:
             "        datetime('now'), datetime('now'))",
             (text, applied, success),
         )
+        hint_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # used_sources: how many INDEPENDENT queries produced those successes.
+        # The strong-history shield counts distinct sources, not events (T4), so
+        # a protected hint needs its evidence rows as well as its counters.
+        for i in range(used_sources):
+            conn.execute(
+                "INSERT INTO hint_evidence (hint_id, source_kind, source_key, "
+                " source_hash, bucket, created_at) "
+                "VALUES (?, 'query', ?, ?, 'used', datetime('now'))",
+                (hint_id, f"q{i}", hashlib.sha256(f"q{i}".encode()).hexdigest()),
+            )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return hint_id
 
     def test_returns_actually_flagged_ids_on_success(self, in_memory_db):
         """A non-protected hint that gets flagged must appear in the return list."""
@@ -923,7 +957,8 @@ class TestConflictFlagHintsReturnValue:
     def test_returns_empty_list_when_all_suppressed_by_strong_history(self, in_memory_db):
         """Strong-history-protected hints must NOT appear in the return list."""
         conn = in_memory_db
-        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8)
+        hint_id = self._insert_hint(conn, "proven hint", applied=10, success=8,
+                                    used_sources=8)
         engine = NLFeedbackEngine(conn)
 
         result = engine.conflict_flag_hints(
@@ -939,7 +974,8 @@ class TestConflictFlagHintsReturnValue:
         """A mix of protected + unprotected hints must yield only the unprotected
         ones — matches the trigger_events.actually_flagged_hint_ids semantic."""
         conn = in_memory_db
-        protected_id   = self._insert_hint(conn, "old proven", applied=10, success=8)
+        protected_id   = self._insert_hint(conn, "old proven", applied=10, success=8,
+                                          used_sources=8)
         unprotected_id = self._insert_hint(conn, "new untested", applied=2, success=1)
         engine = NLFeedbackEngine(conn)
 
@@ -1021,6 +1057,7 @@ class TestAdminTriageWarning:
             feedback_text="Click the submit button",
             anchor_query="submit the form on the page",
             scope="global",
+            org_id="org-A",
             run_triage=True,
             actor="test-admin",
         )

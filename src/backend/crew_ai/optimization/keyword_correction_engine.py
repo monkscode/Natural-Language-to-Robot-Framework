@@ -80,50 +80,54 @@ class KeywordCorrectionEngine(LearningEngine):
         if not wrong_keyword:
             return
 
-        # Check if we already know this wrong keyword
-        existing = self._em._writer_conn.execute(
-            "SELECT * FROM keyword_corrections WHERE wrong_keyword = ?",
-            (wrong_keyword,),
-        ).fetchone()
+        try:
+            # Check if we already know this wrong keyword
+            existing = self._em._writer_conn.execute(
+                "SELECT * FROM keyword_corrections WHERE wrong_keyword = ?",
+                (wrong_keyword,),
+            ).fetchone()
 
-        if existing:
-            # Increment evidence — same wrong keyword seen again
-            new_evidence = existing["evidence_count"] + 1
-            new_score = EffectivenessScore.calculate(new_evidence, 0)
-            self._em._writer_conn.execute(
-                "UPDATE keyword_corrections "
-                "SET evidence_count = ?, "
-                "    score = ?, "
-                "    last_seen = datetime('now', 'localtime') "
-                "WHERE id = ?",
-                (new_evidence, new_score, existing["id"]),
-            )
-            logger.debug(
-                f"[LEARNING:KEYWORD] Reinforced correction for "
-                f"'{wrong_keyword}' (evidence={new_evidence}, score={new_score:.4f})"
-            )
-        else:
-            # Store new correction (correct_keyword may be None if unknown)
-            correct = self._infer_correct_keyword(wrong_keyword)
-            initial_score = EffectivenessScore.calculate(1, 0)
-            # GLOBAL / cross-org table (no org_id, by Phase 1c design): only the
-            # generic keyword names get injected into other orgs. error_pattern
-            # stores the raw error_message but has NO reader anywhere - keep it so.
-            # Writing org-private data (queries/URLs/locators) here, or adding an
-            # error_pattern reader, leaks across orgs unless you add org_id first.
-            self._em._writer_conn.execute(
-                "INSERT INTO keyword_corrections "
-                "(wrong_keyword, correct_keyword, library, error_pattern, "
-                " score, last_seen) "
-                "VALUES (?, ?, 'browser', ?, ?, datetime('now', 'localtime'))",
-                (wrong_keyword, correct, record.error_message, initial_score),
-            )
-            logger.debug(
-                f"[LEARNING:KEYWORD] New correction: "
-                f"'{wrong_keyword}' → '{correct or 'unknown'}'"
-            )
+            if existing:
+                # Increment evidence — same wrong keyword seen again
+                new_evidence = existing["evidence_count"] + 1
+                new_score = EffectivenessScore.calculate(new_evidence, 0)
+                self._em._writer_conn.execute(
+                    "UPDATE keyword_corrections "
+                    "SET evidence_count = ?, "
+                    "    score = ?, "
+                    "    last_seen = datetime('now', 'localtime') "
+                    "WHERE id = ?",
+                    (new_evidence, new_score, existing["id"]),
+                )
+                logger.debug(
+                    f"[LEARNING:KEYWORD] Reinforced correction for "
+                    f"'{wrong_keyword}' (evidence={new_evidence}, score={new_score:.4f})"
+                )
+            else:
+                # Store new correction (correct_keyword may be None if unknown)
+                correct = self._infer_correct_keyword(wrong_keyword)
+                initial_score = EffectivenessScore.calculate(1, 0)
+                # GLOBAL / cross-org table (no org_id, by Phase 1c design): only the
+                # generic keyword names get injected into other orgs. error_pattern
+                # stores the raw error_message but has NO reader anywhere - keep it so.
+                # Writing org-private data (queries/URLs/locators) here, or adding an
+                # error_pattern reader, leaks across orgs unless you add org_id first.
+                self._em._writer_conn.execute(
+                    "INSERT INTO keyword_corrections "
+                    "(wrong_keyword, correct_keyword, library, error_pattern, "
+                    " score, last_seen) "
+                    "VALUES (?, ?, 'browser', ?, ?, datetime('now', 'localtime'))",
+                    (wrong_keyword, correct, record.error_message, initial_score),
+                )
+                logger.debug(
+                    f"[LEARNING:KEYWORD] New correction: "
+                    f"'{wrong_keyword}' → '{correct or 'unknown'}'"
+                )
 
-        self._em._writer_conn.commit()
+            self._em._writer_conn.commit()
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def get_hints(self, user_query: str, url: str,
                   agent_role: str) -> Optional[List[str]]:

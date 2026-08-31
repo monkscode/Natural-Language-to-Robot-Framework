@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
-import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair } from 'lucide-react'
+import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
 
 /* ── Types ── */
@@ -440,27 +440,84 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
   )
 }
 
+/** POST /api/feedback. `outcome` is the only authority on what happened to the
+    correction ("processed" | "no_text" | "no_record" | "learning_paused" |
+    "no_org" | "queued" | "error"); it is absent when learning is switched off,
+    which is equally not a success. `message` is the backend's own sentence for
+    whichever case fired; the panel writes its own only when the body carries
+    none (FeedbackPanel's `submit`). */
+interface FeedbackResponse { status?: string; outcome?: string; message?: string }
+
+/** GET /api/feedback/{run_id}. The corrections this run has already
+    contributed — the hints it created AND the ones it reinforced. T5 makes a
+    second submission of the same text from the same run a no-op, and this is
+    the answer to that: the user sees their own words on file rather than a
+    warning about a duplicate the backend could not report anyway. */
+interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string }
+interface RecordedResponse { corrections?: RecordedCorrection[] }
+
 /* ── Feedback footer, rendered inside the result card (generated runs only).
    Pass: thumbs row — 👍 is a UI-only acknowledgment (passing runs already feed
    learning automatically at execution time; an empty positive carried no
    signal, so it no longer calls the backend). 👎 expands an inline correction
    form — the corrective text is the signal that actually trains the system.
    Fail: form open by default; Skip still records an empty completely_wrong
-   (N0) label on the execution record. ── */
-function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
+   label on the execution record, but nothing is learned from it (outcome
+   "no_text") — the empty text carries nothing for any engine to route. ── */
+export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
-  const [status, setStatus] = useState<'idle' | 'sending' | 'done'>('idle')
+  const [status, setStatus] = useState<'idle' | 'sending'>('idle')
+  const [result, setResult] = useState<{ ok: boolean; neutral: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
+  const [recorded, setRecorded] = useState<RecordedCorrection[]>([])
+  // Two fetches write `recorded`: this panel's mount read and the post-submit
+  // refresh below. Whichever STARTED last is the newer question, so a slow
+  // earlier response must not overwrite it.
+  //
+  // No regression test accompanies this, deliberately, and the reason is worth
+  // keeping: the overwrite is currently UNOBSERVABLE. The refresh runs only
+  // when `ok` is true, and an `ok` submission retires the form — the
+  // "Already recorded" list is not rendered in that terminal state, so a stale
+  // value cannot reach the screen. The guard is three lines of insurance
+  // against that render condition changing, not a fix for a live defect.
+  const recordedGen = useRef(0)
+
+  // What this run already told the system. Fetched on mount rather than when
+  // the form opens: the list exists to be read BEFORE typing, and it must not
+  // arrive mid-sentence. Normally empty on a first run — the interesting case
+  // is a second run of the same code, which reuses the workflow id and so
+  // remounts this panel over the corrections the first run filed.
+  //
+  // Failures are swallowed on purpose. The panel adds a note when something is
+  // on file and is silent otherwise, so a failed read degrades to exactly the
+  // form that shipped before this feature — it never claims nothing was
+  // recorded, it just says nothing.
+  useEffect(() => {
+    if (!workflowId) return
+    let live = true
+    const gen = ++recordedGen.current
+    api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`, { cache: 'no-store' })
+      .then(b => { if (live && gen === recordedGen.current) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
+      .catch(() => { /* silence is the honest degradation here */ })
+    return () => { live = false }
+  }, [workflowId])
 
   // Nothing to attribute feedback to — don't render a dead form.
   if (!workflowId) return null
 
+  // Same text, same run: T5 gates it on the backend, so this is a courtesy
+  // notice and never a block. A plain compare is exactly as accurate as the
+  // gate — same text on the same run means the same triage category, hence
+  // the same scope and the same dedup key — and re-deriving that key here
+  // would put a second copy of it beside the first.
+  const alreadySent = recorded.some(c => c.feedback_text === text.trim())
+
   async function submit(feedbackText: string = text) {
-    setStatus('sending'); setErr('')
+    setStatus('sending'); setErr(''); setResult(null)
     try {
-      await api('/api/feedback', {
+      const body = await api<FeedbackResponse>('/api/feedback', {
         method: 'POST',
         body: JSON.stringify({
           workflow_id: workflowId,
@@ -468,7 +525,36 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
           feedback_type: outcome === 'pass' ? 'close_enough' : 'completely_wrong',
         }),
       })
-      setStatus('done')
+      // Only "processed" means the correction reached the learning store. The
+      // panel used to thank the user for every one of the others too — no
+      // record found, learning paused, an internal error, learning switched
+      // off — while the text was discarded. The sentence itself is the
+      // backend's, so one place says what the system did.
+      const ok = body?.outcome === 'processed'
+      // Skip submits empty text, which every engine treats as a free no-op —
+      // nothing was learned, but the user already declined to say more, so
+      // "send it again" (the amber notice below) is advice they cannot act
+      // on. This is its own terminal state, distinct from `ok`.
+      const neutral = body?.outcome === 'no_text'
+      // M9: the mount-effect fetch above only ever runs once, so a correction
+      // filed during THIS session never showed up in "Already recorded for
+      // this run" until the page reloaded. Re-fetch once the backend confirms
+      // this one actually landed — display only, not the storage check (that
+      // is `outcome`, already read above).
+      if (ok && workflowId) {
+        const gen = ++recordedGen.current
+        api<RecordedResponse>(`/api/feedback/${encodeURIComponent(workflowId)}`, { cache: 'no-store' })
+          .then(b => { if (gen === recordedGen.current) setRecorded(Array.isArray(b?.corrections) ? b.corrections : []) })
+          .catch(() => { /* silence is the honest degradation here, same as the mount fetch */ })
+      }
+      setResult({
+        ok,
+        neutral,
+        message: body?.message || (ok
+          ? 'Thanks — your feedback helps the system learn.'
+          : 'Your feedback was sent, but the system did not confirm it was recorded.'),
+      })
+      setStatus('idle')
     } catch (e) {
       setStatus('idle')
       setErr(e instanceof Error ? e.message : 'Could not send feedback')
@@ -483,10 +569,27 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
     )
   }
 
-  if (status === 'done') {
+  // Only a recorded correction retires the form. Every other answer tells the
+  // user to send it again, so the textarea, their typed text and Submit all
+  // have to survive — replacing them with the message would be advice the UI
+  // makes impossible to follow. Rendered like `err` below: a notice beside a
+  // still-usable form, not a terminal state.
+  //
+  // no_text is the one exception: the user clicked Skip, so "send it again"
+  // is advice they already declined. It retires the form too, but with a
+  // neutral presentation — no green check (nothing was learned) and no amber
+  // warning (nothing failed).
+  if (result?.ok) {
     return (
       <div className="flex items-center gap-2 text-sm">
-        <Check className="h-4 w-4 text-green-600" /> Thanks — your feedback helps the system learn.
+        <Check className="h-4 w-4 text-green-600" /> {result.message}
+      </div>
+    )
+  }
+  if (result?.neutral) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {result.message}
       </div>
     )
   }
@@ -510,6 +613,20 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
 
   return (
     <div className="space-y-2">
+      {result && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{result.message}</span>
+        </div>
+      )}
+      {recorded.length > 0 && (
+        <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
+          <div className="font-medium">Already recorded for this run</div>
+          <ul className="mt-1 space-y-0.5 text-muted-foreground">
+            {recorded.map(c => <li key={c.hint_id}>“{c.feedback_text}”</li>)}
+          </ul>
+        </div>
+      )}
       <div>
         <div className="text-sm font-semibold">
           {outcome === 'fail' ? '💡 Help us get it right next time' : 'What was off?'}
@@ -527,6 +644,13 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
         placeholder="e.g. it clicked the wrong button; the search box locator was off…"
         className="min-h-[72px] text-sm"
       />
+      {/* Its own row, not a third item in the counter/buttons flex below: at
+          this width the sentence wraps and collides with the 0/500 counter. */}
+      {alreadySent && (
+        <p className="text-xs text-muted-foreground">
+          You already sent this for this run — it won’t be counted again.
+        </p>
+      )}
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted-foreground">{text.length}/500</span>
         {err && <span className="text-xs text-destructive">{err}</span>}
@@ -538,12 +662,21 @@ function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null
           )}
           {outcome === 'fail' && (
             // Legacy-UI behaviour: skipping still records a completely_wrong
-            // signal (empty text) so the failure feeds the learning system.
+            // signal (empty text) on the execution record, but the backend
+            // answers "no_text" — empty text carries nothing for any engine
+            // to learn from.
             <Button variant="ghost" size="sm" onClick={() => submit('')} disabled={status === 'sending'}>
               Skip →
             </Button>
           )}
-          <Button size="sm" onClick={() => submit()} disabled={status === 'sending'}>
+          {/* Empty Submit is an ATTEMPT to correct, not a decline, but it
+              sent the identical empty-text request Skip does — so it drew the
+              same `no_text`, which retires this panel, and the panel is
+              rendered in one place and never remounts for a run. Measured in
+              the SPA: after an empty Submit every feedback control was gone.
+              Skip keeps sending the empty decline, and the passing path keeps
+              Cancel, so neither is a dead end. */}
+          <Button size="sm" onClick={() => submit()} disabled={status === 'sending' || !text.trim()}>
             {status === 'sending' ? 'Sending…' : 'Submit feedback'}
           </Button>
         </div>

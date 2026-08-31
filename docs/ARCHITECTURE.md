@@ -501,8 +501,12 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 26. SSE stream sends to browser
 27. React SPA receives events, updates UI
 28. Shows links: /reports/{run_id}/log.html
-29. Learning (when ON): workflow_service._process_learning() records the
-    execution via the LearningWriteQueue — never blocks the pipeline
+29. Learning (when ON) runs in two halves around artifact persistence:
+    workflow_service._process_learning_record() submits this run's execution
+    record right after the result event (so a feedback POST finds the row),
+    then _process_learning_attribution() runs after persist_run, because its
+    hint-attribution LLM call takes 5-30s and must not delay a durable
+    report. Both write via the LearningWriteQueue — never blocks the pipeline
 ```
 
 ### Key Architectural Decisions

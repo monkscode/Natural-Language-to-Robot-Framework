@@ -1,5 +1,5 @@
 """
-Unit tests for _process_learning() and helper logic in workflow_service.py.
+Unit tests for _process_learning_record() and helper logic in workflow_service.py.
 
 These tests verify the glue between Docker execution results and the adaptive
 learning system, including:
@@ -23,9 +23,9 @@ class TestProcessLearningGuards:
         """If learning system is disabled, return early without error."""
         mock_get_fl.return_value = None
 
-        from src.backend.services.workflow_service import _process_learning
+        from src.backend.services.workflow_service import _process_learning_record
         # Should not raise, just return quietly
-        _process_learning("run-1", "search on amazon.com", "*** Test Cases ***", {"test_status": "passed"})
+        _process_learning_record("run-1", "search on amazon.com", "*** Test Cases ***", {"test_status": "passed"})
 
     @patch("src.backend.services.workflow_service.get_feedback_loop")
     def test_skips_when_user_query_is_empty(self, mock_get_fl):
@@ -33,8 +33,8 @@ class TestProcessLearningGuards:
         mock_fl = MagicMock()
         mock_get_fl.return_value = mock_fl
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("run-2", "", "*** Test Cases ***", {"test_status": "passed"})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("run-2", "", "*** Test Cases ***", {"test_status": "passed"})
 
         mock_fl.process_execution.assert_not_called()
 
@@ -44,8 +44,8 @@ class TestProcessLearningGuards:
         mock_fl = MagicMock()
         mock_get_fl.return_value = mock_fl
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("run-3", "   ", "*** Test Cases ***", {"test_status": "passed"})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("run-3", "   ", "*** Test Cases ***", {"test_status": "passed"})
 
         mock_fl.process_execution.assert_not_called()
 
@@ -61,8 +61,8 @@ class TestProcessLearningCallsProcessExecution:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://amazon.com"
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning(
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record(
             "run-abc",
             "search on amazon.com for laptops",
             "*** Test Cases ***\nTest\n    Log    Hi",
@@ -86,8 +86,8 @@ class TestProcessLearningCallsProcessExecution:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("run-url", "go to example.com", "code", {"test_status": "failed"})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("run-url", "go to example.com", "code", {"test_status": "failed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["url"] == "https://example.com"
@@ -100,8 +100,8 @@ class TestProcessLearningCallsProcessExecution:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://x.com"
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("run-fail", "test on x.com", "code", {"test_status": "failed"})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("run-fail", "test on x.com", "code", {"test_status": "failed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["test_status"] == "failed"
@@ -114,8 +114,8 @@ class TestProcessLearningCallsProcessExecution:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://x.com"
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("run-nostat", "test on x.com", "code", {})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("run-nostat", "test on x.com", "code", {})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["test_status"] == "unknown"
@@ -132,10 +132,10 @@ class TestProcessLearningHintMetadata:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://x.com"
 
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         _hint_metadata_cache.clear()  # ensure clean state
 
-        _process_learning("no-hints-run", "test on x.com", "code", {"test_status": "passed"})
+        _process_learning_record("no-hints-run", "test on x.com", "code", {"test_status": "passed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["hints_injected"] == 0
@@ -150,7 +150,7 @@ class TestProcessLearningHintMetadata:
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://x.com"
 
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         run_id = "hint-sum-run"
         _hint_metadata_cache[run_id] = {
             "agents": {
@@ -160,7 +160,7 @@ class TestProcessLearningHintMetadata:
             "nl_injected_ids": [],
         }
 
-        _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+        _process_learning_record(run_id, "test on x.com", "code", {"test_status": "passed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["hints_injected"] == 5
@@ -170,19 +170,19 @@ class TestProcessLearningHintMetadata:
     @patch("src.backend.services.workflow_service.extract_url_from_query")
     @patch("src.backend.services.workflow_service.get_feedback_loop")
     def test_hint_metadata_is_consumed_from_cache(self, mock_get_fl, mock_extract_url):
-        """Cache entry is popped after _process_learning — no stale data."""
+        """Cache entry is popped after _process_learning_record — no stale data."""
         mock_fl = MagicMock()
         mock_get_fl.return_value = mock_fl
         mock_extract_url.return_value = "https://x.com"
 
-        from src.backend.services.workflow_service import _process_learning, _hint_metadata_cache
+        from src.backend.services.workflow_service import _process_learning_record, _hint_metadata_cache
         run_id = "consume-run"
         _hint_metadata_cache[run_id] = {
             "agents": {"planner": {"count": 1, "available": 1, "sources": ["s1"]}},
             "nl_injected_ids": [],
         }
 
-        _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+        _process_learning_record(run_id, "test on x.com", "code", {"test_status": "passed"})
 
         # Entry should be consumed
         assert run_id not in _hint_metadata_cache
@@ -198,17 +198,17 @@ class TestProcessLearningNonBlocking:
         mock_fl.process_execution.side_effect = RuntimeError("DB error")
         mock_get_fl.return_value = mock_fl
 
-        from src.backend.services.workflow_service import _process_learning
+        from src.backend.services.workflow_service import _process_learning_record
         # Must not raise
-        _process_learning("err-run", "test on example.com", "code", {"test_status": "failed"})
+        _process_learning_record("err-run", "test on example.com", "code", {"test_status": "failed"})
 
     @patch("src.backend.services.workflow_service.get_feedback_loop")
     def test_get_feedback_loop_exception_does_not_propagate(self, mock_get_fl):
         """Even if get_feedback_loop() itself throws, pipeline is unaffected."""
         mock_get_fl.side_effect = RuntimeError("registry failed")
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("err-fl", "test on example.com", "code", {"test_status": "passed"})
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("err-fl", "test on example.com", "code", {"test_status": "passed"})
 
 
 class TestProcessLearningHoldout:
@@ -223,7 +223,7 @@ class TestProcessLearningHoldout:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         run_id = "holdout-run"
         _hint_metadata_cache[run_id] = {
@@ -232,7 +232,7 @@ class TestProcessLearningHoldout:
             "was_holdout": True,
         }
 
-        _process_learning(run_id, "test on x.com", "code", {"test_status": "passed"})
+        _process_learning_record(run_id, "test on x.com", "code", {"test_status": "passed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["was_holdout"] is True
@@ -246,11 +246,11 @@ class TestProcessLearningHoldout:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         _hint_metadata_cache.clear()
 
-        _process_learning("no-holdout-run", "test on x.com", "code",
+        _process_learning_record("no-holdout-run", "test on x.com", "code",
                           {"test_status": "passed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
@@ -261,7 +261,7 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
     """Re-run cache-miss recovers injected_hint_ids from the DB record.
 
     Fixes a bug where success_count never incremented on edit-then-pass
-    re-runs: the v1 _process_learning call consumed _hint_metadata_cache
+    re-runs: the v1 _process_learning_record call consumed _hint_metadata_cache
     via .pop(), so the v2 re-run saw nl_injected_ids=[] and passed
     injected_hint_ids='[]' to update_hint_effectiveness, which early-exits
     before touching counters. The fallback recovers the original v1
@@ -285,11 +285,11 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         _hint_metadata_cache.clear()
 
-        _process_learning(
+        _process_learning_record(
             "rerun-recover", "q on x.com", "v2 code",
             {"test_status": "passed"},
         )
@@ -311,7 +311,7 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         run_id = "cache-wins"
         _hint_metadata_cache[run_id] = {
@@ -319,7 +319,7 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
             "nl_injected_ids": [5, 12],
         }
 
-        _process_learning(run_id, "q on x.com", "code", {"test_status": "passed"})
+        _process_learning_record(run_id, "q on x.com", "code", {"test_status": "passed"})
 
         kwargs = mock_fl.process_execution.call_args.kwargs
         assert kwargs["injected_hint_ids"] == "[5, 12]"
@@ -338,11 +338,11 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         _hint_metadata_cache.clear()
 
-        _process_learning(
+        _process_learning_record(
             "legacy-null", "q on x.com", "code", {"test_status": "passed"},
         )
 
@@ -363,11 +363,11 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         _hint_metadata_cache.clear()
 
-        _process_learning(
+        _process_learning_record(
             "empty-original", "q on x.com", "code", {"test_status": "passed"},
         )
 
@@ -384,11 +384,11 @@ class TestProcessLearningRerunInjectedHintIdsFallback:
         mock_extract_url.return_value = "https://x.com"
 
         from src.backend.services.workflow_service import (
-            _process_learning, _hint_metadata_cache,
+            _process_learning_record, _hint_metadata_cache,
         )
         _hint_metadata_cache.clear()
 
-        _process_learning(
+        _process_learning_record(
             "first-attempt", "q on x.com", "code", {"test_status": "passed"},
         )
 
@@ -400,9 +400,24 @@ class TestProcessLearningUsageAttribution:
     """Phase 4 — a passing run with NL hints routes to fire_usage_attribution
     (standalone, or merged on Case B); everything else skips it. The atomic
     claim inside apply_hint_attribution is the real once-guard; this gate is a
-    cost early-out."""
+    cost early-out.
+
+    T6 split learning in two, so these drive both halves in the order
+    _stream_docker_execution drives them — the gate lives in the second."""
 
     _FIRE = "src.backend.crew_ai.optimization.conflict_detection.fire_usage_attribution"
+
+    @staticmethod
+    def _run_both_phases(run_id, user_query, robot_code, result):
+        """Exactly what _stream_docker_execution does, minus the artifact work
+        that now sits between the two calls."""
+        from src.backend.services.workflow_service import (
+            _process_learning_record, _process_learning_attribution,
+        )
+        ctx = _process_learning_record(run_id, user_query, robot_code, result)
+        if ctx is not None:
+            _process_learning_attribution(
+                run_id, user_query, robot_code, result, *ctx)
 
     @staticmethod
     def _set_cache(run_id, nl_ids):
@@ -423,9 +438,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = None  # first pass
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-s", [5, 12])
-        _process_learning("attr-s", "search on example.com", "v2", {"test_status": "passed"})
+        self._run_both_phases("attr-s", "search on example.com", "v2", {"test_status": "passed"})
 
         mock_fire.assert_called_once()
         kw = mock_fire.call_args.kwargs
@@ -448,9 +462,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = pre
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-b", [5, 12])
-        _process_learning("attr-b", "search on example.com", "v2 DIFFERENT",
+        self._run_both_phases("attr-b", "search on example.com", "v2 DIFFERENT",
                           {"test_status": "passed"})
 
         mock_fire.assert_called_once()
@@ -465,9 +478,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = None
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-fail", [5, 12])
-        _process_learning("attr-fail", "search on example.com", "code",
+        self._run_both_phases("attr-fail", "search on example.com", "code",
                           {"test_status": "failed"})
 
         mock_fire.assert_not_called()
@@ -481,9 +493,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = None
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-none", [])  # '[]' → gate skips
-        _process_learning("attr-none", "search on example.com", "code",
+        self._run_both_phases("attr-none", "search on example.com", "code",
                           {"test_status": "passed"})
 
         mock_fire.assert_not_called()
@@ -501,9 +512,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = pre
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-done", [5, 12])
-        _process_learning("attr-done", "search on example.com", "code",
+        self._run_both_phases("attr-done", "search on example.com", "code",
                           {"test_status": "passed"})
 
         mock_fire.assert_not_called()
@@ -523,9 +533,8 @@ class TestProcessLearningUsageAttribution:
         mock_fl.execution_memory.get.return_value = pre
         mock_url.return_value = "https://example.com"
 
-        from src.backend.services.workflow_service import _process_learning
         self._set_cache("attr-bad", [])  # empty cache → recovery uses pre.injected_hint_ids
-        _process_learning("attr-bad", "search on example.com", "code",
+        self._run_both_phases("attr-bad", "search on example.com", "code",
                           {"test_status": "passed"})
 
         mock_fire.assert_not_called()
@@ -565,8 +574,8 @@ class TestProcessLearningSelectionTrace:
                      "drop_reason": "cap"}}
         self._set_cache("trace-1", trace)
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("trace-1", "search on example.com", "code",
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("trace-1", "search on example.com", "code",
                           {"test_status": "failed"})
 
         calls = self._trace_submits(mock_fl)
@@ -583,8 +592,8 @@ class TestProcessLearningSelectionTrace:
         mock_url.return_value = "https://example.com"
         self._set_cache("trace-2", None)                       # trace off → None
 
-        from src.backend.services.workflow_service import _process_learning
-        _process_learning("trace-2", "search on example.com", "code",
+        from src.backend.services.workflow_service import _process_learning_record
+        _process_learning_record("trace-2", "search on example.com", "code",
                           {"test_status": "failed"})
 
         assert self._trace_submits(mock_fl) == []
@@ -600,9 +609,9 @@ class TestProcessLearningSelectionTrace:
         trace = {5: {"available": 1, "injected": 1, "drop_reason": None}}
         self._set_cache("trace-3", trace)
 
-        from src.backend.services.workflow_service import _process_learning
+        from src.backend.services.workflow_service import _process_learning_record
         with patch.object(settings, "HINT_TRACE_ENABLED", False):
-            _process_learning("trace-3", "search on example.com", "code",
+            _process_learning_record("trace-3", "search on example.com", "code",
                               {"test_status": "failed"})
 
         assert self._trace_submits(mock_fl) == []

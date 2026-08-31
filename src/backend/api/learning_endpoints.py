@@ -125,6 +125,7 @@ class HintCreateRequest(BaseModel):
     feedback_text: str
     anchor_query: str                       # example user request the hint applies to
     scope: str                              # url | domain | global
+    org_id: str                             # owning org — hints never cross one
     domain: str | None = None
     url: str | None = None
     category: str | None = None
@@ -220,9 +221,10 @@ def list_hints(
         conditions = []
         params: list = []
 
-        # Org scope: non-platform-admins see only their org's hints + shared hints.
+        # Org scope: a hint belongs to exactly one org, so a non-platform-admin
+        # sees their own org's and nothing else.
         if scope_org is not None:
-            conditions.append("(org_id = ? OR is_shared = 1)")
+            conditions.append("org_id = ?")
             params.append(scope_org)
 
         if status == "flagged":
@@ -335,7 +337,7 @@ def get_hint(
         if scope_org is not None:
             row = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
-                "WHERE id = ? AND (org_id = ? OR is_shared = 1)",
+                "WHERE id = ? AND org_id = ?",
                 (hint_id, scope_org),
             ).fetchone()
         else:
@@ -346,11 +348,12 @@ def get_hint(
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
 
         # The timeline is keyed by hint_id only — hint_audit and trigger_events
-        # carry no org_id, so they cannot be org-scoped in SQL. A shared hint can
-        # be fetched from another org via the is_shared=1 branch above; its audit
-        # trail and trigger rows would then expose the originating org's workflow
-        # ids, trigger reasons and audit actors. Surface the timeline only to
-        # platform-scope callers (scope_org is None) or the hint's own org.
+        # carry no org_id, so they cannot be org-scoped in SQL. The SELECT above
+        # already restricts an org-scoped caller to their own org, so this is now
+        # belt-and-braces rather than the sole gate it was while a shared hint
+        # could be fetched from another org. Kept: the cost of being wrong is the
+        # originating org's workflow ids, trigger reasons and audit actors, and
+        # this is what still holds if that SELECT is ever widened again.
         timeline: list = []
         if scope_org is None or row["org_id"] == scope_org:
             audit_rows = conn.execute(
@@ -402,6 +405,12 @@ def create_hint(
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
+    # Every hint is owned by exactly one org. Generic guidance wanted in several
+    # orgs is created once per org (the manual half of copy-on-promote), so each
+    # copy keeps its own counters, flags and disables permanently.
+    org_id = request.org_id.strip()
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
     actor = _audit_actor(admin, request.actor)
     text = request.feedback_text.strip()
     if not text:
@@ -421,9 +430,15 @@ def create_hint(
         raise HTTPException(status_code=400, detail="anchor_query must be ≤500 characters")
     if request.scope not in ("url", "domain", "global"):
         raise HTTPException(status_code=400, detail="scope must be url, domain, or global")
-    if request.scope == "url" and not request.url:
+    # F5: normalise before validating — whitespace-only is truthy in Python,
+    # so `not request.domain`/`not request.url` alone let "   " through, and
+    # scope='url' never validated domain at all, so domain='' passed
+    # straight to storage unnormalised.
+    domain = (request.domain or "").strip() or None
+    url = (request.url or "").strip() or None
+    if request.scope == "url" and not url:
         raise HTTPException(status_code=400, detail="url is required when scope is 'url'")
-    if request.scope == "domain" and not request.domain:
+    if request.scope == "domain" and not domain:
         raise HTTPException(status_code=400, detail="domain is required when scope is 'domain'")
 
     category = request.category or "uncategorized"
@@ -441,34 +456,50 @@ def create_hint(
     now = _now()
     conn = _admin_conn()
     try:
-        # BEGIN IMMEDIATE acquires the SQLite RESERVED lock before the SELECT so a
-        # concurrent request blocks here rather than racing to a lost UPDATE or a
-        # UNIQUE-constraint 500. Mirrors start_hint_review (same TOCTOU pattern).
-        # Readers are never blocked — WAL allows concurrent reads throughout.
+        # BEGIN IMMEDIATE takes no lock on Postgres — pg_compat._is_noop
+        # swallows it — so this SELECT does NOT block a concurrent identical
+        # create, and the dedup check below is advisory only. The real guard
+        # is the uq_nlfc_dedup_* unique index, which the INSERT's
+        # IntegrityError handler turns into a retriable 409 (see there). The
+        # line stays for SQLite-dialect fidelity, as elsewhere in this module.
         conn.execute("BEGIN IMMEDIATE")
-        # Admin creates are global (is_shared=1), so dedup ONLY against global
-        # rows. Matching an org-private hint here would silently turn "create a
-        # hint for every org" into an evidence bump on one tenant's private row
-        # — the shared hint the admin intended would never exist.
+        # Dedup within the TARGET org, matching uq_nlfc_dedup_* and the engine's
+        # own key. Identical text in another org is a separate hint by design —
+        # that is what keeps the two copies' counters independent.
         #
-        # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url and
+        # url-scoped hints key on url too, mirroring uq_nlfc_dedup_url_v21 and
         # NLFeedbackEngine.learn_from_feedback: identical text on two pages of
         # the same domain is two hints, one per page. Without the url predicate
         # the second page's create bumps evidence on the FIRST page's hint and
         # the hint the admin asked for is never written.
+        #
+        # global-scoped hints drop domain, mirroring uq_nlfc_dedup_global_v21:
+        # a global hint applies to every query in the org, so the page it was
+        # typed on is not part of its identity. Keeping domain here would make
+        # this SELECT narrower than its index — the duplicate would go unfound
+        # and the INSERT would 409 on the constraint instead of bumping
+        # evidence on the hint that already says the same thing.
         if request.scope == "url":
             existing = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
-                "AND url IS NOT DISTINCT FROM ? AND scope = ? AND is_shared = 1",
-                (text, request.domain, request.url, request.scope),
+                "AND url IS NOT DISTINCT FROM ? AND scope = ? "
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, domain, url, request.scope, org_id),
+            ).fetchone()
+        elif request.scope == "global":
+            existing = conn.execute(
+                "SELECT * FROM nl_feedback_corrections "
+                "WHERE feedback_text = ? AND scope = 'global' "
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, org_id),
             ).fetchone()
         else:
             existing = conn.execute(
                 "SELECT * FROM nl_feedback_corrections "
                 "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
-                "AND is_shared = 1",
-                (text, request.domain, request.scope),
+                "AND org_id IS NOT DISTINCT FROM ?",
+                (text, domain, request.scope, org_id),
             ).fetchone()
 
         if existing:
@@ -492,7 +523,7 @@ def create_hint(
                     {"conflict_flagged": 1}, {"conflict_flagged": 0},
                 )
             _write_hint_audit(
-                conn, existing["id"], "create", actor,
+                conn, existing["id"], "reinforce", actor,
                 "Admin re-submitted existing hint — evidence incremented",
                 None, {"evidence_count": existing["evidence_count"] + 1},
             )
@@ -507,11 +538,11 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via, is_shared) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', 1)",
+                " created_via, org_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?)",
                 (
-                    text, category, request.scope, request.domain, request.url,
-                    request.original_failure_category, anchor, now, now,
+                    text, category, request.scope, domain, url,
+                    request.original_failure_category, anchor, now, now, org_id,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -530,8 +561,9 @@ def create_hint(
             conn, hint_id, "create", actor, None, None,
             {
                 "feedback_text": text, "scope": request.scope,
-                "domain": request.domain, "url": request.url,
+                "domain": domain, "url": url,
                 "category": category, "created_via": "admin",
+                "org_id": org_id,
             },
         )
         conn.commit()
@@ -541,8 +573,12 @@ def create_hint(
         # only — so the add MUST go through the write queue. Best-effort: a
         # missed doc is healed by the next reconcile.
         try:
+            # org_id matters: filter_by_query_similarity matches an org-less
+            # anchor for EVERY calling org, so an unowned anchor would leave the
+            # SQL gate as the only thing standing between orgs.
             fb.write_queue.submit(
                 fb.execution_memory.add_anchor, "nl", hint_id, anchor,
+                org_id=org_id,
             )
         except Exception as e:
             logger.warning(
@@ -604,12 +640,25 @@ def patch_hint(
         updates: dict = {}
         before: dict = {}
 
+        # F5: normalise before anything below reads request.domain/request.url —
+        # whitespace-only is truthy in Python, so the scope branch's
+        # `resolved_url = request.url or row_dict.get("url")` fallback (and
+        # the equivalent for domain) must see the normalised value or a
+        # whitespace-only input overwrites the stored value with blank
+        # instead of falling through to it.
+        norm_domain = None
+        if request.domain is not None:
+            norm_domain = (request.domain or "").strip() or None
+        norm_url = None
+        if request.url is not None:
+            norm_url = (request.url or "").strip() or None
+
         if request.scope is not None:
             if request.scope not in ("url", "domain", "global"):
                 raise HTTPException(status_code=400, detail="scope must be url, domain, or global")
             # Narrower-scope validation with column retention
             if request.scope == "url":
-                resolved_url = request.url or row_dict.get("url")
+                resolved_url = norm_url or row_dict.get("url")
                 if not resolved_url:
                     raise HTTPException(
                         status_code=400,
@@ -618,7 +667,7 @@ def patch_hint(
                 before["url"] = row_dict.get("url")
                 updates["url"] = resolved_url
             elif request.scope == "domain":
-                resolved_domain = request.domain or row_dict.get("domain")
+                resolved_domain = norm_domain or row_dict.get("domain")
                 if not resolved_domain:
                     raise HTTPException(
                         status_code=400,
@@ -632,10 +681,10 @@ def patch_hint(
         # Explicit field updates (only if provided and not already set via scope logic)
         if request.url is not None and "url" not in updates:
             before["url"] = row_dict.get("url")
-            updates["url"] = request.url
+            updates["url"] = norm_url
         if request.domain is not None and "domain" not in updates:
             before["domain"] = row_dict.get("domain")
-            updates["domain"] = request.domain
+            updates["domain"] = norm_domain
         if request.category is not None:
             before["category"] = row_dict.get("category")
             updates["category"] = request.category
@@ -643,14 +692,60 @@ def patch_hint(
             before["original_failure_category"] = row_dict.get("original_failure_category")
             updates["original_failure_category"] = request.original_failure_category
 
+        # F5: the scope/target consistency check create_hint already has
+        # (learning_endpoints.py:431-436) — the scope branch above already
+        # enforces it when `scope` is itself in the request, but a domain/url
+        # edit that leaves the CURRENT scope unchanged took the explicit-field
+        # branch above and skipped it entirely. Validate the resulting row
+        # regardless of which branch produced it.
+        resolved_scope = request.scope if request.scope is not None else row_dict["scope"]
+        if resolved_scope == "domain":
+            final_domain = updates["domain"] if "domain" in updates else row_dict.get("domain")
+            if not final_domain:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "this hint is domain-scoped but has no domain — "
+                        "the patch must supply one"
+                    ),
+                )
+        elif resolved_scope == "url":
+            final_url = updates["url"] if "url" in updates else row_dict.get("url")
+            if not final_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "this hint is url-scoped but has no url — "
+                        "the patch must supply one"
+                    ),
+                )
+
         if not updates:
             return {"hint": row_dict, "changed": False}
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        conn.execute(
-            f"UPDATE nl_feedback_corrections SET {set_clause} WHERE id = ?",
-            list(updates.values()) + [hint_id],
-        )
+        try:
+            conn.execute(
+                f"UPDATE nl_feedback_corrections SET {set_clause} WHERE id = ?",
+                list(updates.values()) + [hint_id],
+            )
+        except sqlite3.IntegrityError:
+            # scope/domain/url ARE the dedup key, so an edit can land on another
+            # hint's key — reachable from the drawer, which sends all three on
+            # every save. That is a conflict the admin can resolve, not a server
+            # fault, and create_hint already answers 409 for these same indexes.
+            # The only IntegrityError this UPDATE can raise is one of them: it
+            # never touches the primary key, scope is validated to one of three
+            # literals above, and every other column it writes is nullable.
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Another hint in this org already matches this one's text "
+                    "and target. Retract the duplicate, or choose a different "
+                    "scope/domain/url."
+                ),
+            ) from None
         after = dict(updates)
         # A patch may change any combination of scope/url/domain/category — a
         # single action verb cannot name all of them, and before/after already
@@ -726,12 +821,14 @@ def unflag_hint(
 
 # ---------------------------------------------------------------------------
 # 5b. POST /hints/{id}/promote — REMOVED (2026-07-02 access-control review).
-# Promotion flipped an org-learned hint to is_shared=1 and nulled its anchor
+# Promotion flipped an org-learned hint to a shared one and nulled its anchor
 # org, injecting it into every org whose runs match the hint's domain. Hints
 # learned on one customer's site must never reach another customer, so the
-# route was deleted to make that guarantee structural. Global hints are
-# exclusively admin-CREATED (POST /hints — generic, non-site-specific guidance);
-# test_learning_promote.py pins the removal.
+# route was deleted to make that guarantee structural. The shared-visibility
+# flag it set is itself gone now (schema v20): a hint belongs to exactly one
+# org, and generic guidance wanted in several is CREATED once per org via
+# POST /hints. test_learning_promote.py and test_hints_are_org_owned.py pin
+# both halves.
 # ---------------------------------------------------------------------------
 
 
@@ -1019,8 +1116,9 @@ def get_run(
     execution record, its metrics, the per-hint selection->attribution funnel
     (hint_workflow_trace LEFT JOIN the hint row for current text/state), and any
     trigger events. The funnel populates only for runs executed under Part 2; a
-    deduped run keeps a standalone funnel with run=null (no FK). 404 only when
-    nothing at all exists for this workflow_id.
+    run with no execution record (learning skipped, or a legacy row aggregated
+    away before T1) keeps a standalone funnel with run=null (no FK). 404 only
+    when nothing at all exists for this workflow_id.
     """
     admin = is_validated_admin(user)
     if not is_dashboard_viewer(user, is_platform_admin=admin):
@@ -1043,9 +1141,8 @@ def get_run(
         # hint_workflow_trace and learning_metrics have no org_id column, so they
         # cannot be org-scoped; serving them to a scoped caller whose execution_record
         # lookup returned None would leak another org's trace rows (D3 violation).
-        # Platform-admins (scope_org=None) are unaffected: they keep the existing
-        # deduped-run behaviour (a trace-only run with no execution record still
-        # returns 200 for platform admins).
+        # Platform-admins (scope_org=None) are unaffected: a trace-only run with
+        # no execution record still returns 200 for platform admins.
         if scope_org is not None and run is None:
             raise HTTPException(
                 status_code=404,
@@ -1214,6 +1311,20 @@ def get_dashboard_stats(
               AND COALESCE(actually_flagged_hint_ids, flagged_hint_ids) <> '[]'::jsonb
         """, (cutoff_30d,)).fetchone()["n"]
 
+        # Excluded by ACTOR, not by an action list. The invariant is "a HUMAN
+        # reviewed this flag" — 'Pending review' on the dashboard is
+        # flagged_events - reviewed_events, so a machine-written row counted
+        # here hides a flag nobody has looked at. An action list was always
+        # going to be one verb behind: migration 21 alone writes two ('merge'
+        # and 'merge_recommendation_dropped') onto the same survivor hint.
+        # These four are every machine writer of hint_audit:
+        #   'migration_v21'          pg_schema.py migration 21 (both verbs)
+        #   'trigger_1'/'trigger_2'  _flag_hints_no_commit's own flag row
+        #   'system'                 _auto_disable_hint
+        # Every other writer takes its actor from a verified token
+        # (_audit_actor, or feedback_insight['actor'] on the engine paths), so
+        # a person can never arrive under one of these names. A NEW machine
+        # actor must be added here.
         reviewed_events = conn.execute("""
             SELECT COUNT(*) AS n FROM trigger_events te
             WHERE te.created_at >= ?
@@ -1225,6 +1336,8 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.created_at > te.created_at
+                    AND ha.actor NOT IN
+                        ('migration_v21', 'system', 'trigger_1', 'trigger_2')
               )
         """, (cutoff_30d,)).fetchone()["n"]
 
@@ -1239,6 +1352,13 @@ def get_dashboard_stats(
                   WHERE COALESCE(te.actually_flagged_hint_ids, te.flagged_hint_ids)
                         @> to_jsonb(ha.hint_id)
                     AND ha.action = 'unflag'
+                    -- Redundant today — no machine writer emits 'unflag', so
+                    -- the actor test cannot subtract anything here. Kept per
+                    -- M5 (both EXISTS clauses get this predicate) so it is
+                    -- load-bearing the day the 'unflag' restriction above is
+                    -- ever widened; not evidence that a machine can write one.
+                    AND ha.actor NOT IN
+                        ('migration_v21', 'system', 'trigger_1', 'trigger_2')
                     AND ha.created_at > te.created_at
               )
         """, (cutoff_30d,)).fetchone()["n"]
@@ -1766,29 +1886,48 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
             conn, [h["id"] for h in hints if (h["success_count"] or 0) == 0]
         )
 
-        # Build chunk plan: 1 globals chunk + 1 per distinct domain.
-        global_hints = [h for h in hints if h["scope"] == "global"]
-        non_global_hints = [h for h in hints if h["scope"] != "global"]
-
-        domain_groups: dict = {}
-        for h in non_global_hints:
-            domain_groups.setdefault(h["domain"], []).append(h)
+        # Build chunk plan: 1 globals chunk + 1 per distinct domain, PER ORG.
+        # F2: two orgs with identical hint text (mandatory, not accidental,
+        # under T10's copy-on-promote design) must never share a chunk — one
+        # org's LLM verdict must never decide another org's hint lifecycle,
+        # and one org's correction text must never enter a prompt about
+        # another org. Group by org_id FIRST, then split each org's hints
+        # into a global chunk + per-domain chunks exactly as before.
+        # org_id IS NULL hints (pre-org-partitioning legacy rows) get their
+        # own group — they are unreachable by any org's read anyway (T9/P6:
+        # org_id = NULL yields NULL for every row), so they must never be
+        # merged into a real org's chunk.
+        org_groups: dict = {}
+        for h in hints:
+            org_groups.setdefault(h["org_id"], []).append(h)
 
         chunks: list[dict] = []
-        if global_hints:
-            chunks.append({
-                "scope_type": "global",
-                "scope_value": None,
-                "decision_hints": global_hints,
-                "context_global_hints": None,
-            })
-        for domain_key in sorted(domain_groups.keys(), key=lambda d: d or ""):
-            chunks.append({
-                "scope_type": "domain",
-                "scope_value": domain_key,
-                "decision_hints": domain_groups[domain_key],
-                "context_global_hints": global_hints if global_hints else None,
-            })
+        for org_key in sorted(org_groups.keys(), key=lambda o: o or ""):
+            org_hints = org_groups[org_key]
+            global_hints = [h for h in org_hints if h["scope"] == "global"]
+            non_global_hints = [h for h in org_hints if h["scope"] != "global"]
+
+            domain_groups: dict = {}
+            for h in non_global_hints:
+                domain_groups.setdefault(h["domain"], []).append(h)
+
+            if global_hints:
+                chunks.append({
+                    "org_id": org_key,
+                    "scope_type": "global",
+                    "scope_value": None,
+                    "decision_hints": global_hints,
+                    "context_global_hints": None,
+                })
+            for domain_key in sorted(domain_groups.keys(), key=lambda d: d or ""):
+                chunks.append({
+                    "org_id": org_key,
+                    "scope_type": "domain",
+                    "scope_value": domain_key,
+                    "decision_hints": domain_groups[domain_key],
+                    # This org's globals only — never another org's.
+                    "context_global_hints": global_hints if global_hints else None,
+                })
 
         # Pre-insert all page rows so the UI sees the full chunk plan immediately.
         page_start = _now()
@@ -1796,10 +1935,10 @@ def _run_hint_review(session_id: int, feedback_loop) -> None:
         for chunk in chunks:
             conn.execute(
                 "INSERT INTO hint_review_pages "
-                "(session_id, scope_type, scope_value, status, hint_count, created_at) "
-                "VALUES (?, ?, ?, 'pending', ?, ?)",
+                "(session_id, scope_type, scope_value, status, hint_count, created_at, org_id) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
                 (session_id, chunk["scope_type"], chunk["scope_value"],
-                 len(chunk["decision_hints"]), page_start),
+                 len(chunk["decision_hints"]), page_start, chunk["org_id"]),
             )
             page_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         conn.commit()
@@ -1966,10 +2105,15 @@ def start_hint_review(
     # _run_hint_review updates the session to 'pending_review' or 'failed', which
     # clears the pending_llm row and allows future reviews to start.
     #
-    # BEGIN IMMEDIATE acquires the SQLite RESERVED lock before the COUNT, so a
-    # second concurrent request blocks until this one commits. Without it the
-    # COUNT-then-INSERT pair has a TOCTOU window where two clicks could both
-    # observe count=0 and both INSERT a pending_llm row.
+    # KNOWN, OPEN: the COUNT-then-INSERT pair below is NOT serialised on
+    # Postgres. BEGIN IMMEDIATE is swallowed by pg_compat._is_noop, and a
+    # COUNT has no row to lock, so two simultaneous clicks can both observe
+    # count=0, both INSERT a pending_llm row and both spawn _run_hint_review
+    # — two sessions and duplicated LLM spend. Closing it needs a unique partial
+    # index on status='pending_llm' (a migration) or an advisory lock;
+    # apply_review_session's sibling race, which corrupts the audit trail, was
+    # closed with FOR UPDATE because it had a row to lock. This one only costs
+    # a duplicate session, both of which are visible in the sessions list.
     conn = _admin_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -2114,13 +2258,25 @@ def apply_review_session(
 ):
     conn = _admin_conn()
     try:
-        # BEGIN IMMEDIATE takes the SQLite write lock before the status check, so
-        # the check-then-apply sequence is atomic. Without it two concurrent
-        # "Apply" clicks can both observe status='pending_review' and both
-        # process the same recommendations, writing duplicate hint_audit rows.
+        # FOR UPDATE is what makes the check-then-apply sequence atomic, NOT
+        # the BEGIN IMMEDIATE below it: pg_compat._is_noop swallows any
+        # statement starting with BEGIN, so on Postgres that line reaches no
+        # connection and takes no lock. Without the row lock two concurrent
+        # "Apply" clicks both observe status='pending_review' and both run the
+        # whole loop — measured, on a real stack and in
+        # TestConcurrentApplyIsSerialised: both returned applied_count and
+        # hint_audit held two llm_review_* rows per approved recommendation.
+        # Hint state survives that (the UPDATEs are idempotent) and so does the
+        # engagement KPI (its clauses are EXISTS, not COUNT); the audit trail
+        # does not, and that is the record this endpoint exists to keep honest.
+        #
+        # The loser blocks here, then re-reads the committed row under READ
+        # COMMITTED, sees 'completed' and takes the 409 below. The BEGIN line
+        # stays for SQLite-dialect fidelity, as elsewhere in this module.
         conn.execute("BEGIN IMMEDIATE")
         session = conn.execute(
-            "SELECT * FROM hint_review_sessions WHERE id = ?", (session_id,)
+            "SELECT * FROM hint_review_sessions WHERE id = ? FOR UPDATE",
+            (session_id,),
         ).fetchone()
         if not session:
             conn.rollback()
@@ -2134,7 +2290,8 @@ def apply_review_session(
 
         approved_recs = conn.execute(
             "SELECT r.*, h.feedback_text, h.scope, h.domain, h.applied_count, "
-            "       h.success_count, h.failure_count, h.is_active, h.conflict_flagged "
+            "       h.success_count, h.failure_count, h.is_active, h.conflict_flagged, "
+            "       h.org_id "
             "FROM hint_review_recommendations r "
             "JOIN nl_feedback_corrections h ON h.id = r.hint_id "
             "WHERE r.session_id = ? AND r.admin_decision = 'approved' AND r.applied = 0",
@@ -2165,42 +2322,69 @@ def apply_review_session(
             audit_reason = f"{note}  —  [LLM: {llm_reason}]" if note else llm_reason
             actor = _audit_actor(admin)
 
+            # Defence in depth (F2), all three UPDATEs below: constrain to the
+            # hint's own org, captured from the JOIN above. Not the
+            # correctness fix — the chunk-plan grouping in _run_hint_review
+            # is — on correct data this predicate changes nothing; it only
+            # guards against a hint whose org no longer matches what this
+            # approved recommendation was selected against.
+            #
+            # guard_blocked tracks whether that predicate actually filtered
+            # the row out (rowcount==0) so the code below can stop treating
+            # a write the guard refused as though it happened: no audit row
+            # asserting a state change that didn't occur, no applied=1, no
+            # applied_count credit. Fix round 1 (reviewer Important finding):
+            # without this, a guard-blocked UPDATE still fabricated its audit
+            # trail and marked the recommendation permanently applied.
+            hint_org = rec["org_id"]
+            guard_blocked = False
+
             if recommendation == "disable":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
-                    "SET is_active=0, disabled_at=? WHERE id=?",
-                    (now, hint_id),
+                    "SET is_active=0, disabled_at=? WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (now, hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
-                                  audit_reason, before,
-                                  {**before, "is_active": 0, "disabled_at": now})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_disable", actor,
+                                      audit_reason, before,
+                                      {**before, "is_active": 0, "disabled_at": now})
 
             elif recommendation == "reactivate":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET is_active=1, conflict_flagged=0, conflict_flagged_at=NULL, "
                     # Step 4b: LLM-review reactivation is a fresh chance — reset
                     # unused_count so the hint is not immediately re-retired.
-                    "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 WHERE id=?",
-                    (hint_id,),
+                    "    conflict_flag_reason=NULL, disabled_at=NULL, unused_count=0 "
+                    "WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
-                                  audit_reason, before,
-                                  {**before, "is_active": 1, "conflict_flagged": 0,
-                                   "conflict_flagged_at": None, "conflict_flag_reason": None,
-                                   "disabled_at": None})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_reactivate", actor,
+                                      audit_reason, before,
+                                      {**before, "is_active": 1, "conflict_flagged": 0,
+                                       "conflict_flagged_at": None, "conflict_flag_reason": None,
+                                       "disabled_at": None})
 
             elif recommendation == "unflag":
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE nl_feedback_corrections "
                     "SET conflict_flagged=0, conflict_flagged_at=NULL, "
-                    "    conflict_flag_reason=NULL WHERE id=?",
-                    (hint_id,),
+                    "    conflict_flag_reason=NULL WHERE id=? AND org_id IS NOT DISTINCT FROM ?",
+                    (hint_id, hint_org),
                 )
-                _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
-                                  audit_reason, before,
-                                  {**before, "conflict_flagged": 0,
-                                   "conflict_flagged_at": None, "conflict_flag_reason": None})
+                if cur.rowcount == 0:
+                    guard_blocked = True
+                else:
+                    _write_hint_audit(conn, hint_id, "llm_review_unflag", actor,
+                                      audit_reason, before,
+                                      {**before, "conflict_flagged": 0,
+                                       "conflict_flagged_at": None, "conflict_flag_reason": None})
 
             elif recommendation == "keep":
                 _write_hint_audit(conn, hint_id, "llm_review_keep", actor,
@@ -2209,6 +2393,25 @@ def apply_review_session(
             elif recommendation == "flag_review":
                 _write_hint_audit(conn, hint_id, "llm_review_flagged", actor,
                                   audit_reason, before, before)
+
+            if guard_blocked:
+                # Leave applied=0 deliberately — the recommendation stays
+                # visible as unapplied rather than silently disappearing.
+                # There is no retry, and this comment used to claim one: the
+                # only writers of hint_review_sessions.status are this
+                # function's 'completed' below, _run_hint_review's
+                # 'completed' on an empty page and its 'pending_review' /
+                # 'failed' at creation. Nothing moves a session back to
+                # 'pending_review', and the guard above 409s on any other
+                # status, so the approved action is stranded — an admin has to
+                # apply it to the hint directly through the hints UI.
+                logger.warning(
+                    "[REVIEW] Session %d: hint %d's org no longer matches "
+                    "the org this recommendation was approved against "
+                    "(expected %r) — %s skipped, recommendation %d left unapplied",
+                    session_id, hint_id, hint_org, recommendation, rec["id"],
+                )
+                continue
 
             conn.execute(
                 "UPDATE hint_review_recommendations SET applied=1 WHERE id=?",
