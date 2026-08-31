@@ -122,36 +122,40 @@ class AntiPatternEngine(LearningEngine):
         )
 
         new_anti_id = None
-        if existing:
-            # Reinforce existing anti-pattern
-            new_evidence = existing["evidence_count"] + 1
-            new_score = EffectivenessScore.calculate(new_evidence, 0)
-            self._em._writer_conn.execute(
-                "UPDATE anti_patterns SET evidence_count = ?, score = ?, "
-                "last_seen = datetime('now', 'localtime') WHERE id = ?",
-                (new_evidence, new_score, existing["id"])
-            )
-        else:
-            # Create new anti-pattern
-            initial_score = EffectivenessScore.calculate(1, 0)
-            cursor = self._em._writer_conn.execute("""
-                INSERT INTO anti_patterns
-                (failure_category, query_pattern, bad_code_snippet, error_message,
-                 domain, org_id, score, evidence_count, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
-                RETURNING id
-            """, (
-                record.failure_category,
-                record.user_query,
-                self._extract_relevant_code(record.robot_code,
-                                            getattr(record, 'failed_keyword', None)),
-                record.error_message,
-                getattr(record, 'domain', None),
-                getattr(record, 'org_id', None),
-                initial_score,
-            ))
-            new_anti_id = cursor.fetchone()["id"]
-        self._em._writer_conn.commit()
+        try:
+            if existing:
+                # Reinforce existing anti-pattern
+                new_evidence = existing["evidence_count"] + 1
+                new_score = EffectivenessScore.calculate(new_evidence, 0)
+                self._em._writer_conn.execute(
+                    "UPDATE anti_patterns SET evidence_count = ?, score = ?, "
+                    "last_seen = datetime('now', 'localtime') WHERE id = ?",
+                    (new_evidence, new_score, existing["id"])
+                )
+            else:
+                # Create new anti-pattern
+                initial_score = EffectivenessScore.calculate(1, 0)
+                cursor = self._em._writer_conn.execute("""
+                    INSERT INTO anti_patterns
+                    (failure_category, query_pattern, bad_code_snippet, error_message,
+                     domain, org_id, score, evidence_count, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now', 'localtime'))
+                    RETURNING id
+                """, (
+                    record.failure_category,
+                    record.user_query,
+                    self._extract_relevant_code(record.robot_code,
+                                                getattr(record, 'failed_keyword', None)),
+                    record.error_message,
+                    getattr(record, 'domain', None),
+                    getattr(record, 'org_id', None),
+                    initial_score,
+                ))
+                new_anti_id = cursor.fetchone()["id"]
+            self._em._writer_conn.commit()
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
         # After the SQL commit, embed a newly created anti-pattern's anchor
         # (its query_pattern, which equals record.user_query) into
@@ -395,30 +399,34 @@ class AntiPatternEngine(LearningEngine):
         )
 
         updated = False
-        for ap in anti_patterns:
-            if ap.get("correct_alternative"):
-                continue  # Already resolved
+        try:
+            for ap in anti_patterns:
+                if ap.get("correct_alternative"):
+                    continue  # Already resolved
 
-            # Only set correct_alternative if the bad snippet is NOT present
-            # in the passing code. This proves the failing pattern was actually
-            # replaced, rather than being a coincidental pass.
-            bad_snippet = ap.get("bad_code_snippet", "")
-            if self._bad_snippet_present(bad_snippet, record.robot_code):
-                logger.debug(
-                    "[LEARNING:ANTI_PATTERN] Skipping alternative for ap_id=%d: "
-                    "bad_code_snippet still present in passing code",
-                    ap["id"],
+                # Only set correct_alternative if the bad snippet is NOT present
+                # in the passing code. This proves the failing pattern was actually
+                # replaced, rather than being a coincidental pass.
+                bad_snippet = ap.get("bad_code_snippet", "")
+                if self._bad_snippet_present(bad_snippet, record.robot_code):
+                    logger.debug(
+                        "[LEARNING:ANTI_PATTERN] Skipping alternative for ap_id=%d: "
+                        "bad_code_snippet still present in passing code",
+                        ap["id"],
+                    )
+                    continue
+
+                self._em._writer_conn.execute(
+                    "UPDATE anti_patterns SET correct_alternative = ? WHERE id = ?",
+                    (record.robot_code[:500], ap["id"])
                 )
-                continue
+                updated = True
 
-            self._em._writer_conn.execute(
-                "UPDATE anti_patterns SET correct_alternative = ? WHERE id = ?",
-                (record.robot_code[:500], ap["id"])
-            )
-            updated = True
-
-        if updated:
-            self._em._writer_conn.commit()
+            if updated:
+                self._em._writer_conn.commit()
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     # -------------------------------------------------------------------
     # Private: Bad Snippet Detection

@@ -228,38 +228,50 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def _update_to_passing_state(self, workflow_id: str, working_code: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory._update_to_passing_state")
-        self._writer_conn.execute(
-            "UPDATE execution_records "
-            "SET working_code = ?, test_status = 'passed' WHERE workflow_id = ?",
-            (working_code, workflow_id),
-        )
-        self._writer_conn.commit()
-        logger.info("[LEARNING] Workflow %s updated to passing state", workflow_id)
+        try:
+            self._writer_conn.execute(
+                "UPDATE execution_records "
+                "SET working_code = ?, test_status = 'passed' WHERE workflow_id = ?",
+                (working_code, workflow_id),
+            )
+            self._writer_conn.commit()
+            logger.info("[LEARNING] Workflow %s updated to passing state", workflow_id)
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def update_user_feedback(self, workflow_id: str, feedback_text: str, feedback_type: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory.update_user_feedback")
-        self._writer_conn.execute(
-            "UPDATE execution_records SET user_feedback = ?, user_feedback_type = ? "
-            "WHERE workflow_id = ?",
-            (feedback_text, feedback_type, workflow_id),
-        )
-        self._writer_conn.commit()
+        try:
+            self._writer_conn.execute(
+                "UPDATE execution_records SET user_feedback = ?, user_feedback_type = ? "
+                "WHERE workflow_id = ?",
+                (feedback_text, feedback_type, workflow_id),
+            )
+            self._writer_conn.commit()
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def update_daily_stats(self, test_status: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory.update_daily_stats")
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # UTC day buckets
-        self._writer_conn.execute(
-            """
-            INSERT INTO learning_stats (stat_date, total_executions, total_passed, total_failed)
-            VALUES (?, 1, ?, ?)
-            ON CONFLICT(stat_date) DO UPDATE SET
-                total_executions = learning_stats.total_executions + 1,
-                total_passed = learning_stats.total_passed + EXCLUDED.total_passed,
-                total_failed = learning_stats.total_failed + EXCLUDED.total_failed
-            """,
-            (today, 1 if test_status == "passed" else 0, 1 if test_status != "passed" else 0),
-        )
-        self._writer_conn.commit()
+        try:
+            self._writer_conn.execute(
+                """
+                INSERT INTO learning_stats (stat_date, total_executions, total_passed, total_failed)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(stat_date) DO UPDATE SET
+                    total_executions = learning_stats.total_executions + 1,
+                    total_passed = learning_stats.total_passed + EXCLUDED.total_passed,
+                    total_failed = learning_stats.total_failed + EXCLUDED.total_failed
+                """,
+                (today, 1 if test_status == "passed" else 0, 1 if test_status != "passed" else 0),
+            )
+            self._writer_conn.commit()
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def store_hint_workflow_trace(self, workflow_id: str, trace: dict) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store_hint_workflow_trace")

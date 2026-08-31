@@ -321,36 +321,40 @@ class LearningMetricsTracker:
             return
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("LearningMetricsTracker.record_execution")
-        self._em._writer_conn.execute(
-            "INSERT INTO learning_metrics "
-            "(workflow_id, user_query, is_first_attempt, "
-            " is_retry_after_feedback, attempt_number, "
-            " hints_available, hints_injected, hint_sources, "
-            " llm_calls, llm_cost, hint_tokens, test_passed, was_holdout, "
-            " timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
-            (
-                workflow_id,
-                user_query,
-                1 if is_first_attempt else 0,
-                1 if is_retry_after_feedback else 0,
-                attempt_number,
-                hints_available,
-                hints_injected,
-                json.dumps(hint_sources),
-                llm_calls,
-                llm_cost,
-                hint_tokens,
-                1 if test_passed else 0,
-                1 if was_holdout else 0,
-            ),
-        )
-        self._em._writer_conn.commit()
-        logger.debug(
-            "[LEARNING:METRICS] Recorded execution %s: "
-            "hints_injected=%d, test_passed=%s",
-            workflow_id, hints_injected, test_passed,
-        )
+        try:
+            self._em._writer_conn.execute(
+                "INSERT INTO learning_metrics "
+                "(workflow_id, user_query, is_first_attempt, "
+                " is_retry_after_feedback, attempt_number, "
+                " hints_available, hints_injected, hint_sources, "
+                " llm_calls, llm_cost, hint_tokens, test_passed, was_holdout, "
+                " timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+                (
+                    workflow_id,
+                    user_query,
+                    1 if is_first_attempt else 0,
+                    1 if is_retry_after_feedback else 0,
+                    attempt_number,
+                    hints_available,
+                    hints_injected,
+                    json.dumps(hint_sources),
+                    llm_calls,
+                    llm_cost,
+                    hint_tokens,
+                    1 if test_passed else 0,
+                    1 if was_holdout else 0,
+                ),
+            )
+            self._em._writer_conn.commit()
+            logger.debug(
+                "[LEARNING:METRICS] Recorded execution %s: "
+                "hints_injected=%d, test_passed=%s",
+                workflow_id, hints_injected, test_passed,
+            )
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def get_effectiveness_report(self) -> dict:
         """
@@ -879,6 +883,7 @@ class FeedbackLoop:
                     cursor.rowcount,
                 )
         except Exception as e:
+            self.execution_memory._writer_conn.rollback()
             logger.warning(
                 "[LEARNING] stale-review-session recovery failed "
                 "(non-blocking): %s", e
@@ -1427,30 +1432,34 @@ class FeedbackLoop:
         from datetime import datetime, timezone
         from src.backend.crew_ai.optimization.execution_memory import _assert_writer_thread
         _assert_writer_thread("FeedbackLoop.write_trigger_event")
-        self.execution_memory._writer_conn.execute(
-            """
-            INSERT INTO trigger_events (
-                trigger_type, workflow_id, domain, url, feedback_text,
-                active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
-                reason, llm_model,
-                input_tokens, output_tokens, llm_latency_ms,
-                status, error_message, used_hint_ids, unused_hint_ids, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trigger_type, workflow_id, domain, url, feedback_text,
-                json.dumps(active_hint_ids),
-                json.dumps(flagged_hint_ids),
-                json.dumps(actually_flagged_hint_ids),
-                reason, llm_model,
-                input_tokens, output_tokens, llm_latency_ms,
-                status, error_message,
-                json.dumps(used_hint_ids) if used_hint_ids is not None else None,
-                json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self.execution_memory._writer_conn.commit()
+        try:
+            self.execution_memory._writer_conn.execute(
+                """
+                INSERT INTO trigger_events (
+                    trigger_type, workflow_id, domain, url, feedback_text,
+                    active_hint_ids, flagged_hint_ids, actually_flagged_hint_ids,
+                    reason, llm_model,
+                    input_tokens, output_tokens, llm_latency_ms,
+                    status, error_message, used_hint_ids, unused_hint_ids, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trigger_type, workflow_id, domain, url, feedback_text,
+                    json.dumps(active_hint_ids),
+                    json.dumps(flagged_hint_ids),
+                    json.dumps(actually_flagged_hint_ids),
+                    reason, llm_model,
+                    input_tokens, output_tokens, llm_latency_ms,
+                    status, error_message,
+                    json.dumps(used_hint_ids) if used_hint_ids is not None else None,
+                    json.dumps(unused_hint_ids) if unused_hint_ids is not None else None,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self.execution_memory._writer_conn.commit()
+        except Exception:
+            self.execution_memory._writer_conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Stats & Monitoring
