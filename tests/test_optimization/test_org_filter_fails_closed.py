@@ -193,6 +193,41 @@ class TestVectorReadsFailClosed:
         in_memory_em.store(_record(org_id="org-A", status="passed"))
         assert in_memory_em.find_similar_executions(_QUERY, org_id="org-A")
 
+    # search_similar is the SemanticStore alias for the same read. It forwarded
+    # the query positionally and dropped org_id entirely, so every caller got
+    # the T9 refusal instead of results. Paired like its delegate above: the
+    # negative alone would pass with the guard deleted, because a disabled
+    # embedder returns [] one line later for an unrelated reason.
+    def test_search_similar_returns_nothing_without_an_org(
+            self, in_memory_em, monkeypatch):
+        monkeypatch.setattr(in_memory_em, "_embed", lambda text: _FAKE_VEC)
+        in_memory_em.store(_record(org_id="org-A", status="passed"))
+        assert in_memory_em.search_similar(_QUERY, org_id=None) == []
+
+    def test_search_similar_still_serves_the_owning_org(
+            self, in_memory_em, monkeypatch):
+        monkeypatch.setattr(in_memory_em, "_embed", lambda text: _FAKE_VEC)
+        in_memory_em.store(_record(org_id="org-A", status="passed"))
+        assert in_memory_em.search_similar(_QUERY, org_id="org-A")
+
+    # The pair above catches the failure that MATTERS — a predicate dropped so
+    # an org-less caller reads another org's rows. It cannot catch removal of
+    # the early-exit itself: `WHERE org_id = ?` bound to NULL matches nothing
+    # under SQL three-valued logic, so the return value is [] either way
+    # (verified by deleting the guard and watching all 8 still pass).
+    # The early exit's observable contribution is the WARNING, so that is what
+    # this pins — the same token every other tenancy refusal logs.
+    def test_the_execution_similarity_refusal_is_logged(
+            self, in_memory_em, monkeypatch, caplog):
+        monkeypatch.setattr(in_memory_em, "_embed", lambda text: _FAKE_VEC)
+        in_memory_em.store(_record(org_id="org-A", status="passed"))
+        with caplog.at_level(logging.WARNING):
+            in_memory_em.find_similar_executions(_QUERY, org_id=None)
+        assert any("refused (no org)" in r.message for r in caplog.records
+                   if r.levelno >= logging.WARNING), (
+            "without the log, an org-less similarity read is indistinguishable "
+            "from 'nothing was similar'")
+
 
 # ---------------------------------------------------------------------------
 # The org must SURVIVE the round trip, or the write guard refuses everything

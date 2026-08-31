@@ -214,12 +214,17 @@ class TestVectorFailurePaths:
         # The relational row was untouched by the failed vector write.
         assert in_memory_em.get("wf-v1") is None
 
+    # Both of these pass an org DELIBERATELY. The T9 refusal is checked one
+    # line before the embedder, so an org-less call returns [] at the guard and
+    # never reaches the failure each test is named for — which is exactly what
+    # these two did until the org was added.
     def test_find_similar_returns_empty_when_embedder_down(self, in_memory_em):
-        assert in_memory_em.find_similar_executions("anything") == []
+        assert in_memory_em.find_similar_executions("anything", org_id="org-1") == []
 
     def test_find_similar_returns_empty_on_query_failure(self, in_memory_em):
         with _with_fake_vec(in_memory_em):
-            assert in_memory_em.find_similar_executions("anything") == []
+            assert in_memory_em.find_similar_executions(
+                "anything", org_id="org-1") == []
 
     def test_search_similar_delegates(self, in_memory_em):
         # org_id must reach find_similar_executions. Without it that method
@@ -238,10 +243,6 @@ class TestVectorFailurePaths:
         with pytest.raises(TypeError):
             in_memory_em.search_similar("q", top_k=2)
 
-    def test_search_similar_still_fails_closed_on_an_explicit_none(self, in_memory_em):
-        # A caller that genuinely has no org may say so, and gets the same
-        # refusal find_similar_executions gives — no rows, not an exception.
-        assert in_memory_em.search_similar("q", top_k=2, org_id=None) == []
 
     def test_store_embedding_skips_when_embedder_down(self, in_memory_em):
         in_memory_em.store_embedding("text", {"workflow_id": "wf-emb-skip"})
