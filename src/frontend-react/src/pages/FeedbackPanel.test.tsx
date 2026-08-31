@@ -146,7 +146,7 @@ describe('an answer that says the correction did not land', () => {
    warning. ── */
 const NO_TEXT =
   'Nothing was learned because no description was given, though this ' +
-  'submission is recorded against the run — a description can still be sent.'
+  'submission was sent to be recorded against the run — a description can still be sent.'
 
 describe('no_text — Skip carried no words to store', () => {
   async function skipWith(body: unknown) {

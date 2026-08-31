@@ -234,7 +234,7 @@ class TestTheFourOutcomes:
         message = _post(client).json()["message"]
 
         assert "was not recorded" not in message, message
-        assert "recorded against the run" in message, message
+        assert "was sent to be recorded against the run" in message, message
         assert "learning store" in message, message
 
     def test_error_does_not_claim_the_submission_was_not_recorded(

@@ -250,8 +250,8 @@ _FEEDBACK_OUTCOME_MESSAGES = {
     "processed": "Thanks — your feedback helps the system learn.",
     "no_text": (
         "Nothing was learned because no description was given, though this "
-        "submission is recorded against the run — a description can still "
-        "be sent."
+        "submission was sent to be recorded against the run — a description "
+        "can still be sent."
     ),
     "no_record": (
         "We could not find the learning record this belongs to, so nothing "
@@ -267,8 +267,8 @@ _FEEDBACK_OUTCOME_MESSAGES = {
     ),
     "no_org": (
         "This run is not associated with an organisation, so the correction "
-        "could not be filed in the learning store, though this submission is "
-        "recorded against the run."
+        "could not be filed in the learning store, though this submission was "
+        "sent to be recorded against the run."
     ),
     # Deliberately says less than "no_org" above: process_user_feedback's own
     # outer except also answers "error", and it can fire at Step 1 before the
