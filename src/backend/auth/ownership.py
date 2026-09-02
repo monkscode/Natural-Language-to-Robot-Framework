@@ -23,7 +23,8 @@ single existing org's behaviour is unchanged until every token has rotated.
 
 Referenced by: auth/jwt_utils.py (reports), api/history_endpoints.py,
 api/endpoints.py (rerun, feedback); api/dashboard_scope.py and
-api/learning_endpoints.py (is_dashboard_viewer).
+api/learning_endpoints.py (is_dashboard_viewer); api/learning_endpoints.py
+and api/endpoints.py (hint_mutation_verdict).
 Depends on: nothing (pure).
 """
 
@@ -125,16 +126,33 @@ def hint_mutation_verdict(
     hint_author_id: str | None,
     *,
     is_platform_admin: bool,
+    author_tier_applies: bool = False,
 ) -> str:
     """May `caller` change this hint? Returns 'allow' | 'not_found' | 'forbidden'.
 
-    Three tiers, first match wins:
+    Tiers, first match wins:
       1. caller is None       -> allow (AUTH_ENFORCED off; the same permissive
-         dev escape hatch caller_can_access has).
+         dev escape hatch caller_can_access has). The learning API's five
+         mutation routes refuse a token-less caller BEFORE reaching here, so
+         this rule serves the read-shaped callers only — see
+         api/learning_endpoints._require_caller.
       2. platform admin       -> allow, any org.
       3. org admin            -> allow, within their OWN org.
-      4. the author           -> allow, for their own hints, within that org.
+      4. the author           -> allow, for their own hints, within that org,
+         and only when the CALL SITE opts in with author_tier_applies=True.
       5. anyone else          -> refused.
+
+    author_tier_applies defaults to FALSE, so author access must be asked for.
+    The author surface this product actually builds is one control — Retract,
+    in the feedback panel — and the other three mutations are escalations an
+    author was never argued to hold: patch can rewrite `scope` to 'global',
+    which applies the hint to every query in the org, and reactivate resets
+    unused_count, which defeats _auto_disable_hint's never-used retirement and
+    can be looped forever. Defaulting to opt-in means a hint-mutation route
+    added later without thinking about tiers is org-admin-and-above, which is
+    where every mutation started. It is ONE predicate with a parameter rather
+    than two predicates because the org check — the part the owner ruled on —
+    is identical on every route; only this last tier varies.
 
     THREE outcomes, not a boolean, because the honest refusal differs:
 
@@ -167,7 +185,9 @@ def hint_mutation_verdict(
     is_platform_admin (is_validated_admin does the DB re-validation at the
     call site), exactly like caller_can_access.
 
-    Referenced by: api/learning_endpoints.py (the five hint-mutation routes).
+    Referenced by: api/learning_endpoints.py (the five hint-mutation routes;
+    author_tier_applies=True on retract only), api/endpoints.py (the feedback
+    panel's can_retract offer, which is that same retract).
     Depends on: nothing (pure).
     """
     if caller is None:
@@ -183,6 +203,7 @@ def hint_mutation_verdict(
 
     if caller.get("org_role") == "org_admin":
         return "allow"
-    if hint_author_id and hint_author_id == caller.get("user_id"):
+    if (author_tier_applies and hint_author_id
+            and hint_author_id == caller.get("user_id")):
         return "allow"
     return "forbidden"

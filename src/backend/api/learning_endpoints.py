@@ -177,13 +177,52 @@ def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
 def _caller(admin) -> dict | None:
     """The verified token, or None. `admin` is the un-resolved Depends
     sentinel when an endpoint function is called directly in a test, and None
-    when AUTH_ENFORCED is off — both mean "no identified caller", which every
-    predicate here reads as the permissive dev case (mirrors _audit_actor)."""
+    when AUTH_ENFORCED is off — both mean "no identified caller" (mirrors
+    _audit_actor).
+
+    What "no identified caller" then MEANS is the caller's decision, not this
+    function's: the read-shaped predicates take it as the permissive dev case,
+    while every hint MUTATION refuses it outright — see _require_caller, the
+    only caller of this function left."""
     return admin if isinstance(admin, dict) else None
 
 
-def _gate_hint_mutation(row, admin, hint_id: int) -> None:
-    """Refuse a hint mutation the caller has no tier for. Raises, or returns.
+def _require_caller(admin) -> dict:
+    """The verified token, or 401. Every hint MUTATION starts here.
+
+    This route family does NOT honour the AUTH_ENFORCED-off escape hatch, for
+    the reason api/dashboard_scope.py states for the aggregate dashboards: a
+    token-less caller is 401 even in dev, where require_user resolves anonymous
+    to None instead of raising. There is no legitimate anonymous case for
+    changing an org's learning store, and there IS a live exposure — bench mode
+    runs with AUTH_ENFORCED=false and binds port 5000, and every predicate here
+    reads a None caller as the permissive dev case, so anything reaching that
+    port could retract every hint in every org, or inject hints that are then
+    pushed into future generations. The five routes carried
+    Depends(require_admin) until the org/author tiers landed; require_admin
+    never opened for a credential-less request (its own docstring: "admin
+    routes are never open"), and this restores that floor without re-imposing
+    the platform role.
+
+    Raised BEFORE the row is fetched, not inside _gate_hint_mutation's verdict
+    handling: behind the lookup, an anonymous caller would read 404 for an
+    absent hint and 401 for a present one, which is an existence oracle handed
+    to someone who is not authenticated at all — exactly what the 404/403 split
+    below exists to prevent.
+    """
+    caller = _caller(admin)
+    if caller is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return caller
+
+
+def _gate_hint_mutation(row, admin, hint_id: int, *,
+                        author_tier_applies: bool = False) -> bool:
+    """Refuse a hint mutation the caller has no tier for. Raises, or returns
+    whether the caller is a CURATOR of this hint's org (platform admin, or org
+    admin of it) — retract uses that to decide how much of the row to hand
+    back, and it is computed here so is_validated_admin re-validates once per
+    request rather than twice.
 
     Called AFTER the row is fetched and its absence has 404'd, so a hint in
     another org and a hint that does not exist are answered identically — a
@@ -191,11 +230,18 @@ def _gate_hint_mutation(row, admin, hint_id: int) -> None:
     already refuses to do. A hint in the caller's own org that they did not
     write is 403 instead: they may have read its text in their own feedback
     panel, and 404 there would deny something they have seen.
+
+    author_tier_applies is opt-in and off by default (see
+    hint_mutation_verdict): only retract grants the author tier, because
+    Retract is the only author control the product draws. Patch, unflag and
+    reactivate need org_admin or above.
     """
-    caller = _caller(admin)
+    caller = _require_caller(admin)
+    is_platform = is_validated_admin(caller)
     verdict = hint_mutation_verdict(
         caller, row["org_id"], row["created_by_user_id"],
-        is_platform_admin=is_validated_admin(caller),
+        is_platform_admin=is_platform,
+        author_tier_applies=author_tier_applies,
     )
     if verdict == "not_found":
         raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
@@ -204,6 +250,38 @@ def _gate_hint_mutation(row, admin, hint_id: int) -> None:
             status_code=403,
             detail="Only the hint's author or an org admin can change it",
         )
+    return is_dashboard_viewer(caller, is_platform_admin=is_platform)
+
+
+# Every column of nl_feedback_corrections EXCEPT conflict_flagged,
+# conflict_flagged_at and conflict_flag_reason — what a caller who is NOT a
+# curator of this org may see of a hint. Those three are the conflict-detection
+# LLM's critique of the hint, and nl_feedback_engine.get_corrections_for_run
+# states the product decision for the sibling read: "What the LLM thought of it
+# is not exposed here; that is a product decision, not a UI one." A plain org
+# member can reach exactly one mutation (retract, on a hint they wrote), so
+# this is the one response that has to honour it.
+#
+# An allow-list, not `del row["conflict_flagged"]`: the same explicit-projection
+# rule /api/feedback follows, so a column added to this table later does not
+# reach a non-curator by default.
+_NON_CURATOR_HINT_FIELDS = (
+    "id", "feedback_text", "category", "scope", "domain", "url",
+    "original_failure_category", "evidence_count", "applied_count",
+    "success_count", "failure_count", "is_active", "source_workflow_id",
+    "created_at", "last_seen", "created_via", "disabled_at", "anchor_query",
+    "unused_count", "org_id", "created_by_user_id", "created_by_email",
+)
+
+
+def _hint_response(row, *, is_curator: bool) -> dict | None:
+    """The hint as this caller may see it: the whole row for a curator of its
+    org, the explicit non-curator projection for anyone else."""
+    if row is None:
+        return None
+    if is_curator:
+        return _row_to_dict(row)
+    return {k: row[k] for k in _NON_CURATOR_HINT_FIELDS}
 
 
 def _write_hint_audit(
@@ -448,8 +526,11 @@ def create_hint(
     # the org themselves, so refusing tells them nothing they did not supply,
     # and there is no hint whose existence could leak. A plain org_member does
     # not create hints through this route; they contribute through feedback.
-    caller = _caller(admin)
-    if caller is not None and not is_validated_admin(caller):
+    # _require_caller first: this check used to read `if caller is not None`,
+    # so a token-less caller skipped it whole and could inject a hint into ANY
+    # org (see _require_caller for why this family opts out of the dev hatch).
+    caller = _require_caller(admin)
+    if not is_validated_admin(caller):
         if caller.get("org_role") != "org_admin" or org_id != caller.get("org_id"):
             raise HTTPException(
                 status_code=403,
@@ -669,6 +750,11 @@ def patch_hint(
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if request.feedback_text is not None:
         raise HTTPException(
             status_code=400,
@@ -829,6 +915,11 @@ def unflag_hint(
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)
@@ -894,6 +985,11 @@ def retract_hint(
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)
@@ -905,10 +1001,15 @@ def retract_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
-        _gate_hint_mutation(row, admin, hint_id)
+        # The ONE route that grants the Author tier: Retract is the only
+        # author control the product draws (the feedback panel's, offered on
+        # can_retract). patch/unflag/reactivate stay org-admin-and-above.
+        is_curator = _gate_hint_mutation(
+            row, admin, hint_id, author_tier_applies=True)
 
         if row["is_active"] == 0:
-            return {"hint": _row_to_dict(row), "changed": False, "note": "hint was already retracted"}
+            return {"hint": _hint_response(row, is_curator=is_curator),
+                    "changed": False, "note": "hint was already retracted"}
 
         conn.execute(
             "UPDATE nl_feedback_corrections SET is_active=0, disabled_at=? WHERE id = ?",
@@ -923,7 +1024,8 @@ def retract_hint(
         updated = conn.execute(
             "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
         ).fetchone()
-        return {"hint": _row_to_dict(updated), "changed": True}
+        return {"hint": _hint_response(updated, is_curator=is_curator),
+                "changed": True}
     except HTTPException:
         raise
     except Exception as e:
@@ -944,6 +1046,11 @@ def reactivate_hint(
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)

@@ -134,10 +134,33 @@ class TestHintMutationVerdict:
             _caller(org_role="org_admin"), _ORG_A, _AUTHOR,
             is_platform_admin=False) == "allow"
 
-    def test_the_author_may_mutate_their_own_hint(self):
+    def test_the_author_may_mutate_their_own_hint_when_the_tier_applies(self):
         assert hint_mutation_verdict(
             _caller(user_id=_AUTHOR), _ORG_A, _AUTHOR,
+            is_platform_admin=False, author_tier_applies=True) == "allow"
+
+    def test_the_author_tier_is_off_unless_the_call_site_asks_for_it(self):
+        """Default-deny on the last tier. The author surface this product
+        builds is one control — Retract — so retract is the only route that
+        passes author_tier_applies=True. patch could promote a url-scoped hint
+        to 'global' (applied to every query in the org) and reactivate resets
+        unused_count, defeating the never-used retirement; a hint-mutation
+        route added later without thinking about tiers must land on the
+        org-admin floor every mutation started from, not on author access."""
+        assert hint_mutation_verdict(
+            _caller(user_id=_AUTHOR), _ORG_A, _AUTHOR,
+            is_platform_admin=False) == "forbidden"
+
+    def test_the_org_admin_and_platform_tiers_ignore_the_author_flag(self):
+        """Only the LAST tier is parametrised. An org admin's access to their
+        own org's hints, and a platform admin's to any, are the org check the
+        owner ruled on and are identical on all five routes."""
+        assert hint_mutation_verdict(
+            _caller(org_role="org_admin"), _ORG_A, _AUTHOR,
             is_platform_admin=False) == "allow"
+        assert hint_mutation_verdict(
+            _caller(org_id=_ORG_B), _ORG_A, _AUTHOR,
+            is_platform_admin=True) == "allow"
 
     def test_a_non_author_member_in_the_same_org_is_forbidden(self):
         """403, not 404. They may well have read the hint's text in their own
@@ -161,7 +184,7 @@ class TestHintMutationVerdict:
         author exemption — the same rule caller_can_access settled on."""
         assert hint_mutation_verdict(
             _caller(org_id=_ORG_B, user_id=_AUTHOR), _ORG_A, _AUTHOR,
-            is_platform_admin=False) == "not_found"
+            is_platform_admin=False, author_tier_applies=True) == "not_found"
 
     def test_a_caller_with_no_org_fails_closed(self):
         """An org-less token means unscoped reads elsewhere; here it must mean
@@ -180,7 +203,11 @@ class TestHintMutationVerdict:
     def test_an_unattributed_hint_is_not_everyones(self):
         """The author check must not match None against None. Without the
         truthiness guard, every org member with no user_id claim would be the
-        author of every hint that has no author."""
+        author of every hint that has no author.
+
+        Asserted with the author tier ON: with it off the answer is
+        "forbidden" for a second, unrelated reason, and the truthiness guard
+        would be untested."""
         assert hint_mutation_verdict(
             _caller(user_id=None), _ORG_A, None,
-            is_platform_admin=False) == "forbidden"
+            is_platform_admin=False, author_tier_applies=True) == "forbidden"

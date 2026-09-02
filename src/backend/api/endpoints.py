@@ -613,6 +613,13 @@ async def get_run_corrections(run_id: str, response: Response,
                 hint_mutation_verdict(
                     user, c.get("org_id"), c.get("created_by_user_id"),
                     is_platform_admin=admin,
+                    # The Author tier is opt-in per call site and this is the
+                    # one that wants it: the panel's Retract control is exactly
+                    # the surface that tier exists for, and POST /hints/{id}/
+                    # retract asks for it on the same terms. patch, unflag and
+                    # reactivate do not, so the flag must be named here rather
+                    # than assumed.
+                    author_tier_applies=True,
                 ) == "allow"
                 and bool(c.get("is_active"))
             ),

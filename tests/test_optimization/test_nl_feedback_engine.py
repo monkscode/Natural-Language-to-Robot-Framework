@@ -1070,7 +1070,17 @@ class TestAdminTriageWarning:
                    side_effect=RuntimeError("db-not-needed")), \
              caplog.at_level(logging.WARNING, logger="src.backend.api.learning_endpoints"):
             with pytest.raises(RuntimeError, match="db-not-needed"):
-                create_hint(request, fb=fb)
+                # create_hint refuses a caller it cannot identify
+                # (learning_endpoints._require_caller): this route family opts
+                # out of the AUTH_ENFORCED-off escape hatch. An org_admin of
+                # the hint's own org is the cheapest identity that gets past
+                # it — role != "admin" short-circuits is_validated_admin
+                # before it reads the users table, so this stays DB-free.
+                create_hint(request, fb=fb, admin={
+                    "user_id": "00000000-0000-0000-0000-0000000000aa",
+                    "email": "test-admin", "role": "user",
+                    "org_id": "org-A", "org_role": "org_admin",
+                })
 
         warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert any("Admin triage failed" in m for m in warning_msgs), (
