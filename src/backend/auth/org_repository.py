@@ -172,8 +172,18 @@ class OrgRepository:
         and this backfill must never abort partway and leave later rows
         unprocessed — an ambiguous org is simply left owner_user_id NULL.
 
-        The primary pass carries an "already owned" guard too, even though
-        the task-2 brief gives it without one: run_migration_once is
+        The primary pass carries TWO guards the task-2 brief's SQL has
+        neither of, and they cover different shapes.
+
+        The first is per-user ambiguity: a user who is the sole member of two
+        still-unclaimed personal orgs matches both rows of this one statement.
+        The "already owned" NOT EXISTS cannot see a row the same statement is
+        updating (it reads the statement snapshot), so both rows take the same
+        owner and uq_org_owner_personal raises. Resolved the way the fallback
+        resolves a duplicate name: claim NEITHER. Picking one arbitrarily would
+        decide which org's learning history the user reclaims.
+
+        The second is "already owned": run_migration_once is
         advisory-lock-gated per migration NAME, not per row, and this table
         has a second writer — ensure_personal_org's own opportunistic stamp
         (step 1) — that a concurrent instance's live login traffic can run at
@@ -204,6 +214,15 @@ class OrgRepository:
                 "WHERE o.kind = 'personal' AND o.owner_user_id IS NULL "
                 "AND m.org_id = o.id "
                 "AND (SELECT count(*) FROM org_members x WHERE x.org_id = o.id) = 1 "
+                # ...and that member is in exactly ONE unclaimed personal org.
+                # Without this, a user in two of them matches BOTH rows: the
+                # NOT EXISTS below reads the statement snapshot, so neither row
+                # sees the other being set, both take the same owner, and
+                # uq_org_owner_personal aborts the whole migration.
+                "AND (SELECT count(*) FROM org_members y "
+                "     JOIN organizations o4 ON o4.id = y.org_id "
+                "     WHERE y.user_id = m.user_id AND o4.kind = 'personal' "
+                "       AND o4.owner_user_id IS NULL) = 1 "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM organizations o2 "
                 "    WHERE o2.kind = 'personal' AND o2.owner_user_id = m.user_id"

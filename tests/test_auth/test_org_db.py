@@ -159,3 +159,80 @@ def test_owner_backfill_handles_sole_member_email_fallback_and_duplicate_names()
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([email_a, email_b, email_c, email_d],))
             conn.commit()
+
+
+def test_owner_backfill_survives_a_user_in_two_unclaimed_personal_orgs():
+    """The primary pass must not abort when ONE user is the sole member of TWO
+    still-unclaimed personal orgs.
+
+    The `NOT EXISTS (... owner_user_id = m.user_id)` guard is evaluated against
+    the statement's snapshot, so rows updated by the SAME statement are
+    invisible to it: both orgs pass the guard, both are set to the same owner,
+    and uq_org_owner_personal raises UniqueViolation. That aborts the whole
+    migration — every other row in the statement rolls back with it, and
+    because main.py wraps init_org_db() in one try/except with
+    init_invitations_db(), the failure surfaces as "auth unavailable until
+    Postgres is reachable", which names the wrong cause.
+
+    Ambiguity is resolved the same way the fallback resolves a duplicate name:
+    claim NEITHER. Picking one arbitrarily would decide which org's learning
+    history the user reclaims, which is not a coin-flip decision.
+
+    The well-formed user in the same run proves the abort is gone rather than
+    merely relocated — before the fix their org is rolled back too.
+    """
+    users = UserRepository()
+    email_x = f"dbl-{uuid.uuid4().hex[:8]}@x.com"
+    email_y = f"one-{uuid.uuid4().hex[:8]}@x.com"
+    org_x1 = org_x2 = org_y = None
+    try:
+        user_x = users.create_user(email_x, "password123", "X")
+        user_y = users.create_user(email_y, "password123", "Y")
+
+        with auth_db.get_pool().connection() as conn:
+            def _personal(name: str) -> str:
+                return conn.execute(
+                    "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                    "RETURNING id", (name,),
+                ).fetchone()["id"]
+
+            # user_x: sole member of two unclaimed personal orgs (a legacy
+            # pre-single-active-org shape; collapse_all_to_single_org exists
+            # because double membership happened).
+            org_x1 = _personal(f"Double One {uuid.uuid4().hex[:8]}")
+            org_x2 = _personal(f"Double Two {uuid.uuid4().hex[:8]}")
+            # user_y: the well-formed case, in the SAME migration run.
+            org_y = _personal(f"Single {uuid.uuid4().hex[:8]}")
+            for oid, uid in ((org_x1, user_x["id"]), (org_x2, user_x["id"]),
+                             (org_y, user_y["id"])):
+                conn.execute(
+                    "INSERT INTO org_members (org_id, user_id, org_role) "
+                    "VALUES (%s, %s, 'org_admin')", (oid, str(uid)),
+                )
+            conn.execute(
+                "DELETE FROM data_migrations WHERE name = 'personal_org_owner_backfill'"
+            )
+            conn.commit()
+
+        init_org_db()  # must not raise
+
+        with auth_db.get_pool().connection() as conn:
+            owners = {
+                oid: conn.execute(
+                    "SELECT owner_user_id FROM organizations WHERE id = %s", (oid,)
+                ).fetchone()["owner_user_id"]
+                for oid in (org_x1, org_x2, org_y)
+            }
+        assert owners[org_x1] is None, "ambiguous double membership must stay NULL"
+        assert owners[org_x2] is None, "ambiguous double membership must stay NULL"
+        assert str(owners[org_y]) == str(user_y["id"]), (
+            "the well-formed org in the same run must still be claimed"
+        )
+    finally:
+        with auth_db.get_pool().connection() as conn:
+            for oid in (org_x1, org_x2, org_y):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([email_x, email_y],))
+            conn.commit()
