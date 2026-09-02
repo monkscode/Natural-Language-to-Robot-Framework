@@ -49,18 +49,48 @@ def test_stats_remains_platform_admin_only(dash_client):
     assert r.status_code == 403
 
 
-def test_mutation_still_platform_admin_only(dash_client):
+def _create_body(org_id, text="x"):
+    return {"feedback_text": text, "anchor_query": "login as admin",
+            "scope": "global", "actor": "a@e.com", "org_id": org_id}
+
+
+def test_org_admin_may_create_a_hint_in_their_own_org(dash_client):
+    """Hint creation is no longer platform-only. An org admin curates their
+    own org's hints — that is the point of the org-admin tier."""
     r = dash_client.post(
-        "/api/learning/hints",
-        json={
-            "feedback_text": "x",
-            "anchor_query": "login as admin",
-            "scope": "global",
-            "actor": "a@e.com",
-        },
+        "/api/learning/hints", json=_create_body(dash_client.org_a),
+        headers={"Authorization": f"Bearer {dash_client.org_a_admin_token}"},
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_org_admin_cannot_create_a_hint_in_another_org(dash_client):
+    """403, not 404: the caller named the org themselves, so refusing tells
+    them nothing they did not supply, and no hint exists whose existence
+    could leak."""
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_b),
         headers={"Authorization": f"Bearer {dash_client.org_a_admin_token}"},
     )
     assert r.status_code == 403
+
+
+def test_a_plain_member_cannot_create_a_hint_at_all(dash_client):
+    """A plain org_member contributes through feedback, never through this
+    route — they are not a curator of the org's hints."""
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_a),
+        headers={"Authorization": f"Bearer {dash_client.member_token}"},
+    )
+    assert r.status_code == 403
+
+
+def test_platform_admin_may_create_a_hint_in_any_org(dash_client):
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_b, "cross-org create"),
+        headers={"Authorization": f"Bearer {dash_client.platform_admin_token}"},
+    )
+    assert r.status_code == 201, r.text
 
 
 def test_org_admin_sees_only_own_org_runs(dash_client):
@@ -93,18 +123,16 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
     assert r.status_code == 404
 
 
-# POST /hints is covered by test_mutation_still_platform_admin_only above; the
-# remaining mutation/curation routes share the identical Depends(require_admin)
-# guard.  Path/body ids need not exist — require_admin 403s before any lookup.
+# The per-hint mutations moved to the three-tier rule and are covered by the
+# matrix below.  These three stay platform-only: they are LLM batch sweeps
+# across every org, not per-hint actions, so there is no org whose admin they
+# could belong to.  They share the identical Depends(require_admin) guard, and
+# path/body ids need not exist — require_admin 403s before any lookup.
 @pytest.mark.parametrize(
     "method, path, body",
     [
-        ("patch", "/api/learning/hints/1", {"actor": "a@e.com"}),
-        ("post", "/api/learning/hints/1/unflag", {"actor": "a@e.com"}),
         # /promote was removed outright (cross-org sharing disabled) — its
         # 404-for-everyone behaviour is pinned by test_learning_promote.py.
-        ("post", "/api/learning/hints/1/retract", {"actor": "a@e.com"}),
-        ("post", "/api/learning/hints/1/reactivate", {"actor": "a@e.com"}),
         ("post", "/api/learning/review-hints/start", None),
         ("patch", "/api/learning/review-hints/sessions/1/recommendations/1",
          {"admin_decision": "approved"}),
@@ -112,7 +140,7 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
     ],
 )
 def test_remaining_mutations_platform_admin_only(dash_client, method, path, body):
-    """Every remaining learning mutation route 403s a non-platform-admin (org-admin token)."""
+    """Every cross-org curation route 403s a non-platform-admin (org-admin token)."""
     kwargs = {"headers": {"Authorization": f"Bearer {dash_client.org_a_admin_token}"}}
     if body is not None:
         kwargs["json"] = body

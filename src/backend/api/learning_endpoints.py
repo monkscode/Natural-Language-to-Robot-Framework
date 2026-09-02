@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import is_dashboard_viewer
+from src.backend.auth.ownership import is_dashboard_viewer, hint_mutation_verdict
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization import pg_compat
 from src.backend.core.config import settings
@@ -172,6 +172,38 @@ def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
     if not isinstance(admin, dict):
         admin = None
     return (admin or {}).get("email") or (request_actor or "").strip() or "admin"
+
+
+def _caller(admin) -> dict | None:
+    """The verified token, or None. `admin` is the un-resolved Depends
+    sentinel when an endpoint function is called directly in a test, and None
+    when AUTH_ENFORCED is off — both mean "no identified caller", which every
+    predicate here reads as the permissive dev case (mirrors _audit_actor)."""
+    return admin if isinstance(admin, dict) else None
+
+
+def _gate_hint_mutation(row, admin, hint_id: int) -> None:
+    """Refuse a hint mutation the caller has no tier for. Raises, or returns.
+
+    Called AFTER the row is fetched and its absence has 404'd, so a hint in
+    another org and a hint that does not exist are answered identically — a
+    403 would confirm the hint exists, which get_hint's own cross-org 404
+    already refuses to do. A hint in the caller's own org that they did not
+    write is 403 instead: they may have read its text in their own feedback
+    panel, and 404 there would deny something they have seen.
+    """
+    caller = _caller(admin)
+    verdict = hint_mutation_verdict(
+        caller, row["org_id"], row["created_by_user_id"],
+        is_platform_admin=is_validated_admin(caller),
+    )
+    if verdict == "not_found":
+        raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+    if verdict == "forbidden":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the hint's author or an org admin can change it",
+        )
 
 
 def _write_hint_audit(
@@ -401,7 +433,6 @@ def create_hint(
     request: HintCreateRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -411,6 +442,19 @@ def create_hint(
     org_id = request.org_id.strip()
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id is required")
+    # create has no hint row, so it takes the sibling rule rather than
+    # _gate_hint_mutation: a platform admin may name any org; anyone else must
+    # be an org_admin naming their OWN org. 403, not 404 — the caller named
+    # the org themselves, so refusing tells them nothing they did not supply,
+    # and there is no hint whose existence could leak. A plain org_member does
+    # not create hints through this route; they contribute through feedback.
+    caller = _caller(admin)
+    if caller is not None and not is_validated_admin(caller):
+        if caller.get("org_role") != "org_admin" or org_id != caller.get("org_id"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only a platform admin can create a hint in another org",
+            )
     actor = _audit_actor(admin, request.actor)
     # The author of an admin-created hint is the admin who created it, keyed
     # the same way the engine keys a user-created one. `actor` is already the
@@ -624,7 +668,6 @@ def patch_hint(
     request: HintPatchRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
     if request.feedback_text is not None:
         raise HTTPException(
@@ -642,6 +685,7 @@ def patch_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         row_dict = _row_to_dict(row)
         updates: dict = {}
@@ -784,7 +828,6 @@ def unflag_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -797,6 +840,7 @@ def unflag_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         if row["conflict_flagged"] == 0:
             return {"hint": _row_to_dict(row), "changed": False, "note": "hint was not flagged"}
@@ -849,7 +893,6 @@ def retract_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -862,6 +905,7 @@ def retract_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         if row["is_active"] == 0:
             return {"hint": _row_to_dict(row), "changed": False, "note": "hint was already retracted"}
@@ -899,7 +943,6 @@ def reactivate_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
@@ -912,6 +955,7 @@ def reactivate_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         if row["is_active"] == 1:
             return {"hint": _row_to_dict(row), "changed": False, "note": "hint was already active"}

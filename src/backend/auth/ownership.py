@@ -117,3 +117,73 @@ def is_dashboard_viewer(caller: dict | None, *, is_platform_admin: bool) -> bool
     if caller is None or is_platform_admin:
         return True
     return caller.get("org_role") == "org_admin" and caller.get("org_id") is not None
+
+
+def hint_mutation_verdict(
+    caller: dict | None,
+    hint_org_id: str | None,
+    hint_author_id: str | None,
+    *,
+    is_platform_admin: bool,
+) -> str:
+    """May `caller` change this hint? Returns 'allow' | 'not_found' | 'forbidden'.
+
+    Three tiers, first match wins:
+      1. caller is None       -> allow (AUTH_ENFORCED off; the same permissive
+         dev escape hatch caller_can_access has).
+      2. platform admin       -> allow, any org.
+      3. org admin            -> allow, within their OWN org.
+      4. the author           -> allow, for their own hints, within that org.
+      5. anyone else          -> refused.
+
+    THREE outcomes, not a boolean, because the honest refusal differs:
+
+      * A hint in ANOTHER org must read as 'not_found'. get_hint already 404s
+        a cross-org read, so answering 403 here would confirm the hint exists
+        and open an existence-leak asymmetry between reading and mutating.
+      * A hint in the caller's OWN org that they did not write must read as
+        'forbidden'. They may well have seen its text in their own feedback
+        panel — reinforcement requires byte-identical text, so a hint a user
+        sees is one they typed themselves — and 404 there would be a lie
+        about something they have read.
+
+    There is no "the author keeps it whatever org they are in" rule, for the
+    same reason caller_can_access dropped one: nothing in a token distinguishes
+    an internal transfer from an offboarding. A hint belongs to the org it was
+    written in, so an author whose token now names a different org gets the
+    cross-org answer.
+
+    Fails closed on every missing input. A caller with no org_id claim gets
+    'not_found' rather than the legacy owner-matching fallback
+    caller_can_access grants: a hint has no per-user owner in the pre-tenancy
+    sense, so there is nothing to fall back to. A hint with a NULL org_id is
+    unreachable to everyone but a platform admin — two Nones must never
+    satisfy the org check. And the author comparison is truthiness-guarded, or
+    every member with no user_id claim would be the author of every
+    unattributed hint.
+
+    Pure function: no DB, no request. The caller passes the decoded JWT dict,
+    the hint's stored org_id and created_by_user_id, and a pre-computed
+    is_platform_admin (is_validated_admin does the DB re-validation at the
+    call site), exactly like caller_can_access.
+
+    Referenced by: api/learning_endpoints.py (the five hint-mutation routes),
+    api/endpoints.py (can_retract on a run's corrections).
+    Depends on: nothing (pure).
+    """
+    if caller is None:
+        return "allow"
+    if is_platform_admin:
+        return "allow"
+
+    caller_org = caller.get("org_id")
+    if not caller_org:
+        return "not_found"
+    if hint_org_id != caller_org:
+        return "not_found"
+
+    if caller.get("org_role") == "org_admin":
+        return "allow"
+    if hint_author_id and hint_author_id == caller.get("user_id"):
+        return "allow"
+    return "forbidden"
