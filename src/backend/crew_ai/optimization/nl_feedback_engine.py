@@ -592,16 +592,26 @@ class NLFeedbackEngine(LearningEngine):
                     existing["evidence_count"] + 1,
                 )
             else:
+                # created_by_* are written HERE and nowhere else. The
+                # reinforce branch above is a SELECT-then-UPDATE that names
+                # its columns explicitly, so a later submission of the same
+                # text — by anyone — cannot take the authorship of the row it
+                # reinforces. Both are NULL when no token identified the
+                # submitter (AUTH_ENFORCED off): the Author permission tier
+                # must never match on a placeholder like "unknown".
                 cursor = self._em._writer_conn.execute(
                     "INSERT INTO nl_feedback_corrections "
                     "(feedback_text, category, scope, domain, url, "
                     " original_failure_category, evidence_count, anchor_query, "
-                    " source_workflow_id, org_id, created_at, last_seen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) RETURNING id",
+                    " source_workflow_id, org_id, created_at, last_seen, "
+                    " created_by_user_id, created_by_email) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                     (
                         feedback_text.strip(), category, scope,
                         domain, url, failure_category,
                         anchor_query, workflow_id, record.org_id, now, now,
+                        feedback_insight.get("actor_user_id"),
+                        feedback_insight.get("actor"),
                     ),
                 )
                 new_hint_id = cursor.fetchone()["id"]

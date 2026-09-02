@@ -1112,6 +1112,7 @@ class FeedbackLoop:
         feedback_text: str,
         feedback_type: str,
         actor: str | None = None,
+        actor_user_id: str | None = None,
     ) -> dict:
         """
         Process user NL feedback from the feedback UI.
@@ -1131,8 +1132,14 @@ class FeedbackLoop:
             feedback_text: User's natural language feedback.
             feedback_type: "close_enough" | "completely_wrong"
             actor: Email of the authenticated submitter, recorded as the
-                hint_audit actor when this feedback implicitly unflags a hint.
+                hint_audit actor when this feedback implicitly unflags a hint,
+                and stored as a created hint's created_by_email.
                 None (auth disabled) falls back to "unknown" at the audit write.
+            actor_user_id: Stable id of the authenticated submitter, stored as
+                a created hint's created_by_user_id — the key the Author
+                permission tier compares against the caller's token. Stays
+                None when auth is disabled: it is an identity, not a label, so
+                it never falls back to a placeholder the way `actor` does.
 
         Returns:
             Triage result dict (category, confidence, taxonomy_code) plus an
@@ -1270,6 +1277,10 @@ class FeedbackLoop:
                 triage["feedback_text"] = feedback_text
                 # who submitted — recorded by the NL engine's implicit-unflag audit row
                 triage["actor"] = actor
+                # ...and their stable id, which the NL engine stores as the
+                # new hint's created_by_user_id. Same carrier as `actor`
+                # because ExecutionRecord has no user_id to hang it on.
+                triage["actor_user_id"] = actor_user_id
 
                 for engine in (
                     self.structural_engine, self.keyword_engine, self.anti_pattern_engine,

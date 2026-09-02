@@ -236,12 +236,22 @@ class _DashClient:
     """TestClient wrapper: exposes org tokens, seed helper, and org constants."""
 
     def __init__(self, client, org_a: str, org_b: str,
-                 org_a_admin_token: str, member_token: str, dsn: str):
+                 org_a_admin_token: str, member_token: str, dsn: str,
+                 platform_admin_token: str = "",
+                 org_b_admin_token: str = ""):
         self._client = client
         self.org_a = org_a
         self.org_b = org_b
         self.org_a_admin_token = org_a_admin_token
         self.member_token = member_token
+        # A hint's author is compared by user id, so tests that exercise the
+        # Author permission tier need the ids behind these tokens, not just
+        # the tokens.
+        self.org_a_admin_uid = _DASH_ORG_A_ADMIN_UID
+        self.member_uid = _DASH_MEMBER_UID
+        self.platform_admin_uid = _DASH_PLATFORM_ADMIN_UID
+        self.platform_admin_token = platform_admin_token
+        self.org_b_admin_token = org_b_admin_token
         self._dsn = dsn
 
     def seed_run(self, org_id: str, workflow_id: str | None = None,
@@ -288,7 +298,9 @@ class _DashClient:
         finally:
             conn.close()
 
-    def seed_hint(self, org_id: str, text: str) -> int:
+    def seed_hint(self, org_id: str, text: str,
+                  author_user_id: str | None = None,
+                  author_email: str | None = None) -> int:
         """Insert a hint scoped to *org_id* and return its id.
 
         Uses INSERT ... RETURNING id (idiomatic Postgres; avoids the fragile
@@ -305,10 +317,11 @@ class _DashClient:
             row = conn.execute(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, evidence_count, anchor_query, "
-                " is_active, conflict_flagged, org_id, created_at, last_seen) "
-                "VALUES (?, 'test', 'global', 1, 'seed anchor', 1, 0, ?, ?, ?) "
+                " is_active, conflict_flagged, org_id, created_at, last_seen, "
+                " created_by_user_id, created_by_email) "
+                "VALUES (?, 'test', 'global', 1, 'seed anchor', 1, 0, ?, ?, ?, ?, ?) "
                 "RETURNING id",
-                (text, org_id, now, now),
+                (text, org_id, now, now, author_user_id, author_email),
             ).fetchone()
             conn.commit()
             return row[0]
@@ -326,8 +339,14 @@ def dash_client(learning_api_isolated, api_pg_em):
     Provides:
     - org_a / org_b  — org-id strings for seeding
     - org_a_admin_token — role="user", org_role="org_admin", org_id=org_a
+    - org_b_admin_token — same, in org_b: the cross-org caller
     - member_token      — role="user", org_role=None, org_id=org_a (no dashboard access)
-    - seed_hint(org_id, text) — inserts a hint with RETURNING id
+    - platform_admin_token — role="admin" (the only token _smart_get_by_id
+      below re-validates as a platform admin)
+    - org_a_admin_uid / member_uid / platform_admin_uid — the ids behind those
+      tokens, for tests that assert on a hint's author
+    - seed_hint(org_id, text, author_user_id=, author_email=) — inserts a hint
+      with RETURNING id, optionally stamped with an author
 
     Re-patches _admin_repo.get_by_id so require_admin actually rejects
     non-platform-admin tokens (the autouse _auth_not_enforced fixture makes it
@@ -358,6 +377,24 @@ def dash_client(learning_api_isolated, api_pg_em):
         "org_id": _DASH_ORG_A,
         "org_role": None,
     })
+    platform_admin_token = create_access_token({
+        "id": _DASH_PLATFORM_ADMIN_UID,
+        "email": "admin@test.local",
+        "role": "admin",
+        "display_name": "Platform Admin",
+        "org_id": _DASH_ORG_A,
+        "org_role": "org_admin",
+    })
+    # org-B's admin: the cross-org caller. Same shape as org-A's admin, so a
+    # refusal can only come from the org check and never from the role.
+    org_b_admin_token = create_access_token({
+        "id": "00000000-0000-0000-0000-000000000011",
+        "email": "org-b-admin@test.local",
+        "role": "user",
+        "display_name": "Org B Admin",
+        "org_id": _DASH_ORG_B,
+        "org_role": "org_admin",
+    })
 
     def _smart_get_by_id(uid: str):
         """Return a DB-row-like dict based on whether the UID is a platform admin."""
@@ -375,7 +412,8 @@ def dash_client(learning_api_isolated, api_pg_em):
     with _patch.object(jwt_utils._admin_repo, "get_by_id", side_effect=_smart_get_by_id):
         with TestClient(app) as client:
             yield _DashClient(client, _DASH_ORG_A, _DASH_ORG_B,
-                              org_a_admin_token, member_token, dsn)
+                              org_a_admin_token, member_token, dsn,
+                              platform_admin_token, org_b_admin_token)
 
 
 @pytest.fixture

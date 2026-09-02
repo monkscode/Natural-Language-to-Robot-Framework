@@ -456,6 +456,12 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # reachable only with AUTH_ENFORCED off (local dev) — an unidentified human,
     # deliberately not a machine actor like 'system'.
     actor = (user or {}).get("email") or "unknown"
+    # The author's STABLE key, threaded beside the email. It is deliberately
+    # left None rather than defaulted: "unknown" is a legitimate audit actor
+    # string, but the Author permission tier compares ids for equality, so a
+    # placeholder id would make every unidentified submitter each other's
+    # author.
+    actor_user_id = (user or {}).get("user_id") or None
 
     try:
         # process_user_feedback runs a blocking conflict-detection LLM call
@@ -465,6 +471,7 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
             feedback_loop.process_user_feedback,
             feedback_target_id, text, request.feedback_type,
             actor=actor,
+            actor_user_id=actor_user_id,
         )
 
         # An outcome this endpoint cannot describe is not evidence that the

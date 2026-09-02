@@ -22,7 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # The version of the consolidated baseline (PG_SCHEMA_DDL). It is recorded once
 # so that every migration newer than the baseline is applied on top — including
@@ -225,7 +225,9 @@ PG_SCHEMA_DDL: tuple[str, ...] = (
         disabled_at               TEXT,
         anchor_query              TEXT,
         unused_count              INTEGER NOT NULL DEFAULT 0,
-        org_id                    TEXT
+        org_id                    TEXT,
+        created_by_user_id        TEXT,
+        created_by_email          TEXT
     )
     """,
     # Dedup uniqueness lives in the v18 migration (org-aware, mirrors the
@@ -1004,6 +1006,32 @@ PG_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
          # Follows the v17 pattern: baseline DDL carries the column for fresh
          # installs, this ADD COLUMN carries it for existing databases.
          "ALTER TABLE hint_review_pages ADD COLUMN IF NOT EXISTS org_id TEXT",
+     )),
+    (23, "A hint carries its author (created_by_user_id + created_by_email)",
+     (
+         # The Author permission tier needs to know whose hint this is: an
+         # author may retract their own. The row recorded WHERE it was made
+         # (org_id, source_workflow_id) but never WHO made it.
+         #
+         # Two columns, following the audit_log precedent which already
+         # carries both actor_user_id and actor_email for this same reason:
+         # the id is the stable key while the user exists (it survives an
+         # email change) and is what the tier compares against the token; the
+         # email is a denormalised snapshot that outlives the user, so the
+         # hint keeps naming its creator with no users row left to join to.
+         #
+         # No FK to users, deliberately: deleting a user must neither cascade
+         # into the org's learning store nor be blocked by it.
+         #
+         # Existing hints stay NULL and render as "unknown". They cannot be
+         # attributed retroactively — measured 2026-09-02 on live nlrf: 36/36
+         # carry a source_workflow_id, 0/36 resolve to a test_runs row, 0/36
+         # resolve to a user, and hint_audit holds no action='create' row
+         # older than the audit that shipped after them.
+         "ALTER TABLE nl_feedback_corrections "
+         "ADD COLUMN IF NOT EXISTS created_by_user_id TEXT",
+         "ALTER TABLE nl_feedback_corrections "
+         "ADD COLUMN IF NOT EXISTS created_by_email TEXT",
      )),
 )
 

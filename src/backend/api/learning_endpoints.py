@@ -164,7 +164,7 @@ def _now() -> str:
 
 def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
     """Audit identity. ALWAYS the authenticated user's email when a token is
-    present — in the live app require_admin guards this router, so a verified
+    present — in the live app require_user guards these routes, so a verified
     token always exists and the client-supplied actor is never trusted. The
     request_actor fallback only engages in tests (bare-router apps without a
     token, or endpoint functions called directly — where `admin` is the
@@ -412,6 +412,12 @@ def create_hint(
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id is required")
     actor = _audit_actor(admin, request.actor)
+    # The author of an admin-created hint is the admin who created it, keyed
+    # the same way the engine keys a user-created one. `actor` is already the
+    # verified token email (or a test fallback); the id has no fallback on
+    # purpose — the Author tier compares ids for equality, so a hint created
+    # without a token stays authorless rather than claiming a placeholder.
+    creator_user_id = (admin or {}).get("user_id") if isinstance(admin, dict) else None
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
@@ -538,11 +544,12 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via, org_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?)",
+                " created_via, org_id, created_by_user_id, created_by_email) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?, ?, ?)",
                 (
                     text, category, request.scope, domain, url,
                     request.original_failure_category, anchor, now, now, org_id,
+                    creator_user_id, actor,
                 ),
             )
         except sqlite3.IntegrityError:
