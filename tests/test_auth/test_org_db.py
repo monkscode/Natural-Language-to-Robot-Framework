@@ -5,12 +5,14 @@ Skipped when Postgres is unreachable. Uses the auth_test isolated schema.
 
 import uuid
 
+import psycopg
 import pytest
 
 from src.backend.auth import db as auth_db
 from src.backend.auth.org_db import init_org_db
 from src.backend.auth.org_repository import OrgRepository
 from src.backend.auth.repository import UserRepository
+from tests.test_auth.conftest import ensure_stub_learning_tables
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
@@ -235,4 +237,141 @@ def test_owner_backfill_survives_a_user_in_two_unclaimed_personal_orgs():
                     conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([email_x, email_y],))
+            conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Task T3 — org deletion is structurally impossible while learning rows name it
+#
+# T1 removed the only DELETE FROM organizations in the codebase. This trigger
+# stops a future one from returning. It is a guarded BEFORE DELETE trigger
+# rather than a real foreign key: organizations.id is uuid while every
+# learning org_id is text, and making an FK satisfiable would mean rewriting
+# 152 synthetic org ids across 31 files — in the very tests that guard tenancy
+# isolation, where a mechanical rewrite is how a guarantee quietly weakens.
+# ---------------------------------------------------------------------------
+
+def _make_personal_org(conn, name: str) -> str:
+    return conn.execute(
+        "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') RETURNING id",
+        (name,),
+    ).fetchone()["id"]
+
+
+def test_deleting_an_org_that_owns_learning_rows_is_refused():
+    """Test 14a. The whole point of the guard: an org naming live learning
+    rows cannot be deleted, so those rows can never be stranded again."""
+    org_id = None
+    try:
+        init_org_db()
+        with auth_db.get_pool().connection() as conn:
+            ensure_stub_learning_tables(conn)
+            org_id = _make_personal_org(conn, f"Referenced {uuid.uuid4().hex[:8]}")
+            conn.execute(
+                "INSERT INTO nl_feedback_corrections (org_id) VALUES (%s)", (str(org_id),)
+            )
+            conn.commit()
+
+        with pytest.raises(psycopg.errors.ForeignKeyViolation) as exc:
+            with auth_db.get_pool().connection() as conn:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+                conn.commit()
+        # The message must name the table, or an operator cannot act on it.
+        assert "nl_feedback_corrections" in str(exc.value)
+    finally:
+        with auth_db.get_pool().connection() as conn:
+            if org_id:
+                conn.execute(
+                    "DELETE FROM nl_feedback_corrections WHERE org_id = %s", (str(org_id),)
+                )
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.commit()
+
+
+def test_deleting_an_unreferenced_org_still_works():
+    """Test 14b — the known-negative. Without this, a trigger that refused
+    EVERY delete would pass 14a and look correct."""
+    with auth_db.get_pool().connection() as conn:
+        init_org_db()
+        ensure_stub_learning_tables(conn)
+        org_id = _make_personal_org(conn, f"Unreferenced {uuid.uuid4().hex[:8]}")
+        conn.commit()
+        conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+        conn.commit()
+        gone = conn.execute(
+            "SELECT 1 FROM organizations WHERE id = %s", (org_id,)
+        ).fetchone()
+    assert gone is None
+
+
+def test_trigger_degrades_when_a_learning_table_is_absent():
+    """Test 14c. Learning tables live in per-test schemas while organizations
+    lives wherever the session points; the to_regclass guard is what stops the
+    trigger raising "relation does not exist" for a table this search_path
+    cannot see. anti_patterns is in the trigger's list and is created by
+    neither this suite's conftest nor its stub helper, so it is the absent
+    case — asserted, not assumed, because the assertion is only meaningful
+    while it stays absent."""
+    org_id = None
+    try:
+        init_org_db()
+        with auth_db.get_pool().connection() as conn:
+            ensure_stub_learning_tables(conn)
+            absent = conn.execute(
+                "SELECT to_regclass('anti_patterns') AS t"
+            ).fetchone()["t"]
+            assert absent is None, (
+                "anti_patterns became visible to this schema — pick another "
+                "table from the trigger's list, or this test proves nothing"
+            )
+            org_id = _make_personal_org(conn, f"Degrade {uuid.uuid4().hex[:8]}")
+            conn.commit()
+            conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.commit()
+            gone = conn.execute(
+                "SELECT 1 FROM organizations WHERE id = %s", (org_id,)
+            ).fetchone()
+        assert gone is None
+        org_id = None
+    finally:
+        if org_id:
+            with auth_db.get_pool().connection() as conn:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+                conn.commit()
+
+
+def test_audit_log_neither_blocks_a_delete_nor_is_repointed():
+    """Test 15. audit_log is deliberately NOT in the trigger's list: audit
+    rows must outlive the org they describe — that is the whole point of the
+    actor/org snapshot. So an audit row naming an org must not block that
+    org's deletion, and must still name it afterwards."""
+    from src.backend.core.audit_log import init_audit_log
+
+    org_id = None
+    audit_id = None
+    try:
+        init_org_db()
+        init_audit_log()
+        with auth_db.get_pool().connection() as conn:
+            org_id = _make_personal_org(conn, f"Audited {uuid.uuid4().hex[:8]}")
+            audit_id = conn.execute(
+                "INSERT INTO audit_log (actor_email, org_id, method, path, status_code) "
+                "VALUES ('a@e.com', %s, 'POST', '/x', 200) RETURNING id",
+                (str(org_id),),
+            ).fetchone()["id"]
+            conn.commit()
+            conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.commit()
+            row = conn.execute(
+                "SELECT org_id FROM audit_log WHERE id = %s", (audit_id,)
+            ).fetchone()
+        assert row is not None, "the audit row must outlive the org"
+        assert row["org_id"] == str(org_id), "and must still name it"
+        org_id = None
+    finally:
+        with auth_db.get_pool().connection() as conn:
+            if audit_id:
+                conn.execute("DELETE FROM audit_log WHERE id = %s", (audit_id,))
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
             conn.commit()

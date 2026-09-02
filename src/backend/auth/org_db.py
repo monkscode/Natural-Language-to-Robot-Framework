@@ -74,6 +74,68 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
 """
 
 
+# An org row must never be deleted while learning rows still name it. T1
+# removed the only DELETE FROM organizations in the codebase; this stops a
+# future one from returning, and makes the property structural rather than
+# conventional.
+#
+# Why a trigger and not a real foreign key: organizations.id is uuid while
+# every learning org_id is text. An FK is achievable (a GENERATED ALWAYS AS
+# (id::text) STORED column with a UNIQUE constraint), but it can only ever
+# reference uuid-shaped strings, and the suite uses 152 synthetic org ids
+# ("org-A", "org-B", ...) across 31 files — in the very tests that guard
+# tenancy isolation, where a mechanical rewrite is how a guarantee quietly
+# weakens. The FK buys one extra guarantee over this trigger (rejecting an
+# orphan WRITE, which the write path already cannot produce); it remains a
+# follow-on, not a quiet reinstatement.
+#
+# audit_log is deliberately absent from the list. Audit rows must outlive the
+# org they describe — that is the whole point of the actor/org snapshot.
+#
+# One honest limitation: TRUNCATE does not fire row-level DELETE triggers, so
+# it bypasses this guard. Nothing in src/ truncates organizations; the only
+# caller is a test fixture (tests/test_core/test_org_backfill_data.py), which
+# rebuilds the whole table on purpose.
+#
+# The to_regclass guard is load-bearing, not defensive noise: learning tables
+# live in per-test schemas while organizations may not, so without it any org
+# delete in a session whose search_path lacks one of these tables would raise
+# "relation does not exist" instead of proceeding. Resolution happens through
+# search_path at execution time, so an isolated schema's own rows are still
+# seen and still refused.
+_ORG_DELETE_GUARD_FN_DDL = """
+CREATE OR REPLACE FUNCTION organizations_block_delete_with_learning()
+RETURNS trigger AS $$
+DECLARE t text; n bigint;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+      'nl_feedback_corrections','execution_records','execution_embeddings',
+      'anti_patterns','learning_anchors','kw_query_patterns',
+      'test_runs','workflow_metrics','llm_traces','run_groups','hint_review_pages'
+  ] LOOP
+    IF to_regclass(t) IS NOT NULL THEN
+      EXECUTE format('SELECT count(*) FROM %I WHERE org_id = $1', t)
+        INTO n USING OLD.id::text;
+      IF n > 0 THEN
+        RAISE EXCEPTION 'org % still owns % row(s) in %', OLD.id, n, t
+          USING ERRCODE = 'foreign_key_violation';
+      END IF;
+    END IF;
+  END LOOP;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql
+"""
+
+# CREATE OR REPLACE TRIGGER (PG14+) rather than DROP + CREATE: it leaves no
+# window in which the guard is absent, which matters because this runs on
+# every boot.
+_ORG_DELETE_GUARD_TRIGGER_DDL = """
+CREATE OR REPLACE TRIGGER trg_organizations_block_delete
+    BEFORE DELETE ON organizations
+    FOR EACH ROW EXECUTE FUNCTION organizations_block_delete_with_learning()
+"""
+
+
 def init_org_db() -> None:
     """Create the organizations + org_members tables and index if absent.
 
@@ -87,6 +149,8 @@ def init_org_db() -> None:
         conn.execute(_ORG_MEMBERS_DDL)
         conn.execute(_ORG_OWNER_COLUMN_DDL)
         conn.execute(_ORG_OWNER_INDEX_DDL)
+        conn.execute(_ORG_DELETE_GUARD_FN_DDL)
+        conn.execute(_ORG_DELETE_GUARD_TRIGGER_DDL)
         for ddl in _INDEXES_DDL:
             conn.execute(ddl)
         conn.commit()
