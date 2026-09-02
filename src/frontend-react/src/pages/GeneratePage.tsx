@@ -584,16 +584,13 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // can_retract is server-decided (hint_mutation_verdict) — this only fires
   // the POST the control's own visibility already cleared.
   //
-  // Drops the item locally on success rather than re-fetching. Re-fetching
-  // looked like the natural match for the mount/M9 pattern above, but
-  // get_corrections_for_run is DELIBERATELY unfiltered on is_active (a
-  // retracted hint is still the user's own recorded words — see the engine
-  // docstring), and hint_mutation_verdict never checks it either: it answers
-  // whether this caller may act on the hint, not whether the hint is still
-  // active. So a re-fetch here would hand back the very same hint with the
-  // very same can_retract: true, and the control would silently reappear —
-  // re-fetching cannot make this control stop being offered. Dropping the
-  // item is the one choice that actually satisfies "stop offering it".
+  // Drops the item locally on success rather than re-fetching. The two are
+  // not alternatives, they cover different spans: the server now returns
+  // can_retract false for a retracted hint (it ANDs in is_active, so a later
+  // page load never offers the control again), and this drop covers the
+  // current render without a round trip. The row itself keeps coming back —
+  // get_corrections_for_run is DELIBERATELY unfiltered on is_active, because
+  // a retracted hint is still the user's own recorded words.
   async function retract(hintId: number) {
     setRetractingId(hintId); setRetractErr('')
     try {
