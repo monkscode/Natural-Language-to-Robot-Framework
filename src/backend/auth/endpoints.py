@@ -171,9 +171,10 @@ def _token_payload(row: dict) -> dict:
     # this caller: POST /api/learning/hints requires org_id, and a non-platform
     # admin may only ever name their own, so the Add-feedback sheet pins it
     # here instead of trying to pick from GET /auth/admin/orgs — which is
-    # require_admin and 403s them. Not added to _user_public: that shape is
-    # also the admin user LIST, whose key set is asserted elsewhere, and one
-    # user's org is not part of another user's row.
+    # require_admin and 403s them. Set here and in /auth/me rather than in
+    # _user_public, which is the DB-free shaping helper: this value comes from
+    # an org query (or, in /auth/me, from the token claim), and _user_public
+    # deliberately stays free of both.
     user["org_id"] = primary.get("org_id")
     token = create_access_token(
         {

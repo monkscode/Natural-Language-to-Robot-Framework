@@ -512,6 +512,11 @@ def create_hint(
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
 ):
+    # Authenticate before anything else, exactly as the four id-routes do:
+    # who you are does not depend on the shape of what you sent, and an
+    # anonymous caller should get one answer from this route family, not a 400
+    # here and a 401 there.
+    caller = _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     # Every hint is owned by exactly one org. Generic guidance wanted in several
@@ -526,10 +531,9 @@ def create_hint(
     # the org themselves, so refusing tells them nothing they did not supply,
     # and there is no hint whose existence could leak. A plain org_member does
     # not create hints through this route; they contribute through feedback.
-    # _require_caller first: this check used to read `if caller is not None`,
-    # so a token-less caller skipped it whole and could inject a hint into ANY
-    # org (see _require_caller for why this family opts out of the dev hatch).
-    caller = _require_caller(admin)
+    # The guard above is load-bearing: this check used to read `if caller is
+    # not None`, so a token-less caller skipped it whole and could inject a
+    # hint into ANY org.
     if not is_validated_admin(caller):
         if caller.get("org_role") != "org_admin" or org_id != caller.get("org_id"):
             raise HTTPException(
@@ -539,10 +543,12 @@ def create_hint(
     actor = _audit_actor(admin, request.actor)
     # The author of an admin-created hint is the admin who created it, keyed
     # the same way the engine keys a user-created one. `actor` is already the
-    # verified token email (or a test fallback); the id has no fallback on
-    # purpose — the Author tier compares ids for equality, so a hint created
-    # without a token stays authorless rather than claiming a placeholder.
-    creator_user_id = (admin or {}).get("user_id") if isinstance(admin, dict) else None
+    # verified token email. _require_caller above means a token is always
+    # present here, so unlike the engine's path this id is never NULL — the
+    # engine still records NULL for an unidentified submitter, because a read
+    # endpoint may legitimately run without a token and the Author tier
+    # compares ids for equality.
+    creator_user_id = caller.get("user_id")
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
