@@ -41,6 +41,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
+import { gateAllowed, type GateFlags } from '@/auth/pageGates'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 
 /* ── Logo mark ── */
@@ -292,30 +293,16 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
   )
 }
 
-/** Whether `item` is visible to a caller with these role flags. Pure, and
- * exported so the Learning nav item — which must never disagree with the
- * page it links to (App.tsx's pageAllowed) — is testable without rendering
- * the sidebar. Kept as this file's own copy rather than importing App.tsx's
- * pageAllowed, matching how admin/orgAdmin were already duplicated across
- * the two files before this flag existed. */
-export function navItemAllowed(
-  item: { admin: boolean; orgAdmin?: boolean; viewLearning?: boolean },
-  auth: { isAdmin: boolean; isOrgAdmin: boolean; canViewLearning: boolean },
-): boolean {
-  return (!item.admin || auth.isAdmin) && (!item.orgAdmin || auth.isOrgAdmin) &&
-    (!item.viewLearning || auth.canViewLearning)
-}
-
-/* ── Renders one nav group, hiding admin-only items from regular users ── */
+/* ── Renders one nav group, hiding admin-only items from regular users ──
+ * gateAllowed (auth/pageGates.ts) is the SAME predicate App.tsx uses to gate
+ * the page itself, so the Learning nav item and the /learning route can
+ * never disagree. */
 function NavGroup({ label, items, isAdmin, isOrgAdmin, canViewLearning, pathname }: {
   label: string
   items: NavItem[]
-  isAdmin: boolean
-  isOrgAdmin: boolean
-  canViewLearning: boolean
   pathname: string
-}) {
-  const visible = items.filter(item => navItemAllowed(item, { isAdmin, isOrgAdmin, canViewLearning }))
+} & GateFlags) {
+  const visible = items.filter(item => gateAllowed(item, { isAdmin, isOrgAdmin, canViewLearning }))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
