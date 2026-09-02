@@ -132,12 +132,15 @@ class TestWhatOneRunContributed:
 
         assert engine.get_corrections_for_run("wf-never") == []
 
-    def test_a_correction_carries_its_org_and_the_authors_user_id(self, in_memory_db):
+    def test_a_correction_carries_every_column_can_retract_is_built_from(
+            self, in_memory_db):
         """T7: GET /api/feedback/{run_id} (endpoints.py) computes can_retract
-        from these two columns via hint_mutation_verdict. Neither reaches the
-        client, but the engine must hand both to that caller — this is the
-        one place that predicate would silently break if the SELECT stopped
-        carrying them."""
+        from THREE columns — org_id and created_by_user_id feed
+        hint_mutation_verdict, and is_active decides whether the action would
+        do anything. None of the three reaches the client, but the engine must
+        hand all three to that caller: this is the one place the predicate
+        would silently break if the SELECT stopped carrying one, and asserting
+        only two of three would have let the third go missing."""
         engine = NLFeedbackEngine(in_memory_db)
         engine.learn_from_feedback(
             _record("wf-1"),
@@ -148,6 +151,10 @@ class TestWhatOneRunContributed:
         row = engine.get_corrections_for_run("wf-1")[0]
         assert row["org_id"] == _ORG
         assert row["created_by_user_id"] == "u-author"
+        # is_active is selected WITHOUT being filtered on (see the class
+        # above): can_retract must be false for a hint already retracted, so
+        # the value has to travel even though the row is returned either way.
+        assert row["is_active"] == 1
 
 
 class TestItNeverRaisesIntoTheRequest:

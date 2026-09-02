@@ -758,9 +758,19 @@ class NLFeedbackEngine(LearningEngine):
         this task removes. What the LLM thought of it is not exposed here;
         that is a product decision, not a UI one.
 
-        Uncapped on purpose: only the run's owner can create these rows and
-        only the run's owner can read them, so the length is self-inflicted,
-        and a silent LIMIT would under-report the user's own history.
+        THREE of the columns selected are permission inputs, not content:
+        org_id, created_by_user_id and is_active exist only so the API layer
+        can compute can_retract (hint_mutation_verdict AND still-active). They
+        must NEVER be forwarded to a client — api/endpoints.get_run_corrections
+        builds an explicit four-field projection rather than passing these rows
+        through, precisely so a column added here cannot leak by default. Add a
+        column to this SELECT only with that projection in mind.
+
+        Uncapped on purpose: only the run's owner can create these rows, and
+        the caller is gated by caller_can_access, so the length is broadly
+        self-inflicted and a silent LIMIT would under-report the user's own
+        history. Not read-restricted to the owner alone, though: that gate also
+        admits a same-org org_admin and a platform admin.
 
         Never raises — the panel calls this on mount for every finished run,
         and an empty list renders as today's plain form.

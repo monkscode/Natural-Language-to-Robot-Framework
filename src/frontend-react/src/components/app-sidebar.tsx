@@ -77,7 +77,10 @@ export const NAV_PLATFORM: NavItem[] = [
   { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]
 
-const NAV_WORKSPACE: NavItem[] = [
+// Exported for the same reason NAV_PLATFORM is: auth/pageGates.test.ts
+// compares every nav entry's gate against the PAGES entry for the same
+// path, and a table it cannot see is a table that can drift.
+export const NAV_WORKSPACE: NavItem[] = [
   { title: 'Settings', url: '/settings', icon: Settings, admin: true },
 ]
 

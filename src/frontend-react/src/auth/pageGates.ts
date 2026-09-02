@@ -5,9 +5,15 @@
  * already imports app-sidebar.tsx (for <AppSidebar />), so app-sidebar.tsx
  * importing a predicate back out of App.tsx would be a module cycle. Both
  * files import gateAllowed from here instead, so the page a URL reaches and
- * the nav link that offers it read the SAME rule — a future edit can no
- * longer change one and silently leave the other stale (a nav link to a page
- * that then bounces, or a hidden link to a page still reachable by URL).
+ * the nav link that offers it read the SAME rule.
+ *
+ * Sharing the predicate removes RULE drift, not TABLE drift, and only the
+ * first is structural. App.tsx's PAGES and app-sidebar.tsx's NAV_PLATFORM /
+ * NAV_WORKSPACE are still two independent lists of flags: setting
+ * PAGES./learning.admin = true while leaving the nav entry on viewLearning
+ * would leave both test files green and put a visible link in front of a page
+ * that bounces. pageGates.test.ts closes that half by comparing the two
+ * tables entry by entry for every path they share.
  *
  * Pure, and exported so the /learning divergence this predicate fixes (an
  * org admin the API admits could not open the page the SPA gated on

@@ -146,6 +146,20 @@ def ensure_stub_learning_tables(conn) -> None:
     what these tests write and read, an id and an org_id, which is enough to
     prove "the org row survives and its org_id is not rewritten": a stand-in
     row proves that exactly as well as a real one would.
+
+    TEARDOWN ORDER MATTERS IN THIS SCHEMA, and not only for the three tables
+    below. organizations now carries a BEFORE DELETE trigger
+    (org_db._ORG_DELETE_GUARD_FN_DDL) that refuses the delete while learning
+    rows still name the org, and its table list also includes test_runs,
+    workflow_metrics, llm_traces and run_groups — all four of which
+    auth_isolated_schema creates in auth_test via the data-plane singletons.
+    So a test that seeds a RUN and then deletes its org in a `finally` block
+    fails with a ForeignKeyViolation raised from the teardown, which replaces
+    whatever the test was actually asserting. Delete the learning/run rows
+    first, then the org. Two teardowns were already fixed for exactly this
+    (test_a_folder_survives_its_creator_leaving_and_the_org_still_manages_it
+    and test_remove_member_leaves_the_folder_with_the_org, both seeding
+    run_groups). Never weaken the trigger to make a teardown pass.
     """
     for table in ("nl_feedback_corrections", "learning_anchors", "execution_records"):
         conn.execute(
