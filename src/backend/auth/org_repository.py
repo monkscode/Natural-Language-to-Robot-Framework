@@ -50,7 +50,14 @@ class OrgRepository:
              memberships, which mints an org-less, unscoped-learning token at
              their next login) and return it.
           3. Else -> create a fresh personal org with owner_user_id set at
-             INSERT time, seat the membership, return it.
+             INSERT time, seat the membership, return it. The INSERT is
+             ON CONFLICT, not bare: see there for the writer the FOR UPDATE
+             does not serialise.
+
+        Returns an org id or raises nothing it can avoid: this method is on the
+        login self-heal, on remove_member and on provision_on_approval, so a
+        raise here is a 500 on login. That is the same reason
+        _stamp_owner_if_unclaimed is guarded rather than allowed to collide.
         """
         with get_pool().connection() as conn:
             # Serialise per-user so the existence check + insert is atomic.
@@ -88,20 +95,63 @@ class OrgRepository:
                 logger.info("[AUTH] reclaimed personal org for user %s", sanitize_for_log(user_id))
                 return str(reclaimed["id"])
 
+            # ON CONFLICT, not a bare INSERT. uq_org_owner_personal is a
+            # partial unique index on (owner_user_id) WHERE kind='personal',
+            # and the FOR UPDATE above does not serialise every writer that can
+            # land in it. It serialises MOST of them by accident:
+            # organizations.owner_user_id carries an FK to users(id), so any
+            # writer SETTING it takes a FOR KEY SHARE lock on that users row,
+            # which conflicts with this transaction's FOR UPDATE — the
+            # backfill_personal_org_owners interleaving (another instance's
+            # boot claiming the org step 2 just failed to find) is blocked by
+            # that lock, measured. What is NOT blocked is a writer that leaves
+            # owner_user_id alone and changes only `kind`: Postgres skips the
+            # FK re-check when the referencing value is unchanged, so such a
+            # statement takes no users lock, is invisible to step 2 until it
+            # commits, and enters the index the moment it does.
+            #
+            # Relying on that FK-plus-row-lock coupling to keep this method
+            # from raising would be a guarantee nobody could see: dropping the
+            # FK, or widening the index, would silently reopen a 500 on login.
+            # So the statement itself absorbs the collision.
+            #
+            # DO UPDATE rather than DO NOTHING because a row must always come
+            # back: DO NOTHING returns nothing, and in READ COMMITTED it may
+            # skip on a row this transaction still cannot SELECT. The SET is a
+            # no-op by value (same owner, and `name` is deliberately untouched,
+            # so a reclaimed org keeps its own); it exists only so RETURNING
+            # yields the existing row's id.
+            #
+            # (xmax <> 0) distinguishes the two outcomes for the log line ONLY
+            # — never for control flow. It is the standard "was this an update"
+            # RETURNING idiom; a wrong answer costs one imprecise log line.
             org = conn.execute(
                 "INSERT INTO organizations (name, kind, owner_user_id) "
-                "VALUES (%s, 'personal', %s) RETURNING id",
+                "VALUES (%s, 'personal', %s) "
+                "ON CONFLICT (owner_user_id) WHERE kind = 'personal' "
+                "DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id "
+                "RETURNING id, (xmax <> 0) AS collided",
                 (name, user_id),
             ).fetchone()
             conn.execute(
+                # ON CONFLICT DO NOTHING for the same reason step 2 has it: on
+                # the collision branch the org already existed, so it may
+                # already carry this membership. Never skip the insert itself,
+                # or the caller is left with zero memberships, which mints an
+                # org-less, unscoped-learning token at their next login.
                 "INSERT INTO org_members (org_id, user_id, org_role) "
-                "VALUES (%s, %s, 'org_admin')",
+                "VALUES (%s, %s, 'org_admin') "
+                "ON CONFLICT (org_id, user_id) DO NOTHING",
                 (org["id"], user_id),
             )
             conn.commit()
             # user_id reaches this log from an HTTP path param (e.g. admin remove
             # member), so scrub CR/LF before logging (Sonar S5145 / CWE-117).
-            logger.info("[AUTH] provisioned personal org for user %s", sanitize_for_log(user_id))
+            logger.info(
+                "[AUTH] %s personal org for user %s",
+                "adopted concurrently claimed" if org["collided"] else "provisioned",
+                sanitize_for_log(user_id),
+            )
             return str(org["id"])
 
     def _stamp_owner_if_unclaimed(self, conn, org_id: str, user_id: str) -> None:
@@ -285,7 +335,15 @@ class OrgRepository:
 
     def create_team_org(self, name: str, owner_user_id: str) -> str:
         """Create a kind='team' org and seat owner_user_id as its org_admin, moving
-        the owner out of any prior org (single-active-org). Returns the new org id."""
+        the owner out of any prior org (single-active-org). Returns the new org id.
+
+        The `owner_user_id` parameter names the MEMBERSHIP to seat and is
+        deliberately NOT written to the organizations.owner_user_id column it
+        now shares a name with: that column exists so a user can reclaim their
+        own PERSONAL org, and uq_org_owner_personal is partial on
+        kind='personal'. A team org has no 1:1 owner and is left unconstrained
+        on purpose (org_db._ORG_OWNER_INDEX_DDL) — writing it here would make
+        one user's team org and their personal org compete for that column."""
         with get_pool().connection() as conn:
             org = conn.execute(
                 "INSERT INTO organizations (name, kind) VALUES (%s, 'team') RETURNING id",

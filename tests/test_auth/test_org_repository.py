@@ -148,3 +148,146 @@ def test_ensure_personal_org_stamp_tolerates_owner_collision(repos):
             "SELECT owner_user_id FROM organizations WHERE id = %s", (org_b["id"],)
         ).fetchone()
     assert str(b_row["owner_user_id"]) == str(user["id"])  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Step 3 (create) and uq_org_owner_personal.
+#
+# The partial unique index is on (owner_user_id) WHERE kind='personal', so any
+# transaction that puts a second personal org under the same owner collides
+# with step 3's INSERT. ensure_personal_org is on the login self-heal, on
+# remove_member and on provision_on_approval, so a raise there is a 500 on
+# login — the same reason _stamp_owner_if_unclaimed is guarded.
+#
+# Both interleavings below are REAL, not mocked: a second connection writes the
+# colliding row and holds its transaction open, so step 2's SELECT cannot see
+# it (READ COMMITTED) while the index can. Two connections, not two instances;
+# the index does not know the difference.
+# ---------------------------------------------------------------------------
+
+def _claim_mid_call(orgs, uid, email, claimer_stmt, params):
+    """Run `claimer_stmt` on a second pooled connection, hold it open, call
+    ensure_personal_org, and commit the claimer 0.6s in — i.e. while the call
+    is blocked. Returns (result, raised)."""
+    import threading
+
+    pool = get_pool()
+    claimer = pool.getconn()
+    committed = threading.Event()
+    try:
+        claimer.execute(claimer_stmt, params)
+
+        def _commit():
+            claimer.commit()
+            committed.set()
+
+        timer = threading.Timer(0.6, _commit)
+        timer.start()
+        result = raised = None
+        try:
+            result = orgs.ensure_personal_org(uid, email)
+        except Exception as exc:          # noqa: BLE001 — the thing under test
+            raised = exc
+        finally:
+            timer.join(10)
+            if not committed.is_set():
+                claimer.commit()
+        return result, raised
+    finally:
+        pool.putconn(claimer)
+
+
+def test_a_concurrent_owner_stamp_is_serialised_by_the_users_row_lock(repos):
+    """The interleaving the review named — another instance's
+    backfill_personal_org_owners claiming the vacated org between step 2 and
+    step 3 — cannot actually happen, and this pins WHY, because the reason is
+    invisible at the call site.
+
+    organizations.owner_user_id carries an FK to users(id), so a writer that
+    SETS it takes a FOR KEY SHARE lock on that users row. Step 1's
+    `SELECT ... FOR UPDATE` on the same row conflicts with it, so the claimer
+    and this call cannot interleave in either order: whoever gets the users row
+    first, the other one waits and then sees a settled world. Measured here as
+    a ~0.6s block followed by the RECLAIM path (step 2), not the create path.
+
+    This is a mechanism, not a coverage claim, and it is exactly why step 3
+    still has to absorb a collision — see the test below for the writer this
+    lock does not catch."""
+    users, orgs = repos
+    email = _unique_email()
+    uid = str(users.create_user(email, "S3cretpw!")["id"])
+
+    with get_pool().connection() as conn:
+        vacated = conn.execute(
+            "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+            "RETURNING id",
+            (email,),
+        ).fetchone()["id"]
+
+    result, raised = _claim_mid_call(
+        orgs, uid, email,
+        "UPDATE organizations SET owner_user_id = %s WHERE id = %s",
+        (uid, vacated),
+    )
+
+    assert raised is None, f"login path raised: {raised!r}"
+    assert result == str(vacated), (
+        "the concurrently claimed org must be the one handed back, not a "
+        "second personal org for the same user"
+    )
+
+
+def test_step_3_absorbs_a_collision_the_users_row_lock_cannot_stop(repos):
+    """The writer the FOR UPDATE does NOT serialise: one that leaves
+    owner_user_id alone and changes only `kind`. Postgres skips the FK
+    re-check when the referencing value is unchanged, so `UPDATE organizations
+    SET kind='personal'` on a row already owned by this user takes no users
+    lock at all. Step 1 sails past it, step 2 cannot see the uncommitted row,
+    and step 3's INSERT lands straight on uq_org_owner_personal.
+
+    Before the fix this raised UniqueViolation out of ensure_personal_org —
+    reproduced, 0.62s in, on the branch as it stood. A team org flipping to
+    personal is a contrived product story; the point is that the method's
+    "never raise" property must hold on the statement itself and not on a
+    coupling between an FK and a row lock that a future schema edit could drop
+    without anyone noticing."""
+    users, orgs = repos
+    email = _unique_email()
+    uid = str(users.create_user(email, "S3cretpw!")["id"])
+
+    with get_pool().connection() as conn:
+        # Owned by this user already, but kind='team' — outside the partial
+        # index, and invisible to step 2's `kind = 'personal'` predicate.
+        pending = conn.execute(
+            "INSERT INTO organizations (name, kind, owner_user_id) "
+            "VALUES (%s, 'team', %s) RETURNING id",
+            (email, uid),
+        ).fetchone()["id"]
+
+    result, raised = _claim_mid_call(
+        orgs, uid, email,
+        "UPDATE organizations SET kind = 'personal' WHERE id = %s",
+        (pending,),
+    )
+
+    assert raised is None, f"ensure_personal_org must never raise, got {raised!r}"
+    assert result == str(pending), (
+        "the colliding row is the user's personal org now — hand that back "
+        "rather than inventing a second one"
+    )
+
+    with get_pool().connection() as conn:
+        owned = conn.execute(
+            "SELECT id FROM organizations WHERE kind = 'personal' "
+            "AND owner_user_id = %s",
+            (uid,),
+        ).fetchall()
+        seat = conn.execute(
+            "SELECT org_role FROM org_members WHERE org_id = %s AND user_id = %s",
+            (pending, uid),
+        ).fetchone()
+    assert len(owned) == 1, "uq_org_owner_personal must still hold"
+    assert seat is not None and seat["org_role"] == "org_admin", (
+        "the caller must be left with a membership — zero memberships mints an "
+        "org-less, unscoped-learning token at their next login"
+    )
