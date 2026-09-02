@@ -32,30 +32,46 @@ import TeamPage from '@/pages/TeamPage'
  * starts clean, and logout unmounts the whole layout (state never leaks
  * across sessions).
  *
- * Role gating: each page can require admin (`admin: true`) and/or org-admin
- * (`orgAdmin: true`) access; a page is only ever mounted when
- * `(!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)` holds, via the
- * `allowed(p)` helper below. A user lacking the required role who navigates
- * to a gated path (e.g. an admin-only page, or the org-admin-only `/team`)
- * is bounced to /generate — the exact behaviour RequireAdmin had when each
- * route owned its element. The redirect renders only for the ACTIVE path,
- * so a cached page can never hijack navigation.
+ * Role gating: each page can require admin (`admin: true`), org-admin
+ * (`orgAdmin: true`) and/or the Learning-dashboard viewer flag
+ * (`viewLearning: true`) access; a page is only ever mounted when
+ * pageAllowed(p, ...) holds, via the `allowed(p)` helper below. A user
+ * lacking the required role who navigates to a gated path (e.g. an
+ * admin-only page, or the org-admin-only `/team`) is bounced to /generate —
+ * the exact behaviour RequireAdmin had when each route owned its element.
+ * The redirect renders only for the ACTIVE path, so a cached page can never
+ * hijack navigation.
  */
-const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JSX.Element }> = [
+export const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; viewLearning?: boolean; node: JSX.Element }> = [
   { path: '/generate', node: <GeneratePage /> },
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
-  { path: '/learning', admin: true, node: <LearningPage /> },
+  { path: '/learning', viewLearning: true, node: <LearningPage /> },
   { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
   { path: '/team', orgAdmin: true, node: <TeamPage /> },
 ]
 
+/** Whether a page/nav entry with these gates is reachable for a caller with
+ * these role flags. Pure, and exported so the /learning divergence this
+ * predicate fixes (an org admin the API admits could not open the page the
+ * SPA gated on platform `admin`) is testable without rendering App — see
+ * App.test.tsx. app-sidebar.tsx keeps its own copy (navItemAllowed) rather
+ * than importing this one, matching how admin/orgAdmin were already
+ * duplicated across the two files before this flag existed. */
+export function pageAllowed(
+  p: { admin?: boolean; orgAdmin?: boolean; viewLearning?: boolean },
+  auth: { isAdmin: boolean; isOrgAdmin: boolean; canViewLearning: boolean },
+): boolean {
+  return (!p.admin || auth.isAdmin) && (!p.orgAdmin || auth.isOrgAdmin) &&
+    (!p.viewLearning || auth.canViewLearning)
+}
+
 function KeepAlivePages() {
   const { pathname } = useLocation()
-  const { isAdmin, isOrgAdmin } = useAuth()
-  const allowed = (p: { admin?: boolean; orgAdmin?: boolean }) =>
-    (!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)
+  const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
+  const allowed = (p: { admin?: boolean; orgAdmin?: boolean; viewLearning?: boolean }) =>
+    pageAllowed(p, { isAdmin, isOrgAdmin, canViewLearning })
   const visited = useRef(new Set<string>())
 
   const active = PAGES.find(p => p.path === pathname)

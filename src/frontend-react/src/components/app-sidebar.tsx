@@ -60,15 +60,18 @@ interface NavItem {
   icon: typeof Zap
   admin: boolean
   orgAdmin?: boolean
+  /** Gates on canViewLearning instead of admin/orgAdmin — see the
+   * can_view_learning comment on AuthContext.tsx's User interface. */
+  viewLearning?: boolean
   /** Renders the expandable run-group quick-access list under this item. */
   groups?: boolean
 }
 
-const NAV_PLATFORM: NavItem[] = [
+export const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
   { title: 'Test Runs', url: '/history', icon: History, admin: false, groups: true },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
-  { title: 'Learning', url: '/learning', icon: Brain, admin: true },
+  { title: 'Learning', url: '/learning', icon: Brain, admin: false, viewLearning: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
   { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]
@@ -289,15 +292,30 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
   )
 }
 
+/** Whether `item` is visible to a caller with these role flags. Pure, and
+ * exported so the Learning nav item — which must never disagree with the
+ * page it links to (App.tsx's pageAllowed) — is testable without rendering
+ * the sidebar. Kept as this file's own copy rather than importing App.tsx's
+ * pageAllowed, matching how admin/orgAdmin were already duplicated across
+ * the two files before this flag existed. */
+export function navItemAllowed(
+  item: { admin: boolean; orgAdmin?: boolean; viewLearning?: boolean },
+  auth: { isAdmin: boolean; isOrgAdmin: boolean; canViewLearning: boolean },
+): boolean {
+  return (!item.admin || auth.isAdmin) && (!item.orgAdmin || auth.isOrgAdmin) &&
+    (!item.viewLearning || auth.canViewLearning)
+}
+
 /* ── Renders one nav group, hiding admin-only items from regular users ── */
-function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
+function NavGroup({ label, items, isAdmin, isOrgAdmin, canViewLearning, pathname }: {
   label: string
   items: NavItem[]
   isAdmin: boolean
   isOrgAdmin: boolean
+  canViewLearning: boolean
   pathname: string
 }) {
-  const visible = items.filter(item => (!item.admin || isAdmin) && (!item.orgAdmin || isOrgAdmin))
+  const visible = items.filter(item => navItemAllowed(item, { isAdmin, isOrgAdmin, canViewLearning }))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
@@ -325,7 +343,7 @@ function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
 /* ── Main sidebar component ── */
 export function AppSidebar() {
   const { pathname } = useLocation()
-  const { isAdmin, isOrgAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
 
   return (
     <Sidebar collapsible="icon">
@@ -345,8 +363,8 @@ export function AppSidebar() {
 
       {/* Nav — role-filtered */}
       <SidebarContent>
-        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
-        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
+        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} canViewLearning={canViewLearning} pathname={pathname} />
+        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} canViewLearning={canViewLearning} pathname={pathname} />
       </SidebarContent>
 
       {/* User footer */}

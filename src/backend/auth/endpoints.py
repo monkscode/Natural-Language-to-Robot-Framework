@@ -28,6 +28,7 @@ from src.backend.auth.jwt_utils import (
 )
 from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
+from src.backend.auth.ownership import is_dashboard_viewer
 from src.backend.auth.provisioning import match_invite_on_signup, provision_on_approval
 from src.backend.auth.repository import (
     AccountInactive,
@@ -156,6 +157,15 @@ def _token_payload(row: dict) -> dict:
     # flag and the token it ships beside can never disagree.
     user["can_manage_org_folders"] = _can_manage_org_folders(
         primary.get("org_id"), primary.get("org_role"))
+    # Whether this login may view an org-level aggregate dashboard — today
+    # that gates only the Learning page (/metrics and the traces dashboard
+    # have the identical divergence and are a deliberate, separate
+    # follow-up). ONE rule with is_dashboard_viewer, which every learning
+    # route also enforces server-side, so the SPA can never draw a Learning
+    # link the API would then 403.
+    user["can_view_learning"] = is_dashboard_viewer(
+        {"org_id": primary.get("org_id"), "org_role": primary.get("org_role")},
+        is_platform_admin=(user["role"] == "admin"))
     token = create_access_token(
         {
             "id": user["id"],
@@ -256,6 +266,14 @@ async def me(user: dict = Depends(get_current_user)):
     # claim, so a stale flag only ever fails closed.
     public["can_manage_org_folders"] = _can_manage_org_folders(
         user.get("org_id"), user.get("org_role"))
+    # Same is_dashboard_viewer rule as _token_payload's can_view_learning,
+    # derived from the TOKEN's claims for the same reason as
+    # can_manage_org_folders just above. `user` (the decoded token) already
+    # has the org_id/org_role shape is_dashboard_viewer expects, so it is
+    # passed directly instead of rebuilding the dict _token_payload builds
+    # from a freshly-queried `primary`.
+    public["can_view_learning"] = is_dashboard_viewer(
+        user, is_platform_admin=(public["role"] == "admin"))
     return public
 
 
