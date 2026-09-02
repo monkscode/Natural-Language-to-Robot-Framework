@@ -3,10 +3,14 @@
 Skipped when Postgres is unreachable. Uses the auth_test isolated schema.
 """
 
+import uuid
+
 import pytest
 
 from src.backend.auth import db as auth_db
 from src.backend.auth.org_db import init_org_db
+from src.backend.auth.org_repository import OrgRepository
+from src.backend.auth.repository import UserRepository
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("auth_isolated_schema")]
 
@@ -27,3 +31,131 @@ def test_init_org_db_is_idempotent():
     init_org_db()
     init_org_db()  # second call must not raise
     assert _table_exists("org_members")
+
+
+def test_init_org_db_adds_owner_column_and_unique_index():
+    """Change 1: owner_user_id + uq_org_owner_personal, both idempotent
+    (CREATE TABLE IF NOT EXISTS ... / ADD COLUMN IF NOT EXISTS / CREATE
+    UNIQUE INDEX IF NOT EXISTS all apply on a fresh DB and on a rerun)."""
+    init_org_db()
+    with auth_db.get_pool().connection() as conn:
+        col = conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'organizations' AND column_name = 'owner_user_id'"
+        ).fetchone()
+    assert col is not None
+    assert _table_exists("uq_org_owner_personal")
+
+
+def test_owner_backfill_handles_sole_member_email_fallback_and_duplicate_names():
+    """Test 9 — the backfill. Three required cases plus one hardening case,
+    all in ONE migration run (proves the ambiguous/colliding cases do not
+    abort the others in the same statement):
+      (a) sole remaining member of a personal org owns it;
+      (b) a personal org's name IS a user's email and gets claimed by the
+          fallback when no sole member exists (org vacated);
+      (c) two personal orgs sharing a name are ambiguous — the migration
+          leaves BOTH owner_user_id NULL rather than aborting;
+      (d) a user who is the sole member of one personal org already OWNS a
+          different one (simulates a concurrent ensure_personal_org stamp —
+          step 1 — landing on a sibling instance mid-rolling-deploy, before
+          this migration's primary pass reaches the org in (d); see
+          backfill_personal_org_owners' docstring for why the primary pass
+          needs this guard even though the task-2 brief's SQL doesn't carry
+          one). (a)/(b) still land in this same run."""
+    users, orgs = UserRepository(), OrgRepository()
+    email_a = f"bfa-{uuid.uuid4().hex[:8]}@x.com"
+    email_b = f"bfb-{uuid.uuid4().hex[:8]}@x.com"
+    email_c = f"bfc-{uuid.uuid4().hex[:8]}@x.com"
+    email_d = f"bfd-{uuid.uuid4().hex[:8]}@x.com"
+    org_a = org_b = org_c1 = org_c2 = org_d_sole = org_d_owned = None
+    try:
+        user_a = users.create_user(email_a, "password123", "A")
+        user_b = users.create_user(email_b, "password123", "B")
+        users.create_user(email_c, "password123", "C")
+        user_d = users.create_user(email_d, "password123", "D")
+
+        with auth_db.get_pool().connection() as conn:
+            # (a) sole remaining member: name is NOT an email, one member.
+            org_a = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                "RETURNING id",
+                (f"Sole Member Org {uuid.uuid4().hex[:8]}",),
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) "
+                "VALUES (%s, %s, 'org_admin')",
+                (org_a, str(user_a["id"])),
+            )
+            # (b) name-fallback: name IS the user's email, vacated (0
+            # members) so the sole-member rule can't claim it — isolates
+            # the fallback from the primary pass.
+            org_b = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                "RETURNING id",
+                (email_b,),
+            ).fetchone()["id"]
+            # (c) ambiguous duplicate name: two vacated personal orgs share
+            # a name that matches user_c's email — neither can be claimed
+            # unambiguously.
+            org_c1 = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                "RETURNING id",
+                (email_c,),
+            ).fetchone()["id"]
+            org_c2 = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                "RETURNING id",
+                (email_c,),
+            ).fetchone()["id"]
+            # (d) primary-pass collision: user_d already OWNS org_d_owned
+            # (set directly, standing in for a concurrent stamp) AND is the
+            # sole member of a SEPARATE org_d_sole whose owner is still NULL.
+            org_d_owned = conn.execute(
+                "INSERT INTO organizations (name, kind, owner_user_id) "
+                "VALUES (%s, 'personal', %s) RETURNING id",
+                (f"Already Owned {uuid.uuid4().hex[:8]}", str(user_d["id"])),
+            ).fetchone()["id"]
+            org_d_sole = conn.execute(
+                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                "RETURNING id",
+                (f"Sole But Already Owns {uuid.uuid4().hex[:8]}",),
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO org_members (org_id, user_id, org_role) "
+                "VALUES (%s, %s, 'org_admin')",
+                (org_d_sole, str(user_d["id"])),
+            )
+            conn.commit()
+
+            # run_migration_once is a one-shot; the package-scoped fixture
+            # already ran this migration (as a no-op) at schema setup, so
+            # clear its marker to let THIS call actually execute it.
+            conn.execute(
+                "DELETE FROM data_migrations WHERE name = 'personal_org_owner_backfill'"
+            )
+            conn.commit()
+
+        init_org_db()  # re-entrant: only the cleared marker's migration runs; must not raise
+
+        with auth_db.get_pool().connection() as conn:
+            owners = {
+                oid: conn.execute(
+                    "SELECT owner_user_id FROM organizations WHERE id = %s", (oid,)
+                ).fetchone()["owner_user_id"]
+                for oid in (org_a, org_b, org_c1, org_c2, org_d_sole, org_d_owned)
+            }
+        assert str(owners[org_a]) == str(user_a["id"]), "sole member must be claimed"
+        assert str(owners[org_b]) == str(user_b["id"]), "name==email fallback must claim it"
+        assert owners[org_c1] is None, "ambiguous duplicate name must stay NULL"
+        assert owners[org_c2] is None, "ambiguous duplicate name must stay NULL"
+        assert owners[org_d_sole] is None, "already-owned collision must stay NULL, not raise"
+        assert str(owners[org_d_owned]) == str(user_d["id"]), "the pre-existing claim is untouched"
+    finally:
+        with auth_db.get_pool().connection() as conn:
+            for oid in (org_a, org_b, org_c1, org_c2, org_d_sole, org_d_owned):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([email_a, email_b, email_c, email_d],))
+            conn.commit()

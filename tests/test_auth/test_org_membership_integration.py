@@ -640,3 +640,144 @@ def test_remove_member_leaves_the_folder_with_the_org():
             conn.execute("DELETE FROM users WHERE email = ANY(%s)",
                          ([admin_email, leaver_email],))
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Task T2 — a user RECLAIMS their own personal org (organizations.owner_user_id)
+#
+# T1 made a vacated personal org row survive. That alone is not enough: the
+# org is findable only through org_members, and the team join that vacated it
+# deleted that exact row. Without owner_user_id, a user who goes team -> solo
+# gets a BRAND NEW personal org every time, and every earlier one's learning
+# history is orphaned forever. These tests pin the reclaim (ensure_personal_org
+# steps 2-3), the token consequence, and the FK's SET NULL (never CASCADE).
+# ---------------------------------------------------------------------------
+
+def test_ensure_personal_org_reclaims_same_org_after_team_round_trip():
+    """Test 5 — the round trip. A user goes team -> solo via remove_member.
+    ensure_personal_org must return the SAME org id they had before joining
+    the team (not a fresh one), AND the user must end up with exactly ONE
+    org_members row. The membership half is the one that regresses silently
+    if step 3's INSERT is ever dropped — remove_member calls
+    ensure_personal_org precisely to keep a last-membership user usable, and
+    a reclaim that returns the org id without seating the membership leaves
+    the user with ZERO memberships."""
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"rt-o-{uuid.uuid4().hex[:8]}@x.com"
+    solo_email = f"rt-s-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    personal_id = None
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        solo = users.create_user(solo_email, "password123", "Solo")
+        personal_id = orgs.ensure_personal_org(str(solo["id"]), solo_email)
+
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(solo["id"]), "org_member")  # vacates personal_id
+        assert orgs.remove_member(org_id, str(solo["id"])) is True  # solo again
+
+        reclaimed = orgs.ensure_personal_org(str(solo["id"]), solo_email)
+
+        assert reclaimed == personal_id, "must reclaim the SAME org, not mint a new one"
+        memberships = orgs.get_orgs_for_user(str(solo["id"]))
+        assert len(memberships) == 1, "must end up with exactly one membership"
+        assert memberships[0]["org_id"] == personal_id
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            if personal_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (personal_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([owner_email, solo_email],))
+            conn.commit()
+
+
+def test_token_after_team_round_trip_has_non_null_org_id():
+    """Test 6 — the token. After the same team -> solo round trip,
+    _token_payload must mint a non-NULL org_id claim. This is the direct
+    guard against the unscoped-learning failure mode (org_id=None means
+    every org's hints get injected into the user's runs) and is kept
+    separate from test 5 so a membership-count regression and a token
+    regression fail independently."""
+    from src.backend.auth.endpoints import _token_payload
+    from src.backend.auth.jwt_utils import decode_token
+
+    users, orgs = UserRepository(), OrgRepository()
+    owner_email = f"tok-o-{uuid.uuid4().hex[:8]}@x.com"
+    solo_email = f"tok-s-{uuid.uuid4().hex[:8]}@x.com"
+    org_id = None
+    personal_id = None
+    try:
+        owner = users.create_user(owner_email, "password123", "Own")
+        solo = users.create_user(solo_email, "password123", "Solo")
+        personal_id = orgs.ensure_personal_org(str(solo["id"]), solo_email)
+
+        org_id = orgs.create_team_org("Acme", str(owner["id"]))
+        orgs.add_member(org_id, str(solo["id"]), "org_member")
+        # remove_member's own last-membership self-heal reclaims personal_id.
+        assert orgs.remove_member(org_id, str(solo["id"])) is True
+
+        row = users.get_by_id(str(solo["id"]))
+        claims = decode_token(_token_payload(row)["access_token"])
+
+        assert claims["org_id"] is not None
+        assert claims["org_id"] == personal_id
+    finally:
+        with get_pool().connection() as conn:
+            if org_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            if personal_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (personal_id,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([owner_email, solo_email],))
+            conn.commit()
+
+
+def test_deleting_user_nulls_owner_but_keeps_org_and_learning_rows():
+    """Test 8 — the FK is not CASCADE. owner_user_id is ON DELETE SET NULL:
+    deleting the owning user must leave the org row AND its learning rows
+    intact, only clearing the owner link. CASCADE would delete the org row
+    on owner deletion, reintroducing the exact bug T1 removed (a personal
+    org disappearing out from under its still-live learning rows)."""
+    users, orgs = UserRepository(), OrgRepository()
+    email = f"fk-{uuid.uuid4().hex[:8]}@x.com"
+    personal_id = None
+    row_ids: dict[str, int] = {}
+    try:
+        user = users.create_user(email, "password123", "FK")
+        personal_id = orgs.ensure_personal_org(str(user["id"]), email)
+        with get_pool().connection() as conn:
+            _ensure_stub_learning_tables(conn)
+            for table in ("nl_feedback_corrections", "learning_anchors", "execution_records"):
+                row = conn.execute(
+                    f"INSERT INTO {table} (org_id) VALUES (%s) RETURNING id",
+                    (personal_id,),
+                ).fetchone()
+                row_ids[table] = row["id"]
+            conn.commit()
+
+        with get_pool().connection() as conn:
+            conn.execute("DELETE FROM users WHERE id = %s", (str(user["id"]),))
+            conn.commit()
+
+        with get_pool().connection() as conn:
+            org_row = conn.execute(
+                "SELECT owner_user_id FROM organizations WHERE id = %s", (personal_id,)
+            ).fetchone()
+            assert org_row is not None, "the org row must survive its owner's deletion"
+            assert org_row["owner_user_id"] is None, "SET NULL, never CASCADE"
+            for table, rid in row_ids.items():
+                learning_row = conn.execute(
+                    f"SELECT org_id FROM {table} WHERE id = %s", (rid,)
+                ).fetchone()
+                assert learning_row is not None, f"{table} row must survive"
+                assert learning_row["org_id"] == personal_id
+    finally:
+        with get_pool().connection() as conn:
+            for table, rid in row_ids.items():
+                conn.execute(f"DELETE FROM {table} WHERE id = %s", (rid,))
+            if personal_id:
+                conn.execute("DELETE FROM organizations WHERE id = %s", (personal_id,))
+            conn.execute("DELETE FROM users WHERE email = %s", (email,))  # no-op: already gone
+            conn.commit()
