@@ -20,7 +20,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import caller_can_access
+from src.backend.auth.ownership import caller_can_access, hint_mutation_verdict
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -578,11 +578,33 @@ async def get_run_corrections(run_id: str, response: Response,
         }
 
     engine = getattr(feedback_loop, "nl_engine", None)
-    corrections = []
+    raw_corrections = []
     if engine is not None:
         # Threaded: the read borrows a pooled connection, which blocks.
-        corrections = await asyncio.to_thread(
+        raw_corrections = await asyncio.to_thread(
             engine.get_corrections_for_run, target_id)
+
+    # Explicit projection, field by field — never the row dict with keys
+    # deleted. org_id and created_by_user_id ride along on each row only to
+    # feed hint_mutation_verdict; building the response any other way would
+    # let a future column added to that SELECT leak to the client silently.
+    # can_retract surfaces the Author tier: the feedback panel is the only
+    # place a plain org member ever sees their own hint text (list_hints and
+    # get_hint stay gated on is_dashboard_viewer), so it is also the only
+    # place they can be offered a control to act on it — the client never
+    # decides this, it only draws what the server already permits.
+    corrections = [
+        {
+            "hint_id": c.get("hint_id"),
+            "feedback_text": c.get("feedback_text"),
+            "recorded_at": c.get("recorded_at"),
+            "can_retract": hint_mutation_verdict(
+                user, c.get("org_id"), c.get("created_by_user_id"),
+                is_platform_admin=admin,
+            ) == "allow",
+        }
+        for c in raw_corrections
+    ]
 
     return {
         "status": "success",

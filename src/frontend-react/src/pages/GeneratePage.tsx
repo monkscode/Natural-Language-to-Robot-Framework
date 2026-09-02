@@ -452,9 +452,23 @@ interface FeedbackResponse { status?: string; outcome?: string; message?: string
     contributed — the hints it created AND the ones it reinforced. T5 makes a
     second submission of the same text from the same run a no-op, and this is
     the answer to that: the user sees their own words on file rather than a
-    warning about a duplicate the backend could not report anyway. */
-interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string }
+    warning about a duplicate the backend could not report anyway.
+
+    can_retract is server-computed per correction (hint_mutation_verdict,
+    auth/ownership.py — the same rule that gates the admin dashboard's hint
+    mutations): true for the hint's own author or an org admin, false for
+    anyone else. Optional because an older backend, or the learning-disabled
+    response shape, never sends it — absence must render exactly like false. */
+interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; can_retract?: boolean }
 interface RecordedResponse { corrections?: RecordedCorrection[] }
+
+/* POST /api/learning/hints/{id}/retract requires a non-empty `actor`, but
+   _audit_actor (learning_endpoints.py) overrides it with the verified
+   token's email whenever a token is present — the client-supplied value is
+   never trusted and never reaches the audit row. This placeholder exists
+   only to satisfy the 400-on-blank validation; sending the signed-in user's
+   own email here would misleadingly imply the client decides identity. */
+const RETRACT_ACTOR_PLACEHOLDER = 'feedback-panel'
 
 /* ── Feedback footer, rendered inside the result card (generated runs only).
    Pass: thumbs row — 👍 is a UI-only acknowledgment (passing runs already feed
@@ -483,6 +497,12 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // value cannot reach the screen. The guard is three lines of insurance
   // against that render condition changing, not a fix for a live defect.
   const recordedGen = useRef(0)
+  // Which item's Retract is in flight (disables that one control only), and
+  // the message when one fails. Separate from `err` above: that field is the
+  // main correction FORM's error, and a failed retract is a different action
+  // the user took from a different control.
+  const [retractingId, setRetractingId] = useState<number | null>(null)
+  const [retractErr, setRetractErr] = useState('')
 
   // What this run already told the system. Fetched on mount rather than when
   // the form opens: the list exists to be read BEFORE typing, and it must not
@@ -561,6 +581,39 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
     }
   }
 
+  // can_retract is server-decided (hint_mutation_verdict) — this only fires
+  // the POST the control's own visibility already cleared.
+  //
+  // Drops the item locally on success rather than re-fetching. Re-fetching
+  // looked like the natural match for the mount/M9 pattern above, but
+  // get_corrections_for_run is DELIBERATELY unfiltered on is_active (a
+  // retracted hint is still the user's own recorded words — see the engine
+  // docstring), and hint_mutation_verdict never checks it either: it answers
+  // whether this caller may act on the hint, not whether the hint is still
+  // active. So a re-fetch here would hand back the very same hint with the
+  // very same can_retract: true, and the control would silently reappear —
+  // re-fetching cannot make this control stop being offered. Dropping the
+  // item is the one choice that actually satisfies "stop offering it".
+  async function retract(hintId: number) {
+    setRetractingId(hintId); setRetractErr('')
+    try {
+      await api(`/api/learning/hints/${hintId}/retract`, {
+        method: 'POST',
+        body: JSON.stringify({
+          actor: RETRACT_ACTOR_PLACEHOLDER,
+          reason: 'retracted from feedback panel',
+        }),
+      })
+      setRecorded(prev => prev.filter(c => c.hint_id !== hintId))
+    } catch (e) {
+      // Unlike the read above, this is a WRITE the user explicitly asked
+      // for — silence here would let a failed retract look like it worked.
+      setRetractErr(e instanceof Error ? e.message : 'Could not retract this correction')
+    } finally {
+      setRetractingId(null)
+    }
+  }
+
   if (ack) {
     return (
       <div className="flex items-center gap-2 text-sm">
@@ -623,8 +676,27 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
           <div className="font-medium">Already recorded for this run</div>
           <ul className="mt-1 space-y-0.5 text-muted-foreground">
-            {recorded.map(c => <li key={c.hint_id}>“{c.feedback_text}”</li>)}
+            {recorded.map(c => (
+              <li key={c.hint_id} className="flex items-center justify-between gap-2">
+                <span>“{c.feedback_text}”</span>
+                {/* can_retract is absent or false on an older backend and on
+                    the learning-disabled shape — both render exactly like
+                    today, with no control. */}
+                {c.can_retract && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 shrink-0 px-1.5 text-[11px] text-destructive"
+                    disabled={retractingId === c.hint_id}
+                    onClick={() => retract(c.hint_id)}
+                  >
+                    Retract
+                  </Button>
+                )}
+              </li>
+            ))}
           </ul>
+          {retractErr && <p className="mt-1 text-destructive">{retractErr}</p>}
         </div>
       )}
       <div>

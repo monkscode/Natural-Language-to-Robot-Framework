@@ -132,6 +132,23 @@ class TestWhatOneRunContributed:
 
         assert engine.get_corrections_for_run("wf-never") == []
 
+    def test_a_correction_carries_its_org_and_the_authors_user_id(self, in_memory_db):
+        """T7: GET /api/feedback/{run_id} (endpoints.py) computes can_retract
+        from these two columns via hint_mutation_verdict. Neither reaches the
+        client, but the engine must hand both to that caller — this is the
+        one place that predicate would silently break if the SELECT stopped
+        carrying them."""
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(
+            _record("wf-1"),
+            {"category": "keyword", "feedback_text": _TEXT,
+             "actor": "author@e.com", "actor_user_id": "u-author"},
+        )
+
+        row = engine.get_corrections_for_run("wf-1")[0]
+        assert row["org_id"] == _ORG
+        assert row["created_by_user_id"] == "u-author"
+
 
 class TestItNeverRaisesIntoTheRequest:
     """The panel calls this on mount for every finished run. An exception is a

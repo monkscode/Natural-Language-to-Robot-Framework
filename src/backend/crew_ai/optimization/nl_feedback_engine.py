@@ -774,7 +774,8 @@ class NLFeedbackEngine(LearningEngine):
             with self._em.read_conn() as conn:
                 rows = conn.execute(
                     "SELECT c.id AS hint_id, c.feedback_text, "
-                    "       e.created_at AS recorded_at "
+                    "       e.created_at AS recorded_at, "
+                    "       c.org_id, c.created_by_user_id "
                     "FROM hint_evidence e "
                     "JOIN nl_feedback_corrections c ON c.id = e.hint_id "
                     "WHERE e.source_kind = 'workflow' AND e.bucket = 'evidence' "

@@ -395,3 +395,105 @@ describe('Submit requires words; Skip does not', () => {
   })
 
 })
+
+/* ── T7: retracting a hint from the feedback panel ───────────────────────────
+   can_retract is server-computed (hint_mutation_verdict, ownership.py) — the
+   client never decides this, it only draws what the server already permits.
+   So the control's presence is driven entirely by the field on each
+   correction, including the two cases where it must stay hidden: an older
+   server that predates the field, and the learning-disabled response shape
+   (neither ever sends can_retract at all). ── */
+describe('T7: retracting a hint from the feedback panel', () => {
+  const RETRACT_PATH = '/api/learning/hints/7/retract'
+  const retractCalls = () =>
+    mockApi.mock.calls.filter(([path]) => path === RETRACT_PATH)
+
+  const RETRACTABLE = [
+    { hint_id: 7, feedback_text: 'wait for the spinner', recorded_at: '2026-08-28T10:00:00Z', can_retract: true },
+  ]
+
+  it('renders a Retract control when the server says can_retract: true', async () => {
+    onFile(RETRACTABLE)
+    renderFailPanel()
+
+    expect(await screen.findByRole('button', { name: /Retract/ })).toBeInTheDocument()
+  })
+
+  it('does not render Retract when can_retract is false', async () => {
+    onFile([{ ...RETRACTABLE[0], can_retract: false }])
+    renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull()
+  })
+
+  it('does not render Retract when the field is absent (older server, or learning disabled)', async () => {
+    onFile([{ hint_id: 7, feedback_text: 'wait for the spinner', recorded_at: '2026-08-28T10:00:00Z' }])
+    renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull()
+  })
+
+  it('POSTs to the retract endpoint for that hint id when clicked', async () => {
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockResolvedValueOnce({ hint: {}, changed: true })   // the retract POST
+
+    fireEvent.click(retractBtn)
+
+    await waitFor(() => expect(retractCalls()).toHaveLength(1))
+    expect(retractCalls()[0][1]).toMatchObject({ method: 'POST' })
+  })
+
+  it('does not send the signed-in user email as actor — the server overrides it from the token', async () => {
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockResolvedValueOnce({ hint: {}, changed: true })
+
+    fireEvent.click(retractBtn)
+    await waitFor(() => expect(retractCalls()).toHaveLength(1))
+
+    const body = JSON.parse((retractCalls()[0][1] as { body: string }).body)
+    expect(typeof body.actor).toBe('string')
+    expect(body.actor.length).toBeGreaterThan(0)
+    expect(body.actor).not.toMatch(/@/)   // never an email address
+  })
+
+  it('stops offering Retract for that item once the retract succeeds', async () => {
+    // Not re-fetched: get_corrections_for_run is deliberately unfiltered on
+    // is_active (a retracted hint is still the user's own recorded words)
+    // and hint_mutation_verdict never checks it either — a re-fetch would
+    // hand back this same hint with can_retract: true again, so the item is
+    // dropped from local state instead. This test pins that the ENTIRE item
+    // (not just the button) is gone, and that no second GET fires.
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockResolvedValueOnce({ hint: {}, changed: true })   // the retract POST
+
+    fireEvent.click(retractBtn)
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+    expect(screen.queryByText(/wait for the spinner/)).toBeNull()
+    expect(screen.queryByText(/Already recorded for this run/)).toBeNull()
+    expect(mockApi.mock.calls.filter(([path]) => path === '/api/feedback/wf-1')).toHaveLength(1)
+  })
+
+  it('surfaces a failed retract instead of silently looking like success', async () => {
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockRejectedValueOnce(new Error('Only the hint’s author or an org admin can change it'))
+
+    fireEvent.click(retractBtn)
+
+    await screen.findByText(/Only the hint.s author or an org admin can change it/)
+    // Unlike the read (which degrades to silence), this is a write the user
+    // explicitly asked for — the panel must not blow up, and the control
+    // must still be there so they can see it did not go through.
+    expect(screen.getByRole('button', { name: /Retract/ })).toBeInTheDocument()
+  })
+})
