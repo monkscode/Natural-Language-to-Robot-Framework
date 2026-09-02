@@ -1,7 +1,14 @@
-"""Learning /hints + /runs are org-scoped; members 403; telemetry + mutations platform-only.
+"""Learning /hints + /runs are org-scoped; members 403; telemetry platform-only.
 
-Task 12: org-admin can read their OWN org's hints/runs; telemetry reads (/stats,
-/triggers, /health) and all mutations stay platform-admin-only.
+Task 12: org-admin can read their OWN org's hints/runs; telemetry reads
+(/stats, /triggers, /health) stay platform-admin-only.
+
+Mutations no longer do. A hint now answers to three tiers — platform admin
+anywhere, org admin in their own org, author for their own hints — so the
+create-tier tests below expect 201 where they once expected 403, and the
+per-hint matrix lives in test_hint_mutation_tiers.py. What stays platform-only
+here is the review-hints sweep: an LLM batch pass across every org, with no
+single org whose admin could own it.
 """
 
 import pytest

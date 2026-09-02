@@ -167,8 +167,7 @@ def hint_mutation_verdict(
     is_platform_admin (is_validated_admin does the DB re-validation at the
     call site), exactly like caller_can_access.
 
-    Referenced by: api/learning_endpoints.py (the five hint-mutation routes),
-    api/endpoints.py (can_retract on a run's corrections).
+    Referenced by: api/learning_endpoints.py (the five hint-mutation routes).
     Depends on: nothing (pure).
     """
     if caller is None:
