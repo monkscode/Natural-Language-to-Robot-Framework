@@ -142,31 +142,25 @@ class OrgRepository:
         ).fetchone()
         return row is not None and row["kind"] == "team"
 
-    def _delete_personal_org_if_empty(self, conn, org_id: str) -> None:
-        """Delete org_id iff it is a personal org with zero remaining members.
-        Personal orgs are 1:1 with a user and meaningless once vacated; team orgs
-        are never auto-deleted. Safe: the only hard FKs to organizations are
-        org_members (none here) and invitations (personal orgs are never invited
-        into), both ON DELETE CASCADE; history/learning org_id is a soft column
-        with no FK, so this can neither be blocked nor cascade user data."""
-        conn.execute(
-            "DELETE FROM organizations o "
-            "WHERE o.id = %s AND o.kind = 'personal' "
-            "AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id)",
-            (org_id,),
-        )
-
     def _collapse_to_single(self, conn, user_id: str, keep_org_id: str) -> None:
-        """Single-active-org invariant: remove every membership of user_id except
-        the one in keep_org_id, deleting any personal org thereby vacated. Runs in
-        the caller's transaction."""
-        vacated = conn.execute(
+        """Single-active-org invariant: remove every membership of user_id
+        except the one in keep_org_id. Runs in the caller's transaction.
+
+        A personal org vacated by this removal is kept, not deleted: org
+        rows are permanent. No FK exists from the learning tables to
+        organizations, so deleting a vacated org would strand the learning
+        rows naming it. The token's org claim is minted from org_members
+        JOIN organizations, so a deleted org can never be claimed again and
+        every org-scoped learning read for those rows would match zero
+        rows. Cost: one leftover organizations row per user who joins a
+        team; invisible to the user (get_orgs_for_user joins org_members),
+        it shows in the admin Orgs tab with 0 members.
+        """
+        conn.execute(
             "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s "
             "RETURNING org_id",
             (user_id, keep_org_id),
-        ).fetchall()
-        for row in vacated:
-            self._delete_personal_org_if_empty(conn, str(row["org_id"]))
+        )
 
     def _email_for(self, user_id: str) -> str | None:
         """The user's email (used as their personal-org name), or None if absent."""
@@ -178,7 +172,8 @@ class OrgRepository:
 
     def add_member(self, org_id: str, user_id: str, org_role: str = "org_member") -> None:
         """Move a user into a TEAM org (single-active-org): upsert their membership,
-        then remove every other membership and prune any emptied personal org.
+        then remove every other membership; an emptied personal org row is kept,
+        not pruned (org rows are permanent, see _collapse_to_single).
         Membership changes apply to team orgs only (Finding #6)."""
         if org_role not in ("org_admin", "org_member"):
             raise ValueError(f"invalid org_role: {org_role!r}")
@@ -247,9 +242,10 @@ class OrgRepository:
         """One-time cleanup: reduce every user with more than one membership to a
         single active org. Keep the most recently joined TEAM org if the user is in
         any team org (reflects the latest assignment intent), else their personal
-        org; delete the rest and prune vacated personal orgs. Bumps token_version
-        for each collapsed user so their stale token refreshes. Returns the number
-        of users collapsed. Idempotent: a no-op once everyone is single-org."""
+        org; delete the rest of their memberships (a vacated personal org row is
+        kept, not pruned). Bumps token_version for each collapsed user so their
+        stale token refreshes. Returns the number of users collapsed. Idempotent:
+        a no-op once everyone is single-org."""
         collapsed_uids: list[str] = []
         with get_pool().connection() as conn:
             multi = conn.execute(
