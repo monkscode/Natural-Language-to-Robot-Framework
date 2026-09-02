@@ -657,17 +657,52 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   )
 }
 
-const VIEWS: { key: View; label: string }[] = [
-  { key: 'overview', label: 'Overview' },
+/* Which tabs a caller can actually open.
+ *
+ * /learning admits an org admin (can_view_learning / is_dashboard_viewer), but
+ * most of this page's own calls are still Depends(require_admin) and answer an
+ * org admin 403: /learning/stats (Overview AND Stats), /learning/triggers, and
+ * /learning/review-hints/sessions. Only GET /learning/hints and
+ * /learning/runs are is_dashboard_viewer. Those four routes are platform-only
+ * on purpose — test_learning_dashboards_org.py pins the 403 — so the page
+ * draws fewer controls rather than the API opening more.
+ *
+ * platformOnly is therefore a statement about the ROUTE behind the tab, not a
+ * second permission model: it is true exactly where the backing route carries
+ * require_admin. Adding a tab means checking its route's guard, not guessing.
+ */
+const VIEWS: { key: View; label: string; platformOnly?: boolean }[] = [
+  { key: 'overview', label: 'Overview', platformOnly: true },
   { key: 'hints', label: 'Hints' },
-  { key: 'triggers', label: 'Triggers' },
+  { key: 'triggers', label: 'Triggers', platformOnly: true },
   { key: 'runs', label: 'Runs' },
-  { key: 'stats', label: 'Stats' },
-  { key: 'review', label: 'LLM Review' },
+  { key: 'stats', label: 'Stats', platformOnly: true },
+  { key: 'review', label: 'LLM Review', platformOnly: true },
 ]
 
+/** The tabs this caller can open. Exported, and pure, so the filtering and the
+ *  default landing tab are testable without rendering the page — this package
+ *  tests no page components (vite.config.ts). */
+export function visibleViews(isPlatformAdmin: boolean) {
+  return VIEWS.filter(v => isPlatformAdmin || !v.platformOnly)
+}
+
+/** The tab the page opens on: the first one this caller can actually open.
+ *  It used to be a hardcoded 'overview', so an org admin following the new
+ *  Learning nav item landed on an error box on arrival. */
+export function defaultView(isPlatformAdmin: boolean): View {
+  return visibleViews(isPlatformAdmin)[0].key
+}
+
 export default function LearningPage() {
-  const [view, setView] = useState<View>('overview')
+  const { isAdmin } = useAuth()
+  const views = visibleViews(isAdmin)
+  const [view, setView] = useState<View>(() => defaultView(isAdmin))
+  // isAdmin can flip mid-session (a demotion, or the /auth/me hydration
+  // landing after first paint). Re-checked on every render for the same
+  // reason KeepAlivePages re-checks its gate: a tab whose route would now
+  // 403 must not stay open just because it was open when it was allowed.
+  const active = views.some(v => v.key === view) ? view : views[0].key
   return (
     <div className="mx-auto w-full max-w-7xl space-y-4">
       <div className="flex items-start justify-between">
@@ -676,20 +711,23 @@ export default function LearningPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">Review learned hints, runs, and the adaptive-learning system</p>
         </div>
       </div>
-      <HealthBanner />
+      {/* GET /learning/health is require_admin too. It fails silently (the
+          banner renders null without data), so this is not a visible error —
+          but it is a guaranteed 403 on every page load for an org admin. */}
+      {isAdmin && <HealthBanner />}
       <div className="flex gap-1.5 border-b pb-2">
-        {VIEWS.map(v => (
-          <Button key={v.key} size="sm" variant={view === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
+        {views.map(v => (
+          <Button key={v.key} size="sm" variant={active === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
             {v.label}
           </Button>
         ))}
       </div>
-      {view === 'overview' && <Overview />}
-      {view === 'hints' && <Hints />}
-      {view === 'triggers' && <TriggersTab />}
-      {view === 'runs' && <Runs />}
-      {view === 'stats' && <StatsTab />}
-      {view === 'review' && <Review />}
+      {active === 'overview' && <Overview />}
+      {active === 'hints' && <Hints />}
+      {active === 'triggers' && <TriggersTab />}
+      {active === 'runs' && <Runs />}
+      {active === 'stats' && <StatsTab />}
+      {active === 'review' && <Review />}
     </div>
   )
 }

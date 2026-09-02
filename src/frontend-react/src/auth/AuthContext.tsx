@@ -37,6 +37,12 @@ export interface User {
   // seat) gets can_manage_org_folders=false but can_view_learning=true.
   // Never reuse one for the other.
   can_view_learning?: boolean
+  // The caller's OWN active org — the org_id claim in their token, echoed by
+  // /auth/me and by login. Present so the SPA can name an org the server will
+  // accept from this caller: POST /api/learning/hints requires one, and a
+  // non-platform admin may only ever name this one. It is not a directory:
+  // there is no other org here and no way to reach one.
+  org_id?: string | null
 }
 
 interface AuthState {

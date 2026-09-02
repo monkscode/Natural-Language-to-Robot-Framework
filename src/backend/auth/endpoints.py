@@ -166,6 +166,15 @@ def _token_payload(row: dict) -> dict:
     user["can_view_learning"] = is_dashboard_viewer(
         {"org_id": primary.get("org_id"), "org_role": primary.get("org_role")},
         is_platform_admin=(user["role"] == "admin"))
+    # The caller's OWN active org, the same value minted into the token below.
+    # The SPA needs it wherever it must name an org the server will accept from
+    # this caller: POST /api/learning/hints requires org_id, and a non-platform
+    # admin may only ever name their own, so the Add-feedback sheet pins it
+    # here instead of trying to pick from GET /auth/admin/orgs — which is
+    # require_admin and 403s them. Not added to _user_public: that shape is
+    # also the admin user LIST, whose key set is asserted elsewhere, and one
+    # user's org is not part of another user's row.
+    user["org_id"] = primary.get("org_id")
     token = create_access_token(
         {
             "id": user["id"],
@@ -274,6 +283,12 @@ async def me(user: dict = Depends(get_current_user)):
     # from a freshly-queried `primary`.
     public["can_view_learning"] = is_dashboard_viewer(
         user, is_platform_admin=(public["role"] == "admin"))
+    # From the TOKEN's claim, for the same reason as the two flags above: the
+    # claim is what the server enforces on, so the org the SPA names and the
+    # org the API accepts are the same string by construction. AuthContext
+    # hydrates from here on every page load, so a value set only in
+    # _token_payload would vanish on F5.
+    public["org_id"] = user.get("org_id")
     return public
 
 

@@ -3,10 +3,22 @@
  * Mirrors the legacy modal: owning org, text, anchor query, scope, category,
  * original failure category, optional auto-triage.
  *
- * The org is required and has no sensible default: every hint belongs to
- * exactly one org (schema v20), and a platform admin — the only caller this
- * endpoint admits — belongs to none. Guidance wanted in several orgs is added
- * once per org, so each copy keeps its own counters, flags and disables.
+ * Every hint belongs to exactly one org (schema v20), and who may name which
+ * org is now two cases, not one:
+ *
+ *   - A PLATFORM ADMIN may create a hint in any org, and belongs to none of
+ *     them in a way this form could infer, so they get the picker — filled
+ *     from GET /auth/admin/orgs, which is require_admin.
+ *   - An ORG ADMIN may create a hint in their OWN org and nowhere else
+ *     (learning_endpoints.create_hint). /auth/admin/orgs 403s them, so the
+ *     picker would stay empty, orgId '', `valid` false, and the submit button
+ *     permanently disabled — the backend widening unreachable from the
+ *     product. They get their own org pinned instead, from the org_id claim
+ *     /auth/me reports, which is the only value the server would accept from
+ *     them anyway.
+ *
+ * Guidance wanted in several orgs is added once per org, so each copy keeps
+ * its own counters, flags and disables.
  */
 
 import { useEffect, useState } from 'react'
@@ -28,9 +40,9 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
   onCreated: () => void
   onClose: () => void
 }) {
-  const { user } = useAuth()
+  const { user, isAdmin } = useAuth()
   const [orgs, setOrgs] = useState<Org[]>([])
-  const [orgId, setOrgId] = useState('')
+  const [orgId, setOrgId] = useState(isAdmin ? '' : (user?.org_id ?? ''))
   const [orgErr, setOrgErr] = useState('')
   const [text, setText] = useState('')
   const [anchor, setAnchor] = useState('')
@@ -44,6 +56,10 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
   const [err, setErr] = useState('')
 
   useEffect(() => {
+    // Skipped entirely for a non-platform admin: /auth/admin/orgs is
+    // require_admin, so the call can only ever 403 and paint that 403 under
+    // the field as if the user had done something wrong.
+    if (!isAdmin) return
     let live = true
     api<Org[]>('/auth/admin/orgs')
       .then(rows => { if (live) setOrgs(rows) })
@@ -51,7 +67,7 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
         if (live) setOrgErr(e instanceof Error ? e.message : 'Failed to load orgs')
       })
     return () => { live = false }
-  }, [])
+  }, [isAdmin])
 
   const valid =
     orgId.trim().length > 0 &&
@@ -100,10 +116,17 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
         <div className="mt-4 space-y-4 text-sm">
           <div>
             <label className="mb-1 block text-xs font-medium">Owning org *</label>
-            <select className={selectCls} value={orgId} onChange={e => setOrgId(e.target.value)}>
-              <option value="">— choose an org —</option>
-              {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-            </select>
+            {isAdmin ? (
+              <select className={selectCls} value={orgId} onChange={e => setOrgId(e.target.value)}>
+                <option value="">— choose an org —</option>
+                {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+            ) : (
+              /* No control at all, not a disabled one: there is nothing to
+                 choose. The org is stated so the writer can see where the
+                 hint will land before they send it. */
+              <p className="text-sm">Your organisation</p>
+            )}
             <p className="mt-1 text-xs text-muted-foreground">
               {orgErr
                 ? orgErr
