@@ -242,12 +242,16 @@ def test_owner_backfill_handles_sole_member_email_fallback_and_duplicate_names()
       (c) two personal orgs sharing a name are ambiguous — the migration
           leaves BOTH owner_user_id NULL rather than aborting;
       (d) a user who is the sole member of one personal org already OWNS a
-          different one (simulates a concurrent ensure_personal_org stamp —
-          step 1 — landing on a sibling instance mid-rolling-deploy, before
-          this migration's primary pass reaches the org in (d); see
+          different one. This is the SEQUENTIAL shape — the claim is written
+          and COMMITTED before the migration runs, which is what a sibling
+          instance's stamp looks like once it has landed. It is not a
+          concurrency test and must not be read as one: an UNCOMMITTED claim
+          is invisible to the guard's statement snapshot and used to raise
+          UniqueViolation, which is pinned separately by
+          test_org_repository.py's two _claim_mid_call backfill tests. See
           backfill_personal_org_owners' docstring for why the primary pass
           needs this guard even though the task-2 brief's SQL doesn't carry
-          one). (a)/(b) still land in this same run."""
+          one. (a)/(b) still land in this same run."""
     users, orgs = UserRepository(), OrgRepository()
     email_a = f"bfa-{uuid.uuid4().hex[:8]}@x.com"
     email_b = f"bfb-{uuid.uuid4().hex[:8]}@x.com"
@@ -471,6 +475,79 @@ def test_a_failing_data_migration_does_not_skip_the_ones_after_it():
         from src.backend.auth.migration_state import mark_migration_done
         mark_migration_done("personal_org_backfill")
         mark_migration_done("personal_org_owner_backfill")
+
+
+def test_owner_backfill_claims_a_sole_member_org_despite_an_unrelated_shared_org():
+    """Minor 5. Pass 1's second guard asked "is this user in exactly ONE
+    unclaimed personal org", but the ambiguity it defends against is narrower
+    than that: only orgs where the user is the SOLE member are candidates of
+    this statement, so only those can collide with each other.
+
+    Measured before the narrowing: user X sole member of unclaimed O1, and
+    also a member of two-member unclaimed O2, left O1 owner_user_id NULL
+    forever — an undocumented third hole, in a branch whose whole purpose is
+    that a personal org's learning history stays reachable. Nothing about O1
+    is ambiguous: O2 has two members, so pass 1 can never claim it and it can
+    never compete for X's ownership.
+
+    Two members in a PERSONAL org is a legacy pre-single-active-org shape;
+    collapse_all_to_single_org exists because double membership happened.
+    """
+    users = UserRepository()
+    email_x = f"nar-{uuid.uuid4().hex[:8]}@x.com"
+    email_y = f"nar-{uuid.uuid4().hex[:8]}@x.com"
+    org_solo = org_shared = None
+    try:
+        user_x = users.create_user(email_x, "password123", "X")
+        user_y = users.create_user(email_y, "password123", "Y")
+
+        with auth_db.get_pool().connection() as conn:
+            def _personal(name: str) -> str:
+                return conn.execute(
+                    "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+                    "RETURNING id", (name,),
+                ).fetchone()["id"]
+
+            # Names are NOT emails, so pass 2 cannot claim either one and this
+            # test is about pass 1 alone.
+            org_solo = _personal(f"Solo Of X {uuid.uuid4().hex[:8]}")
+            org_shared = _personal(f"Shared XY {uuid.uuid4().hex[:8]}")
+            for oid, uid in ((org_solo, user_x["id"]), (org_shared, user_x["id"]),
+                             (org_shared, user_y["id"])):
+                conn.execute(
+                    "INSERT INTO org_members (org_id, user_id, org_role) "
+                    "VALUES (%s, %s, 'org_admin')", (oid, str(uid)),
+                )
+            conn.execute(
+                "DELETE FROM data_migrations WHERE name = 'personal_org_owner_backfill'"
+            )
+            conn.commit()
+
+        init_org_db()
+
+        with auth_db.get_pool().connection() as conn:
+            owners = {
+                oid: conn.execute(
+                    "SELECT owner_user_id FROM organizations WHERE id = %s", (oid,)
+                ).fetchone()["owner_user_id"]
+                for oid in (org_solo, org_shared)
+            }
+        assert str(owners[org_solo]) == str(user_x["id"]), (
+            "X is the sole member of this org and nothing else can claim it — "
+            "a shared org X merely belongs to must not block it"
+        )
+        assert owners[org_shared] is None, (
+            "a two-member personal org has no sole member, so pass 1 must "
+            "leave it alone"
+        )
+    finally:
+        with auth_db.get_pool().connection() as conn:
+            for oid in (org_solo, org_shared):
+                if oid:
+                    conn.execute("DELETE FROM organizations WHERE id = %s", (oid,))
+            conn.execute("DELETE FROM users WHERE email = ANY(%s)",
+                         ([email_x, email_y],))
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------

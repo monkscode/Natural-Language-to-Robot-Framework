@@ -98,17 +98,23 @@ class OrgRepository:
             # ON CONFLICT, not a bare INSERT. uq_org_owner_personal is a
             # partial unique index on (owner_user_id) WHERE kind='personal',
             # and the FOR UPDATE above does not serialise every writer that can
-            # land in it. It serialises MOST of them by accident:
-            # organizations.owner_user_id carries an FK to users(id), so any
-            # writer SETTING it takes a FOR KEY SHARE lock on that users row,
-            # which conflicts with this transaction's FOR UPDATE — the
-            # backfill_personal_org_owners interleaving (another instance's
-            # boot claiming the org step 2 just failed to find) is blocked by
-            # that lock, measured. What is NOT blocked is a writer that leaves
-            # owner_user_id alone and changes only `kind`: Postgres skips the
-            # FK re-check when the referencing value is unchanged, so such a
-            # statement takes no users lock, is invisible to step 2 until it
-            # commits, and enters the index the moment it does.
+            # land in it. It serialises the writers that SET owner_user_id:
+            # that column carries an FK to users(id), so such a writer takes a
+            # FOR KEY SHARE lock on that users row, which conflicts with this
+            # transaction's FOR UPDATE. backfill_personal_org_owners is one of
+            # them, and it now takes that lock deliberately rather than as a
+            # side effect of its own UPDATE — see the comment on its candidate
+            # lock for the interleaving that used to abort a boot.
+            #
+            # Two writers are still NOT serialised by it. One is any writer
+            # that enters the index WITHOUT touching owner_user_id — changing
+            # only `kind` — because Postgres skips the FK re-check when the
+            # referencing value is unchanged, so it takes no users lock at all
+            # (no code path does this today; it is the constructible
+            # demonstration, and the test below uses it). The other is the
+            # backfill in the window between choosing its candidates and
+            # running its UPDATE, when a row it did not lock can become a
+            # candidate.
             #
             # Relying on that FK-plus-row-lock coupling to keep this method
             # from raising would be a guarantee nobody could see: dropping the
@@ -256,7 +262,12 @@ class OrgRepository:
         Known holes, left deliberately (see task-2 brief): a vacated personal
         org whose name is not an email matches neither pass and stays NULL
         forever (its hints become unreachable); two personal orgs sharing a
-        name leave BOTH NULL.
+        name leave BOTH NULL; and an org whose user is claimed by a concurrent
+        login mid-migration is skipped rather than fought over, which leaves
+        it NULL after the marker is set, so it is never revisited. All three
+        keep the same shape: when the answer is not unambiguous, claim
+        nothing. Picking one arbitrarily would decide which org's learning
+        history the user gets back.
 
         Idempotent: only touches rows still NULL. Called once from
         init_org_db() under run_migration_once("personal_org_owner_backfill").
@@ -313,15 +324,27 @@ class OrgRepository:
                 "WHERE o.kind = 'personal' AND o.owner_user_id IS NULL "
                 "AND m.org_id = o.id "
                 "AND (SELECT count(*) FROM org_members x WHERE x.org_id = o.id) = 1 "
-                # ...and that member is in exactly ONE unclaimed personal org.
-                # Without this, a user in two of them matches BOTH rows: the
-                # NOT EXISTS below reads the statement snapshot, so neither row
-                # sees the other being set, both take the same owner, and
+                # ...and that member is the SOLE member of exactly ONE
+                # unclaimed personal org. Without this, a user who is the sole
+                # member of two of them matches BOTH rows: the NOT EXISTS below
+                # reads the statement snapshot, so neither row sees the other
+                # being set, both take the same owner, and
                 # uq_org_owner_personal aborts the whole migration.
+                #
+                # "sole member of", not merely "a member of": only sole-member
+                # orgs are candidates of this statement, so only they can
+                # collide with each other. Counting every membership left a
+                # user who is sole member of unclaimed O1 AND one of two
+                # members of unclaimed O2 with O1 unclaimed forever, though
+                # nothing about O1 is ambiguous — an undocumented third hole
+                # in a migration whose point is that a personal org's learning
+                # history stays reachable.
                 "AND (SELECT count(*) FROM org_members y "
                 "     JOIN organizations o4 ON o4.id = y.org_id "
                 "     WHERE y.user_id = m.user_id AND o4.kind = 'personal' "
-                "       AND o4.owner_user_id IS NULL) = 1 "
+                "       AND o4.owner_user_id IS NULL "
+                "       AND (SELECT count(*) FROM org_members z "
+                "            WHERE z.org_id = o4.id) = 1) = 1 "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM organizations o2 "
                 "    WHERE o2.kind = 'personal' AND o2.owner_user_id = m.user_id"
@@ -441,8 +464,7 @@ class OrgRepository:
         it shows in the admin Orgs tab with 0 members.
         """
         conn.execute(
-            "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s "
-            "RETURNING org_id",
+            "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s",
             (user_id, keep_org_id),
         )
 
