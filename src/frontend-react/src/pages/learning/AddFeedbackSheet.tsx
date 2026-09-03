@@ -44,6 +44,11 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
   const [orgs, setOrgs] = useState<Org[]>([])
   const [orgId, setOrgId] = useState(isAdmin ? '' : (user?.org_id ?? ''))
   const [orgErr, setOrgErr] = useState('')
+  const [loadingOrgs, setLoadingOrgs] = useState(false)
+  // Bumped by the Retry control; the fetch effect re-runs on it. A transient
+  // 500 on this one call used to disable Submit for the life of the sheet,
+  // with closing and reopening as the only way out.
+  const [orgAttempt, setOrgAttempt] = useState(0)
   const [text, setText] = useState('')
   const [anchor, setAnchor] = useState('')
   const [scope, setScope] = useState('domain')
@@ -61,13 +66,21 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
     // the field as if the user had done something wrong.
     if (!isAdmin) return
     let live = true
+    setLoadingOrgs(true)
     api<Org[]>('/auth/admin/orgs')
-      .then(rows => { if (live) setOrgs(rows) })
+      .then(rows => {
+        if (!live) return
+        setOrgs(rows)
+        // Cleared on success: without this a retry that WORKED still showed
+        // the failed attempt's message beside a picker that had just filled.
+        setOrgErr('')
+      })
       .catch(e => {
         if (live) setOrgErr(e instanceof Error ? e.message : 'Failed to load orgs')
       })
+      .finally(() => { if (live) setLoadingOrgs(false) })
     return () => { live = false }
-  }, [isAdmin])
+  }, [isAdmin, orgAttempt])
 
   const valid =
     orgId.trim().length > 0 &&
@@ -121,17 +134,43 @@ export default function AddFeedbackSheet({ onCreated, onClose }: {
                 <option value="">— choose an org —</option>
                 {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
-            ) : (
+            ) : user?.org_id ? (
               /* No control at all, not a disabled one: there is nothing to
                  choose. The org is stated so the writer can see where the
                  hint will land before they send it. */
               <p className="text-sm">Your organisation</p>
+            ) : (
+              /* No org on the claim, so `valid` can never be true and Submit
+                 can never enable. That combination — a fillable form and a
+                 permanently grey button with no explanation — is the one
+                 thing this must not do. Unreachable today (is_dashboard_viewer
+                 needs a non-null org_id and both flags come off the same
+                 claim), but that coupling is invisible from here and would
+                 break in silence. */
+              <p className="text-sm text-destructive">
+                Your account isn’t in an organisation, so there is nowhere to file
+                this hint. Ask an admin to check your membership.
+              </p>
             )}
             <p className="mt-1 text-xs text-muted-foreground">
-              {orgErr
-                ? orgErr
-                : 'This hint reaches only this org. To give the same guidance to another org, add it there too.'}
+              This hint reaches only this org. To give the same guidance to another org, add it there too.
             </p>
+            {/* Beside the explanation, not instead of it: the sentence above
+                is what the field MEANS, and a failed directory lookup does
+                not stop being worth reading. */}
+            {orgErr && (
+              <p className="mt-1 text-xs text-destructive">
+                Couldn’t load the org list — {orgErr}{' '}
+                <button
+                  type="button"
+                  className="underline underline-offset-2"
+                  disabled={loadingOrgs}
+                  onClick={() => setOrgAttempt(n => n + 1)}
+                >
+                  {loadingOrgs ? 'Retrying…' : 'Retry'}
+                </button>
+              </p>
+            )}
           </div>
 
           <div>

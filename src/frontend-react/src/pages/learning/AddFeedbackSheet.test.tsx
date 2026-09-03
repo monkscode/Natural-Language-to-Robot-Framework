@@ -133,3 +133,86 @@ describe('a platform admin', () => {
     expect(submitButton()).toBeDisabled()
   })
 })
+
+/* M4: a transient failure on ONE directory fetch used to end the sheet.
+   orgErr was never cleared and nothing re-ran the call, so a 500 left a
+   platform admin with an empty picker and a permanently disabled Submit until
+   they closed and reopened the drawer — and the error REPLACED the sentence
+   explaining what the field does, rather than sitting beside it. */
+describe('when the org directory fails to load', () => {
+  const EXPLANATION = /This hint reaches only this org/
+  const retry = () => screen.getByRole('button', { name: /Retry/ })
+
+  it('keeps the explanation visible beside the error, not replaced by it', async () => {
+    asCaller(true)
+    mockApi.mockRejectedValue(new Error('Request failed (500)'))
+    render(<AddFeedbackSheet onCreated={() => {}} onClose={() => {}} />)
+
+    await screen.findByText(/Couldn.t load the org list/)
+    expect(screen.getByText(EXPLANATION)).toBeInTheDocument()
+  })
+
+  it('offers a retry that refills the picker and clears the error', async () => {
+    asCaller(true)
+    mockApi.mockRejectedValueOnce(new Error('Request failed (500)'))
+    render(<AddFeedbackSheet onCreated={() => {}} onClose={() => {}} />)
+    await screen.findByText(/Couldn.t load the org list/)
+
+    mockApi.mockResolvedValueOnce([{ id: ORG, name: 'Org A', kind: 'team' }])
+    fireEvent.click(retry())
+
+    expect(await screen.findByText('Org A')).toBeInTheDocument()
+    // The message must go with the failure it described — leaving it up
+    // beside a picker that has just filled is its own small lie.
+    await waitFor(() => expect(screen.queryByText(/Couldn.t load the org list/)).toBeNull())
+    expect(adminOrgsCalls()).toHaveLength(2)
+  })
+
+  it('lets the admin finish the form once the retry succeeds', async () => {
+    asCaller(true)
+    mockApi.mockRejectedValueOnce(new Error('Request failed (500)'))
+    render(<AddFeedbackSheet onCreated={() => {}} onClose={() => {}} />)
+    await screen.findByText(/Couldn.t load the org list/)
+    fillTheRest()
+    expect(submitButton()).toBeDisabled()   // no org to name yet
+
+    mockApi.mockResolvedValueOnce([{ id: ORG, name: 'Org A', kind: 'team' }])
+    fireEvent.click(retry())
+    await screen.findByText('Org A')
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: ORG } })
+
+    expect(submitButton()).not.toBeDisabled()
+  })
+})
+
+/* M5: `valid` requires a non-empty org id, so a non-platform admin whose
+   claim carries none gets a fillable form and a permanently grey Submit —
+   with nothing on screen saying why. Unreachable today (is_dashboard_viewer
+   requires a non-null org_id, and both flags derive from the same claim), but
+   that coupling is invisible from this component and would break silently. */
+describe('a caller whose token carries no org', () => {
+  function asOrglessCaller() {
+    mockUseAuth.mockReturnValue({
+      user: { id: 'u1', email: 'writer@test.local', display_name: 'W', role: 'user', status: 'active' },
+      isAdmin: false,
+      canViewLearning: true,
+    } as unknown as ReturnType<typeof useAuth>)
+  }
+
+  it('says what is wrong instead of greying out in silence', () => {
+    asOrglessCaller()
+    render(<AddFeedbackSheet onCreated={() => {}} onClose={() => {}} />)
+
+    expect(screen.getByText(/isn.t in an organisation/)).toBeInTheDocument()
+    // And it does not claim an org it does not have.
+    expect(screen.queryByText('Your organisation')).toBeNull()
+  })
+
+  it('still refuses to post a blank org id', () => {
+    asOrglessCaller()
+    render(<AddFeedbackSheet onCreated={() => {}} onClose={() => {}} />)
+    fillTheRest()
+
+    expect(submitButton()).toBeDisabled()
+  })
+})
