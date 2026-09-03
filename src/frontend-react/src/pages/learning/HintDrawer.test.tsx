@@ -19,13 +19,26 @@
  * go through diffFields()/isCompactChange() into an expandable detail view
  * instead of the compact inline string.
  *
- * Only pure functions are imported here (no render) — this package's test
- * policy is "no page components" (vite.config.ts); HintDrawer is a drawer,
- * not a route, but the logic under test needs no DOM either way.
+ * The timeline half needs no DOM, so it imports the pure functions only. The
+ * Metadata half at the bottom renders the drawer — it is a Sheet, not a
+ * route, so no Router is involved.
  */
-import { describe, expect, it } from 'vitest'
-import { ACTION_LABELS, diffFields, isCompactChange, COMPACT_FIELD_LIMIT } from './HintDrawer'
+import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('@/auth/AuthContext', () => ({ useAuth: vi.fn() }))
+vi.mock('@/lib/useFetch', () => ({ useFetch: vi.fn() }))
+vi.mock('@/lib/api', () => ({ api: vi.fn() }))
+
+import { useAuth } from '@/auth/AuthContext'
+import { useFetch } from '@/lib/useFetch'
+import HintDrawer, { ACTION_LABELS, diffFields, isCompactChange, COMPACT_FIELD_LIMIT } from './HintDrawer'
 import type { TimelineEntry } from './types'
+
+const mockUseAuth = vi.mocked(useAuth)
+const mockUseFetch = vi.mocked(useFetch)
+
+afterEach(() => vi.resetAllMocks())
 
 function entry(overrides: Partial<TimelineEntry> = {}): TimelineEntry {
   return {
@@ -184,5 +197,65 @@ describe('isCompactChange: real merge-row shapes from pg_schema.py', () => {
       before_value: JSON.stringify(before), after_value: JSON.stringify(after),
     })
     expect(isCompactChange(e)).toBe(false)
+  })
+})
+
+/**
+ * I3, the detail half: the drawer an admin opens to decide which tenant's
+ * hint they are about to change had no org and no author in its Metadata
+ * block either — change 4 of this branch captured authorship and the SPA
+ * rendered it nowhere.
+ *
+ * Rendering the drawer needs no Router (it is a Sheet, not a route) and no
+ * second directory fetch: the full org_id is appropriate detail-view content,
+ * and /auth/admin/orgs would be a request this view otherwise never makes.
+ */
+describe('Metadata names the org and the author', () => {
+  const ORG = 'aaaaaaaa-0000-0000-0000-000000000001'
+
+  function renderDrawer(hint: Record<string, unknown>) {
+    mockUseAuth.mockReturnValue({
+      user: { id: 'u1', email: 'admin@test.local', display_name: 'A', role: 'admin', status: 'active' },
+      isAdmin: true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockUseFetch.mockReturnValue({
+      data: { hint: { id: 7, feedback_text: 'wait for the spinner', is_active: 1, conflict_flagged: 0, ...hint }, timeline: [] },
+      loading: false,
+      error: '',
+      reload: vi.fn(),
+    } as unknown as ReturnType<typeof useFetch>)
+    render(<HintDrawer id={7} onChanged={() => {}} onClose={() => {}} />)
+  }
+
+  /** The <dd> that follows a given <dt> label in the Metadata list. */
+  const valueFor = (label: string) =>
+    screen.getByText(label).nextElementSibling?.textContent
+
+  it('shows the owning org as its whole id, not a prefix of it', () => {
+    renderDrawer({ org_id: ORG })
+
+    expect(valueFor('Org')).toBe(ORG)
+  })
+
+  it('shows the author’s email when the hint carries one', () => {
+    renderDrawer({ org_id: ORG, created_by_email: 'writer@tenant-one.test' })
+
+    expect(valueFor('Author')).toBe('writer@tenant-one.test')
+  })
+
+  it('says "unknown" for a hint written before authorship was captured', () => {
+    // Pre-v23 rows carry NULL created_by_* and cannot be attributed after the
+    // fact. "unknown" is the true answer — not blank, and certainly not the
+    // string "undefined".
+    renderDrawer({ org_id: ORG, created_by_email: null })
+
+    expect(valueFor('Author')).toBe('unknown')
+  })
+
+  it('renders a dash rather than nothing when the org is missing too', () => {
+    renderDrawer({ org_id: null, created_by_email: null })
+
+    expect(valueFor('Org')).toBe('—')
+    expect(valueFor('Author')).toBe('unknown')
   })
 })

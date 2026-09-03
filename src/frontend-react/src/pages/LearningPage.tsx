@@ -156,8 +156,9 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 
 /* ── Hints management ── */
 function Hints() {
-  const { user } = useAuth()
+  const { user, isAdmin } = useAuth()
   const [filter, setFilter] = useState('')
+  const [orgNames, setOrgNames] = useState<Record<string, string>>({})
   const [busyId, setBusyId] = useState<number | null>(null)
   const [actErr, setActErr] = useState('')
   const [detailId, setDetailId] = useState<number | null>(null)
@@ -165,6 +166,23 @@ function Hints() {
   const [scopeFilter, setScopeFilter] = useState('')
   const [domainFilter, setDomainFilter] = useState('')
   const [search, setSearch] = useState('')
+  // Org names for the owning-org column, fetched once. Only a PLATFORM admin
+  // needs them: list_hints sets scope_org = None for them alone, so they are
+  // the only caller whose rows span more than one org — for an org admin every
+  // row carries the same org and the column would be noise. /auth/admin/orgs
+  // is require_admin, so for anyone else the call could only 403; skipping it
+  // is the same pattern, for the same reason, as AddFeedbackSheet's picker.
+  useEffect(() => {
+    if (!isAdmin) return
+    let live = true
+    api<{ id: string; name: string }[]>('/auth/admin/orgs')
+      .then(rows => { if (live) setOrgNames(Object.fromEntries(rows.map(o => [o.id, o.name]))) })
+      // The name is a convenience; the id is the identity, and the column
+      // falls back to it. A directory lookup must never take down the table
+      // the Retract button lives in.
+      .catch(() => { /* rows keep showing their raw org_id */ })
+    return () => { live = false }
+  }, [isAdmin])
   // Debounce text inputs so we don't refetch per keystroke
   const [applied, setApplied] = useState({ domain: '', search: '' })
   useEffect(() => {
@@ -240,6 +258,10 @@ function Hints() {
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
                     <th className="px-4 py-2.5">Hint</th>
+                    {/* Not responsive-hidden like Scope: this is the column
+                        that tells two tenants' identical hints apart, and it
+                        sits beside the buttons that mutate them. */}
+                    {isAdmin && <th className="px-4 py-2.5">Org</th>}
                     <th className="px-4 py-2.5 hidden md:table-cell">Scope</th>
                     <th className="px-4 py-2.5">Status</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">OK / Fail / Applied</th>
@@ -259,6 +281,14 @@ function Hints() {
                             <span className="mt-0.5 block text-xs italic text-amber-700 line-clamp-2">⚠ {h.conflict_flag_reason}</span>
                           )}
                         </td>
+                        {/* Falls back to the raw id when the name lookup has
+                            not landed or failed, and wraps rather than
+                            truncating — a half-printed org id names nothing. */}
+                        {isAdmin && (
+                          <td className="px-4 py-3 text-xs text-muted-foreground break-all">
+                            {h.org_id ? (orgNames[h.org_id] || h.org_id) : '—'}
+                          </td>
+                        )}
                         <td className="px-4 py-3 hidden md:table-cell text-xs text-muted-foreground">{h.scope || '—'}</td>
                         <td className="px-4 py-3"><Badge className={cn('text-xs', st.cls)}>{st.label}</Badge></td>
                         <td className="px-4 py-3 hidden sm:table-cell text-xs text-muted-foreground whitespace-nowrap">

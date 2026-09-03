@@ -13,7 +13,7 @@
  * AddFeedbackSheet.test.tsx already uses for the drawer), so no tab fetches
  * anything.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/auth/AuthContext', () => ({ useAuth: vi.fn() }))
@@ -22,10 +22,12 @@ vi.mock('@/lib/api', () => ({ api: vi.fn() }))
 
 import { useAuth } from '@/auth/AuthContext'
 import { useFetch } from '@/lib/useFetch'
+import { api } from '@/lib/api'
 import LearningPage, { reviewPageLabel, visibleViews } from './LearningPage'
 
 const mockUseAuth = vi.mocked(useAuth)
 const mockUseFetch = vi.mocked(useFetch)
+const mockApi = vi.mocked(api)
 
 afterEach(() => vi.resetAllMocks())
 
@@ -180,5 +182,102 @@ describe('the tab LearningPage opens on', () => {
 
     expect(screen.getByPlaceholderText('Search query…')).toBeInTheDocument()
     expect(overviewIsOpen()).toBeNull()
+  })
+})
+
+/**
+ * I3: whose hint is this?
+ *
+ * For a platform admin `list_hints` sets scope_org = None and returns hints
+ * from EVERY org. Orgs T1 and T2 can each accumulate "always wait for the
+ * spinner before reading the grid", scope global, both active — and the table
+ * rendered text / scope / status / counters / actions, so those were two
+ * visually identical rows with a Retract button each. Which tenant's live
+ * guidance stopped injecting was a coin flip.
+ *
+ * This branch fixed the same class one tab over (reviewPageLabel, above).
+ * This is that fix where the MUTATION buttons are.
+ */
+describe('the owning org on the Hints table', () => {
+  const T1 = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const T2 = 'bbbbbbbb-0000-0000-0000-000000000002'
+  const SAME_TEXT = 'always wait for the spinner before reading the grid'
+  const HINTS = {
+    total: 2,
+    hints: [
+      { id: 1, feedback_text: SAME_TEXT, is_active: 1, conflict_flagged: 0, scope: 'global', org_id: T1 },
+      { id: 2, feedback_text: SAME_TEXT, is_active: 1, conflict_flagged: 0, scope: 'global', org_id: T2 },
+    ],
+  }
+
+  /** Only the hints path answers with rows; every other tab's fetch stays
+   *  inert. `orgs` is what GET /auth/admin/orgs answers — an Error to make
+   *  it fail. */
+  function renderHints(isAdmin: boolean, orgs: unknown = []) {
+    mockUseAuth.mockReturnValue({
+      user: { id: 'u1', email: 'someone@test.local', display_name: 'S', role: isAdmin ? 'admin' : 'user', status: 'active' },
+      isAdmin,
+      isOrgAdmin: !isAdmin,
+      canViewLearning: true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockUseFetch.mockImplementation((path: string | null) => ({
+      data: path?.startsWith('/api/learning/hints') ? HINTS : null,
+      loading: false,
+      error: '',
+      reload: vi.fn(),
+    }) as unknown as ReturnType<typeof useFetch>)
+    if (orgs instanceof Error) mockApi.mockRejectedValue(orgs)
+    else mockApi.mockResolvedValue(orgs)
+    render(<LearningPage />)
+    // A platform admin lands on Overview; Hints is one click away.
+    if (isAdmin) fireEvent.click(screen.getByRole('button', { name: 'Hints' }))
+  }
+
+  /** The Org cell of every body row — column 1, right after the hint text. */
+  const orgCells = () =>
+    screen.getAllByRole('row').slice(1).map(r => r.querySelectorAll('td')[1]?.textContent)
+
+  it('names each row’s org for a platform admin, resolved to the org name', async () => {
+    renderHints(true, [
+      { id: T1, name: 'Tenant One', kind: 'team' },
+      { id: T2, name: 'Tenant Two', kind: 'team' },
+    ])
+
+    expect(await screen.findByText('Tenant One')).toBeInTheDocument()
+    // The whole point: the two rows are no longer indistinguishable.
+    expect(orgCells()).toEqual(['Tenant One', 'Tenant Two'])
+  })
+
+  it('falls back to the full org id, never a truncation of it', async () => {
+    // An org the directory does not name — created since the fetch, or one
+    // this admin's list simply missed. The id IS the identity, so it is what
+    // the column shows, whole.
+    renderHints(true, [{ id: T1, name: 'Tenant One', kind: 'team' }])
+
+    expect(await screen.findByText('Tenant One')).toBeInTheDocument()
+    expect(screen.getByText(T2).textContent).toBe(T2)
+  })
+
+  it('keeps the table usable when the org directory fails to load', async () => {
+    renderHints(true, new Error('Request failed (500)'))
+
+    // Both rows still render, both still name their org by id, and no error
+    // lands on the table that carries the Retract buttons.
+    await waitFor(() => expect(orgCells()).toEqual([T1, T2]))
+    expect(screen.queryByText(/Request failed/)).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Retract' })).toHaveLength(2)
+  })
+
+  it('draws no org column for an org admin, and never calls the admin-only route', async () => {
+    // Every row an org admin can see carries the same org, so the column
+    // would be noise — and GET /auth/admin/orgs is require_admin, so the
+    // fetch could only ever 403 them.
+    renderHints(false)
+
+    expect(screen.getByText('Hint')).toBeInTheDocument()   // the table did render
+    expect(screen.queryByText('Org')).toBeNull()
+    expect(screen.queryByText(T1)).toBeNull()
+    await waitFor(() =>
+      expect(mockApi.mock.calls.filter(([path]) => path === '/auth/admin/orgs')).toHaveLength(0))
   })
 })
