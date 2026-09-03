@@ -13,8 +13,7 @@
  * So this compares the tables themselves, for every path present in both. It
  * is the claim made true rather than softened.
  *
- * Pure data, no render: this package tests no page components
- * (vite.config.ts).
+ * Pure data, no render: comparing two constant tables needs neither.
  */
 import { describe, expect, it } from 'vitest'
 import { PAGES } from '../App'

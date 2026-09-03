@@ -21,8 +21,8 @@
  * and hydrate() returns early unless getToken() is truthy, so the mock factory
  * supplies all four or the provider never asks for a user at all.
  *
- * A provider is not a page component (vite.config.ts: "no page components") —
- * nothing here renders App, and no Router is involved.
+ * A provider is not a page component — nothing here renders App, and no
+ * Router is involved.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'

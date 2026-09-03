@@ -8,8 +8,10 @@
  * KeepAlivePages uses to decide which page mounts (and to redirect to
  * /generate otherwise) — shared with app-sidebar.test.tsx, which exercises
  * the same predicate against NAV_PLATFORM, so this is testable without
- * rendering App — this package tests no page components (see
- * FeedbackPanel.test.tsx / LearningPage.test.tsx).
+ * rendering App. Most of this package still tests predicates and
+ * sub-components rather than pages (see FeedbackPanel.test.tsx);
+ * LearningPage.test.tsx is the deliberate exception, where mounting the page
+ * is the point (vite.config.ts).
  */
 import { describe, expect, it } from 'vitest'
 import { PAGES } from './App'

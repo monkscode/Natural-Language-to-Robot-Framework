@@ -618,11 +618,13 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // because "these are the user's own words", so the very next mount showed
   // the correction again, without a button, and the two mounts disagreed
   // about what had been said. Keeping the row also keeps the duplicate
-  // notice below armed, which is what stops the panel thanking the user for
-  // a resubmission that does nothing: re-sending the identical text on THIS
-  // run dedups to the same hint, and _claim_feedback_run's
-  // ON CONFLICT DO NOTHING returns before the reinforcement that would set
-  // is_active back to 1.
+  // notice below armed, which WARNS before a resubmission that does
+  // nothing: re-sending the identical text on THIS run dedups to the same
+  // hint, and _claim_feedback_run's ON CONFLICT DO NOTHING returns before
+  // the reinforcement that would set is_active back to 1. It does not stop
+  // the resubmission: Submit stays enabled, and the response still lands on
+  // the "Thanks…" branch below, because the engine's claim gate is not
+  // reported upward (owner-deferred).
   async function retract(hintId: number) {
     if (!window.confirm('Retract this correction? It will stop shaping future tests.')) return
     setRetracting(prev => new Set(prev).add(hintId))

@@ -564,10 +564,13 @@ describe('T7: retracting a hint from the feedback panel', () => {
     })
 
     it('tells the user a re-send will not undo it — scoped to this run', async () => {
-      // The sequence this closes: retract by mistake, retype the identical
-      // text, and the panel used to answer "Thanks — your feedback helps the
-      // system learn" while the writer thread deduped to the retracted hint
-      // and returned before the reinforcement that sets is_active back to 1.
+      // The warning this arms: retract by mistake, retype the identical
+      // text, and the panel warns before the resend instead of staying
+      // silent about it, while the writer thread dedupes to the retracted
+      // hint and returns before the reinforcement that sets is_active back
+      // to 1. The resend still goes through and still gets thanked; closing
+      // that is a separate, owner-deferred change (the engine's claim gate
+      // is not reported upward).
       const { box } = await retractIt()
 
       fireEvent.change(box, { target: { value: 'wait for the spinner' } })
@@ -621,11 +624,11 @@ describe('T7: retracting a hint from the feedback panel', () => {
       renderFailPanel()
       const retractBtn = await screen.findByRole('button', { name: /Retract/ })
       mockApi.mockRejectedValueOnce(
-        new ApiError(403, 'Only the hint’s author or an org admin can retract it'))
+        new ApiError(403, "Only the hint's author or an org admin can retract it"))
 
       fireEvent.click(retractBtn)
 
-      await screen.findByText(/Only the hint.s author or an org admin can retract it/)
+      await screen.findByText("Only the hint's author or an org admin can retract it")
       await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
       expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
       // A refusal is not a retraction, so no marker.

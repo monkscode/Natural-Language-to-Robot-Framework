@@ -13,9 +13,8 @@
  * picker, org pinned to the caller's own org_id claim (the only value the
  * server would accept from them anyway). A platform admin keeps the picker.
  *
- * The sheet is a drawer, not a route, so rendering it does not break this
- * package's "no page components" policy (vite.config.ts) — nothing here
- * renders LearningPage, and no Router is involved.
+ * The sheet is a drawer, not a route: rendering it needs no Router, and
+ * nothing here renders LearningPage either.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
