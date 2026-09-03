@@ -11,8 +11,10 @@ different answer than login did (AuthContext.hydrate() calls /auth/me on
 every page load, not /auth/login).
 
 Exercised here at the HTTP level so a wiring regression in either call site
-is caught; is_dashboard_viewer's own branch logic has its pure-function
-tests in test_ownership.py.
+is caught; is_dashboard_viewer's own branch logic has its pure-function tests
+in test_ownership.py (TestIsDashboardViewer — it had none when this sentence
+was first written, and a mutation to the predicate's token-less branch left
+824 tests green).
 
 Mounts just auth_router (mirrors test_endpoints_integration.py) to avoid the
 heavy crewai import main.py pulls in.

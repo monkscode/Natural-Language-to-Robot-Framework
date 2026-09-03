@@ -30,6 +30,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from src.backend.api.dashboard_scope import authorize_dashboard_read
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
 from src.backend.auth.ownership import is_dashboard_viewer, hint_mutation_verdict
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
@@ -193,16 +194,27 @@ def _require_caller(admin) -> dict:
     This route family does NOT honour the AUTH_ENFORCED-off escape hatch, for
     the reason api/dashboard_scope.py states for the aggregate dashboards: a
     token-less caller is 401 even in dev, where require_user resolves anonymous
-    to None instead of raising. There is no legitimate anonymous case for
-    changing an org's learning store, and there IS a live exposure — bench mode
-    runs with AUTH_ENFORCED=false and binds port 5000, and every predicate here
-    reads a None caller as the permissive dev case, so anything reaching that
-    port could retract every hint in every org, or inject hints that are then
-    pushed into future generations. The five routes carried
-    Depends(require_admin) until the org/author tiers landed; require_admin
-    never opened for a credential-less request (its own docstring: "admin
-    routes are never open"), and this restores that floor without re-imposing
-    the platform role.
+    to None instead of raising. That is now true of the whole family — the five
+    mutations through here, and list_hints / get_hint / list_runs / get_run
+    through authorize_dashboard_read, which raises the same 401 before its
+    predicate. It was true of the mutations only until then, and the four reads
+    were worse than open: is_dashboard_viewer(None) is True, so a token-less
+    caller passed the gate AND landed in the platform-admin branch, which drops
+    the org filter. Probed on this branch: GET /api/learning/hints with no
+    Authorization header returned 200 with every org's hints.
+
+    There is no legitimate anonymous case for reading or changing an org's
+    learning store, and the exposure is live: any process started with
+    AUTH_ENFORCED=false and learning ON serves it, and run.sh binds
+    --host 0.0.0.0. Note it is NOT the bench: `run.sh bench` pins
+    OPTIMIZATION_ENABLED=false, and _require_feedback_loop is a dependency on
+    every route in this module, so under bench pins each one 503s before
+    authorization is considered at all.
+
+    The five routes carried Depends(require_admin) until the org/author tiers
+    landed; require_admin never opened for a credential-less request (its own
+    docstring: "admin routes are never open"), and this restores that floor
+    without re-imposing the platform role.
 
     Raised BEFORE the row is fetched, not inside _gate_hint_mutation's verdict
     handling: behind the lookup, an anonymous caller would read 404 for an
@@ -321,10 +333,15 @@ def list_hints(
     fb=Depends(_require_feedback_loop),
     user: dict | None = Depends(require_user),
 ):
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -437,10 +454,15 @@ def get_hint(
     fb=Depends(_require_feedback_loop),
     user: dict | None = Depends(require_user),
 ):
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -1227,10 +1249,15 @@ def list_runs(
     filters. A failed run has no trigger event, so this (not /triggers) is how a
     failure is found.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -1284,10 +1311,15 @@ def get_run(
     away before T1) keeps a standalone funnel with run=null (no FK). 404 only
     when nothing at all exists for this workflow_id.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:

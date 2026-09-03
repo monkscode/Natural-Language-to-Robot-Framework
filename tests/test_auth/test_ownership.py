@@ -1,6 +1,15 @@
-"""Unit tests for the org-scoped ownership predicate. No DB, no Postgres."""
+"""Unit tests for the org-scoped ownership predicates. No DB, no Postgres.
 
-from src.backend.auth.ownership import caller_can_access
+All three live in auth/ownership.py and are pure functions: caller_can_access
+(one run or its report), is_dashboard_viewer (org-level aggregate dashboards)
+and hint_mutation_verdict (who may change a hint).
+"""
+
+from src.backend.auth.ownership import (
+    caller_can_access,
+    hint_mutation_verdict,
+    is_dashboard_viewer,
+)
 
 _OWNER = {"user_id": "u-owner", "org_id": "org-A", "org_role": "org_member"}
 _ADMIN_OF_A = {"user_id": "u-admin", "org_id": "org-A", "org_role": "org_admin"}
@@ -104,8 +113,6 @@ def test_unattributed_resource_denied_even_to_same_org_admin():
 # refusal differs by case.
 # ---------------------------------------------------------------------------
 
-from src.backend.auth.ownership import hint_mutation_verdict
-
 _ORG_A = "org-a"
 _ORG_B = "org-b"
 _AUTHOR = "user-1"
@@ -200,6 +207,29 @@ class TestHintMutationVerdict:
             _caller(org_role="org_admin"), None, _AUTHOR,
             is_platform_admin=False) == "not_found"
 
+    def test_two_missing_orgs_do_not_satisfy_the_org_check(self):
+        """Important 6. The two tests above vary ONE axis each — the org-less
+        caller is asked about a hint in org-a, the org-less hint is asked
+        about by a caller in org-a — so both still refuse through the
+        INEQUALITY, and removing `if not caller_org: return "not_found"`
+        left 80 tests passing. With both axes None the inequality is
+        satisfied (None == None) and, without the guard, an org-less caller
+        who is nominally an org_admin is ALLOWED to mutate an org-less hint.
+        """
+        assert hint_mutation_verdict(
+            _caller(org_id=None, org_role="org_admin"), None, _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_two_empty_string_orgs_do_not_satisfy_the_org_check_either(self):
+        """The same shape with '' instead of None, which is why the guard is
+        a truthiness test and not `is None`. Claims decode with defaults
+        (jwt_utils decode_token defaults the `sub` claim to ''), and a hint's
+        org_id is a TEXT column that a bad write could leave empty — either
+        side reaching '' must refuse, and equality alone would allow it."""
+        assert hint_mutation_verdict(
+            _caller(org_id="", org_role="org_admin"), "", _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
     def test_an_unattributed_hint_is_not_everyones(self):
         """The author check must not match None against None. Without the
         truthiness guard, every org member with no user_id claim would be the
@@ -211,3 +241,57 @@ class TestHintMutationVerdict:
         assert hint_mutation_verdict(
             _caller(user_id=None), _ORG_A, None,
             is_platform_admin=False, author_tier_applies=True) == "forbidden"
+
+
+# ---------------------------------------------------------------------------
+# is_dashboard_viewer — who may read an org-level AGGREGATE dashboard
+#
+# grep -rn "is_dashboard_viewer(" tests/ returned nothing before this block,
+# while test_can_view_learning.py's header said its branch logic was tested
+# here. Measured consequence: flipping the caller-is-None branch to False left
+# 824 tests green, so the suite was indifferent in BOTH directions and the
+# read-side escape hatch survived a whole-branch review.
+# ---------------------------------------------------------------------------
+
+class TestIsDashboardViewer:
+
+    def test_a_token_less_caller_is_admitted_by_the_predicate(self):
+        """True, deliberately — this is the AUTH_ENFORCED-off escape hatch
+        every predicate in this module has, and the flag it feeds
+        (can_view_learning) is only ever computed for a real logged-in user.
+
+        The routes that must NOT honour it do not ask this question first:
+        api/dashboard_scope.authorize_dashboard_read raises 401 for a
+        token-less caller BEFORE reaching here, and every learning read and
+        mutation goes through that or through _require_caller. Changing this
+        line to False would be a second, silent place to enforce the same
+        rule."""
+        assert is_dashboard_viewer(None, is_platform_admin=False) is True
+
+    def test_a_platform_admin_is_admitted_with_no_org_at_all(self):
+        """Platform scope is all orgs, so an org claim is irrelevant."""
+        assert is_dashboard_viewer(
+            {"org_id": None, "org_role": None}, is_platform_admin=True) is True
+
+    def test_an_org_admin_is_admitted_for_their_own_org(self):
+        assert is_dashboard_viewer(
+            {"org_id": _ORG_A, "org_role": "org_admin"},
+            is_platform_admin=False) is True
+
+    def test_a_plain_member_is_refused(self):
+        """A member sees their own runs through caller_can_access; an
+        aggregate dashboard spans everyone in the org."""
+        assert is_dashboard_viewer(
+            {"org_id": _ORG_A, "org_role": "org_member"},
+            is_platform_admin=False) is False
+
+    def test_an_org_admin_with_no_resolvable_org_is_refused(self):
+        """Fail closed. Callers derive the dashboard's org filter from
+        caller["org_id"], so admitting an org_admin claim with no org_id
+        would widen the query to every org instead of narrowing it."""
+        assert is_dashboard_viewer(
+            {"org_id": None, "org_role": "org_admin"},
+            is_platform_admin=False) is False
+
+    def test_a_legacy_token_with_neither_claim_is_refused(self):
+        assert is_dashboard_viewer({}, is_platform_admin=False) is False

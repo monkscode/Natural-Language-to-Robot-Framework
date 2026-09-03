@@ -153,3 +153,52 @@ def test_remaining_mutations_platform_admin_only(dash_client, method, path, body
         kwargs["json"] = body
     r = getattr(dash_client, method)(path, **kwargs)
     assert r.status_code == 403, f"{method.upper()} {path} returned {r.status_code}, expected 403"
+
+
+# ---------------------------------------------------------------------------
+# The AUTH_ENFORCED-off escape hatch, on the READ side.
+#
+# _require_caller closed it on the five mutations. The four reads on the same
+# router still ran `is_dashboard_viewer(None)`, which returns True, so a
+# token-less caller passed the gate AND landed in the platform-admin branch,
+# which drops the `org_id = ?` filter entirely. Probed: GET
+# /api/learning/hints with no Authorization header answered 200 with BOTH
+# orgs' hints, including the conflict_* columns _NON_CURATOR_HINT_FIELDS
+# exists to withhold; /runs/{id} does SELECT * FROM execution_records, so it
+# handed out every org's user_query, url and generated robot_code.
+#
+# dash_client runs AUTH_ENFORCED=false, exactly like a dev process started for
+# API debugging, and run.sh binds --host 0.0.0.0.
+# ---------------------------------------------------------------------------
+
+_READ_ROUTES = [
+    ("/api/learning/hints", "list_hints"),
+    ("/api/learning/hints/1", "get_hint"),
+    ("/api/learning/runs", "list_runs"),
+    ("/api/learning/runs/some-workflow-id", "get_run"),
+]
+
+
+@pytest.mark.parametrize("path, name", _READ_ROUTES)
+def test_a_token_less_caller_cannot_read_the_learning_api(dash_client, path, name):
+    """401, with no token at all — the same rule the five mutations already
+    follow and the one api/dashboard_scope.py states for the aggregate
+    dashboards."""
+    r = dash_client.get(path)
+    assert r.status_code == 401, (
+        f"GET {path} ({name}) answered {r.status_code} to a caller with no "
+        f"Authorization header"
+    )
+
+
+def test_a_token_less_caller_is_not_handed_every_org(dash_client):
+    """The consequence, spelled out: it is not only that the request was
+    allowed, it is that it was allowed with PLATFORM scope. Both orgs' hints
+    came back in one unauthenticated response."""
+    dash_client.seed_hint(org_id=dash_client.org_a, text="A-tokenless-probe")
+    dash_client.seed_hint(org_id=dash_client.org_b, text="B-tokenless-probe")
+    r = dash_client.get("/api/learning/hints?limit=200")
+    assert r.status_code == 401, (
+        f"answered {r.status_code}; body carried "
+        f"{[h.get('feedback_text') for h in r.json().get('hints', [])]}"
+    )
