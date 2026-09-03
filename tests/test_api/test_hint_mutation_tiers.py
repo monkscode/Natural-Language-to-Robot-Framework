@@ -257,3 +257,39 @@ def test_a_token_less_caller_cannot_create_a_hint(dash_client):
         },
     )
     assert r.status_code == 401, r.text
+
+def test_the_non_curator_projection_accounts_for_every_column(dash_client):
+    """_NON_CURATOR_HINT_FIELDS is a hand-maintained second copy of the column
+    list, and being an ALLOW-list is exactly what makes it silently wrong when
+    the table grows: a v24 column simply stops being served to a non-curator,
+    with no failure anywhere. Compare it against the real table, and name the
+    three withheld columns explicitly so ADDING one to the allow-list is a
+    failure too — those three are the conflict-detection LLM's critique of the
+    hint, which is a product decision and not an oversight.
+    """
+    from src.backend.api.learning_endpoints import _NON_CURATOR_HINT_FIELDS
+    from src.backend.crew_ai.optimization import pg_compat
+
+    conn = pg_compat.connect(dash_client._dsn)
+    try:
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'nl_feedback_corrections' "
+            "  AND table_schema = current_schema()"
+        ).fetchall()
+    finally:
+        conn.close()
+    columns = {r["column_name"] for r in rows}
+    assert columns, "no columns found — the schema lookup itself is wrong"
+
+    allowed = set(_NON_CURATOR_HINT_FIELDS)
+    assert allowed <= columns, (
+        f"the allow-list names columns that do not exist: {sorted(allowed - columns)}"
+    )
+    assert columns - allowed == {
+        "conflict_flagged", "conflict_flagged_at", "conflict_flag_reason",
+    }, (
+        f"withheld set changed: {sorted(columns - allowed)}. A column added to "
+        f"nl_feedback_corrections must be added to _NON_CURATOR_HINT_FIELDS or "
+        f"deliberately withheld here."
+    )

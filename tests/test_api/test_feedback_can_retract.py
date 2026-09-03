@@ -147,6 +147,21 @@ class TestCanRetract:
         assert set(body["corrections"][0].keys()) == {
             "hint_id", "feedback_text", "recorded_at", "can_retract"}
 
+    def test_a_token_less_caller_is_offered_nothing(self):
+        """Minor 9. AUTH_ENFORCED off resolves an anonymous request to None,
+        and hint_mutation_verdict(None, ...) answers "allow" — the permissive
+        dev escape hatch every predicate in that module has. So the panel
+        drew a Retract control that POST /hints/{id}/retract then 401s,
+        because _require_caller refuses a token-less caller outright.
+
+        The comment justifying the is_active term says an offered action
+        "must not be one the server already knows will no-op". This one is
+        worse than a no-op: it is one the server already knows it will
+        refuse."""
+        body = _get([_row(author_id=_AUTHOR["user_id"])], caller=None)
+
+        assert body["corrections"][0]["can_retract"] is False
+
     def test_an_already_retracted_hint_is_not_offered_to_its_own_author(self):
         """can_retract must mean "retracting this would do something", not
         just "you have the tier for it" — a caller who passes

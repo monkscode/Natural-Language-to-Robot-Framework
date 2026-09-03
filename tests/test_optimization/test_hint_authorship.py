@@ -99,14 +99,15 @@ class TestTheAuthorIsRecorded:
         delete would either cascade (destroying the org's hint) or be blocked
         (making the user undeletable). Neither is wanted: the hint stays and
         keeps naming them."""
-        rows = in_memory_db.read_conn().__enter__().execute(
-            "SELECT c.conname, a.attname "
-            "FROM pg_constraint c "
-            "JOIN pg_attribute a ON a.attrelid = c.conrelid "
-            "                   AND a.attnum = ANY(c.conkey) "
-            "WHERE c.conrelid = 'nl_feedback_corrections'::regclass "
-            "  AND c.contype = 'f'"
-        ).fetchall()
+        with in_memory_db.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT c.conname, a.attname "
+                "FROM pg_constraint c "
+                "JOIN pg_attribute a ON a.attrelid = c.conrelid "
+                "                   AND a.attnum = ANY(c.conkey) "
+                "WHERE c.conrelid = 'nl_feedback_corrections'::regclass "
+                "  AND c.contype = 'f'"
+            ).fetchall()
         offenders = [r["attname"] for r in rows
                      if r["attname"] in ("created_by_user_id", "created_by_email")]
         assert offenders == [], f"author columns must carry no FK, found {offenders}"

@@ -1,6 +1,13 @@
 """
 Coverage tests for learning_endpoints.py — targeting 384 missing lines.
 
+LINE coverage, not permission coverage: the fixture below overrides
+require_user with a platform admin, so every test in this file runs in the
+scope_org = None all-orgs branch and none of them exercises org scoping at
+all. Do not read this file's green as evidence of tenancy isolation — that
+lives in test_learning_dashboards_org.py, test_hints_are_org_owned.py and
+test_hint_mutation_tiers.py.
+
 Tests grouped by function/endpoint:
 - _estimate_cost: known model, unknown/exception path → 0.0
 - _model_rate_info: known model, unknown model → None, exception → None

@@ -175,19 +175,6 @@ def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
     return (admin or {}).get("email") or (request_actor or "").strip() or "admin"
 
 
-def _caller(admin) -> dict | None:
-    """The verified token, or None. `admin` is the un-resolved Depends
-    sentinel when an endpoint function is called directly in a test, and None
-    when AUTH_ENFORCED is off — both mean "no identified caller" (mirrors
-    _audit_actor).
-
-    What "no identified caller" then MEANS is the caller's decision, not this
-    function's: the read-shaped predicates take it as the permissive dev case,
-    while every hint MUTATION refuses it outright — see _require_caller, the
-    only caller of this function left."""
-    return admin if isinstance(admin, dict) else None
-
-
 def _require_caller(admin) -> dict:
     """The verified token, or 401. Every hint MUTATION starts here.
 
@@ -222,10 +209,12 @@ def _require_caller(admin) -> dict:
     to someone who is not authenticated at all — exactly what the 404/403 split
     below exists to prevent.
     """
-    caller = _caller(admin)
-    if caller is None:
+    # `admin` is the un-resolved Depends sentinel when an endpoint function is
+    # called directly in a test, and None when AUTH_ENFORCED is off — both mean
+    # "no identified caller" (the same isinstance test _audit_actor makes).
+    if not isinstance(admin, dict):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return caller
+    return admin
 
 
 def _gate_hint_mutation(row, admin, hint_id: int, *,
@@ -258,9 +247,20 @@ def _gate_hint_mutation(row, admin, hint_id: int, *,
     if verdict == "not_found":
         raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
     if verdict == "forbidden":
+        # The two refusals behind this verdict are different facts and must
+        # not share a sentence. On retract the author tier applies, so
+        # "forbidden" means "you are not the author and not an org admin". On
+        # patch / unflag / reactivate it does not, so "forbidden" means "org
+        # admin or above, author or not" — and telling the AUTHOR of a hint
+        # that its author may change it, while refusing them, is a false
+        # explanation of a real refusal.
         raise HTTPException(
             status_code=403,
-            detail="Only the hint's author or an org admin can change it",
+            detail=(
+                "Only the hint's author or an org admin can retract it"
+                if author_tier_applies
+                else "Only an org admin can change this hint"
+            ),
         )
     return is_dashboard_viewer(caller, is_platform_admin=is_platform)
 
@@ -565,12 +565,16 @@ def create_hint(
     actor = _audit_actor(admin, request.actor)
     # The author of an admin-created hint is the admin who created it, keyed
     # the same way the engine keys a user-created one. `actor` is already the
-    # verified token email. _require_caller above means a token is always
-    # present here, so unlike the engine's path this id is never NULL — the
-    # engine still records NULL for an unidentified submitter, because a read
-    # endpoint may legitimately run without a token and the Author tier
-    # compares ids for equality.
-    creator_user_id = caller.get("user_id")
+    # verified token email.
+    #
+    # `or None`, matching api/endpoints.py's actor_user_id: decode_token
+    # defaults the `sub` claim to '' rather than None, and "unattributed" must
+    # have exactly ONE representation in this column. hint_mutation_verdict's
+    # author comparison is truthiness-guarded, so '' would fail closed rather
+    # than make every unidentified creator each other's author — but a column
+    # holding both '' and NULL for the same fact contradicts its own design,
+    # and every read that groups or counts by author would split them.
+    creator_user_id = caller.get("user_id") or None
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")

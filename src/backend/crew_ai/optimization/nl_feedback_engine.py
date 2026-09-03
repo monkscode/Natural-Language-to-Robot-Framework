@@ -766,11 +766,13 @@ class NLFeedbackEngine(LearningEngine):
         through, precisely so a column added here cannot leak by default. Add a
         column to this SELECT only with that projection in mind.
 
-        Uncapped on purpose: only the run's owner can create these rows, and
-        the caller is gated by caller_can_access, so the length is broadly
-        self-inflicted and a silent LIMIT would under-report the user's own
-        history. Not read-restricted to the owner alone, though: that gate also
-        admits a same-org org_admin and a platform admin.
+        Uncapped on purpose: every row here was typed by a human against this
+        one run, and a silent LIMIT would under-report a user's own history.
+        NOT "only the run's owner can create these rows" — submit_feedback's
+        gate is caller_can_access, which also admits a same-org org_admin and
+        any platform admin, so an org admin can add unbounded distinct
+        corrections against a member's run and the member's panel then renders
+        text they never typed. The same gate governs the read.
 
         Never raises — the panel calls this on mount for every finished run,
         and an empty list renders as today's plain form.

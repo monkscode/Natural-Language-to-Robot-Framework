@@ -490,7 +490,16 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
             "status": "error" if outcome == "error" else "success",
             "outcome": outcome,
             "message": _FEEDBACK_OUTCOME_MESSAGES[outcome],
-            "triage": {k: v for k, v in result.items() if k != "outcome"},
+            # `actor` and `actor_user_id` are stamped into the triage dict by
+            # FeedbackLoop.process_user_feedback as CARRIERS for the engines
+            # (ExecutionRecord has no user_id to hang them on) — they are not
+            # triage. Dropped here with `outcome` for the same reason: triage
+            # is the category / confidence the SPA displays, and echoing the
+            # submitter's identity back widens that contract by accident.
+            "triage": {
+                k: v for k, v in result.items()
+                if k not in ("outcome", "actor", "actor_user_id")
+            },
             "applied_to": feedback_target_id,
         }
     except Exception as e:
@@ -610,7 +619,16 @@ async def get_run_corrections(run_id: str, response: Response,
             "feedback_text": c.get("feedback_text"),
             "recorded_at": c.get("recorded_at"),
             "can_retract": (
-                hint_mutation_verdict(
+                # user is not None FIRST, mirroring _require_caller: this
+                # route family does not honour the AUTH_ENFORCED-off escape
+                # hatch, but hint_mutation_verdict does (it answers "allow"
+                # for a None caller), so without this term the panel drew a
+                # Retract control that POST /hints/{id}/retract then 401s.
+                # An offered action must not be one the server already knows
+                # it will refuse, for the same reason it must not be one the
+                # server already knows will no-op.
+                user is not None
+                and hint_mutation_verdict(
                     user, c.get("org_id"), c.get("created_by_user_id"),
                     is_platform_admin=admin,
                     # The Author tier is opt-in per call site and this is the
