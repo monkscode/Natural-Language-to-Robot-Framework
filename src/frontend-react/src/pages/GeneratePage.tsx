@@ -5,7 +5,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-import { api } from '@/lib/api'
+import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
@@ -462,6 +462,19 @@ interface FeedbackResponse { status?: string; outcome?: string; message?: string
 interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; can_retract?: boolean }
 interface RecordedResponse { corrections?: RecordedCorrection[] }
 
+/** A recorded correction as the PANEL holds it: the server's row plus what
+    this session has since done to it. `retracted` is client-only, and it is
+    not the inverse of can_retract — can_retract is also false for a hint that
+    is perfectly active and simply not this caller's to touch. 'already' is
+    the changed:false answer below: retracted, but not by this click. */
+interface PanelCorrection extends RecordedCorrection { retracted?: 'now' | 'already' }
+
+/** POST /api/learning/hints/{id}/retract → { hint, changed, note }
+    (learning_endpoints.py). `changed: false` is the route's own answer for a
+    hint that was ALREADY inactive — an org admin who retracted it between
+    this panel's GET and this click. */
+interface RetractResponse { changed?: boolean }
+
 /* POST /api/learning/hints/{id}/retract requires a non-empty `actor`, but
    _audit_actor (learning_endpoints.py) overrides it with the verified
    token's email whenever a token is present — the client-supplied value is
@@ -485,7 +498,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   const [status, setStatus] = useState<'idle' | 'sending'>('idle')
   const [result, setResult] = useState<{ ok: boolean; neutral: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
-  const [recorded, setRecorded] = useState<RecordedCorrection[]>([])
+  const [recorded, setRecorded] = useState<PanelCorrection[]>([])
   // Two fetches write `recorded`: this panel's mount read and the post-submit
   // refresh below. Whichever STARTED last is the newer question, so a slow
   // earlier response must not overwrite it.
@@ -497,12 +510,16 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // value cannot reach the screen. The guard is three lines of insurance
   // against that render condition changing, not a fix for a live defect.
   const recordedGen = useRef(0)
-  // Which item's Retract is in flight (disables that one control only), and
-  // the message when one fails. Separate from `err` above: that field is the
-  // main correction FORM's error, and a failed retract is a different action
-  // the user took from a different control.
-  const [retractingId, setRetractingId] = useState<number | null>(null)
-  const [retractErr, setRetractErr] = useState('')
+  // Which items' Retract is in flight, and the message for whichever ones
+  // failed — both keyed by hint id, because this list can hold several
+  // corrections and each one's control acts independently. A single id and a
+  // single string made them interfere: starting B re-enabled A's button while
+  // A's POST was still in flight, and wiped A's error before the user could
+  // read it. Separate from `err` above: that field is the main correction
+  // FORM's error, and a failed retract is a different action from a different
+  // control.
+  const [retracting, setRetracting] = useState<ReadonlySet<number>>(new Set())
+  const [retractErrs, setRetractErrs] = useState<Record<number, string>>({})
 
   // What this run already told the system. Fetched on mount rather than when
   // the form opens: the list exists to be read BEFORE typing, and it must not
@@ -532,7 +549,10 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // gate — same text on the same run means the same triage category, hence
   // the same scope and the same dedup key — and re-deriving that key here
   // would put a second copy of it beside the first.
-  const alreadySent = recorded.some(c => c.feedback_text === text.trim())
+  //
+  // The matching ITEM, not a boolean: a correction the user has since
+  // retracted needs a different sentence from one that is simply on file.
+  const alreadySent = recorded.find(c => c.feedback_text === text.trim())
 
   async function submit(feedbackText: string = text) {
     setStatus('sending'); setErr(''); setResult(null)
@@ -584,30 +604,70 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // can_retract is server-decided (hint_mutation_verdict) — this only fires
   // the POST the control's own visibility already cleared.
   //
-  // Drops the item locally on success rather than re-fetching. The two are
-  // not alternatives, they cover different spans: the server now returns
-  // can_retract false for a retracted hint (it ANDs in is_active, so a later
-  // page load never offers the control again), and this drop covers the
-  // current render without a round trip. The row itself keeps coming back —
-  // get_corrections_for_run is DELIBERATELY unfiltered on is_active, because
-  // a retracted hint is still the user's own recorded words.
+  // Confirmed first, like the two admin surfaces that offer the same action
+  // (LearningPage's Hints table and HintDrawer). This is a small destructive
+  // button sitting against the user's own text; it is also the ONLY retract
+  // control a plain org member ever sees, and they have the fewest ways back
+  // — /learning is closed to them, and reactivate is org-admin-and-above.
+  // The wording is theirs, not the admin sentence: "stop injecting into agent
+  // prompts" is not a thing to ask a plain member to reason about.
+  //
+  // On success the row STAYS, with its control cleared and a retracted
+  // marker added. Dropping it hid the user's own words — and the words are
+  // deliberately kept: get_corrections_for_run is unfiltered on is_active
+  // because "these are the user's own words", so the very next mount showed
+  // the correction again, without a button, and the two mounts disagreed
+  // about what had been said. Keeping the row also keeps the duplicate
+  // notice below armed, which is what stops the panel thanking the user for
+  // a resubmission that does nothing: re-sending the identical text on THIS
+  // run dedups to the same hint, and _claim_feedback_run's
+  // ON CONFLICT DO NOTHING returns before the reinforcement that would set
+  // is_active back to 1.
   async function retract(hintId: number) {
-    setRetractingId(hintId); setRetractErr('')
+    if (!window.confirm('Retract this correction? It will stop shaping future tests.')) return
+    setRetracting(prev => new Set(prev).add(hintId))
+    setRetractErrs(prev => {
+      const next = { ...prev }
+      delete next[hintId]
+      return next
+    })
     try {
-      await api(`/api/learning/hints/${hintId}/retract`, {
+      const body = await api<RetractResponse>(`/api/learning/hints/${hintId}/retract`, {
         method: 'POST',
         body: JSON.stringify({
           actor: RETRACT_ACTOR_PLACEHOLDER,
           reason: 'retracted from feedback panel',
         }),
       })
-      setRecorded(prev => prev.filter(c => c.hint_id !== hintId))
+      // The hint is retracted under both answers, so the row is marked under
+      // both. changed:false only means this click was not what did it, and
+      // reporting a no-op as the user's own action is the thing to avoid.
+      const mark: PanelCorrection['retracted'] = body?.changed === false ? 'already' : 'now'
+      setRecorded(prev => prev.map(c =>
+        c.hint_id === hintId ? { ...c, can_retract: false, retracted: mark } : c))
     } catch (e) {
       // Unlike the read above, this is a WRITE the user explicitly asked
       // for — silence here would let a failed retract look like it worked.
-      setRetractErr(e instanceof Error ? e.message : 'Could not retract this correction')
+      setRetractErrs(prev => ({
+        ...prev,
+        [hintId]: e instanceof Error ? e.message : 'Could not retract this correction',
+      }))
+      // 403/404 say the caller cannot act on this hint AT ALL — it is not
+      // theirs, or it is gone — so the control is dead and leaving it draws
+      // a button that can only fail again. The row still stays (their words
+      // are still their words) and it is NOT marked retracted: a refusal is
+      // not a retraction. Every other failure is transient or ours, so
+      // Retract survives for a retry.
+      if (isAccessLoss(e)) {
+        setRecorded(prev => prev.map(c =>
+          c.hint_id === hintId ? { ...c, can_retract: false } : c))
+      }
     } finally {
-      setRetractingId(null)
+      setRetracting(prev => {
+        const next = new Set(prev)
+        next.delete(hintId)
+        return next
+      })
     }
   }
 
@@ -674,26 +734,44 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           <div className="font-medium">Already recorded for this run</div>
           <ul className="mt-1 space-y-0.5 text-muted-foreground">
             {recorded.map(c => (
-              <li key={c.hint_id} className="flex items-center justify-between gap-2">
-                <span>“{c.feedback_text}”</span>
-                {/* can_retract is absent or false on an older backend and on
-                    the learning-disabled shape — both render exactly like
-                    today, with no control. */}
-                {c.can_retract && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-6 shrink-0 px-1.5 text-[11px] text-destructive"
-                    disabled={retractingId === c.hint_id}
-                    onClick={() => retract(c.hint_id)}
-                  >
-                    Retract
-                  </Button>
+              <li key={c.hint_id}>
+                <div className="flex items-center justify-between gap-2">
+                  <span>
+                    “{c.feedback_text}”
+                    {/* Set only by this session's own retract. The server
+                        never says "retracted" on this route — it answers
+                        can_retract, which is false for plenty of hints that
+                        are still perfectly active. */}
+                    {c.retracted && (
+                      <span className="ml-1.5 italic">
+                        {c.retracted === 'already' ? '— already retracted' : '— retracted'}
+                      </span>
+                    )}
+                  </span>
+                  {/* can_retract is absent or false on an older backend and on
+                      the learning-disabled shape — both render exactly like
+                      today, with no control. */}
+                  {c.can_retract && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6 shrink-0 px-1.5 text-[11px] text-destructive"
+                      disabled={retracting.has(c.hint_id)}
+                      onClick={() => retract(c.hint_id)}
+                    >
+                      Retract
+                    </Button>
+                  )}
+                </div>
+                {/* Beside the correction it belongs to, not under the list:
+                    with several rows, one shared line cannot say which
+                    Retract failed. */}
+                {retractErrs[c.hint_id] && (
+                  <p className="mt-0.5 text-destructive">{retractErrs[c.hint_id]}</p>
                 )}
               </li>
             ))}
           </ul>
-          {retractErr && <p className="mt-1 text-destructive">{retractErr}</p>}
         </div>
       )}
       <div>
@@ -717,7 +795,16 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           this width the sentence wraps and collides with the 0/500 counter. */}
       {alreadySent && (
         <p className="text-xs text-muted-foreground">
-          You already sent this for this run — it won’t be counted again.
+          {alreadySent.retracted
+            /* Scoped to THIS run on purpose. Sending it again here dedups to
+               the hint that was just retracted and the claim row for this run
+               already exists, so nothing reactivates it — but the same text
+               from a LATER run does reinforce, and an unqualified "it can't
+               come back" would be a new false claim. What the panel must not
+               do is stay silent and then answer the resubmission with
+               "Thanks — your feedback helps the system learn." */
+            ? 'You retracted this correction. Sending it again on this run won’t restore it.'
+            : 'You already sent this for this run — it won’t be counted again.'}
         </p>
       )}
       <div className="flex items-center justify-between">
