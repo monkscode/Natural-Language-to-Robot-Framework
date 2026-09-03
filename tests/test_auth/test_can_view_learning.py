@@ -134,3 +134,82 @@ def test_me_fails_closed_on_org_admin_role_with_no_org_id(client):
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["can_view_learning"] is False
+
+
+# ---------------------------------------------------------------------------
+# The org_id claim that rides beside can_view_learning.
+#
+# Both were added by the same change, for the same persona. Nulling org_id in
+# BOTH _token_payload and /auth/me left 824 backend tests and every frontend
+# test green (the SPA mocks AuthContext), yet its only consumer is the
+# Add-feedback sheet's org pinning: POST /api/learning/hints requires an
+# org_id, a non-platform admin may only ever name their own, and
+# GET /auth/admin/orgs is require_admin and 403s them. Drop or rename the
+# field and Submit is permanently greyed with no message.
+# ---------------------------------------------------------------------------
+
+def test_login_payload_carries_the_callers_own_org_id(client):
+    """It must be the caller's ACTIVE org — the same value minted into the
+    token — not merely present: the server only accepts that one from them."""
+    email = _unique_email()
+    _register_active(client, email)
+    login = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+    assert login.status_code == 200
+    user = login.json()["user"]
+
+    memberships = OrgRepository().get_orgs_for_user(user["id"])
+    assert len(memberships) == 1, "solo user should have exactly one org"
+    assert user["org_id"] == memberships[0]["org_id"]
+
+
+def test_me_carries_the_same_org_id_as_login(client):
+    """AuthContext hydrates from /auth/me on every page load, so a value set
+    only at login vanishes on F5 and the sheet greys out after a refresh."""
+    email = _unique_email()
+    _register_active(client, email)
+    login = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+    token = login.json()["access_token"]
+    login_org = login.json()["user"]["org_id"]
+    assert login_org, "login payload carried no org_id at all"
+
+    me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["org_id"] == login_org
+
+
+def test_me_does_not_promise_learning_access_the_api_would_refuse(client):
+    """Addendum 1. _token_payload's comment claims one rule with
+    is_dashboard_viewer "so the SPA can never draw a Learning link the API
+    would then 403". The two sides read DIFFERENT admin inputs: /auth/me had
+    the freshly re-read DB row, while every learning route uses
+    is_validated_admin, which short-circuits on the TOKEN's role claim.
+    set_platform_role does not bump token_version, so a user promoted to
+    platform admin who does not log in again is exactly this shape: DB row
+    says admin, token still says user.
+
+    Before the fix /auth/me answered can_view_learning=True on the DB row and
+    GET /api/learning/hints answered 403 on the token. The flag must fail
+    closed the same way the gate does.
+    """
+    from src.backend.auth.repository import UserRepository
+
+    email = _unique_email()
+    data = _register_active(client, email)
+    uid = data["user"]["id"]
+    # A token minted BEFORE the promotion: role="user", and no org_admin seat
+    # anywhere, so the org tier cannot grant the flag either.
+    stale_token = create_access_token({
+        "id": uid, "email": email, "role": "user", "display_name": "",
+        "org_id": None, "org_role": "org_member",
+    })
+    UserRepository().set_platform_role(uid, "admin")
+
+    me = client.get("/auth/me", headers={"Authorization": f"Bearer {stale_token}"})
+    assert me.status_code == 200
+    assert me.json()["role"] == "admin", (
+        "precondition: the DB row really did change under the stale token"
+    )
+    assert me.json()["can_view_learning"] is False, (
+        "the SPA would draw a Learning link that every learning route 403s, "
+        "because those routes read the TOKEN's role claim, not this DB row"
+    )

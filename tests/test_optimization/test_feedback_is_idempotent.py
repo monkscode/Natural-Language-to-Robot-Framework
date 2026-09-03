@@ -299,3 +299,67 @@ class TestClaimConflictTarget:
             in_memory_db.rollback()
             in_memory_db.execute("DROP INDEX IF EXISTS test_m12_uq_source_key")
             in_memory_db.commit()
+
+
+class TestRetractThenResubmit:
+    """What the run-level gate does to a RETRACTED hint, pinned in both rows.
+
+    The gate returns False before the UPDATE that carries `SET is_active = 1`,
+    so which run the resubmission comes from decides whether a retracted hint
+    comes back. Neither row was asserted anywhere: grep for `assert.*is_active`
+    across this suite returned exactly one hit, on an INITIAL value.
+
+    This is deliberate behaviour, not a defect being enshrined: every effect in
+    that UPDATE is a per-run fact and T5 gates them together, and carving
+    `is_active` out would let one effect fire without the evidence token that
+    authorises it. What is wrong is what the USER is told — POST /api/feedback
+    answers outcome "processed" and the SPA renders "Thanks - your feedback
+    helps the system learn" for the same-run case below, in which nothing at
+    all happened. That half is a separate wave; these two tests exist so the
+    engine side is visible and cannot drift silently underneath it.
+    """
+
+    def test_the_same_run_cannot_reinstate_a_hint_it_retracted(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-retract"), _triage())
+        hid = _hints(in_memory_db)[0]["id"]
+
+        # What POST /hints/{id}/retract does to the row.
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections SET is_active = 0 WHERE id = ?",
+            (hid,),
+        )
+        in_memory_db.commit()
+
+        engine.learn_from_feedback(_record("wf-retract"), _triage())
+
+        row = _hints(in_memory_db)[0]
+        assert row["is_active"] == 0, (
+            "the same run's resubmission reinstated a retracted hint, which "
+            "means it ran the UPSERT the run-level gate exists to stop"
+        )
+        assert row["evidence_count"] == 1, "the same run counted twice"
+        assert len(_evidence(in_memory_db, hid)) == 1, "one token per run"
+
+    def test_a_different_run_does_reinstate_it(self, in_memory_db):
+        """The other row, and the reason the first is not simply "retracted
+        hints stay retracted": the gate is per RUN. Fresh evidence from a
+        different run is Gap 7's recovery path and reactivates the hint."""
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-retract-a"), _triage())
+        hid = _hints(in_memory_db)[0]["id"]
+
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections SET is_active = 0 WHERE id = ?",
+            (hid,),
+        )
+        in_memory_db.commit()
+
+        engine.learn_from_feedback(_record("wf-retract-b"), _triage())
+
+        row = _hints(in_memory_db)[0]
+        assert row["is_active"] == 1, (
+            "a different run's identical feedback must reinstate the hint - "
+            "that is the cross-run recovery path"
+        )
+        assert row["evidence_count"] == 2
