@@ -300,12 +300,16 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
  * gateAllowed (auth/pageGates.ts) is the SAME predicate App.tsx uses to gate
  * the page itself, so the Learning nav item and the /learning route can
  * never disagree. */
-function NavGroup({ label, items, isAdmin, isOrgAdmin, canViewLearning, pathname }: {
+function NavGroup({ label, items, flags, pathname }: {
   label: string
   items: NavItem[]
+  /** The caller's flags as one value — GateFlags already IS this shape, and
+   *  taking it whole is what lets the filter below pass it straight through
+   *  instead of rebuilding the same object for every item on every render. */
+  flags: GateFlags
   pathname: string
-} & GateFlags) {
-  const visible = items.filter(item => gateAllowed(item, { isAdmin, isOrgAdmin, canViewLearning }))
+}) {
+  const visible = items.filter(item => gateAllowed(item, flags))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
@@ -334,6 +338,7 @@ function NavGroup({ label, items, isAdmin, isOrgAdmin, canViewLearning, pathname
 export function AppSidebar() {
   const { pathname } = useLocation()
   const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
+  const flags: GateFlags = { isAdmin, isOrgAdmin, canViewLearning }
 
   return (
     <Sidebar collapsible="icon">
@@ -353,8 +358,8 @@ export function AppSidebar() {
 
       {/* Nav — role-filtered */}
       <SidebarContent>
-        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} canViewLearning={canViewLearning} pathname={pathname} />
-        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} canViewLearning={canViewLearning} pathname={pathname} />
+        <NavGroup label="Platform" items={NAV_PLATFORM} flags={flags} pathname={pathname} />
+        <NavGroup label="Workspace" items={NAV_WORKSPACE} flags={flags} pathname={pathname} />
       </SidebarContent>
 
       {/* User footer */}

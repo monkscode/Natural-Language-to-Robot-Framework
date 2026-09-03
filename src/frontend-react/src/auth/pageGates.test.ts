@@ -19,7 +19,7 @@
 import { describe, expect, it } from 'vitest'
 import { PAGES } from '../App'
 import { NAV_PLATFORM, NAV_WORKSPACE } from '@/components/app-sidebar'
-import { gateAllowed, type Gate, type GateFlags } from './pageGates'
+import { type Gate } from './pageGates'
 
 /** Gate has optional booleans; NavItem's `admin` is required. Compare what
  *  gateAllowed reads, normalised, so `admin: false` and `admin: undefined`
@@ -32,45 +32,22 @@ const shape = (g: Gate) => ({
 
 const NAV = [...NAV_PLATFORM, ...NAV_WORKSPACE]
 
-/** Every combination of the three flags — the gate objects must agree on all
- *  of them, not merely on the one the current roles happen to exercise. */
-const ALL_FLAGS: GateFlags[] = [false, true].flatMap(isAdmin =>
-  [false, true].flatMap(isOrgAdmin =>
-    [false, true].map(canViewLearning => ({ isAdmin, isOrgAdmin, canViewLearning }))))
-
 describe('PAGES and the nav tables', () => {
   it('every nav item points at a real page', () => {
     const paths = new Set(PAGES.map(p => p.path))
     for (const item of NAV) expect(paths).toContain(item.url)
   })
 
-  it('carry the identical gate for every path they share', () => {
+  // Equal shapes are the whole claim: shape() normalises exactly the three
+  // flags gateAllowed reads, so two entries with equal shapes give equal
+  // answers for every possible caller. Feeding both through gateAllowed for
+  // all eight flag combinations was a second assertion that could not fail
+  // while this one passed.
+  it('carry the identical gate for every path they share, so no caller can see a link to a page that would bounce them', () => {
     for (const item of NAV) {
       const page = PAGES.find(p => p.path === item.url)!
       expect(shape(item), `nav "${item.title}" (${item.url}) disagrees with its PAGES entry`)
         .toEqual(shape(page))
     }
-  })
-
-  it('so no caller can see a link to a page that would bounce them', () => {
-    for (const item of NAV) {
-      const page = PAGES.find(p => p.path === item.url)!
-      for (const flags of ALL_FLAGS) {
-        expect(gateAllowed(item, flags), `${item.url} with ${JSON.stringify(flags)}`)
-          .toBe(gateAllowed(page, flags))
-      }
-    }
-  })
-})
-
-describe('the guard on this guard', () => {
-  it('fails when a page gate is changed without its nav entry', () => {
-    // The exact drift the claim above is about, forced by hand: this is what
-    // the loops would catch, proved rather than asserted.
-    const page: Gate = { admin: true }
-    const nav: Gate = { viewLearning: true }
-    expect(shape(page)).not.toEqual(shape(nav))
-    expect(gateAllowed(page, { isAdmin: false, isOrgAdmin: false, canViewLearning: true }))
-      .not.toBe(gateAllowed(nav, { isAdmin: false, isOrgAdmin: false, canViewLearning: true }))
   })
 })

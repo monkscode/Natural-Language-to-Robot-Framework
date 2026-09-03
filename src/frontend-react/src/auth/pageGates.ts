@@ -7,18 +7,8 @@
  * files import gateAllowed from here instead, so the page a URL reaches and
  * the nav link that offers it read the SAME rule.
  *
- * Sharing the predicate removes RULE drift, not TABLE drift, and only the
- * first is structural. App.tsx's PAGES and app-sidebar.tsx's NAV_PLATFORM /
- * NAV_WORKSPACE are still two independent lists of flags: setting
- * PAGES./learning.admin = true while leaving the nav entry on viewLearning
- * would leave both test files green and put a visible link in front of a page
- * that bounces. pageGates.test.ts closes that half by comparing the two
- * tables entry by entry for every path they share.
- *
- * Pure, and exported so the /learning divergence this predicate fixes (an
- * org admin the API admits could not open the page the SPA gated on
- * platform `admin`) is testable without rendering App or the sidebar — see
- * App.test.tsx and app-sidebar.test.tsx.
+ * Sharing it removes RULE drift only. The two gate TABLES can still disagree;
+ * pageGates.test.ts is what compares them.
  */
 
 /** The gating requirements a page or nav item can carry. All optional: an
