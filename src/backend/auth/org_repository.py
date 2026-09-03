@@ -248,6 +248,11 @@ class OrgRepository:
         crash from a data race the module's own advisory-lock comment already
         treats as expected. Caught by test_org_db.py's collision test.
 
+        That guard only sees COMMITTED claims, though — it reads its own
+        statement snapshot — so each pass first takes FOR UPDATE on the users
+        rows it is about to claim for. See the comment on that statement for
+        the interleaving it closes and the one it does not.
+
         Known holes, left deliberately (see task-2 brief): a vacated personal
         org whose name is not an email matches neither pass and stays NULL
         forever (its hints become unreachable); two personal orgs sharing a
@@ -258,6 +263,50 @@ class OrgRepository:
         Returns the total number of org rows updated across both passes.
         """
         with get_pool().connection() as conn:
+            # Lock this pass's candidate USERS before the UPDATE reads them.
+            #
+            # The "already owned" NOT EXISTS below is evaluated against the
+            # UPDATE's own statement snapshot, so a concurrent
+            # ensure_personal_org that has written its claim and not yet
+            # committed is invisible to it. The org row being updated was not
+            # touched by that other transaction, so there is no EvalPlanQual
+            # re-check either: the snapshot verdict stands, the UPDATE writes,
+            # and uq_org_owner_personal raises the moment the other transaction
+            # commits — aborting BOTH passes, since they share this
+            # transaction. Measured, in both directions, before this lock
+            # existed (test_backfill_pass_{1,2}_survives_a_concurrent_
+            # uncommitted_claim).
+            #
+            # organizations.owner_user_id carries an FK to users(id), so every
+            # writer that SETS it takes FOR KEY SHARE on that users row, which
+            # conflicts with FOR UPDATE here. So this statement blocks until
+            # such a writer commits, and the UPDATE that follows then takes a
+            # FRESH snapshot (READ COMMITTED gives each statement its own) in
+            # which the claim is visible and the NOT EXISTS excludes it.
+            # ensure_personal_org's own comment already leans on that FK
+            # coupling; this makes it explicit and load-bearing instead of
+            # accidental, on the side that was still relying on it silently.
+            #
+            # ORDER BY id so two backfills cannot deadlock against each other
+            # by locking the same users in different orders. (run_migration_once
+            # already serialises them by name; this costs nothing and does not
+            # depend on that staying true.)
+            #
+            # Residual, stated rather than hidden: a writer that enters the
+            # partial index WITHOUT setting owner_user_id — flipping an
+            # already-owned row's `kind` to 'personal' — takes no users lock and
+            # is not serialised by this. That is the same residual step 3
+            # absorbs with ON CONFLICT, no code path does it, and if one ever
+            # did, init_org_db's per-migration try/except keeps the failure
+            # inside this migration and leaves the marker unset so the next
+            # boot retries.
+            conn.execute(
+                "SELECT 1 FROM users u WHERE u.id IN ("
+                "    SELECT m.user_id FROM org_members m "
+                "    JOIN organizations o ON o.id = m.org_id "
+                "    WHERE o.kind = 'personal' AND o.owner_user_id IS NULL"
+                ") ORDER BY u.id FOR UPDATE"
+            )
             primary = conn.execute(
                 "UPDATE organizations o SET owner_user_id = m.user_id "
                 "FROM org_members m "
@@ -277,6 +326,17 @@ class OrgRepository:
                 "    SELECT 1 FROM organizations o2 "
                 "    WHERE o2.kind = 'personal' AND o2.owner_user_id = m.user_id"
                 ")"
+            )
+            # Pass 2's own candidates, locked for the reason above and
+            # computed AFTER pass 1 so a user pass 1 just claimed is no longer
+            # in the set. Locks taken here are held to the end of the
+            # transaction, as are pass 1's.
+            conn.execute(
+                "SELECT 1 FROM users u WHERE u.id IN ("
+                "    SELECT u2.id FROM users u2 "
+                "    JOIN organizations o ON o.name = u2.email "
+                "    WHERE o.kind = 'personal' AND o.owner_user_id IS NULL"
+                ") ORDER BY u.id FOR UPDATE"
             )
             fallback = conn.execute(
                 "UPDATE organizations o SET owner_user_id = u.id "

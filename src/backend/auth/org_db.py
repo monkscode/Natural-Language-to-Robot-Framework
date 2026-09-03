@@ -163,14 +163,35 @@ def init_org_db() -> None:
     # concurrent boots can't both run it. Best-effort: an unset marker retries.
     from src.backend.auth.migration_state import run_migration_once
 
+    def _run_data_migration(name: str, fn) -> None:
+        """One data migration, guarded on its own.
+
+        Every one of these is best-effort by construction: run_migration_once
+        writes the marker only after fn() returns, so a failure leaves the
+        marker unset and the next boot retries. What a failure must NOT do is
+        skip the migrations behind it or init_invitations_db() — main.py wraps
+        init_auth_db + init_org_db + init_invitations_db in ONE try/except and
+        logs "auth unavailable until Postgres is reachable", which names
+        Postgres for what can be a data race (a concurrent login claiming a
+        personal org while the owner backfill is picking candidates). Log the
+        real exception, leave the marker unset, let boot continue.
+        """
+        try:
+            if run_migration_once(name, fn):
+                logger.info("[AUTH] data migration %s applied", name)
+            else:
+                logger.info("[AUTH] data migration %s already applied; skipping", name)
+        except Exception as exc:  # noqa: BLE001 — one migration must not end boot
+            logger.warning(
+                "[AUTH] data migration %s failed; marker left unset so the next "
+                "boot retries: %s", name, exc,
+            )
+
     def _provision_personal_orgs() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().backfill_personal_orgs()
 
-    if run_migration_once("personal_org_backfill", _provision_personal_orgs):
-        logger.info("[AUTH] personal-org backfill applied")
-    else:
-        logger.info("[AUTH] personal-org backfill already applied; skipping")
+    _run_data_migration("personal_org_backfill", _provision_personal_orgs)
 
     # Collapse any pre-existing multi-org memberships to a single active org — a
     # one-time migration gated by the same advisory lock so concurrent boots can't
@@ -184,10 +205,7 @@ def init_org_db() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().collapse_all_to_single_org()
 
-    if run_migration_once("collapse_to_single_org", _collapse_single_org):
-        logger.info("[AUTH] single-active-org collapse applied")
-    else:
-        logger.info("[AUTH] single-active-org collapse already applied; skipping")
+    _run_data_migration("collapse_to_single_org", _collapse_single_org)
 
     # Stamp owner_user_id on personal orgs that predate the column — a
     # one-time migration, gated by the same advisory lock. Two passes (sole
@@ -199,7 +217,4 @@ def init_org_db() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().backfill_personal_org_owners()
 
-    if run_migration_once("personal_org_owner_backfill", _backfill_personal_org_owners):
-        logger.info("[AUTH] personal-org owner backfill applied")
-    else:
-        logger.info("[AUTH] personal-org owner backfill already applied; skipping")
+    _run_data_migration("personal_org_owner_backfill", _backfill_personal_org_owners)

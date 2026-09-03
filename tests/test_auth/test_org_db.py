@@ -240,6 +240,56 @@ def test_owner_backfill_survives_a_user_in_two_unclaimed_personal_orgs():
             conn.commit()
 
 
+def test_a_failing_data_migration_does_not_skip_the_ones_after_it():
+    """Critical 1(b). init_org_db ran its three run_migration_once calls
+    unguarded, and main.py wraps init_auth_db + init_org_db +
+    init_invitations_db in ONE try/except. So a raise out of any data
+    migration — the UniqueViolation the backfill's concurrency tests pin, for
+    instance — skipped every migration after it AND init_invitations_db, and
+    logged "auth unavailable until Postgres is reachable", which names the
+    wrong cause for a data race.
+
+    A data migration is best-effort by construction: run_migration_once only
+    writes the marker after migrate() returns, so a failure already retries on
+    the next boot. What it must not do is take the rest of the boot with it.
+    """
+    from unittest.mock import patch
+
+    def _marker(name: str):
+        with auth_db.get_pool().connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM data_migrations WHERE name = %s", (name,)
+            ).fetchone()
+
+    with auth_db.get_pool().connection() as conn:
+        conn.execute(
+            "DELETE FROM data_migrations WHERE name = ANY(%s)",
+            (['personal_org_backfill', 'personal_org_owner_backfill'],),
+        )
+        conn.commit()
+    try:
+        with patch.object(
+            OrgRepository, "backfill_personal_orgs",
+            side_effect=RuntimeError("simulated migration failure"),
+        ) as first, patch.object(
+            OrgRepository, "backfill_personal_org_owners",
+        ) as last:
+            init_org_db()  # must NOT raise
+
+        assert first.called, "the failing migration must have been attempted"
+        assert last.called, (
+            "a later data migration must still run — otherwise one failure "
+            "silently skips every migration behind it and init_invitations_db"
+        )
+        assert _marker("personal_org_backfill") is None, (
+            "a failed migration must leave its marker unset so it retries"
+        )
+    finally:
+        from src.backend.auth.migration_state import mark_migration_done
+        mark_migration_done("personal_org_backfill")
+        mark_migration_done("personal_org_owner_backfill")
+
+
 # ---------------------------------------------------------------------------
 # Task T3 — org deletion is structurally impossible while learning rows name it
 #

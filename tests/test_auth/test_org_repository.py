@@ -165,10 +165,15 @@ def test_ensure_personal_org_stamp_tolerates_owner_collision(repos):
 # the index does not know the difference.
 # ---------------------------------------------------------------------------
 
-def _claim_mid_call(orgs, uid, email, claimer_stmt, params):
-    """Run `claimer_stmt` on a second pooled connection, hold it open, call
-    ensure_personal_org, and commit the claimer 0.6s in — i.e. while the call
-    is blocked. Returns (result, raised)."""
+def _claim_mid_call(call, claimer_stmt, params):
+    """Run `claimer_stmt` on a second pooled connection, hold it open, invoke
+    `call`, and commit the claimer 0.6s in — i.e. while the call is blocked.
+    Returns (result, raised).
+
+    `call` is a zero-arg callable rather than a hard-wired ensure_personal_org
+    so the same interleaving can be aimed at the owner backfill, which enters
+    the same partial unique index from the other side.
+    """
     import threading
 
     pool = get_pool()
@@ -185,7 +190,7 @@ def _claim_mid_call(orgs, uid, email, claimer_stmt, params):
         timer.start()
         result = raised = None
         try:
-            result = orgs.ensure_personal_org(uid, email)
+            result = call()
         except Exception as exc:          # noqa: BLE001 — the thing under test
             raised = exc
         finally:
@@ -225,7 +230,7 @@ def test_a_concurrent_owner_stamp_is_serialised_by_the_users_row_lock(repos):
         ).fetchone()["id"]
 
     result, raised = _claim_mid_call(
-        orgs, uid, email,
+        lambda: orgs.ensure_personal_org(uid, email),
         "UPDATE organizations SET owner_user_id = %s WHERE id = %s",
         (uid, vacated),
     )
@@ -265,7 +270,7 @@ def test_step_3_absorbs_a_collision_the_users_row_lock_cannot_stop(repos):
         ).fetchone()["id"]
 
     result, raised = _claim_mid_call(
-        orgs, uid, email,
+        lambda: orgs.ensure_personal_org(uid, email),
         "UPDATE organizations SET kind = 'personal' WHERE id = %s",
         (pending,),
     )
@@ -290,4 +295,130 @@ def test_step_3_absorbs_a_collision_the_users_row_lock_cannot_stop(repos):
     assert seat is not None and seat["org_role"] == "org_admin", (
         "the caller must be left with a membership — zero memberships mints an "
         "org-less, unscoped-learning token at their next login"
+    )
+
+
+# ---------------------------------------------------------------------------
+# backfill_personal_org_owners and uq_org_owner_personal.
+#
+# Both passes end in `NOT EXISTS (... owner_user_id = <candidate>)`, evaluated
+# against the UPDATE's own statement snapshot. A concurrent ensure_personal_org
+# that has WRITTEN its claim but not committed is invisible to that snapshot,
+# and the row the backfill is updating was not touched by that other
+# transaction, so there is no EvalPlanQual re-check to correct the verdict: the
+# UPDATE writes, blocks on the partial unique index, and raises UniqueViolation
+# the moment the other transaction commits.
+#
+# That abort takes the WHOLE migration with it — both passes run in one
+# transaction — so it is a boot-time crash out of a data race the module's own
+# advisory-lock comment already treats as expected. Same interleaving as the
+# two tests above, aimed the other way: there the backfill is the claimer and
+# ensure_personal_org is under test; here ensure_personal_org's own step-3
+# INSERT is the claimer and the backfill is under test.
+#
+# The claimer org's name is deliberately NOT the user's email: a duplicate name
+# would make pass 2 skip on its OWN ambiguity guard, and the test would pass
+# without ever exercising the "already owned" one.
+# ---------------------------------------------------------------------------
+
+def _personal_orgs_owned_by(uid: str) -> list:
+    with get_pool().connection() as conn:
+        return conn.execute(
+            "SELECT id FROM organizations WHERE kind = 'personal' "
+            "AND owner_user_id = %s",
+            (uid,),
+        ).fetchall()
+
+
+def _owner_of(org_id) -> str | None:
+    with get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT owner_user_id FROM organizations WHERE id = %s", (org_id,)
+        ).fetchone()
+    return None if row["owner_user_id"] is None else str(row["owner_user_id"])
+
+
+def test_backfill_pass_1_survives_a_concurrent_uncommitted_claim(repos):
+    """Pass 1 (sole remaining member) against a live login that has already
+    INSERTed its own personal org for the same user and not yet committed.
+
+    Before the users-row lock this raised UniqueViolation out of
+    backfill_personal_org_owners, aborting the migration and — because
+    init_org_db had no per-migration guard — skipping init_invitations_db and
+    logging "auth unavailable until Postgres is reachable" for what is a data
+    race.
+
+    The correct outcome is the one the docstring already promises for an
+    ambiguous row: claim NEITHER, never raise. The user keeps exactly one
+    personal org (the one the concurrent login just made), and the org this
+    pass was looking at is left NULL for a later boot to reconsider.
+    """
+    users, orgs = repos
+    email = _unique_email()
+    uid = str(users.create_user(email, "S3cretpw!")["id"])
+
+    with get_pool().connection() as conn:
+        sole = conn.execute(
+            "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+            "RETURNING id",
+            (f"Sole Member {uuid.uuid4().hex[:8]}",),
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO org_members (org_id, user_id, org_role) "
+            "VALUES (%s, %s, 'org_admin')",
+            (sole, uid),
+        )
+        conn.commit()
+
+    _result, raised = _claim_mid_call(
+        orgs.backfill_personal_org_owners,
+        "INSERT INTO organizations (name, kind, owner_user_id) "
+        "VALUES (%s, 'personal', %s)",
+        (f"Concurrent Login {uuid.uuid4().hex[:8]}", uid),
+    )
+
+    assert raised is None, f"the boot path raised: {raised!r}"
+    assert _owner_of(sole) is None, (
+        "the concurrently claimed user must be skipped, not double-claimed"
+    )
+    assert len(_personal_orgs_owned_by(uid)) == 1, (
+        "uq_org_owner_personal must still hold"
+    )
+
+
+def test_backfill_pass_2_survives_a_concurrent_uncommitted_claim(repos):
+    """Pass 2 (name == email) against the same interleaving — the shape this
+    branch exists for: a user who cycled team -> solo, whose vacated personal
+    org still carries their email as its name, logging in on another instance
+    while this migration runs.
+
+    Pass 2 is reached only when pass 1 cannot claim the row, so the org here
+    has NO members; that is what makes this a second, independent site rather
+    than a repeat of the test above.
+    """
+    users, orgs = repos
+    email = _unique_email()
+    uid = str(users.create_user(email, "S3cretpw!")["id"])
+
+    with get_pool().connection() as conn:
+        vacated = conn.execute(
+            "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
+            "RETURNING id",
+            (email,),
+        ).fetchone()["id"]
+        conn.commit()
+
+    _result, raised = _claim_mid_call(
+        orgs.backfill_personal_org_owners,
+        "INSERT INTO organizations (name, kind, owner_user_id) "
+        "VALUES (%s, 'personal', %s)",
+        (f"Concurrent Login {uuid.uuid4().hex[:8]}", uid),
+    )
+
+    assert raised is None, f"the boot path raised: {raised!r}"
+    assert _owner_of(vacated) is None, (
+        "the concurrently claimed user must be skipped, not double-claimed"
+    )
+    assert len(_personal_orgs_owned_by(uid)) == 1, (
+        "uq_org_owner_personal must still hold"
     )
