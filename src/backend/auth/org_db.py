@@ -19,13 +19,22 @@ from src.backend.auth.db import get_pool
 
 logger = logging.getLogger(__name__)
 
+# owner_user_id is deliberately NOT here — it is added by
+# _ORG_OWNER_COLUMN_DDL below, which init_org_db runs immediately after this
+# statement, so a fresh database and an existing one end up in exactly the
+# same shape by exactly the same statement. Do not "complete" this CREATE
+# TABLE by adding the column back: a column defined in both places is
+# exercised in only ONE of them per environment (this suite drops and
+# recreates its schema, so the CREATE always wins there; every deployed
+# database already has the table, so the ALTER always wins there), and a
+# divergence between the two literals is then invisible to the suite. Measured
+# on this branch before the definitions were merged: ON DELETE CASCADE in the
+# ALTER left all 271 test_auth tests green.
 _ORGANIZATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS organizations (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT NOT NULL,
     kind        TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal', 'team')),
-    -- ON DELETE SET NULL, never CASCADE — see _ORG_OWNER_COLUMN_DDL below.
-    owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 """
@@ -47,11 +56,10 @@ _INDEXES_DDL = (
 
 # owner_user_id lets a user RECLAIM their own personal org (ensure_personal_org
 # steps 2-3 in org_repository.py) instead of minting a new empty one every time
-# they cycle through a team and back out solo. org_db.py has no ALTER
-# mechanism (CREATE TABLE IF NOT EXISTS only), so a new column needs its own
-# idempotent statement alongside the one baked into _ORGANIZATIONS_DDL above
-# (baseline DDL + idempotent migration, both — a fresh DB gets the column
-# directly; an existing one gets it via this ALTER).
+# they cycle through a team and back out solo. CREATE TABLE IF NOT EXISTS
+# cannot add a column to a table that already exists, so the column needs this
+# idempotent statement — and this is its ONLY definition, for both a fresh
+# database and one that predates it (see _ORGANIZATIONS_DDL above).
 #
 # ON DELETE SET NULL, and it must NEVER become CASCADE. CASCADE would delete
 # the org row when its owner is deleted, reintroducing the exact "vacated

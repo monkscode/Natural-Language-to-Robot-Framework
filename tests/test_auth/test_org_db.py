@@ -49,6 +49,177 @@ def test_init_org_db_adds_owner_column_and_unique_index():
     assert _table_exists("uq_org_owner_personal")
 
 
+# ---------------------------------------------------------------------------
+# The migration path every DEPLOYED database actually takes.
+#
+# owner_user_id is defined TWICE: in _ORGANIZATIONS_DDL's CREATE TABLE and in
+# _ORG_OWNER_COLUMN_DDL's ALTER. This suite's fixture drops and recreates its
+# schema every session, so init_org_db() always CREATEs organizations fresh and
+# the ALTER is a no-op in every other test in this file. Every deployed
+# database is the mirror image: organizations predates this branch, so the
+# CREATE is the no-op and the ALTER is what defines the FK and its delete
+# action.
+#
+# That asymmetry is not hypothetical. Measured on this branch: ON DELETE
+# CASCADE in the CREATE TABLE fails one test; the same word in the ALTER left
+# the whole 271-test test_auth suite green -- while reintroducing, on every
+# deployed database, the exact "vacated personal org is deleted and its
+# learning rows are stranded" defect this branch exists to fix.
+#
+# So this fixture builds organizations in the PRE-COLUMN shape in a throwaway
+# schema and lets init_org_db() migrate it, which is the only place the ALTER
+# is the live statement.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def precolumn_schema():
+    """A throwaway schema holding `organizations` as it stood BEFORE this
+    branch: no owner_user_id, no index, no trigger. Yields with auth_db._pool
+    pointed at it; drops the schema on teardown.
+
+    Same injection mechanism as auth_isolated_schema (replace auth_db._pool,
+    never settings.DATABASE_URL), so nothing leaks into the suites that run
+    afterwards.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
+
+    schema = f"auth_precol_{uuid.uuid4().hex[:8]}"
+    admin = psycopg.connect(
+        settings.DATABASE_URL, autocommit=True,
+        connect_timeout=PG_CONNECT_TIMEOUT_S,
+    )
+    saved_pool = auth_db._pool
+    pool = None
+    try:
+        admin.execute(f"CREATE SCHEMA {schema}")
+        sep = "&" if "?" in settings.DATABASE_URL else "?"
+        dsn = settings.DATABASE_URL + f"{sep}options=-c%20search_path%3D{schema}"
+        pool = ConnectionPool(
+            conninfo=dsn, min_size=1, max_size=3,
+            kwargs={"row_factory": dict_row, "connect_timeout": PG_CONNECT_TIMEOUT_S},
+            open=True,
+        )
+        auth_db._pool = pool
+        auth_db.init_auth_db()  # users, the FK target
+        with pool.connection() as conn:
+            # organizations WITHOUT owner_user_id: the shape of every database
+            # that predates this branch.
+            conn.execute(
+                "CREATE TABLE organizations ("
+                "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+                "  name TEXT NOT NULL,"
+                "  kind TEXT NOT NULL DEFAULT 'personal'"
+                "       CHECK (kind IN ('personal', 'team')),"
+                "  created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+            conn.commit()
+        yield schema
+    finally:
+        auth_db._pool = saved_pool
+        if pool is not None:
+            try:
+                pool.close()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+        try:
+            admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        finally:
+            admin.close()
+
+
+def _owner_fk_row():
+    with auth_db.get_pool().connection() as conn:
+        return conn.execute(
+            "SELECT c.conname, c.confdeltype "
+            "FROM pg_constraint c "
+            "JOIN pg_attribute a ON a.attrelid = c.conrelid "
+            "                   AND a.attnum = c.conkey[1] "
+            "WHERE c.conrelid = 'organizations'::regclass "
+            "  AND c.contype = 'f' AND array_length(c.conkey, 1) = 1 "
+            "  AND a.attname = 'owner_user_id'"
+        ).fetchone()
+
+
+def _owner_index_row():
+    with auth_db.get_pool().connection() as conn:
+        return conn.execute(
+            "SELECT i.indisunique, "
+            "       pg_get_expr(i.indpred, i.indrelid) AS predicate, "
+            "       (SELECT string_agg(a.attname, ',' ORDER BY a.attnum) "
+            "          FROM pg_attribute a "
+            "         WHERE a.attrelid = i.indrelid "
+            "           AND a.attnum = ANY(i.indkey::smallint[])) AS cols "
+            "FROM pg_index i "
+            "WHERE i.indexrelid = 'uq_org_owner_personal'::regclass"
+        ).fetchone()
+
+
+def test_the_owner_migration_a_deployed_database_runs_sets_null_not_cascade(
+        precolumn_schema):
+    """The ALTER, exercised as the live statement for once.
+
+    ON DELETE SET NULL, and it must NEVER become CASCADE: CASCADE deletes the
+    org row when its owner is deleted, which strands every learning row naming
+    that org -- the 356-row defect this branch exists to fix, reintroduced
+    through the guard rail. confdeltype 'n' is SET NULL, 'c' is CASCADE.
+    """
+    init_org_db()
+    fk = _owner_fk_row()
+    assert fk is not None, (
+        "the ALTER must add owner_user_id AND its FK on a database that "
+        "predates the column -- a CREATE TABLE IF NOT EXISTS cannot"
+    )
+    assert fk["confdeltype"] == "n", (
+        f"owner_user_id must be ON DELETE SET NULL, got confdeltype="
+        f"{fk['confdeltype']!r} for {fk['conname']}"
+    )
+
+
+def test_the_owner_index_a_deployed_database_gets_is_unique_and_partial(
+        precolumn_schema):
+    """Minor 1. to_regclass('uq_org_owner_personal') matches ANY relation of
+    that name, so the pre-existing assertion held just as well for a plain
+    CREATE INDEX -- the downgrade was caught only incidentally, in a different
+    file, through an ON CONFLICT inference failure. Assert the two properties
+    the design actually depends on: UNIQUE (one personal org per owner) and
+    PARTIAL on kind='personal' (a team org has no 1:1 owner and is left
+    unconstrained).
+    """
+    init_org_db()
+    idx = _owner_index_row()
+    assert idx is not None, "uq_org_owner_personal must exist"
+    assert idx["cols"] == "owner_user_id", "indexed on the owner column"
+    assert idx["indisunique"] is True, (
+        "a non-unique index lets one user own two personal orgs, and "
+        "ensure_personal_org's ON CONFLICT inference has nothing to infer"
+    )
+    assert idx["predicate"] is not None, "must be PARTIAL, not a full index"
+    assert "personal" in idx["predicate"], (
+        f"partial on kind='personal', got {idx['predicate']!r}"
+    )
+
+
+def test_the_delete_guard_reaches_a_database_that_predates_it(precolumn_schema):
+    """The trigger is CREATE OR REPLACE on every boot, so it lands on an
+    existing organizations table as readily as a fresh one -- asserted here
+    rather than assumed, because the two other DDL statements in this block
+    behave differently on a pre-column database than they do in every other
+    test in this file."""
+    init_org_db()
+    with auth_db.get_pool().connection() as conn:
+        trg = conn.execute(
+            "SELECT 1 FROM pg_trigger "
+            "WHERE tgrelid = 'organizations'::regclass "
+            "  AND tgname = 'trg_organizations_block_delete' "
+            "  AND NOT tgisinternal"
+        ).fetchone()
+    assert trg is not None
+
+
 def test_owner_backfill_handles_sole_member_email_fallback_and_duplicate_names():
     """Test 9 — the backfill. Three required cases plus one hardening case,
     all in ONE migration run (proves the ambiguous/colliding cases do not
