@@ -680,29 +680,21 @@ const VIEWS: { key: View; label: string; platformOnly?: boolean }[] = [
   { key: 'review', label: 'LLM Review', platformOnly: true },
 ]
 
-/** The tabs this caller can open. Exported, and pure, so the filtering and the
- *  default landing tab are testable without rendering the page — this package
- *  tests no page components (vite.config.ts). */
+/** The tabs this caller can open. Exported, and pure, so the filtering is
+ *  testable as a table — LearningPage.test.tsx pins both roles' tab lists
+ *  against it as well as rendering the page. */
 export function visibleViews(isPlatformAdmin: boolean) {
   return VIEWS.filter(v => isPlatformAdmin || !v.platformOnly)
-}
-
-/** The tab the page opens on: the first one this caller can actually open.
- *  It used to be a hardcoded 'overview', so an org admin following the new
- *  Learning nav item landed on an error box on arrival. */
-export function defaultView(isPlatformAdmin: boolean): View {
-  return visibleViews(isPlatformAdmin)[0].key
 }
 
 export default function LearningPage() {
   const { isAdmin } = useAuth()
   const views = visibleViews(isAdmin)
-  const [view, setView] = useState<View>(() => defaultView(isAdmin))
-  // isAdmin can flip mid-session (a demotion, or the /auth/me hydration
-  // landing after first paint). Re-checked on every render for the same
-  // reason KeepAlivePages re-checks its gate: a tab whose route would now
-  // 403 must not stay open just because it was open when it was allowed.
-  const active = views.some(v => v.key === view) ? view : views[0].key
+  // Open on the first tab this caller can actually load. It used to be a
+  // hardcoded 'overview', so an org admin following the Learning nav item
+  // landed on a 403 error box on arrival — GET /learning/stats, Overview's
+  // only call, is require_admin.
+  const [view, setView] = useState<View>(views[0].key)
   return (
     <div className="mx-auto w-full max-w-7xl space-y-4">
       <div className="flex items-start justify-between">
@@ -717,17 +709,17 @@ export default function LearningPage() {
       {isAdmin && <HealthBanner />}
       <div className="flex gap-1.5 border-b pb-2">
         {views.map(v => (
-          <Button key={v.key} size="sm" variant={active === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
+          <Button key={v.key} size="sm" variant={view === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
             {v.label}
           </Button>
         ))}
       </div>
-      {active === 'overview' && <Overview />}
-      {active === 'hints' && <Hints />}
-      {active === 'triggers' && <TriggersTab />}
-      {active === 'runs' && <Runs />}
-      {active === 'stats' && <StatsTab />}
-      {active === 'review' && <Review />}
+      {view === 'overview' && <Overview />}
+      {view === 'hints' && <Hints />}
+      {view === 'triggers' && <TriggersTab />}
+      {view === 'runs' && <Runs />}
+      {view === 'stats' && <StatsTab />}
+      {view === 'review' && <Review />}
     </div>
   )
 }

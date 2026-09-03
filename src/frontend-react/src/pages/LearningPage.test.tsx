@@ -22,7 +22,7 @@ vi.mock('@/lib/api', () => ({ api: vi.fn() }))
 
 import { useAuth } from '@/auth/AuthContext'
 import { useFetch } from '@/lib/useFetch'
-import LearningPage, { defaultView, reviewPageLabel, visibleViews } from './LearningPage'
+import LearningPage, { reviewPageLabel, visibleViews } from './LearningPage'
 
 const mockUseAuth = vi.mocked(useAuth)
 const mockUseFetch = vi.mocked(useFetch)
@@ -82,9 +82,11 @@ describe('reviewPageLabel', () => {
  *
  * Those four routes stay platform-only on purpose —
  * test_learning_dashboards_org.py::test_stats_remains_platform_admin_only
- * asserts the 403 — so the fix is fewer controls, not a wider API. Both
- * functions are pure, so this needs no render (vite.config.ts: no page
- * components).
+ * asserts the 403 — so the fix is fewer controls, not a wider API.
+ *
+ * visibleViews is pure, so this half is a table check. Which tab the PAGE
+ * then opens on is the render below: the two are not the same claim, and the
+ * predicate passing was never evidence the page consulted it.
  */
 describe('visibleViews', () => {
   const keys = (isAdmin: boolean) => visibleViews(isAdmin).map(v => v.key)
@@ -104,26 +106,15 @@ describe('visibleViews', () => {
   })
 })
 
-describe('defaultView', () => {
-  it('opens an org admin on a tab they can actually load, not on Overview', () => {
-    expect(defaultView(false)).not.toBe('overview')
-    expect(visibleViews(false).map(v => v.key)).toContain(defaultView(false))
-  })
-
-  it('still opens a platform admin on Overview (no regression)', () => {
-    expect(defaultView(true)).toBe('overview')
-  })
-})
-
 /**
  * The tab the page actually opens on.
  *
- * visibleViews and defaultView above are pure and were already pinned, and
- * that was not enough: rewriting the component's own initialiser from
- * `useState<View>(() => defaultView(isAdmin))` to `useState<View>('overview')`
- * left all of those tests green. The predicate was proved correct; nothing
- * proved the page consulted it. This half renders the page and reads the tab
- * strip and the tab body, which is what a user gets.
+ * visibleViews above is pure and was already pinned, and that was not enough:
+ * rewriting the component's own initialiser to a hardcoded
+ * `useState<View>('overview')` left every one of those tests green. The
+ * predicate was proved correct; nothing proved the page consulted it. This
+ * half renders the page and reads the tab strip and the tab body, which is
+ * what a user gets.
  *
  * The failure it guards is not cosmetic: Overview's only call is
  * GET /learning/stats, which is Depends(require_admin), so an org admin
