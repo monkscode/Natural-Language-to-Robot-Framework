@@ -158,7 +158,6 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 function Hints() {
   const { user, isAdmin } = useAuth()
   const [filter, setFilter] = useState('')
-  const [orgNames, setOrgNames] = useState<Record<string, string>>({})
   const [busyId, setBusyId] = useState<number | null>(null)
   const [actErr, setActErr] = useState('')
   const [detailId, setDetailId] = useState<number | null>(null)
@@ -166,6 +165,7 @@ function Hints() {
   const [scopeFilter, setScopeFilter] = useState('')
   const [domainFilter, setDomainFilter] = useState('')
   const [search, setSearch] = useState('')
+  const [orgNames, setOrgNames] = useState<Record<string, string>>({})
   // Org names for the owning-org column, fetched once. Only a PLATFORM admin
   // needs them: list_hints sets scope_org = None for them alone, so they are
   // the only caller whose rows span more than one org — for an org admin every
