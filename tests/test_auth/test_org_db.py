@@ -3,6 +3,7 @@
 Skipped when Postgres is unreachable. Uses the auth_test isolated schema.
 """
 
+import contextlib
 import uuid
 
 import psycopg
@@ -71,15 +72,16 @@ def test_init_org_db_adds_owner_column_and_unique_index():
 # is the live statement.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def precolumn_schema():
-    """A throwaway schema holding `organizations` as it stood BEFORE this
-    branch: no owner_user_id, no index, no trigger. Yields with auth_db._pool
-    pointed at it; drops the schema on teardown.
+@contextlib.contextmanager
+def _throwaway_auth_schema(prefix: str):
+    """Create an empty schema, point auth_db._pool at it, yield the pool, and
+    drop the schema afterwards.
 
     Same injection mechanism as auth_isolated_schema (replace auth_db._pool,
     never settings.DATABASE_URL), so nothing leaks into the suites that run
-    afterwards.
+    afterwards. search_path is this schema ONLY, with no public fallback, so
+    to_regclass inside the delete guard resolves here and cannot accidentally
+    see the live tables.
     """
     import psycopg
     from psycopg.rows import dict_row
@@ -87,7 +89,7 @@ def precolumn_schema():
 
     from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 
-    schema = f"auth_precol_{uuid.uuid4().hex[:8]}"
+    schema = f"{prefix}_{uuid.uuid4().hex[:8]}"
     admin = psycopg.connect(
         settings.DATABASE_URL, autocommit=True,
         connect_timeout=PG_CONNECT_TIMEOUT_S,
@@ -104,6 +106,27 @@ def precolumn_schema():
             open=True,
         )
         auth_db._pool = pool
+        yield pool
+    finally:
+        auth_db._pool = saved_pool
+        if pool is not None:
+            try:
+                pool.close()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+        try:
+            admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        finally:
+            admin.close()
+
+
+@pytest.fixture
+def precolumn_schema():
+    """A throwaway schema holding `organizations` as it stood BEFORE this
+    branch: no owner_user_id, no index, no trigger. Yields with auth_db._pool
+    pointed at it.
+    """
+    with _throwaway_auth_schema("auth_precol") as pool:
         auth_db.init_auth_db()  # users, the FK target
         with pool.connection() as conn:
             # organizations WITHOUT owner_user_id: the shape of every database
@@ -117,18 +140,7 @@ def precolumn_schema():
                 "  created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
             )
             conn.commit()
-        yield schema
-    finally:
-        auth_db._pool = saved_pool
-        if pool is not None:
-            try:
-                pool.close()
-            except Exception:  # noqa: BLE001 - best-effort teardown
-                pass
-        try:
-            admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-        finally:
-            admin.close()
+        yield
 
 
 def _owner_fk_row():
@@ -596,3 +608,197 @@ def test_audit_log_neither_blocks_a_delete_nor_is_repointed():
             if org_id:
                 conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# The guard, for every table it names -- not just the first one.
+#
+# Measured on this branch: replacing the trigger's 11-element array with just
+# 'nl_feedback_corrections' left all 274 test_auth tests green. Ten of the
+# eleven tables were undefended, and because to_regclass silently skips a name
+# it cannot resolve, a renamed or dropped table is never an error either. An
+# org whose only remaining footprint was llm_traces + workflow_metrics would
+# have deleted cleanly, stranding every trace and metrics row for that tenant.
+#
+# This list is written out by hand rather than parsed out of
+# _ORG_DELETE_GUARD_FN_DDL: a list derived from the thing under test cannot
+# fail when that thing shrinks. The agreement between the two is asserted
+# separately, below, so a table ADDED to the guard without a test also fails.
+#
+# It runs in its own throwaway schema with all eleven present as minimal
+# (id, org_id) stubs. Four of them exist for real in auth_test (the data-plane
+# singletons build test_runs, llm_traces, workflow_metrics and run_groups) and
+# one -- anti_patterns -- must stay ABSENT there, because
+# test_trigger_degrades_when_a_learning_table_is_absent asserts its absence.
+# Seeding all eleven in the shared schema would break that test and leave rows
+# behind that other modules' teardowns then trip over (see
+# ensure_stub_learning_tables' docstring). A stand-in row proves the guard
+# exactly as well as a real one, for the same reason that helper gives.
+# ---------------------------------------------------------------------------
+
+_GUARDED_LEARNING_TABLES = (
+    "nl_feedback_corrections",
+    "execution_records",
+    "execution_embeddings",
+    "anti_patterns",
+    "learning_anchors",
+    "kw_query_patterns",
+    "test_runs",
+    "workflow_metrics",
+    "llm_traces",
+    "run_groups",
+    "hint_review_pages",
+)
+
+
+@pytest.fixture
+def guard_schema():
+    """A throwaway schema with the real org DDL and all eleven guarded
+    learning tables present as minimal stubs."""
+    with _throwaway_auth_schema("auth_guard") as pool:
+        auth_db.init_auth_db()
+        init_org_db()
+        with pool.connection() as conn:
+            for table in _GUARDED_LEARNING_TABLES:
+                conn.execute(
+                    f"CREATE TABLE IF NOT EXISTS {table} ("
+                    "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+                    "org_id TEXT NOT NULL)"
+                )
+            conn.commit()
+        yield
+
+
+@pytest.mark.parametrize("table", _GUARDED_LEARNING_TABLES)
+def test_deleting_an_org_is_refused_by_every_table_the_guard_names(
+        guard_schema, table):
+    """Critical 3. One row in ANY of the eleven tables must refuse the delete,
+    and the error must name the table -- an operator who cannot see which
+    table is holding the org cannot act on the refusal."""
+    with auth_db.get_pool().connection() as conn:
+        org_id = _make_personal_org(conn, f"Guarded by {table}")
+        conn.execute(
+            f"INSERT INTO {table} (org_id) VALUES (%s)", (str(org_id),)
+        )
+        conn.commit()
+
+    with pytest.raises(psycopg.errors.ForeignKeyViolation) as exc:
+        with auth_db.get_pool().connection() as conn:
+            conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.commit()
+    assert table in str(exc.value)
+
+    with auth_db.get_pool().connection() as conn:
+        still_there = conn.execute(
+            "SELECT 1 FROM organizations WHERE id = %s", (org_id,)
+        ).fetchone()
+    assert still_there is not None, "a refused delete must not have happened"
+
+
+def test_the_guarded_table_list_matches_the_trigger_body():
+    """The list above is hand-written on purpose (see the comment), so this is
+    what stops it drifting the other way: a table added to the guard without a
+    test is caught here rather than shipping untested."""
+    import re
+
+    from src.backend.auth.org_db import _ORG_DELETE_GUARD_FN_DDL
+
+    array_body = _ORG_DELETE_GUARD_FN_DDL.split("ARRAY[", 1)[1].split("]", 1)[0]
+    in_trigger = set(re.findall(r"'([a-z_]+)'", array_body))
+    assert in_trigger == set(_GUARDED_LEARNING_TABLES), (
+        "the trigger's table list and this file's parametrisation disagree: "
+        f"only in trigger={sorted(in_trigger - set(_GUARDED_LEARNING_TABLES))}, "
+        f"only in tests={sorted(set(_GUARDED_LEARNING_TABLES) - in_trigger)}"
+    )
+
+
+def test_the_guard_is_not_fooled_by_a_shadow_schema_earlier_on_the_path():
+    """Minor 2. The guard function is SECURITY INVOKER, so without a pinned
+    search_path both to_regclass and format('%I') resolved through the
+    CALLER's path. Measured before the pin: with search_path = shadow, home,
+    where shadow held an EMPTY nl_feedback_corrections and home held the real
+    org plus a hint naming it, DELETE FROM home.organizations SUCCEEDED and
+    stranded the hint -- the exact defect the branch exists to prevent,
+    executed by the guard meant to prevent it.
+
+    The function is CREATE OR REPLACE'd on every boot with
+    `SET search_path FROM CURRENT`, so it is pinned to whatever schema
+    init_org_db ran in: public in production, the isolated schema under test.
+    That keeps the per-test schemas working (a fixed literal would not) while
+    making the guard independent of whoever issues the DELETE.
+    """
+    with _throwaway_auth_schema("auth_home") as pool:
+        auth_db.init_auth_db()
+        init_org_db()
+        with pool.connection() as conn:
+            home = conn.execute("SELECT current_schema() AS s").fetchone()["s"]
+            conn.execute(
+                "CREATE TABLE nl_feedback_corrections ("
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+                "org_id TEXT NOT NULL)"
+            )
+            org_id = _make_personal_org(conn, "Shadowed")
+            conn.execute(
+                "INSERT INTO nl_feedback_corrections (org_id) VALUES (%s)",
+                (str(org_id),),
+            )
+            conn.commit()
+
+        shadow = f"{home}_shadow"
+        with pool.connection() as conn:
+            conn.execute(f"CREATE SCHEMA {shadow}")
+            conn.execute(
+                f"CREATE TABLE {shadow}.nl_feedback_corrections ("
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+                "org_id TEXT NOT NULL)"
+            )
+            conn.commit()
+
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            with pool.connection() as conn:
+                # SET LOCAL: reverts when this transaction ends, so the pooled
+                # connection goes back clean.
+                conn.execute(f"SET LOCAL search_path = {shadow}, {home}")
+                conn.execute(
+                    "DELETE FROM organizations WHERE id = %s", (org_id,)
+                )
+                conn.commit()
+
+        with pool.connection() as conn:
+            still_there = conn.execute(
+                "SELECT 1 FROM organizations WHERE id = %s", (org_id,)
+            ).fetchone()
+        assert still_there is not None
+
+
+def test_the_guard_skips_a_guarded_table_that_has_no_org_id_column():
+    """Minor 3. to_regclass answers "does a relation of this name exist", not
+    "does it have an org_id column". A learning schema that predates the
+    migration adding that column -- hint_review_pages.org_id only arrived in
+    v22, and ensure_schema does not run at all when OPTIMIZATION_ENABLED is
+    false -- made the guard raise UndefinedColumn instead of refusing or
+    allowing, turning an org delete into a confusing error.
+
+    Resolving the name ONCE and checking pg_attribute covers that and the
+    other to_regclass gap the audit named (it matches views too, so a relation
+    with no org_id column of any kind now skips rather than raises).
+    """
+    with _throwaway_auth_schema("auth_nocol") as pool:
+        auth_db.init_auth_db()
+        init_org_db()
+        with pool.connection() as conn:
+            conn.execute(
+                "CREATE TABLE hint_review_pages ("
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY)"
+            )
+            org_id = _make_personal_org(conn, "Pre-v22 learning schema")
+            conn.commit()
+            conn.execute("DELETE FROM organizations WHERE id = %s", (org_id,))
+            conn.commit()
+            gone = conn.execute(
+                "SELECT 1 FROM organizations WHERE id = %s", (org_id,)
+            ).fetchone()
+        assert gone is None, (
+            "an org with no learning rows must still delete when one of the "
+            "guarded tables predates its org_id column"
+        )

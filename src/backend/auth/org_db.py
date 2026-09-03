@@ -85,7 +85,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
 # An org row must never be deleted while learning rows still name it. T1
 # removed the only DELETE FROM organizations in the codebase; this stops a
 # future one from returning, and makes the property structural rather than
-# conventional.
+# conventional — but only because the function pins its own search_path (see
+# below). A SECURITY INVOKER function with no pinned path resolves every table
+# name through the CALLER's search_path, which makes the guarantee
+# conventional, not structural: measured, a shadow schema earlier on the path
+# holding an EMPTY nl_feedback_corrections let the delete succeed and stranded
+# the real rows.
 #
 # Why a trigger and not a real foreign key: organizations.id is uuid while
 # every learning org_id is text. An FK is achievable (a GENERATED ALWAYS AS
@@ -105,24 +110,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
 # caller is a test fixture (tests/test_core/test_org_backfill_data.py), which
 # rebuilds the whole table on purpose.
 #
+# That limitation now reaches further than the organizations table itself.
+# owner_user_id's REFERENCES users(id) did not exist before this branch, so
+# `users` was referenced only by org_members and invitations; TRUNCATE users
+# CASCADE now truncates organizations too (measured: 1 row before, 0 after).
+# The same fixture does exactly that at test_org_backfill_data.py:88, one line
+# after truncating organizations. Any future TRUNCATE users CASCADE strands
+# every learning row with no error and no trigger.
+#
 # The to_regclass guard is load-bearing, not defensive noise: learning tables
 # live in per-test schemas while organizations may not, so without it any org
 # delete in a session whose search_path lacks one of these tables would raise
-# "relation does not exist" instead of proceeding. Resolution happens through
-# search_path at execution time, so an isolated schema's own rows are still
-# seen and still refused.
+# "relation does not exist" instead of proceeding.
+#
+# SET search_path FROM CURRENT pins resolution to whatever schema init_org_db
+# ran in — public in production, the isolated schema in a test — instead of
+# leaving it to whoever issues the DELETE. Without it the guard reads the
+# caller's path: a shadow schema earlier on that path holding an empty
+# nl_feedback_corrections made the delete succeed and stranded the real rows
+# (measured). FROM CURRENT rather than a literal because a literal `public`
+# would break every per-test schema, which is the whole reason the names are
+# unqualified; the function is CREATE OR REPLACE'd on every boot, so it
+# re-pins itself to the schema it is installed in.
+#
+# The name is resolved ONCE, into rel, and the count runs against that regclass
+# rather than re-resolving the bare name — so the two lookups cannot disagree,
+# and %s on a regclass schema-qualifies and quotes for us. to_regclass answers
+# only "a relation of this name exists"; it says nothing about an org_id
+# column, and a learning schema predating the migration that added one
+# (hint_review_pages.org_id arrived in v22, and ensure_schema does not run at
+# all when OPTIMIZATION_ENABLED is false) turned an org delete into
+# UndefinedColumn. The pg_attribute check makes that a skip, the same way an
+# absent table is a skip. A relation that is not a table but does carry an
+# org_id column is still counted, deliberately: something named after a
+# learning table and holding org ids is treated as holding them.
 _ORG_DELETE_GUARD_FN_DDL = """
 CREATE OR REPLACE FUNCTION organizations_block_delete_with_learning()
 RETURNS trigger AS $$
-DECLARE t text; n bigint;
+DECLARE t text; n bigint; rel regclass;
 BEGIN
   FOREACH t IN ARRAY ARRAY[
       'nl_feedback_corrections','execution_records','execution_embeddings',
       'anti_patterns','learning_anchors','kw_query_patterns',
       'test_runs','workflow_metrics','llm_traces','run_groups','hint_review_pages'
   ] LOOP
-    IF to_regclass(t) IS NOT NULL THEN
-      EXECUTE format('SELECT count(*) FROM %I WHERE org_id = $1', t)
+    rel := to_regclass(t);
+    IF rel IS NOT NULL AND EXISTS (
+         SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = rel AND a.attname = 'org_id'
+           AND a.attnum > 0 AND NOT a.attisdropped
+       ) THEN
+      EXECUTE format('SELECT count(*) FROM %s WHERE org_id = $1', rel)
         INTO n USING OLD.id::text;
       IF n > 0 THEN
         RAISE EXCEPTION 'org % still owns % row(s) in %', OLD.id, n, t
@@ -131,7 +169,7 @@ BEGIN
     END IF;
   END LOOP;
   RETURN OLD;
-END $$ LANGUAGE plpgsql
+END $$ LANGUAGE plpgsql SET search_path FROM CURRENT
 """
 
 # CREATE OR REPLACE TRIGGER (PG14+) rather than DROP + CREATE: it leaves no
