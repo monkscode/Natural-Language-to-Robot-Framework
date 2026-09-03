@@ -132,10 +132,13 @@ def hint_mutation_verdict(
 
     Tiers, first match wins:
       1. caller is None       -> allow (AUTH_ENFORCED off; the same permissive
-         dev escape hatch caller_can_access has). The learning API's five
-         mutation routes refuse a token-less caller BEFORE reaching here, so
-         this rule serves the read-shaped callers only — see
-         api/learning_endpoints._require_caller.
+         dev escape hatch caller_can_access has). Both production call sites
+         refuse a token-less caller before reaching here —
+         learning_endpoints._gate_hint_mutation behind _require_caller,
+         api/endpoints.py's can_retract behind `user is not None` — so this
+         tier is unreachable from production today. A future call site must
+         supply its own guard rather than treat tier 1 as a supported dev
+         path.
       2. platform admin       -> allow, any org.
       3. org admin            -> allow, within their OWN org.
       4. the author           -> allow, for their own hints, within that org,

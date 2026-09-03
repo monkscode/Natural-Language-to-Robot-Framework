@@ -119,9 +119,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
 # every learning row with no error and no trigger.
 #
 # The to_regclass guard is load-bearing, not defensive noise: learning tables
-# live in per-test schemas while organizations may not, so without it any org
-# delete in a session whose search_path lacks one of these tables would raise
-# "relation does not exist" instead of proceeding.
+# live in per-test schemas while organizations may not, so without it an org
+# delete would raise "relation does not exist" whenever the PINNED schema (see
+# SET search_path FROM CURRENT, below) lacks one of these tables -- auth_test
+# is exactly that case: it stubs nl_feedback_corrections but never creates
+# anti_patterns.
 #
 # SET search_path FROM CURRENT pins resolution to whatever schema init_org_db
 # ran in — public in production, the isolated schema in a test — instead of
@@ -135,8 +137,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
 #
 # The name is resolved ONCE, into rel, and the count runs against that regclass
 # rather than re-resolving the bare name — so the two lookups cannot disagree,
-# and %s on a regclass schema-qualifies and quotes for us. to_regclass answers
-# only "a relation of this name exists"; it says nothing about an org_id
+# and %s on a regclass quotes for us. It would also schema-qualify if the
+# relation were not visible on the path that resolved it, but here it always
+# is (to_regclass already resolved rel through that same pinned path), so the
+# output stays bare. to_regclass answers only "a relation of this name
+# exists"; it says nothing about an org_id
 # column, and a learning schema predating the migration that added one
 # (hint_review_pages.org_id arrived in v22, and ensure_schema does not run at
 # all when OPTIMIZATION_ENABLED is false) turned an org delete into

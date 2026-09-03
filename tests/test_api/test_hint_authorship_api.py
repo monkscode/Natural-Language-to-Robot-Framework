@@ -12,7 +12,6 @@ so a placeholder id would make every unidentified creator each other's author.
 Depends on: src/backend/api/learning_endpoints.py (create_hint)
 """
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

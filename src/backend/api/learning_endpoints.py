@@ -195,8 +195,9 @@ def _require_caller(admin) -> dict:
     AUTH_ENFORCED=false and learning ON serves it, and run.sh binds
     --host 0.0.0.0. Note it is NOT the bench: `run.sh bench` pins
     OPTIMIZATION_ENABLED=false, and _require_feedback_loop is a dependency on
-    every route in this module, so under bench pins each one 503s before
-    authorization is considered at all.
+    17 of this module's 18 routes, so under bench pins each of those 503s
+    before authorization is considered at all (the exception, GET /health, is
+    gated by require_admin instead — see its own docstring).
 
     The five routes carried Depends(require_admin) until the org/author tiers
     landed; require_admin never opened for a credential-less request (its own
