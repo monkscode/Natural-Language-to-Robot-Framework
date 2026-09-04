@@ -33,6 +33,7 @@ import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 import type { RunGroup } from '@/components/history/useGroups'
 import { useAuth } from '@/auth/AuthContext'
+import { RecordedCorrections, type RecordedCorrectionItem } from '@/components/RecordedCorrections'
 
 type RunStatus = 'generated' | 'running' | 'passed' | 'failed' | 'error'
 
@@ -70,6 +71,17 @@ interface HistoryResponse {
   runs: Run[]
   total: number
   scope: 'own' | 'all'
+}
+
+/** GET /api/feedback/{run_id} — see GeneratePage.tsx's RecordedResponse for
+    the full contract (can_retract, absent-field semantics, etc.); the
+    drawer is read-only, so it only needs `applied_to` and the corrections
+    themselves. `applied_to` names the run these corrections are actually
+    filed against — the ORIGINAL run when the one being viewed is a re-run
+    (endpoints.py, get_run_corrections). */
+interface FeedbackCorrectionsResponse {
+  applied_to?: string
+  corrections?: RecordedCorrectionItem[]
 }
 
 const PAGE = 100
@@ -290,6 +302,32 @@ export default function HistoryPage() {
   // briefly render the PREVIOUS run's code/query. Only trust detail once it
   // matches the open row.
   const d = detail && detail.run_id === selected ? detail : null
+
+  // What this run has already contributed to the learning store — the
+  // History drawer's read of the same data GeneratePage's FeedbackPanel
+  // shows while the run is still on screen.
+  //
+  // Unlike detail above, this payload carries no run_id of its own to check
+  // against `selected` (only `applied_to`, the resolved ORIGINAL run, which
+  // legitimately differs from `selected` on a re-run — see the block below),
+  // so the same "does the response match the open row" trick doesn't apply
+  // here. `loading` is the substitute: useFetch holds it true from the
+  // moment `feedbackPath` changes until the fetch for THAT path lands, so
+  // forcing `corrections` empty while it is true stops a just-left row's
+  // corrections rendering under the newly-selected row while its own fetch
+  // is still catching up.
+  //
+  // Errors are read but never rendered. A 403 here is EXPECTED and correct:
+  // GET /api/history/{run_id} above passes is_grouped=true (a colleague's
+  // run published into a shared folder opens in this drawer), while
+  // GET /api/feedback/{run_id} deliberately does not — publishing a test
+  // does not publish the corrections filed against it (get_run_corrections,
+  // endpoints.py). An error banner would put a red box on every shared run
+  // in the org. An empty list degrades the same way, silently: silence
+  // claims nothing either way.
+  const feedbackPath = selected ? `/api/feedback/${selected}` : null
+  const { data: feedback, loading: feedbackLoading } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
+  const corrections = feedbackLoading || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -974,6 +1012,31 @@ export default function HistoryPage() {
           {/* The card header's copy of this sits BEHIND the drawer overlay, so
               a move that failed from in here would otherwise be silent. */}
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
+
+          {/* What this run has already told the learning system — read-only
+              here; Retract stays the Generate panel's action alone (see
+              feedbackPath above). `corrections` above is already [] for
+              every case that must render nothing — still loading, refused,
+              or genuinely empty — so this needs no separate loading/error
+              check: silence claims nothing, same as RecordedCorrections'
+              own empty-array case. */}
+          {corrections.length > 0 && (
+            <div className="space-y-1.5">
+              {feedback?.applied_to && feedback.applied_to !== selected && (
+                /* Same treatment as the header's "re-run of" id above:
+                   font-mono, never truncated. This run is a re-run, so the
+                   corrections just listed are filed against the run the
+                   code was cloned from, not this one. */
+                <p className="text-xs text-muted-foreground">
+                  Filed against the original run{' '}
+                  <span className="font-mono" title="Corrections on a re-run are recorded against the run the code was cloned from">
+                    {feedback.applied_to}
+                  </span>
+                </p>
+              )}
+              <RecordedCorrections corrections={corrections} />
+            </div>
+          )}
 
           <Separator />
 

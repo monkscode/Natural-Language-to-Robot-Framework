@@ -9,6 +9,7 @@ import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle, Info } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
+import { ALREADY_RECORDED_HEADING, SWITCHED_OFF_MARKER } from '@/components/RecordedCorrections'
 
 /* ── Types ── */
 type Phase = 'idle' | 'generating' | 'executing'
@@ -768,7 +769,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       ))}
       {recorded.length > 0 && (
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
-          <div className="font-medium">Already recorded for this run</div>
+          <div className="font-medium">{ALREADY_RECORDED_HEADING}</div>
           <ul className="mt-1 space-y-0.5 text-muted-foreground">
             {recorded.map(c => (
               <li key={c.hint_id}>
@@ -788,7 +789,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
                         {c.retracted === 'already' ? '— already retracted' : '— retracted'}
                       </span>
                     ) : c.active === false ? (
-                      <span className="ml-1.5 italic">— switched off</span>
+                      <span className="ml-1.5 italic">{SWITCHED_OFF_MARKER}</span>
                     ) : null}
                   </span>
                   {/* can_retract is absent or false on an older backend and on
