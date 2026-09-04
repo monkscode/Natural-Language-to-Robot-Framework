@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
-import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle } from 'lucide-react'
+import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle, Info } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
 
 /* ── Types ── */
@@ -442,7 +442,7 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
 
 /** POST /api/feedback. `outcome` is the only authority on what happened to the
     correction ("processed" | "no_text" | "no_record" | "learning_paused" |
-    "no_org" | "queued" | "error"); it is absent when learning is switched off,
+    "no_org" | "queued" | "hint_inactive" | "error"); it is absent when learning is switched off,
     which is equally not a success. `message` is the backend's own sentence for
     whichever case fired; the panel writes its own only when the body carries
     none (FeedbackPanel's `submit`). */
@@ -496,7 +496,10 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
   const [status, setStatus] = useState<'idle' | 'sending'>('idle')
-  const [result, setResult] = useState<{ ok: boolean; neutral: boolean; message: string } | null>(null)
+  // Three flags rather than the raw outcome string: each one names a
+  // PRESENTATION this panel draws (terminal green, terminal muted, a notice
+  // beside a live form), and several outcomes share the last of them.
+  const [result, setResult] = useState<{ ok: boolean; neutral: boolean; inactive: boolean; message: string } | null>(null)
   const [err, setErr] = useState('')
   const [recorded, setRecorded] = useState<PanelCorrection[]>([])
   // Two fetches write `recorded`: this panel's mount read and the post-submit
@@ -576,6 +579,15 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       // "send it again" (the amber notice below) is advice they cannot act
       // on. This is its own terminal state, distinct from `ok`.
       const neutral = body?.outcome === 'no_text'
+      // The run-level gate refused this resubmission because the hint it
+      // matches is switched off. Nothing was stored and nothing broke, so
+      // neither terminal state fits — and unlike every other answer below,
+      // "send it again" is not the way out, so the amber retry notice would be
+      // wrong too. Its own presentation, with the form left alive: the user
+      // did not decline to speak, and they may have something different to
+      // say. The panel adds no words of its own here — the backend's sentence
+      // is the only one that knows which hint and why.
+      const inactive = body?.outcome === 'hint_inactive'
       // M9: the mount-effect fetch above only ever runs once, so a correction
       // filed during THIS session never showed up in "Already recorded for
       // this run" until the page reloaded. Re-fetch once the backend confirms
@@ -590,6 +602,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       setResult({
         ok,
         neutral,
+        inactive,
         message: body?.message || (ok
           ? 'Thanks — your feedback helps the system learn.'
           : 'Your feedback was sent, but the system did not confirm it was recorded.'),
@@ -622,9 +635,11 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
   // nothing: re-sending the identical text on THIS run dedups to the same
   // hint, and _claim_feedback_run's ON CONFLICT DO NOTHING returns before
   // the reinforcement that would set is_active back to 1. It does not stop
-  // the resubmission: Submit stays enabled, and the response still lands on
-  // the "Thanks…" branch below, because the engine's claim gate is not
-  // reported upward (owner-deferred).
+  // the resubmission — Submit stays enabled — but the answer is no longer
+  // "Thanks…": the gate reports the refusal on a switched-off hint all the
+  // way up, and the response arrives as outcome "hint_inactive". This marker
+  // is the warning BEFORE the click; that outcome is the truthful answer
+  // after it, and it survives the reload this client-only marker does not.
   async function retract(hintId: number) {
     if (!window.confirm('Retract this correction? It will stop shaping future tests.')) return
     setRetracting(prev => new Set(prev).add(hintId))
@@ -681,16 +696,22 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
     )
   }
 
-  // Only a recorded correction retires the form. Every other answer tells the
-  // user to send it again, so the textarea, their typed text and Submit all
-  // have to survive — replacing them with the message would be advice the UI
-  // makes impossible to follow. Rendered like `err` below: a notice beside a
+  // Only a recorded correction retires the form. Every other answer that tells
+  // the user to send it again leaves the textarea, their typed text and Submit
+  // alive — replacing them with the message would be advice the UI makes
+  // impossible to follow. Rendered like `err` below: a notice beside a
   // still-usable form, not a terminal state.
   //
-  // no_text is the one exception: the user clicked Skip, so "send it again"
-  // is advice they already declined. It retires the form too, but with a
-  // neutral presentation — no green check (nothing was learned) and no amber
-  // warning (nothing failed).
+  // Two answers do not say "send it again", and each gets its own treatment:
+  //
+  //   no_text — the user clicked Skip, so a retry is advice they already
+  //   declined. It retires the form, with a neutral presentation: no green
+  //   check (nothing was learned) and no amber warning (nothing failed).
+  //
+  //   hint_inactive — the correction is on file but switched off, and
+  //   re-sending on this run can never turn it back on. The form STAYS (they
+  //   may have a different correction to make) and the notice is neutral for
+  //   the same reason no_text's is: nothing was learned, and nothing broke.
   if (result?.ok) {
     return (
       <div className="flex items-center gap-2 text-sm">
@@ -725,12 +746,21 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
 
   return (
     <div className="space-y-2">
-      {result && (
+      {result && (result.inactive ? (
+        /* Same muted card as "Already recorded for this run" below, and for
+           the same reason: this is a fact about what is on file, not a
+           problem to fix. Amber + AlertTriangle would report a failure that
+           did not happen. */
+        <div className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{result.message}</span>
+        </div>
+      ) : (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{result.message}</span>
         </div>
-      )}
+      ))}
       {recorded.length > 0 && (
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
           <div className="font-medium">Already recorded for this run</div>
@@ -802,9 +832,10 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
                the hint that was just retracted and the claim row for this run
                already exists, so nothing reactivates it — but the same text
                from a LATER run does reinforce, and an unqualified "it can't
-               come back" would be a new false claim. What the panel must not
-               do is stay silent and then answer the resubmission with
-               "Thanks — your feedback helps the system learn." */
+               come back" would be a new false claim. Kept now that the
+               backend answers such a resubmission honestly ("hint_inactive"),
+               because this fires BEFORE the click: it is the only thing that
+               warns while the user can still change their mind. */
             ? 'You retracted this correction. Sending it again on this run won’t restore it.'
             : 'You already sent this for this run — it won’t be counted again.'}
         </p>

@@ -179,6 +179,48 @@ describe('no_text — Skip carried no words to store', () => {
   })
 })
 
+/* ── Fix wave D: the resubmission the run-level gate refused because the hint
+   it matches is switched off. Nothing was stored and nothing broke, so this
+   is neither of the two terminal states — and it is the one answer where
+   "send it again" is provably useless, so the amber retry notice is wrong
+   for it too. ── */
+const INACTIVE =
+  'This correction is already on file but is currently switched off, so this ' +
+  'submission did not change it. An organisation admin can switch it back on.'
+
+describe('hint_inactive — on file, but switched off', () => {
+  it('shows the backend sentence and does NOT claim the correction landed', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+
+    await screen.findByText(INACTIVE)
+    expect(screen.queryByText(THANKS)).toBeNull()
+  })
+
+  it('leaves the form usable — the user may have something different to say', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+    await screen.findByText(INACTIVE)
+
+    // Unlike no_text the user did not decline to speak, so retiring the panel
+    // would take the correction form away over an answer about a DIFFERENT
+    // correction. Their typed text survives too, because re-sending is only
+    // useless for this exact text on this run.
+    const box = screen.getByPlaceholderText(/it clicked the wrong button/)
+    expect(box).toBeInTheDocument()
+    expect(box).toHaveValue('the search box locator was off')
+    expect(screen.getByRole('button', { name: /Submit feedback/ })).toBeEnabled()
+  })
+
+  it('does not render as a failure — nothing broke', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+
+    // The amber AlertTriangle notice is this panel's "something went wrong,
+    // try again" register. Every other non-terminal answer uses it; this one
+    // must not, or a no-op reads as an error.
+    const notice = (await screen.findByText(INACTIVE)).closest('div')
+    expect(notice?.className).not.toMatch(/amber/)
+  })
+})
+
 describe('processed is unchanged', () => {
   it('still retires the form with the green "Thanks" state', async () => {
     await answerWith({ status: 'success', outcome: 'processed', message: THANKS })
