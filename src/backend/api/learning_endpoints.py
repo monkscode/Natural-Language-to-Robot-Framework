@@ -30,8 +30,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from src.backend.api.dashboard_scope import authorize_dashboard_read
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import is_dashboard_viewer
+from src.backend.auth.ownership import is_dashboard_viewer, hint_mutation_verdict
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization import pg_compat
 from src.backend.core.config import settings
@@ -164,7 +165,7 @@ def _now() -> str:
 
 def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
     """Audit identity. ALWAYS the authenticated user's email when a token is
-    present — in the live app require_admin guards this router, so a verified
+    present — in the live app require_user guards these routes, so a verified
     token always exists and the client-supplied actor is never trusted. The
     request_actor fallback only engages in tests (bare-router apps without a
     token, or endpoint functions called directly — where `admin` is the
@@ -172,6 +173,128 @@ def _audit_actor(admin: dict | None, request_actor: str | None = None) -> str:
     if not isinstance(admin, dict):
         admin = None
     return (admin or {}).get("email") or (request_actor or "").strip() or "admin"
+
+
+def _require_caller(admin) -> dict:
+    """The verified token, or 401. Every hint MUTATION starts here.
+
+    This route family does NOT honour the AUTH_ENFORCED-off escape hatch, for
+    the reason api/dashboard_scope.py states for the aggregate dashboards: a
+    token-less caller is 401 even in dev, where require_user resolves anonymous
+    to None instead of raising. That is now true of the whole family — the five
+    mutations through here, and list_hints / get_hint / list_runs / get_run
+    through authorize_dashboard_read, which raises the same 401 before its
+    predicate. It was true of the mutations only until then, and the four reads
+    were worse than open: is_dashboard_viewer(None) is True, so a token-less
+    caller passed the gate AND landed in the platform-admin branch, which drops
+    the org filter. Probed on this branch: GET /api/learning/hints with no
+    Authorization header returned 200 with every org's hints.
+
+    There is no legitimate anonymous case for reading or changing an org's
+    learning store, and the exposure is live: any process started with
+    AUTH_ENFORCED=false and learning ON serves it, and run.sh binds
+    --host 0.0.0.0. Note it is NOT the bench: `run.sh bench` pins
+    OPTIMIZATION_ENABLED=false, and _require_feedback_loop is a dependency on
+    17 of this module's 18 routes, so under bench pins each of those 503s
+    before authorization is considered at all (the exception, GET /health, is
+    gated by require_admin instead — see its own docstring).
+
+    The five routes carried Depends(require_admin) until the org/author tiers
+    landed; require_admin never opened for a credential-less request (its own
+    docstring: "admin routes are never open"), and this restores that floor
+    without re-imposing the platform role.
+
+    Raised BEFORE the row is fetched, not inside _gate_hint_mutation's verdict
+    handling: behind the lookup, an anonymous caller would read 404 for an
+    absent hint and 401 for a present one, which is an existence oracle handed
+    to someone who is not authenticated at all — exactly what the 404/403 split
+    below exists to prevent.
+    """
+    # `admin` is the un-resolved Depends sentinel when an endpoint function is
+    # called directly in a test, and None when AUTH_ENFORCED is off — both mean
+    # "no identified caller" (the same isinstance test _audit_actor makes).
+    if not isinstance(admin, dict):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return admin
+
+
+def _gate_hint_mutation(row, admin, hint_id: int, *,
+                        author_tier_applies: bool = False) -> bool:
+    """Refuse a hint mutation the caller has no tier for. Raises, or returns
+    whether the caller is a CURATOR of this hint's org (platform admin, or org
+    admin of it) — retract uses that to decide how much of the row to hand
+    back, and it is computed here so is_validated_admin re-validates once per
+    request rather than twice.
+
+    Called AFTER the row is fetched and its absence has 404'd, so a hint in
+    another org and a hint that does not exist are answered identically — a
+    403 would confirm the hint exists, which get_hint's own cross-org 404
+    already refuses to do. A hint in the caller's own org that they did not
+    write is 403 instead: they may have read its text in their own feedback
+    panel, and 404 there would deny something they have seen.
+
+    author_tier_applies is opt-in and off by default (see
+    hint_mutation_verdict): only retract grants the author tier, because
+    Retract is the only author control the product draws. Patch, unflag and
+    reactivate need org_admin or above.
+    """
+    caller = _require_caller(admin)
+    is_platform = is_validated_admin(caller)
+    verdict = hint_mutation_verdict(
+        caller, row["org_id"], row["created_by_user_id"],
+        is_platform_admin=is_platform,
+        author_tier_applies=author_tier_applies,
+    )
+    if verdict == "not_found":
+        raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+    if verdict == "forbidden":
+        # The two refusals behind this verdict are different facts and must
+        # not share a sentence. On retract the author tier applies, so
+        # "forbidden" means "you are not the author and not an org admin". On
+        # patch / unflag / reactivate it does not, so "forbidden" means "org
+        # admin or above, author or not" — and telling the AUTHOR of a hint
+        # that its author may change it, while refusing them, is a false
+        # explanation of a real refusal.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only the hint's author or an org admin can retract it"
+                if author_tier_applies
+                else "Only an org admin can change this hint"
+            ),
+        )
+    return is_dashboard_viewer(caller, is_platform_admin=is_platform)
+
+
+# Every column of nl_feedback_corrections EXCEPT conflict_flagged,
+# conflict_flagged_at and conflict_flag_reason — what a caller who is NOT a
+# curator of this org may see of a hint. Those three are the conflict-detection
+# LLM's critique of the hint, and nl_feedback_engine.get_corrections_for_run
+# states the product decision for the sibling read: "What the LLM thought of it
+# is not exposed here; that is a product decision, not a UI one." A plain org
+# member can reach exactly one mutation (retract, on a hint they wrote), so
+# this is the one response that has to honour it.
+#
+# An allow-list, not `del row["conflict_flagged"]`: the same explicit-projection
+# rule /api/feedback follows, so a column added to this table later does not
+# reach a non-curator by default.
+_NON_CURATOR_HINT_FIELDS = (
+    "id", "feedback_text", "category", "scope", "domain", "url",
+    "original_failure_category", "evidence_count", "applied_count",
+    "success_count", "failure_count", "is_active", "source_workflow_id",
+    "created_at", "last_seen", "created_via", "disabled_at", "anchor_query",
+    "unused_count", "org_id", "created_by_user_id", "created_by_email",
+)
+
+
+def _hint_response(row, *, is_curator: bool) -> dict | None:
+    """The hint as this caller may see it: the whole row for a curator of its
+    org, the explicit non-curator projection for anyone else."""
+    if row is None:
+        return None
+    if is_curator:
+        return _row_to_dict(row)
+    return {k: row[k] for k in _NON_CURATOR_HINT_FIELDS}
 
 
 def _write_hint_audit(
@@ -211,10 +334,15 @@ def list_hints(
     fb=Depends(_require_feedback_loop),
     user: dict | None = Depends(require_user),
 ):
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -327,10 +455,15 @@ def get_hint(
     fb=Depends(_require_feedback_loop),
     user: dict | None = Depends(require_user),
 ):
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -401,8 +534,12 @@ def create_hint(
     request: HintCreateRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
+    # Authenticate before anything else, exactly as the four id-routes do:
+    # who you are does not depend on the shape of what you sent, and an
+    # anonymous caller should get one answer from this route family, not a 400
+    # here and a 401 there.
+    caller = _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     # Every hint is owned by exactly one org. Generic guidance wanted in several
@@ -411,7 +548,34 @@ def create_hint(
     org_id = request.org_id.strip()
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id is required")
+    # create has no hint row, so it takes the sibling rule rather than
+    # _gate_hint_mutation: a platform admin may name any org; anyone else must
+    # be an org_admin naming their OWN org. 403, not 404 — the caller named
+    # the org themselves, so refusing tells them nothing they did not supply,
+    # and there is no hint whose existence could leak. A plain org_member does
+    # not create hints through this route; they contribute through feedback.
+    # The guard above is load-bearing: this check used to read `if caller is
+    # not None`, so a token-less caller skipped it whole and could inject a
+    # hint into ANY org.
+    if not is_validated_admin(caller):
+        if caller.get("org_role") != "org_admin" or org_id != caller.get("org_id"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only a platform admin can create a hint in another org",
+            )
     actor = _audit_actor(admin, request.actor)
+    # The author of an admin-created hint is the admin who created it, keyed
+    # the same way the engine keys a user-created one. `actor` is already the
+    # verified token email.
+    #
+    # `or None`, matching api/endpoints.py's actor_user_id: decode_token
+    # defaults the `sub` claim to '' rather than None, and "unattributed" must
+    # have exactly ONE representation in this column. hint_mutation_verdict's
+    # author comparison is truthiness-guarded, so '' would fail closed rather
+    # than make every unidentified creator each other's author — but a column
+    # holding both '' and NULL for the same fact contradicts its own design,
+    # and every read that groups or counts by author would split them.
+    creator_user_id = caller.get("user_id") or None
     text = request.feedback_text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="feedback_text is required")
@@ -538,11 +702,12 @@ def create_hint(
                 "INSERT INTO nl_feedback_corrections "
                 "(feedback_text, category, scope, domain, url, original_failure_category, "
                 " evidence_count, anchor_query, source_workflow_id, created_at, last_seen, "
-                " created_via, org_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?)",
+                " created_via, org_id, created_by_user_id, created_by_email) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, 'admin', ?, ?, ?)",
                 (
                     text, category, request.scope, domain, url,
                     request.original_failure_category, anchor, now, now, org_id,
+                    creator_user_id, actor,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -617,8 +782,12 @@ def patch_hint(
     request: HintPatchRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if request.feedback_text is not None:
         raise HTTPException(
             status_code=400,
@@ -635,6 +804,7 @@ def patch_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         row_dict = _row_to_dict(row)
         updates: dict = {}
@@ -777,8 +947,12 @@ def unflag_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)
@@ -790,6 +964,7 @@ def unflag_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         if row["conflict_flagged"] == 0:
             return {"hint": _row_to_dict(row), "changed": False, "note": "hint was not flagged"}
@@ -842,8 +1017,12 @@ def retract_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)
@@ -855,9 +1034,15 @@ def retract_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        # The ONE route that grants the Author tier: Retract is the only
+        # author control the product draws (the feedback panel's, offered on
+        # can_retract). patch/unflag/reactivate stay org-admin-and-above.
+        is_curator = _gate_hint_mutation(
+            row, admin, hint_id, author_tier_applies=True)
 
         if row["is_active"] == 0:
-            return {"hint": _row_to_dict(row), "changed": False, "note": "hint was already retracted"}
+            return {"hint": _hint_response(row, is_curator=is_curator),
+                    "changed": False, "note": "hint was already retracted"}
 
         conn.execute(
             "UPDATE nl_feedback_corrections SET is_active=0, disabled_at=? WHERE id = ?",
@@ -872,7 +1057,8 @@ def retract_hint(
         updated = conn.execute(
             "SELECT * FROM nl_feedback_corrections WHERE id = ?", (hint_id,)
         ).fetchone()
-        return {"hint": _row_to_dict(updated), "changed": True}
+        return {"hint": _hint_response(updated, is_curator=is_curator),
+                "changed": True}
     except HTTPException:
         raise
     except Exception as e:
@@ -892,8 +1078,12 @@ def reactivate_hint(
     request: ActorReasonRequest,
     fb=Depends(_require_feedback_loop),
     admin: dict | None = Depends(require_user),
-    _platform: dict = Depends(require_admin),
 ):
+    # Authentication before request shape and before the row lookup — see
+    # _require_caller. _gate_hint_mutation re-applies it as the choke point a
+    # future route will inherit; this call is what keeps the refusal uniform
+    # for a hint that does not exist.
+    _require_caller(admin)
     if not request.actor.strip():
         raise HTTPException(status_code=400, detail="actor is required")
     actor = _audit_actor(admin, request.actor)
@@ -905,6 +1095,7 @@ def reactivate_hint(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Hint {hint_id} not found")
+        _gate_hint_mutation(row, admin, hint_id)
 
         if row["is_active"] == 1:
             return {"hint": _row_to_dict(row), "changed": False, "note": "hint was already active"}
@@ -1063,10 +1254,15 @@ def list_runs(
     filters. A failed run has no trigger event, so this (not /triggers) is how a
     failure is found.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:
@@ -1120,10 +1316,15 @@ def get_run(
     away before T1) keeps a standalone funnel with run=null (no FK). 404 only
     when nothing at all exists for this workflow_id.
     """
-    admin = is_validated_admin(user)
-    if not is_dashboard_viewer(user, is_platform_admin=admin):
-        raise HTTPException(status_code=403, detail="Org-admin access required")
-    scope_org: str | None = None if (admin or user is None) else user.get("org_id")
+    # authorize_dashboard_read, not a hand-written gate: it is the same rule
+    # (401 token-less, 403 non-viewer, org filter or None for platform scope)
+    # that /metrics and the traces dashboard already share, and the hand-written
+    # copy here differed from it in the one way that mattered — it read a
+    # token-less caller as the permissive dev case AND then dropped the
+    # `org_id = ?` filter, so an unauthenticated request was served with
+    # PLATFORM scope. See _require_caller for why this route family opts out of
+    # the AUTH_ENFORCED-off escape hatch.
+    scope_org: str | None = authorize_dashboard_read(user)
 
     conn = fb.execution_memory.get_read_connection()
     try:

@@ -331,14 +331,26 @@ class LearningWriteQueue:
     ):
         """Submit a write and wait for the writer thread's verdict.
 
-        Returns ("ok", None) | ("failed", exc) | ("timeout", None).
+        Returns ("ok", <write_fn's return value>) | ("failed", exc)
+        | ("timeout", None).
+
+        The second element is the write function's OWN return, verbatim —
+        including None, which is what every write here but one produces. It is
+        not a status the queue invents. A write that ran and deliberately
+        changed nothing (NLFeedbackEngine.learn_from_feedback refusing a
+        resubmission against a switched-off hint) is otherwise indistinguishable
+        from one that stored a correction, and the caller reported both as
+        success. On the timeout branch it is None because the job has not
+        finished: whatever it eventually returns arrives too late to report, and
+        must not be.
 
         `submit` is fire-and-forget by design: the pipeline must never block on
-        learning. /api/feedback is not the pipeline — it is a human-speed endpoint
-        that already blocks on a conflict-detection LLM call — and it is the one
-        caller that must report whether the user's correction was actually stored.
-        A timeout does NOT cancel the job: it still runs, so "we queued it and could
-        not confirm within the budget" is the honest answer, never a lost write.
+        learning, and it keeps ignoring return values. /api/feedback is not the
+        pipeline — it is a human-speed endpoint that already blocks on a
+        conflict-detection LLM call — and it is the one caller that must report
+        whether the user's correction was actually stored. A timeout does NOT
+        cancel the job: it still runs, so "we queued it and could not confirm
+        within the budget" is the honest answer, never a lost write.
         """
         if threading.current_thread().name == WRITER_THREAD_NAME:
             raise RuntimeError(
@@ -352,7 +364,11 @@ class LearningWriteQueue:
 
         def _wrapped():
             try:
-                write_fn(*args, **kwargs)
+                # Stored, not returned: this runs on the writer thread, whose
+                # drain loop discards what it calls. `done.set()` below is the
+                # happens-before edge that publishes it to the waiter, exactly
+                # as it already does for "exc".
+                outcome_box["value"] = write_fn(*args, **kwargs)
             except BaseException as e:
                 outcome_box["exc"] = e
                 logger.warning(f"[LEARNING] Write failed (waited): {e}")
@@ -365,7 +381,13 @@ class LearningWriteQueue:
             exc = outcome_box.get("exc")
             if exc is not None:
                 return ("failed", exc)
-            return ("ok", None)
+            # .get(), not [...]: `_wrapped` catches BaseException, so the only
+            # way past the branch above is a call that RETURNED — the key is
+            # always present here. This is the /api/feedback request path
+            # though, and a KeyError raised out of a queue internal is not
+            # something to add to it. Carried verbatim either way: a falsy
+            # return is a real answer, and normalising it to None loses it.
+            return ("ok", outcome_box.get("value"))
         return ("timeout", None)
 
     def shutdown(self, timeout: float = 5.0):
@@ -476,7 +498,7 @@ class LearningEngine(ABC):
         """
         ...
 
-    def learn_from_feedback(self, record, feedback_insight) -> None:
+    def learn_from_feedback(self, record, feedback_insight) -> str | None:
         """
         Optional: Process user NL feedback for this engine.
         Default implementation does nothing.
@@ -484,6 +506,15 @@ class LearningEngine(ABC):
         Args:
             record: ExecutionRecord for the workflow being given feedback
             feedback_insight: Triaged feedback result from NLFeedbackEngine
+
+        Returns:
+            None from this default, and from the three engines that inherit it
+            (AntiPattern, KeywordCorrection, StructuralRule) — they do not
+            override this method. The annotation is `str | None` only because
+            NLFeedbackEngine's override returns a signal string on one path
+            (GATED_INACTIVE_HINT), which submit_and_wait carries to
+            /api/feedback; a `-> None` here would misdescribe that override.
+            An implementer with nothing to signal returns None.
         """
         pass
 

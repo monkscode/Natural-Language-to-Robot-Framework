@@ -246,6 +246,19 @@ export default function HintDrawer({ id, onChanged, onClose }: {
             <section>
               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Metadata</h3>
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+                {/* The owning org as its full id, never a prefix: this drawer
+                    is the detail view a platform admin opens to decide which
+                    tenant's hint they are about to change, and the Hints
+                    table's org column is the only other place it appears.
+                    No name lookup here — /auth/admin/orgs would be a second
+                    fetch of a directory this view does not otherwise need. */}
+                <dt className="text-muted-foreground">Org</dt>
+                <dd className="text-right font-mono break-all">{h.org_id || '—'}</dd>
+                {/* Hints created before schema v23 carry NULL created_by_* and
+                    cannot be attributed after the fact — "unknown" is the true
+                    answer for them, not a placeholder for a missing feature. */}
+                <dt className="text-muted-foreground">Author</dt>
+                <dd className="text-right font-mono break-all">{h.created_by_email || 'unknown'}</dd>
                 <dt className="text-muted-foreground">Scope</dt>
                 <dd className="text-right font-mono">{[h.scope, h.domain, h.url].filter(Boolean).join(' / ') || '—'}</dd>
                 <dt className="text-muted-foreground">Category</dt>

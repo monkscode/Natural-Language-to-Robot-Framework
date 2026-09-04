@@ -13,16 +13,21 @@
  * that is exactly what the first cut of this change did.
  *
  * Imported from GeneratePage.tsx, which is where the panel is defined. The
- * page itself is deliberately not under test (vite.config.ts: "no page
- * components") — nothing here renders GeneratePage, only the panel, so no
- * Router and no page state are involved.
+ * page itself is not under test — nothing here renders GeneratePage, only the
+ * panel, so no Router and no page state are involved.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/lib/api', () => ({ api: vi.fn() }))
+// Only `api` is stubbed. ApiError and isAccessLoss stay REAL: the retract
+// path now branches on isAccessLoss(e), and a stubbed copy of that rule would
+// test the stub instead of the rule lib/api.test.ts pins.
+vi.mock('@/lib/api', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
+  api: vi.fn(),
+}))
 
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import { FeedbackPanel } from './GeneratePage'
 
 const THANKS = 'Thanks — your feedback helps the system learn.'
@@ -171,6 +176,48 @@ describe('no_text — Skip carried no words to store', () => {
 
     await screen.findByText(NO_TEXT)
     expect(screen.queryByText(THANKS)).toBeNull()
+  })
+})
+
+/* ── Fix wave D: the resubmission the run-level gate refused because the hint
+   it matches is switched off. Nothing was stored and nothing broke, so this
+   is neither of the two terminal states — and it is the one answer where
+   "send it again" is provably useless, so the amber retry notice is wrong
+   for it too. ── */
+const INACTIVE =
+  'This correction is already on file but is currently switched off, so this ' +
+  'submission did not change it. An organisation admin can switch it back on.'
+
+describe('hint_inactive — on file, but switched off', () => {
+  it('shows the backend sentence and does NOT claim the correction landed', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+
+    await screen.findByText(INACTIVE)
+    expect(screen.queryByText(THANKS)).toBeNull()
+  })
+
+  it('leaves the form usable — the user may have something different to say', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+    await screen.findByText(INACTIVE)
+
+    // Unlike no_text the user did not decline to speak, so retiring the panel
+    // would take the correction form away over an answer about a DIFFERENT
+    // correction. Their typed text survives too, because re-sending is only
+    // useless for this exact text on this run.
+    const box = screen.getByPlaceholderText(/it clicked the wrong button/)
+    expect(box).toBeInTheDocument()
+    expect(box).toHaveValue('the search box locator was off')
+    expect(screen.getByRole('button', { name: /Submit feedback/ })).toBeEnabled()
+  })
+
+  it('does not render as a failure — nothing broke', async () => {
+    await answerWith({ status: 'success', outcome: 'hint_inactive', message: INACTIVE })
+
+    // The amber AlertTriangle notice is this panel's "something went wrong,
+    // try again" register. Every other non-terminal answer uses it; this one
+    // must not, or a no-op reads as an error.
+    const notice = (await screen.findByText(INACTIVE)).closest('div')
+    expect(notice?.className).not.toMatch(/amber/)
   })
 })
 
@@ -394,4 +441,277 @@ describe('Submit requires words; Skip does not', () => {
     expect(posts()).toHaveLength(0)
   })
 
+})
+
+
+/* ── T7: retracting a hint from the feedback panel ───────────────────────────
+   can_retract is server-computed (hint_mutation_verdict, ownership.py) — the
+   client never decides this, it only draws what the server already permits.
+   So the control's presence is driven entirely by the field on each
+   correction, including the two cases where it must stay hidden: an older
+   server that predates the field, and the learning-disabled response shape
+   (neither ever sends can_retract at all).
+
+   What happens AFTER a retract is the other half, and it is where this panel
+   was lying. It used to drop the row, which hid the user's own words (the GET
+   behind them is deliberately unfiltered on is_active), disarmed the
+   duplicate-submission notice, and so let a re-typed identical correction be
+   answered with "Thanks — your feedback helps the system learn" while the
+   writer thread deduped it back to the retracted hint and returned without
+   reactivating anything. ── */
+describe('T7: retracting a hint from the feedback panel', () => {
+  const RETRACT_PATH = '/api/learning/hints/7/retract'
+  const retractCalls = () =>
+    mockApi.mock.calls.filter(([path]) => path === RETRACT_PATH)
+
+  const RETRACTABLE = [
+    { hint_id: 7, feedback_text: 'wait for the spinner', recorded_at: '2026-08-28T10:00:00Z', can_retract: true },
+  ]
+  const TWO_RETRACTABLE = [
+    RETRACTABLE[0],
+    { hint_id: 9, feedback_text: 'the search box locator was off', recorded_at: '2026-08-28T10:05:00Z', can_retract: true },
+  ]
+
+  // jsdom ships a window.confirm that only logs "Not implemented", so every
+  // test that reaches the POST has to say what the user answered. Restored
+  // rather than reset, so the stub cannot outlive this file.
+  // Typed by what this file does with the handle — restore it — rather than
+  // by spyOn's return, whose generic parameters cannot be spelled here.
+  let confirmSpy: { mockRestore: () => void } | null = null
+  const answersConfirm = (agreed: boolean) => {
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(agreed)
+  }
+  afterEach(() => { confirmSpy?.mockRestore(); confirmSpy = null })
+
+  it('renders a Retract control when the server says can_retract: true', async () => {
+    onFile(RETRACTABLE)
+    renderFailPanel()
+
+    expect(await screen.findByRole('button', { name: /Retract/ })).toBeInTheDocument()
+  })
+
+  it('does not render Retract when can_retract is false', async () => {
+    onFile([{ ...RETRACTABLE[0], can_retract: false }])
+    renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull()
+  })
+
+  it('does not render Retract when the field is absent (older server, or learning disabled)', async () => {
+    onFile([{ hint_id: 7, feedback_text: 'wait for the spinner', recorded_at: '2026-08-28T10:00:00Z' }])
+    renderFailPanel()
+    await screen.findByText(/Already recorded for this run/)
+
+    expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull()
+  })
+
+  it('POSTs to the retract endpoint for that hint id when clicked', async () => {
+    answersConfirm(true)
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockResolvedValueOnce({ hint: {}, changed: true })   // the retract POST
+
+    fireEvent.click(retractBtn)
+
+    await waitFor(() => expect(retractCalls()).toHaveLength(1))
+    expect(retractCalls()[0][1]).toMatchObject({ method: 'POST' })
+  })
+
+  it('does not send the signed-in user email as actor — the server overrides it from the token', async () => {
+    answersConfirm(true)
+    onFile(RETRACTABLE)
+    renderFailPanel()
+    const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+    mockApi.mockResolvedValueOnce({ hint: {}, changed: true })
+
+    fireEvent.click(retractBtn)
+    await waitFor(() => expect(retractCalls()).toHaveLength(1))
+
+    const body = JSON.parse((retractCalls()[0][1] as { body: string }).body)
+    expect(typeof body.actor).toBe('string')
+    expect(body.actor.length).toBeGreaterThan(0)
+    expect(body.actor).not.toMatch(/@/)   // never an email address
+  })
+
+  /* Both admin surfaces that offer this action confirm first (LearningPage's
+     Hints table and HintDrawer, identical wording). This one did not — and it
+     is a small destructive button flush against the user's own text, on the
+     surface built for the user with the fewest ways back. */
+  describe('the confirmation', () => {
+    it('sends nothing when the user cancels', async () => {
+      answersConfirm(false)
+      onFile(RETRACTABLE)
+      renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+
+      fireEvent.click(retractBtn)
+
+      expect(window.confirm).toHaveBeenCalled()
+      expect(retractCalls()).toHaveLength(0)
+      // Nothing moved: the control and the words are exactly as they were.
+      expect(screen.getByRole('button', { name: /Retract/ })).toBeInTheDocument()
+      expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
+    })
+
+    it('asks in the user’s language, not the admin’s', async () => {
+      answersConfirm(false)
+      onFile(RETRACTABLE)
+      renderFailPanel()
+      fireEvent.click(await screen.findByRole('button', { name: /Retract/ }))
+
+      const asked = vi.mocked(window.confirm).mock.calls[0][0] as string
+      // "It will stop injecting into agent prompts" is the admin sentence. A
+      // plain org member is not the person to reason about that.
+      expect(asked).not.toMatch(/inject/i)
+      expect(asked).toMatch(/retract this correction/i)
+    })
+  })
+
+  /* R-B2: the row survives a successful retract.
+
+     The engine's own rule is that these words stay visible —
+     get_corrections_for_run is unfiltered on is_active because "these are the
+     user's own words, and hiding a hint the LLM later flagged would report
+     'nothing on file' … the exact lie this task removes." Dropping the row
+     here contradicted that on the very next mount, and disarmed the duplicate
+     notice in between. */
+  describe('after a successful retract', () => {
+    async function retractIt(answer: unknown = { hint: {}, changed: true }) {
+      answersConfirm(true)
+      onFile(RETRACTABLE)
+      const rendered = renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce(answer)
+      fireEvent.click(retractBtn)
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+      return rendered
+    }
+
+    it('keeps the user’s own words on screen, marked retracted', async () => {
+      await retractIt()
+
+      expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
+      expect(screen.getByText(/Already recorded for this run/)).toBeInTheDocument()
+      expect(screen.getByText('— retracted')).toBeInTheDocument()
+    })
+
+    it('does not re-fetch the list to find that out', async () => {
+      // The server would hand back this same row: the GET is unfiltered on
+      // is_active, and only can_retract flips. A round trip buys nothing.
+      await retractIt()
+
+      expect(mockApi.mock.calls.filter(([path]) => path === '/api/feedback/wf-1')).toHaveLength(1)
+    })
+
+    it('tells the user a re-send will not undo it — scoped to this run', async () => {
+      // The warning this arms: retract by mistake, retype the identical
+      // text, and the panel warns before the resend instead of staying
+      // silent about it, while the writer thread dedupes to the retracted
+      // hint and returns before the reinforcement that sets is_active back
+      // to 1. The resend still goes through and still gets thanked; closing
+      // that is a separate, owner-deferred change (the engine's claim gate
+      // is not reported upward).
+      const { box } = await retractIt()
+
+      fireEvent.change(box, { target: { value: 'wait for the spinner' } })
+
+      await screen.findByText(/You retracted this correction/)
+      expect(screen.queryByText(/won’t be counted again/)).toBeNull()
+    })
+
+    it('says a no-op was a no-op when the server reports changed: false', async () => {
+      // An org admin retracted it between this panel's GET and this click.
+      // The hint IS retracted, so the row is still marked — but this click is
+      // not what did it, and claiming otherwise reports a no-op as the user's
+      // own action.
+      await retractIt({ hint: {}, changed: false, note: 'hint was already retracted' })
+
+      expect(screen.getByText('— already retracted')).toBeInTheDocument()
+      expect(screen.queryByText('— retracted')).toBeNull()
+      expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
+    })
+  })
+
+  describe('a retract that fails', () => {
+    it('surfaces the failure instead of silently looking like success', async () => {
+      answersConfirm(true)
+      onFile(RETRACTABLE)
+      renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockRejectedValueOnce(new ApiError(500, 'Failed to retract hint'))
+
+      fireEvent.click(retractBtn)
+
+      await screen.findByText('Failed to retract hint')
+      // Unlike the read (which degrades to silence), this is a write the user
+      // explicitly asked for — the panel must not blow up, and a 500 is ours
+      // and transient, so the control stays for a retry.
+      expect(screen.getByRole('button', { name: /Retract/ })).toBeInTheDocument()
+      expect(screen.queryByText(/^— (already )?retracted$/)).toBeNull()
+    })
+
+    it('clears a control the server has refused, and keeps the words', async () => {
+      // M1. 403 and 404 both mean this hint is not the caller's to act on — an
+      // org admin got there first, or it is gone. Leaving the button drew a
+      // control that could only fail again, forever.
+      //
+      // The sentence is the server's own, and it is the one wave A split out
+      // for this route: the author tier applies to retract and to nothing
+      // else, so the other four routes now say "Only an org admin can change
+      // this hint" instead.
+      answersConfirm(true)
+      onFile(RETRACTABLE)
+      renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockRejectedValueOnce(
+        new ApiError(403, "Only the hint's author or an org admin can retract it"))
+
+      fireEvent.click(retractBtn)
+
+      await screen.findByText("Only the hint's author or an org admin can retract it")
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+      expect(screen.getByText(/wait for the spinner/)).toBeInTheDocument()
+      // A refusal is not a retraction, so no marker.
+      expect(screen.queryByText(/^— (already )?retracted$/)).toBeNull()
+    })
+  })
+
+  /* M3: one in-flight id and one error string, for a list of N items. */
+  describe('two corrections, two independent controls', () => {
+    it('does not re-enable one item’s Retract while it is still in flight', async () => {
+      answersConfirm(true)
+      onFile(TWO_RETRACTABLE)
+      renderFailPanel()
+      const [a, b] = await screen.findAllByRole('button', { name: /Retract/ })
+
+      mockApi.mockReturnValueOnce(new Promise(() => {}))   // A never answers
+      fireEvent.click(a)
+      await waitFor(() => expect(a).toBeDisabled())
+
+      mockApi.mockReturnValueOnce(new Promise(() => {}))
+      fireEvent.click(b)
+      await waitFor(() => expect(b).toBeDisabled())
+
+      expect(a).toBeDisabled()
+    })
+
+    it('does not wipe one item’s error the instant the other is attempted', async () => {
+      answersConfirm(true)
+      onFile(TWO_RETRACTABLE)
+      renderFailPanel()
+      const [a, b] = await screen.findAllByRole('button', { name: /Retract/ })
+
+      mockApi.mockRejectedValueOnce(new ApiError(500, 'Failed to retract hint'))
+      fireEvent.click(a)
+      await screen.findByText('Failed to retract hint')
+
+      mockApi.mockReturnValueOnce(new Promise(() => {}))
+      fireEvent.click(b)
+      await waitFor(() => expect(b).toBeDisabled())
+
+      expect(screen.getByText('Failed to retract hint')).toBeInTheDocument()
+    })
+  })
 })

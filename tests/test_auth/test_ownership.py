@@ -1,6 +1,15 @@
-"""Unit tests for the org-scoped ownership predicate. No DB, no Postgres."""
+"""Unit tests for the org-scoped ownership predicates. No DB, no Postgres.
 
-from src.backend.auth.ownership import caller_can_access
+All three live in auth/ownership.py and are pure functions: caller_can_access
+(one run or its report), is_dashboard_viewer (org-level aggregate dashboards)
+and hint_mutation_verdict (who may change a hint).
+"""
+
+from src.backend.auth.ownership import (
+    caller_can_access,
+    hint_mutation_verdict,
+    is_dashboard_viewer,
+)
 
 _OWNER = {"user_id": "u-owner", "org_id": "org-A", "org_role": "org_member"}
 _ADMIN_OF_A = {"user_id": "u-admin", "org_id": "org-A", "org_role": "org_admin"}
@@ -91,3 +100,198 @@ def test_unattributed_resource_denied_even_to_same_org_admin():
     # exposes typed credentials, so the org-admin shortcut must not grant it.
     assert caller_can_access(_ADMIN_OF_A, None, "org-A", is_platform_admin=False) is False
     assert caller_can_access(_ADMIN_OF_A, None, "org-A", is_platform_admin=True) is True
+
+
+# ---------------------------------------------------------------------------
+# hint_mutation_verdict — who may change a hint
+#
+# Every hint mutation used to be gated on require_admin, the PLATFORM role,
+# and was entirely org-blind: an admin could retract any org's hint and no one
+# else could touch their own. Three tiers replace that — platform admin
+# (anywhere), org admin (their own org), author (their own hints) — and the
+# predicate returns THREE outcomes rather than a boolean, because the right
+# refusal differs by case.
+# ---------------------------------------------------------------------------
+
+_ORG_A = "org-a"
+_ORG_B = "org-b"
+_AUTHOR = "user-1"
+_OTHER = "user-2"
+
+
+def _caller(org_id=_ORG_A, org_role="org_member", user_id=_OTHER):
+    return {"org_id": org_id, "org_role": org_role, "user_id": user_id}
+
+
+class TestHintMutationVerdict:
+
+    def test_no_caller_is_allowed(self):
+        """AUTH_ENFORCED off — the same permissive dev escape hatch every
+        sibling predicate in this module has."""
+        assert hint_mutation_verdict(
+            None, _ORG_A, _AUTHOR, is_platform_admin=False) == "allow"
+
+    def test_platform_admin_may_mutate_any_org(self):
+        assert hint_mutation_verdict(
+            _caller(org_id=_ORG_B), _ORG_A, _AUTHOR,
+            is_platform_admin=True) == "allow"
+
+    def test_org_admin_may_mutate_a_hint_in_their_own_org(self):
+        assert hint_mutation_verdict(
+            _caller(org_role="org_admin"), _ORG_A, _AUTHOR,
+            is_platform_admin=False) == "allow"
+
+    def test_the_author_may_mutate_their_own_hint_when_the_tier_applies(self):
+        assert hint_mutation_verdict(
+            _caller(user_id=_AUTHOR), _ORG_A, _AUTHOR,
+            is_platform_admin=False, author_tier_applies=True) == "allow"
+
+    def test_the_author_tier_is_off_unless_the_call_site_asks_for_it(self):
+        """Default-deny on the last tier. The author surface this product
+        builds is one control — Retract — so retract is the only route that
+        passes author_tier_applies=True. patch could promote a url-scoped hint
+        to 'global' (applied to every query in the org) and reactivate resets
+        unused_count, defeating the never-used retirement; a hint-mutation
+        route added later without thinking about tiers must land on the
+        org-admin floor every mutation started from, not on author access."""
+        assert hint_mutation_verdict(
+            _caller(user_id=_AUTHOR), _ORG_A, _AUTHOR,
+            is_platform_admin=False) == "forbidden"
+
+    def test_the_org_admin_and_platform_tiers_ignore_the_author_flag(self):
+        """Only the LAST tier is parametrised. An org admin's access to their
+        own org's hints, and a platform admin's to any, are the org check the
+        owner ruled on and are identical on all five routes."""
+        assert hint_mutation_verdict(
+            _caller(org_role="org_admin"), _ORG_A, _AUTHOR,
+            is_platform_admin=False) == "allow"
+        assert hint_mutation_verdict(
+            _caller(org_id=_ORG_B), _ORG_A, _AUTHOR,
+            is_platform_admin=True) == "allow"
+
+    def test_a_non_author_member_in_the_same_org_is_forbidden(self):
+        """403, not 404. They may well have read the hint's text in their own
+        feedback panel — reinforcement requires byte-identical text, so a hint
+        a user sees is one they typed themselves. Answering 404 there would be
+        a lie about something they have seen."""
+        assert hint_mutation_verdict(
+            _caller(), _ORG_A, _AUTHOR, is_platform_admin=False) == "forbidden"
+
+    def test_another_orgs_hint_is_not_found_not_forbidden(self):
+        """404, because 403 confirms the hint exists. get_hint already 404s a
+        cross-org read, so a 403 here would open an existence-leak asymmetry
+        between reading and mutating."""
+        assert hint_mutation_verdict(
+            _caller(org_role="org_admin"), _ORG_B, _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_the_author_loses_access_after_leaving_the_org(self):
+        """The hint belongs to the org it was written in. An author whose
+        token now names a different org gets the cross-org answer, not an
+        author exemption — the same rule caller_can_access settled on."""
+        assert hint_mutation_verdict(
+            _caller(org_id=_ORG_B, user_id=_AUTHOR), _ORG_A, _AUTHOR,
+            is_platform_admin=False, author_tier_applies=True) == "not_found"
+
+    def test_a_caller_with_no_org_fails_closed(self):
+        """An org-less token means unscoped reads elsewhere; here it must mean
+        no mutation at all, and the refusal must not confirm the hint."""
+        assert hint_mutation_verdict(
+            _caller(org_id=None), _ORG_A, _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_a_hint_with_no_org_is_unreachable(self):
+        """Legacy rows can carry a NULL org_id. Nobody but a platform admin
+        may mutate one — the org check must not be satisfied by two Nones."""
+        assert hint_mutation_verdict(
+            _caller(org_role="org_admin"), None, _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_two_missing_orgs_do_not_satisfy_the_org_check(self):
+        """Important 6. The two tests above vary ONE axis each — the org-less
+        caller is asked about a hint in org-a, the org-less hint is asked
+        about by a caller in org-a — so both still refuse through the
+        INEQUALITY, and removing `if not caller_org: return "not_found"`
+        left 80 tests passing. With both axes None the inequality is
+        satisfied (None == None) and, without the guard, an org-less caller
+        who is nominally an org_admin is ALLOWED to mutate an org-less hint.
+        """
+        assert hint_mutation_verdict(
+            _caller(org_id=None, org_role="org_admin"), None, _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_two_empty_string_orgs_do_not_satisfy_the_org_check_either(self):
+        """The same shape with '' instead of None, which is why the guard is
+        a truthiness test and not `is None`. Claims decode with defaults
+        (jwt_utils decode_token defaults the `sub` claim to ''), and a hint's
+        org_id is a TEXT column that a bad write could leave empty — either
+        side reaching '' must refuse, and equality alone would allow it."""
+        assert hint_mutation_verdict(
+            _caller(org_id="", org_role="org_admin"), "", _AUTHOR,
+            is_platform_admin=False) == "not_found"
+
+    def test_an_unattributed_hint_is_not_everyones(self):
+        """The author check must not match None against None. Without the
+        truthiness guard, every org member with no user_id claim would be the
+        author of every hint that has no author.
+
+        Asserted with the author tier ON: with it off the answer is
+        "forbidden" for a second, unrelated reason, and the truthiness guard
+        would be untested."""
+        assert hint_mutation_verdict(
+            _caller(user_id=None), _ORG_A, None,
+            is_platform_admin=False, author_tier_applies=True) == "forbidden"
+
+
+# ---------------------------------------------------------------------------
+# is_dashboard_viewer — who may read an org-level AGGREGATE dashboard
+#
+# grep -rn "is_dashboard_viewer(" tests/ returned nothing before this block,
+# while test_can_view_learning.py's header said its branch logic was tested
+# here. Measured consequence: flipping the caller-is-None branch to False left
+# 824 tests green, so the suite was indifferent in BOTH directions and the
+# read-side escape hatch survived a whole-branch review.
+# ---------------------------------------------------------------------------
+
+class TestIsDashboardViewer:
+
+    def test_a_token_less_caller_is_admitted_by_the_predicate(self):
+        """True, deliberately — this is the AUTH_ENFORCED-off escape hatch
+        every predicate in this module has, and the flag it feeds
+        (can_view_learning) is only ever computed for a real logged-in user.
+
+        The routes that must NOT honour it do not ask this question first:
+        api/dashboard_scope.authorize_dashboard_read raises 401 for a
+        token-less caller BEFORE reaching here, and every learning read and
+        mutation goes through that or through _require_caller. Changing this
+        line to False would be a second, silent place to enforce the same
+        rule."""
+        assert is_dashboard_viewer(None, is_platform_admin=False) is True
+
+    def test_a_platform_admin_is_admitted_with_no_org_at_all(self):
+        """Platform scope is all orgs, so an org claim is irrelevant."""
+        assert is_dashboard_viewer(
+            {"org_id": None, "org_role": None}, is_platform_admin=True) is True
+
+    def test_an_org_admin_is_admitted_for_their_own_org(self):
+        assert is_dashboard_viewer(
+            {"org_id": _ORG_A, "org_role": "org_admin"},
+            is_platform_admin=False) is True
+
+    def test_a_plain_member_is_refused(self):
+        """A member sees their own runs through caller_can_access; an
+        aggregate dashboard spans everyone in the org."""
+        assert is_dashboard_viewer(
+            {"org_id": _ORG_A, "org_role": "org_member"},
+            is_platform_admin=False) is False
+
+    def test_an_org_admin_with_no_resolvable_org_is_refused(self):
+        """Fail closed. Callers derive the dashboard's org filter from
+        caller["org_id"], so admitting an org_admin claim with no org_id
+        would widen the query to every org instead of narrowing it."""
+        assert is_dashboard_viewer(
+            {"org_id": None, "org_role": "org_admin"},
+            is_platform_admin=False) is False
+
+    def test_a_legacy_token_with_neither_claim_is_refused(self):
+        assert is_dashboard_viewer({}, is_platform_admin=False) is False

@@ -26,6 +26,16 @@ export interface Hint {
   success_count?: number
   failure_count?: number
   applied_count?: number
+  /** The org this hint belongs to, and who wrote it (schema v20 / v23). Every
+   *  hints response already carries all three — _row_to_dict returns dict(row)
+   *  — and a PLATFORM admin's list_hints spans every org, so without them two
+   *  tenants' identical guidance renders as two identical rows above the
+   *  Retract button. Optional because hints created before v23 have NULL
+   *  created_by_* (they cannot be attributed retroactively; "unknown" is the
+   *  correct rendering, not a defect) and an older backend omits them. */
+  org_id?: string | null
+  created_by_user_id?: string | null
+  created_by_email?: string | null
 }
 
 export interface HintsResp { total: number; hints: Hint[] }

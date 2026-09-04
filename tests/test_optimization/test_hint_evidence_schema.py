@@ -72,8 +72,12 @@ def _insert(conn, hint_id, kind, key, hash_, bucket):
     )
 
 
-def test_schema_version_is_22():
-    assert pg_schema.SCHEMA_VERSION == 22
+def test_schema_version_is_at_the_current_head():
+    """Bumped to 23 by the author-columns migration (created_by_user_id +
+    created_by_email on nl_feedback_corrections). The number is pinned here so
+    a migration added without bumping SCHEMA_VERSION fails loudly; the
+    module-level assert in pg_schema only catches the inverse."""
+    assert pg_schema.SCHEMA_VERSION == 23
 
 
 def test_fresh_database_has_hint_evidence():
@@ -81,7 +85,7 @@ def test_fresh_database_has_hint_evidence():
     try:
         conn = _schema_conn(admin, _FRESH_SCHEMA)
         try:
-            assert pg_schema.ensure_schema(conn) == 22
+            assert pg_schema.ensure_schema(conn) == 23
             assert _columns(conn, _FRESH_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
         finally:
             conn.close()
@@ -106,7 +110,7 @@ def test_existing_v18_database_gains_hint_evidence_via_migration():
                 "WHERE table_schema = %s", (_UPGRADE_SCHEMA,),
             ).fetchall()}
 
-            assert pg_schema.ensure_schema(conn) == 22
+            assert pg_schema.ensure_schema(conn) == 23
 
             assert _columns(conn, _UPGRADE_SCHEMA, "hint_evidence") == _EXPECTED_COLUMNS
             assert 19 in {r[0] for r in conn.execute(

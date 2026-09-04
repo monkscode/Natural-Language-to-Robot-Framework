@@ -1112,6 +1112,7 @@ class FeedbackLoop:
         feedback_text: str,
         feedback_type: str,
         actor: str | None = None,
+        actor_user_id: str | None = None,
     ) -> dict:
         """
         Process user NL feedback from the feedback UI.
@@ -1131,8 +1132,14 @@ class FeedbackLoop:
             feedback_text: User's natural language feedback.
             feedback_type: "close_enough" | "completely_wrong"
             actor: Email of the authenticated submitter, recorded as the
-                hint_audit actor when this feedback implicitly unflags a hint.
+                hint_audit actor when this feedback implicitly unflags a hint,
+                and stored as a created hint's created_by_email.
                 None (auth disabled) falls back to "unknown" at the audit write.
+            actor_user_id: Stable id of the authenticated submitter, stored as
+                a created hint's created_by_user_id — the key the Author
+                permission tier compares against the caller's token. Stays
+                None when auth is disabled: it is an identity, not a label, so
+                it never falls back to a placeholder the way `actor` does.
 
         Returns:
             Triage result dict (category, confidence, taxonomy_code) plus an
@@ -1270,6 +1277,10 @@ class FeedbackLoop:
                 triage["feedback_text"] = feedback_text
                 # who submitted — recorded by the NL engine's implicit-unflag audit row
                 triage["actor"] = actor
+                # ...and their stable id, which the NL engine stores as the
+                # new hint's created_by_user_id. Same carrier as `actor`
+                # because ExecutionRecord has no user_id to hang it on.
+                triage["actor_user_id"] = actor_user_id
 
                 for engine in (
                     self.structural_engine, self.keyword_engine, self.anti_pattern_engine,
@@ -1315,8 +1326,20 @@ class FeedbackLoop:
                     )
                     outcome = "no_org"
                 else:
+                    # Local, like Step 3b's conflict-detection import above,
+                    # and for a reason worth keeping: __init__ imports
+                    # NLFeedbackEngine inside a try and degrades to
+                    # nl_engine=None if that module cannot be imported. A
+                    # module-level import here would turn the same failure into
+                    # a FeedbackLoop that cannot be constructed at all — every
+                    # feedback submission answered 503 instead of "error". This
+                    # branch only runs when nl_engine is not None, so the
+                    # module is already imported and this cannot fail.
+                    from src.backend.crew_ai.optimization.nl_feedback_engine import (
+                        GATED_INACTIVE_HINT,
+                    )
                     try:
-                        verdict, _detail = self.write_queue.submit_and_wait(
+                        verdict, detail = self.write_queue.submit_and_wait(
                             self.nl_engine.learn_from_feedback, record, triage,
                         )
                     except Exception as e:
@@ -1329,8 +1352,39 @@ class FeedbackLoop:
                         if verdict == "failed":
                             outcome = "error"
                         elif verdict == "timeout":
+                            # The job is still running and its return value
+                            # arrives after this response — including the
+                            # sentinel below, which is why it is only read on
+                            # the "ok" branch. Reporting a signal we do not
+                            # have yet would be the same lie in a new place.
                             outcome = "queued"
-                        # verdict == "ok": outcome stays "processed"
+                        elif detail == GATED_INACTIVE_HINT:
+                            # The write ran, refused a resubmission whose
+                            # matched hint is switched off, and changed
+                            # nothing. "processed" here is what thanked a user
+                            # for retyping a correction that reaches no prompt
+                            # — and re-sending on this run can never work,
+                            # because the claim row that gates it is permanent.
+                            #
+                            # WHO switched it off is not known and must not be
+                            # implied downstream: the engine reads is_active
+                            # and nothing else, and a user retract, an org
+                            # admin's retract, _auto_disable_hint's
+                            # unused_count retirement and an LLM review disable
+                            # are identical in it.
+                            #
+                            # A string literal, not the constant: this is the
+                            # OUTCOME vocabulary, which belongs to this module
+                            # and is pinned to the endpoint's message table by
+                            # test_feedback_response_honesty.py. The constant
+                            # is the engine's own signal; keeping the two
+                            # apart is what stops one rename silently changing
+                            # the other.
+                            outcome = "hint_inactive"
+                        # verdict == "ok" and no signal: outcome stays
+                        # "processed". That includes the gate refusing a
+                        # duplicate on an ACTIVE hint, where the guidance IS on
+                        # file and injecting.
 
             # Step 4b: "no_text" narrows the success path only. Every other
             # outcome from Step 4 (learning_paused, no_record, error, no_org,

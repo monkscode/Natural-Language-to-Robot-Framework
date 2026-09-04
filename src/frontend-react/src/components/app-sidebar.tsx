@@ -41,6 +41,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
+import { gateAllowed, type GateFlags } from '@/auth/pageGates'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 
 /* ── Logo mark ── */
@@ -60,20 +61,26 @@ interface NavItem {
   icon: typeof Zap
   admin: boolean
   orgAdmin?: boolean
+  /** Gates on canViewLearning instead of admin/orgAdmin — see the
+   * can_view_learning comment on AuthContext.tsx's User interface. */
+  viewLearning?: boolean
   /** Renders the expandable run-group quick-access list under this item. */
   groups?: boolean
 }
 
-const NAV_PLATFORM: NavItem[] = [
+export const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
   { title: 'Test Runs', url: '/history', icon: History, admin: false, groups: true },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
-  { title: 'Learning', url: '/learning', icon: Brain, admin: true },
+  { title: 'Learning', url: '/learning', icon: Brain, admin: false, viewLearning: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
   { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]
 
-const NAV_WORKSPACE: NavItem[] = [
+// Exported for the same reason NAV_PLATFORM is: auth/pageGates.test.ts
+// compares every nav entry's gate against the PAGES entry for the same
+// path, and a table it cannot see is a table that can drift.
+export const NAV_WORKSPACE: NavItem[] = [
   { title: 'Settings', url: '/settings', icon: Settings, admin: true },
 ]
 
@@ -289,15 +296,20 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
   )
 }
 
-/* ── Renders one nav group, hiding admin-only items from regular users ── */
-function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
+/* ── Renders one nav group, hiding admin-only items from regular users ──
+ * gateAllowed (auth/pageGates.ts) is the SAME predicate App.tsx uses to gate
+ * the page itself, so the Learning nav item and the /learning route can
+ * never disagree. */
+function NavGroup({ label, items, flags, pathname }: {
   label: string
   items: NavItem[]
-  isAdmin: boolean
-  isOrgAdmin: boolean
+  /** The caller's flags as one value — GateFlags already IS this shape, and
+   *  taking it whole is what lets the filter below pass it straight through
+   *  instead of rebuilding the same object for every item on every render. */
+  flags: GateFlags
   pathname: string
 }) {
-  const visible = items.filter(item => (!item.admin || isAdmin) && (!item.orgAdmin || isOrgAdmin))
+  const visible = items.filter(item => gateAllowed(item, flags))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
@@ -325,7 +337,8 @@ function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
 /* ── Main sidebar component ── */
 export function AppSidebar() {
   const { pathname } = useLocation()
-  const { isAdmin, isOrgAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
+  const flags: GateFlags = { isAdmin, isOrgAdmin, canViewLearning }
 
   return (
     <Sidebar collapsible="icon">
@@ -345,8 +358,8 @@ export function AppSidebar() {
 
       {/* Nav — role-filtered */}
       <SidebarContent>
-        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
-        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
+        <NavGroup label="Platform" items={NAV_PLATFORM} flags={flags} pathname={pathname} />
+        <NavGroup label="Workspace" items={NAV_WORKSPACE} flags={flags} pathname={pathname} />
       </SidebarContent>
 
       {/* User footer */}

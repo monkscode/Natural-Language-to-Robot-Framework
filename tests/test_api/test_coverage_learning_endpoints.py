@@ -1,6 +1,13 @@
 """
 Coverage tests for learning_endpoints.py — targeting 384 missing lines.
 
+LINE coverage, not permission coverage: the fixture below overrides
+require_user with a platform admin, so every test in this file runs in the
+scope_org = None all-orgs branch and none of them exercises org scoping at
+all. Do not read this file's green as evidence of tenancy isolation — that
+lives in test_learning_dashboards_org.py, test_hints_are_org_owned.py and
+test_hint_mutation_tiers.py.
+
 Tests grouped by function/endpoint:
 - _estimate_cost: known model, unknown/exception path → 0.0
 - _model_rate_info: known model, unknown model → None, exception → None
@@ -43,7 +50,10 @@ from src.backend.api.learning_endpoints import (
     _require_feedback_loop,
     router,
 )
-from src.backend.auth.jwt_utils import require_admin as _require_admin
+from src.backend.auth.jwt_utils import (
+    require_admin as _require_admin,
+    require_user as _require_user,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +104,23 @@ def learning_client(db_em):
     app.include_router(router, prefix="")
     app.dependency_overrides[_require_feedback_loop] = lambda: mock_fb
     # After Task 12, routes self-guard via require_admin / require_user; override
-    # require_admin here so the coverage tests (which call without tokens) keep
+    # BOTH here so the coverage tests (which call without tokens) keep
     # exercising the business logic rather than hitting 401/403.
+    #
+    # require_user, not just require_admin: the five hint-mutation routes now
+    # refuse a token-less caller outright (learning_endpoints._require_caller),
+    # so overriding require_admin alone would leave them 401 — and, before that
+    # refusal existed, these tests were passing only because an anonymous
+    # caller was silently granted every tier. They supply an identity now
+    # rather than exploiting that hole. user_id is required: is_validated_admin
+    # reads it to re-validate the platform role against the users table.
     app.dependency_overrides[_require_admin] = lambda: {
         "role": "admin", "email": "admin@test.local"
+    }
+    app.dependency_overrides[_require_user] = lambda: {
+        "user_id": "00000000-0000-0000-0000-000000000099",
+        "role": "admin", "email": "admin@test.local",
+        "org_id": None, "org_role": None,
     }
 
     with patch("src.backend.api.learning_endpoints._admin_conn", side_effect=_test_admin_conn):

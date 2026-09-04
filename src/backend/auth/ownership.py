@@ -23,7 +23,8 @@ single existing org's behaviour is unchanged until every token has rotated.
 
 Referenced by: auth/jwt_utils.py (reports), api/history_endpoints.py,
 api/endpoints.py (rerun, feedback); api/dashboard_scope.py and
-api/learning_endpoints.py (is_dashboard_viewer).
+api/learning_endpoints.py (is_dashboard_viewer); api/learning_endpoints.py
+and api/endpoints.py (hint_mutation_verdict).
 Depends on: nothing (pure).
 """
 
@@ -117,3 +118,95 @@ def is_dashboard_viewer(caller: dict | None, *, is_platform_admin: bool) -> bool
     if caller is None or is_platform_admin:
         return True
     return caller.get("org_role") == "org_admin" and caller.get("org_id") is not None
+
+
+def hint_mutation_verdict(
+    caller: dict | None,
+    hint_org_id: str | None,
+    hint_author_id: str | None,
+    *,
+    is_platform_admin: bool,
+    author_tier_applies: bool = False,
+) -> str:
+    """May `caller` change this hint? Returns 'allow' | 'not_found' | 'forbidden'.
+
+    Tiers, first match wins:
+      1. caller is None       -> allow (AUTH_ENFORCED off; the same permissive
+         dev escape hatch caller_can_access has). Both production call sites
+         refuse a token-less caller before reaching here —
+         learning_endpoints._gate_hint_mutation behind _require_caller,
+         api/endpoints.py's can_retract behind `user is not None` — so this
+         tier is unreachable from production today. A future call site must
+         supply its own guard rather than treat tier 1 as a supported dev
+         path.
+      2. platform admin       -> allow, any org.
+      3. org admin            -> allow, within their OWN org.
+      4. the author           -> allow, for their own hints, within that org,
+         and only when the CALL SITE opts in with author_tier_applies=True.
+      5. anyone else          -> refused.
+
+    author_tier_applies defaults to FALSE, so author access must be asked for.
+    The author surface this product actually builds is one control — Retract,
+    in the feedback panel — and the other three mutations are escalations an
+    author was never argued to hold: patch can rewrite `scope` to 'global',
+    which applies the hint to every query in the org, and reactivate resets
+    unused_count, which defeats _auto_disable_hint's never-used retirement and
+    can be looped forever. Defaulting to opt-in means a hint-mutation route
+    added later without thinking about tiers is org-admin-and-above, which is
+    where every mutation started. It is ONE predicate with a parameter rather
+    than two predicates because the org check — the part the owner ruled on —
+    is identical on every route; only this last tier varies.
+
+    THREE outcomes, not a boolean, because the honest refusal differs:
+
+      * A hint in ANOTHER org must read as 'not_found'. get_hint already 404s
+        a cross-org read, so answering 403 here would confirm the hint exists
+        and open an existence-leak asymmetry between reading and mutating.
+      * A hint in the caller's OWN org that they did not write must read as
+        'forbidden'. They may well have seen its text in their own feedback
+        panel — reinforcement requires byte-identical text, so a hint a user
+        sees is one they typed themselves — and 404 there would be a lie
+        about something they have read.
+
+    There is no "the author keeps it whatever org they are in" rule, for the
+    same reason caller_can_access dropped one: nothing in a token distinguishes
+    an internal transfer from an offboarding. A hint belongs to the org it was
+    written in, so an author whose token now names a different org gets the
+    cross-org answer.
+
+    Fails closed on every missing input. A caller with no org_id claim gets
+    'not_found' rather than the legacy owner-matching fallback
+    caller_can_access grants: a hint has no per-user owner in the pre-tenancy
+    sense, so there is nothing to fall back to. A hint with a NULL org_id is
+    unreachable to everyone but a platform admin — two Nones must never
+    satisfy the org check. And the author comparison is truthiness-guarded, or
+    every member with no user_id claim would be the author of every
+    unattributed hint.
+
+    Pure function: no DB, no request. The caller passes the decoded JWT dict,
+    the hint's stored org_id and created_by_user_id, and a pre-computed
+    is_platform_admin (is_validated_admin does the DB re-validation at the
+    call site), exactly like caller_can_access.
+
+    Referenced by: api/learning_endpoints.py (the five hint-mutation routes;
+    author_tier_applies=True on retract only), api/endpoints.py (the feedback
+    panel's can_retract offer, which is that same retract).
+    Depends on: nothing (pure).
+    """
+    if caller is None:
+        return "allow"
+    if is_platform_admin:
+        return "allow"
+
+    caller_org = caller.get("org_id")
+    if not caller_org:
+        return "not_found"
+    if hint_org_id != caller_org:
+        return "not_found"
+
+    if caller.get("org_role") == "org_admin":
+        return "allow"
+    if (author_tier_applies and hint_author_id
+            and hint_author_id == caller.get("user_id")):
+        return "allow"
+    return "forbidden"

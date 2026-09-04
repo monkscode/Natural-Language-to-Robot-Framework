@@ -24,6 +24,25 @@ export interface User {
   // file anyone's run). A solo user IS org_admin of their personal org, so
   // this is true for them while is_org_admin is not. Never swap the two.
   can_manage_org_folders?: boolean
+  // True iff the caller may view an org-level aggregate dashboard — today
+  // this gates only the Learning page (/metrics and the traces dashboard
+  // have the identical divergence and are a deliberate, separate
+  // follow-up). Mirrors the server's is_dashboard_viewer rule: true for a
+  // platform admin (regardless of their own org_role), or for an org_admin
+  // of the caller's own org — so, like can_manage_org_folders and unlike
+  // is_org_admin, a solo user's own PERSONAL org counts. It is NOT the same
+  // rule as can_manage_org_folders: that one has no platform-admin
+  // short-circuit, so a platform admin who is merely an org_member of their
+  // current org (e.g. one who joined a team and so lost their personal-org
+  // seat) gets can_manage_org_folders=false but can_view_learning=true.
+  // Never reuse one for the other.
+  can_view_learning?: boolean
+  // The caller's OWN active org — the org_id claim in their token, echoed by
+  // /auth/me and by login. Present so the SPA can name an org the server will
+  // accept from this caller: POST /api/learning/hints requires one, and a
+  // non-platform admin may only ever name this one. It is not a directory:
+  // there is no other org here and no way to reach one.
+  org_id?: string | null
 }
 
 interface AuthState {
@@ -33,6 +52,7 @@ interface AuthState {
   isAdmin: boolean
   status: User['status'] | null
   isOrgAdmin: boolean
+  canViewLearning: boolean
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string, displayName: string) => Promise<void>
   loginWithToken: (token: string) => Promise<void>
@@ -122,6 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAdmin: user?.role === 'admin',
         status: user?.status ?? null,
         isOrgAdmin: user?.is_org_admin ?? false,
+        canViewLearning: user?.can_view_learning ?? false,
         login,
         signup,
         loginWithToken,

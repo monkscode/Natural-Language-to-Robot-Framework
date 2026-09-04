@@ -28,6 +28,7 @@ from src.backend.auth.jwt_utils import (
 )
 from src.backend.auth.rate_limit import auth_rate_limit
 from src.backend.auth.org_repository import OrgRepository
+from src.backend.auth.ownership import is_dashboard_viewer
 from src.backend.auth.provisioning import match_invite_on_signup, provision_on_approval
 from src.backend.auth.repository import (
     AccountInactive,
@@ -156,6 +157,32 @@ def _token_payload(row: dict) -> dict:
     # flag and the token it ships beside can never disagree.
     user["can_manage_org_folders"] = _can_manage_org_folders(
         primary.get("org_id"), primary.get("org_role"))
+    # Whether this login may view an org-level aggregate dashboard — today
+    # that gates only the Learning page (/metrics and the traces dashboard
+    # have the identical divergence and are a deliberate, separate
+    # follow-up). ONE rule with is_dashboard_viewer, which every learning
+    # route also enforces server-side, so the SPA can never draw a Learning
+    # link the API would then 403.
+    #
+    # Here that holds by construction rather than by care: the org claims and
+    # the platform role below are minted into the token from this same `row`
+    # and `primary`, in this request, so the inputs the flag is computed from
+    # ARE the inputs the API will later re-read from the token. /auth/me is
+    # the site where they can drift apart — a token minted before a role
+    # change — and it ANDs both role reads for exactly that reason.
+    user["can_view_learning"] = is_dashboard_viewer(
+        {"org_id": primary.get("org_id"), "org_role": primary.get("org_role")},
+        is_platform_admin=(user["role"] == "admin"))
+    # The caller's OWN active org, the same value minted into the token below.
+    # The SPA needs it wherever it must name an org the server will accept from
+    # this caller: POST /api/learning/hints requires org_id, and a non-platform
+    # admin may only ever name their own, so the Add-feedback sheet pins it
+    # here instead of trying to pick from GET /auth/admin/orgs — which is
+    # require_admin and 403s them. Set here and in /auth/me rather than in
+    # _user_public, which is the DB-free shaping helper: this value comes from
+    # an org query (or, in /auth/me, from the token claim), and _user_public
+    # deliberately stays free of both.
+    user["org_id"] = primary.get("org_id")
     token = create_access_token(
         {
             "id": user["id"],
@@ -256,6 +283,40 @@ async def me(user: dict = Depends(get_current_user)):
     # claim, so a stale flag only ever fails closed.
     public["can_manage_org_folders"] = _can_manage_org_folders(
         user.get("org_id"), user.get("org_role"))
+    # Same is_dashboard_viewer rule as _token_payload's can_view_learning,
+    # derived from the TOKEN's claims for the same reason as
+    # can_manage_org_folders just above. `user` (the decoded token) already
+    # has the org_id/org_role shape is_dashboard_viewer expects, so it is
+    # passed directly instead of rebuilding the dict _token_payload builds
+    # from a freshly-queried `primary`.
+    #
+    # is_platform_admin is BOTH role reads, not just the DB row's. Every
+    # learning route computes it with is_validated_admin, which short-circuits
+    # on the TOKEN's role claim before it touches the DB, and set_platform_role
+    # does not bump token_version — so a user promoted to platform admin who has
+    # not logged in again has role=admin in the row and role=user in the token.
+    # On the row alone this flag said True and the API then answered 403: the
+    # exact disagreement the comment above says cannot happen. ANDing the two is
+    # is_validated_admin's own rule at zero extra cost, because this handler has
+    # already re-read the row and checked token_version and status above.
+    #
+    # One residual, stated rather than hidden: is_validated_admin also requires
+    # status 'active' and this handler admits 'pending'. A pending platform
+    # admin therefore still reads True here — but require_user rejects a
+    # non-active status outright, so the API answers 401, not 403, and the flag
+    # agrees with _token_payload rather than diverging from it on refresh.
+    public["can_view_learning"] = is_dashboard_viewer(
+        user,
+        is_platform_admin=(
+            user.get("role") == "admin" and public["role"] == "admin"
+        ),
+    )
+    # From the TOKEN's claim, for the same reason as the two flags above: the
+    # claim is what the server enforces on, so the org the SPA names and the
+    # org the API accepts are the same string by construction. AuthContext
+    # hydrates from here on every page load, so a value set only in
+    # _token_payload would vanish on F5.
+    public["org_id"] = user.get("org_id")
     return public
 
 

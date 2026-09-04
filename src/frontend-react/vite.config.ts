@@ -30,8 +30,10 @@ export default defineConfig({
     },
   },
   // Unit tests for the pieces whose bugs are invisible in a type check: the
-  // group-state hooks and the folder chip row. Deliberately narrow — no page
-  // components, no browser suite, no coverage gate.
+  // group-state hooks and the folder chip row, plus page components where
+  // the wiring itself is the feature (LearningPage.test.tsx — see its own
+  // docstring). Deliberately narrow — still no browser suite, no coverage
+  // gate.
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],

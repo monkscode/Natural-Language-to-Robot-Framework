@@ -20,7 +20,7 @@ from src.backend.crew_ai.optimization.learning_config import MAX_FEEDBACK_TEXT_C
 from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
-from src.backend.auth.ownership import caller_can_access
+from src.backend.auth.ownership import caller_can_access, hint_mutation_verdict
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -269,6 +269,36 @@ _FEEDBACK_OUTCOME_MESSAGES = {
         "Your correction was received and is still being saved. You do not "
         "need to send it again."
     ),
+    # Four clauses, each checked against what the engine can actually see.
+    #
+    # "already on file": the dedup SELECT matched an existing row in this run's
+    # org — the user's words are stored.
+    # "currently switched off": is_active = 0 on that row, read in the same
+    # transaction, and every retrieval query filters is_active = 1, so the hint
+    # reaches no prompt.
+    # "did not change it": the run-level gate returned before every effect —
+    # evidence_count, last_seen, is_active, conflict_flagged and its metadata,
+    # unused_count, and both hint_audit rows. Scoped to the CORRECTION on
+    # purpose: the submission's raw text still went to the run's execution
+    # record (Step 2's unconditional submit), so an unqualified "changed
+    # nothing" would be the same overstatement no_org and error were fixed for.
+    # "an organisation admin can switch it back on": reactivate is gated by
+    # hint_mutation_verdict with author_tier_applies=False — org_admin or
+    # above, within the hint's own org — and ensure_personal_org seats a solo
+    # user as org_admin of their personal org, so the sentence is true for a
+    # team member and a solo user alike.
+    #
+    # What it must NOT say, and does not: that the CALLER retracted it. The
+    # engine reads one bit, is_active, and a user retract, an admin retract,
+    # _auto_disable_hint's unused_count retirement and an LLM review disable
+    # are indistinguishable in it. It also does not say "send it again" — that
+    # is the one action which provably does nothing on this run, because the
+    # claim row gating it is permanent.
+    "hint_inactive": (
+        "This correction is already on file but is currently switched off, so "
+        "this submission did not change it. An organisation admin can switch "
+        "it back on."
+    ),
     "no_org": (
         "This run is not associated with an organisation, so the correction "
         "could not be filed in the learning store, though this submission was "
@@ -373,7 +403,8 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
 
       * `outcome` is the only authority on what happened to the CORRECTION —
         "processed" | "no_text" | "no_record" | "learning_paused" | "no_org" |
-        "queued" | "error", straight from process_user_feedback. Read this
+        "queued" | "hint_inactive" | "error", straight from
+        process_user_feedback. Read this
         one. `_FEEDBACK_OUTCOME_MESSAGES` above is the full list; the two are
         pinned together by test_feedback_response_honesty.py.
       * `status` keeps the meaning it has across this router: could the
@@ -456,6 +487,12 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
     # reachable only with AUTH_ENFORCED off (local dev) — an unidentified human,
     # deliberately not a machine actor like 'system'.
     actor = (user or {}).get("email") or "unknown"
+    # The author's STABLE key, threaded beside the email. It is deliberately
+    # left None rather than defaulted: "unknown" is a legitimate audit actor
+    # string, but the Author permission tier compares ids for equality, so a
+    # placeholder id would make every unidentified submitter each other's
+    # author.
+    actor_user_id = (user or {}).get("user_id") or None
 
     try:
         # process_user_feedback runs a blocking conflict-detection LLM call
@@ -465,6 +502,7 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
             feedback_loop.process_user_feedback,
             feedback_target_id, text, request.feedback_type,
             actor=actor,
+            actor_user_id=actor_user_id,
         )
 
         # An outcome this endpoint cannot describe is not evidence that the
@@ -483,7 +521,16 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
             "status": "error" if outcome == "error" else "success",
             "outcome": outcome,
             "message": _FEEDBACK_OUTCOME_MESSAGES[outcome],
-            "triage": {k: v for k, v in result.items() if k != "outcome"},
+            # `actor` and `actor_user_id` are stamped into the triage dict by
+            # FeedbackLoop.process_user_feedback as CARRIERS for the engines
+            # (ExecutionRecord has no user_id to hang them on) — they are not
+            # triage. Dropped here with `outcome` for the same reason: triage
+            # is the category / confidence the SPA displays, and echoing the
+            # submitter's identity back widens that contract by accident.
+            "triage": {
+                k: v for k, v in result.items()
+                if k not in ("outcome", "actor", "actor_user_id")
+            },
             "applied_to": feedback_target_id,
         }
     except Exception as e:
@@ -571,11 +618,63 @@ async def get_run_corrections(run_id: str, response: Response,
         }
 
     engine = getattr(feedback_loop, "nl_engine", None)
-    corrections = []
+    raw_corrections = []
     if engine is not None:
         # Threaded: the read borrows a pooled connection, which blocks.
-        corrections = await asyncio.to_thread(
+        raw_corrections = await asyncio.to_thread(
             engine.get_corrections_for_run, target_id)
+
+    # Explicit projection, field by field — never the row dict with keys
+    # deleted. org_id, created_by_user_id and is_active ride along on each
+    # row only to compute can_retract; building the response any other way
+    # would let a future column added to that SELECT leak to the client
+    # silently. can_retract surfaces the Author tier: the feedback panel is
+    # the only place a plain org member ever sees their own hint text
+    # (list_hints and get_hint stay gated on is_dashboard_viewer), so it is
+    # also the only place they can be offered a control to act on it — the
+    # client never decides this, it only draws what the server permits.
+    #
+    # can_retract is an OFFER of an action, not just a permission check, so
+    # it is not hint_mutation_verdict alone. get_corrections_for_run stays
+    # deliberately unfiltered on is_active (a retracted hint is still the
+    # user's own recorded words — see its docstring), and
+    # hint_mutation_verdict answers WHO may act on a hint, not whether the
+    # hint is still active. Without also requiring is_active, a caller who
+    # passes the verdict would be offered a control on an already-retracted
+    # hint that can only ever answer "already retracted" — a small
+    # dishonesty this codebase's contract does not tolerate: an offered
+    # action must not be one the server already knows will no-op.
+    corrections = [
+        {
+            "hint_id": c.get("hint_id"),
+            "feedback_text": c.get("feedback_text"),
+            "recorded_at": c.get("recorded_at"),
+            "can_retract": (
+                # user is not None FIRST, mirroring _require_caller: this
+                # route family does not honour the AUTH_ENFORCED-off escape
+                # hatch, but hint_mutation_verdict does (it answers "allow"
+                # for a None caller), so without this term the panel drew a
+                # Retract control that POST /hints/{id}/retract then 401s.
+                # An offered action must not be one the server already knows
+                # it will refuse, for the same reason it must not be one the
+                # server already knows will no-op.
+                user is not None
+                and hint_mutation_verdict(
+                    user, c.get("org_id"), c.get("created_by_user_id"),
+                    is_platform_admin=admin,
+                    # The Author tier is opt-in per call site and this is the
+                    # one that wants it: the panel's Retract control is exactly
+                    # the surface that tier exists for, and POST /hints/{id}/
+                    # retract asks for it on the same terms. patch, unflag and
+                    # reactivate do not, so the flag must be named here rather
+                    # than assumed.
+                    author_tier_applies=True,
+                ) == "allow"
+                and bool(c.get("is_active"))
+            ),
+        }
+        for c in raw_corrections
+    ]
 
     return {
         "status": "success",

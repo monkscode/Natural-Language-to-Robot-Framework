@@ -843,6 +843,19 @@ class TestHintWorkflowTracePrune:
 # ===================================================================
 
 
+# create_hint refuses a caller it cannot identify (learning_endpoints.
+# _require_caller): the route family opts out of the AUTH_ENFORCED-off escape
+# hatch, so these direct calls supply a token dict. An ORG admin of the target
+# org, not a platform admin — role != "admin" short-circuits
+# is_validated_admin before it touches the users table, so these unit tests
+# stay DB-free on the auth side.
+_ADMIN_OF_ORG = {
+    "user_id": "00000000-0000-0000-0000-0000000000aa",
+    "email": "admin@test.local", "role": "user",
+    "org_id": _ORG, "org_role": "org_admin",
+}
+
+
 class TestLearningEndpoints:
     def test_create_hint_rejects_missing_anchor_query(self):
         from pydantic import ValidationError
@@ -862,7 +875,7 @@ class TestLearningEndpoints:
             scope="global", org_id=_ORG, actor="admin",
         )
         with pytest.raises(HTTPException) as exc:
-            create_hint(req, fb=MagicMock())
+            create_hint(req, fb=MagicMock(), admin=_ADMIN_OF_ORG)
         assert exc.value.status_code == 400
 
     def test_create_hint_stores_anchor_and_enqueues(self, in_memory_em):
@@ -879,7 +892,7 @@ class TestLearningEndpoints:
         )
         with patch("src.backend.api.learning_endpoints._admin_conn",
                    side_effect=lambda: pg_compat.connect(em.dsn)):
-            result = create_hint(req, fb=fb)
+            result = create_hint(req, fb=fb, admin=_ADMIN_OF_ORG)
         assert result["created"] is True
         assert result["hint"]["anchor_query"] == (
             "verify the product list loads after filtering"

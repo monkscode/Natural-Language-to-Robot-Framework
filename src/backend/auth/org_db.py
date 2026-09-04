@@ -19,6 +19,17 @@ from src.backend.auth.db import get_pool
 
 logger = logging.getLogger(__name__)
 
+# owner_user_id is deliberately NOT here — it is added by
+# _ORG_OWNER_COLUMN_DDL below, which init_org_db runs immediately after this
+# statement, so a fresh database and an existing one end up in exactly the
+# same shape by exactly the same statement. Do not "complete" this CREATE
+# TABLE by adding the column back: a column defined in both places is
+# exercised in only ONE of them per environment (this suite drops and
+# recreates its schema, so the CREATE always wins there; every deployed
+# database already has the table, so the ALTER always wins there), and a
+# divergence between the two literals is then invisible to the suite. Measured
+# on this branch before the definitions were merged: ON DELETE CASCADE in the
+# ALTER left all 271 test_auth tests green.
 _ORGANIZATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS organizations (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -43,6 +54,138 @@ _INDEXES_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members (user_id)",
 )
 
+# owner_user_id lets a user RECLAIM their own personal org (ensure_personal_org
+# steps 2-3 in org_repository.py) instead of minting a new empty one every time
+# they cycle through a team and back out solo. CREATE TABLE IF NOT EXISTS
+# cannot add a column to a table that already exists, so the column needs this
+# idempotent statement — and this is its ONLY definition, for both a fresh
+# database and one that predates it (see _ORGANIZATIONS_DDL above).
+#
+# ON DELETE SET NULL, and it must NEVER become CASCADE. CASCADE would delete
+# the org row when its owner is deleted, reintroducing the exact "vacated
+# personal org gets deleted, stranding its learning rows" bug T1 removed.
+# SET NULL is also the honest statement: the owner really is gone, but the
+# org and the learning rows naming it are not — do not "tidy" this into a
+# cascade.
+_ORG_OWNER_COLUMN_DDL = """
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS owner_user_id UUID
+    REFERENCES users(id) ON DELETE SET NULL
+"""
+
+# Partial (kind='personal' only): a team org has no 1:1 owner and is
+# deliberately left unconstrained. Two personal orgs both owned by NULL are
+# allowed (the common case before a user is ever stamped/backfilled); two
+# personal orgs owned by the SAME user are not.
+_ORG_OWNER_INDEX_DDL = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_org_owner_personal
+    ON organizations (owner_user_id) WHERE kind = 'personal'
+"""
+
+
+# An org row must never be deleted while learning rows still name it. T1
+# removed the only DELETE FROM organizations in the codebase; this stops a
+# future one from returning, and makes the property structural rather than
+# conventional — but only because the function pins its own search_path (see
+# below). A SECURITY INVOKER function with no pinned path resolves every table
+# name through the CALLER's search_path, which makes the guarantee
+# conventional, not structural: measured, a shadow schema earlier on the path
+# holding an EMPTY nl_feedback_corrections let the delete succeed and stranded
+# the real rows.
+#
+# Why a trigger and not a real foreign key: organizations.id is uuid while
+# every learning org_id is text. An FK is achievable (a GENERATED ALWAYS AS
+# (id::text) STORED column with a UNIQUE constraint), but it can only ever
+# reference uuid-shaped strings, and the suite uses 152 synthetic org ids
+# ("org-A", "org-B", ...) across 31 files — in the very tests that guard
+# tenancy isolation, where a mechanical rewrite is how a guarantee quietly
+# weakens. The FK buys one extra guarantee over this trigger (rejecting an
+# orphan WRITE, which the write path already cannot produce); it remains a
+# follow-on, not a quiet reinstatement.
+#
+# audit_log is deliberately absent from the list. Audit rows must outlive the
+# org they describe — that is the whole point of the actor/org snapshot.
+#
+# One honest limitation: TRUNCATE does not fire row-level DELETE triggers, so
+# it bypasses this guard. Nothing in src/ truncates organizations; the only
+# caller is a test fixture (tests/test_core/test_org_backfill_data.py), which
+# rebuilds the whole table on purpose.
+#
+# That limitation now reaches further than the organizations table itself.
+# owner_user_id's REFERENCES users(id) did not exist before this branch, so
+# `users` was referenced only by org_members and invitations; TRUNCATE users
+# CASCADE now truncates organizations too (measured: 1 row before, 0 after).
+# The same fixture does exactly that at test_org_backfill_data.py:88, one line
+# after truncating organizations. Any future TRUNCATE users CASCADE strands
+# every learning row with no error and no trigger.
+#
+# The to_regclass guard is load-bearing, not defensive noise: learning tables
+# live in per-test schemas while organizations may not, so without it an org
+# delete would raise "relation does not exist" whenever the PINNED schema (see
+# SET search_path FROM CURRENT, below) lacks one of these tables -- auth_test
+# is exactly that case: it stubs nl_feedback_corrections but never creates
+# anti_patterns.
+#
+# SET search_path FROM CURRENT pins resolution to whatever schema init_org_db
+# ran in — public in production, the isolated schema in a test — instead of
+# leaving it to whoever issues the DELETE. Without it the guard reads the
+# caller's path: a shadow schema earlier on that path holding an empty
+# nl_feedback_corrections made the delete succeed and stranded the real rows
+# (measured). FROM CURRENT rather than a literal because a literal `public`
+# would break every per-test schema, which is the whole reason the names are
+# unqualified; the function is CREATE OR REPLACE'd on every boot, so it
+# re-pins itself to the schema it is installed in.
+#
+# The name is resolved ONCE, into rel, and the count runs against that regclass
+# rather than re-resolving the bare name — so the two lookups cannot disagree,
+# and %s on a regclass quotes for us. It would also schema-qualify if the
+# relation were not visible on the path that resolved it, but here it always
+# is (to_regclass already resolved rel through that same pinned path), so the
+# output stays bare. to_regclass answers only "a relation of this name
+# exists"; it says nothing about an org_id
+# column, and a learning schema predating the migration that added one
+# (hint_review_pages.org_id arrived in v22, and ensure_schema does not run at
+# all when OPTIMIZATION_ENABLED is false) turned an org delete into
+# UndefinedColumn. The pg_attribute check makes that a skip, the same way an
+# absent table is a skip. A relation that is not a table but does carry an
+# org_id column is still counted, deliberately: something named after a
+# learning table and holding org ids is treated as holding them.
+_ORG_DELETE_GUARD_FN_DDL = """
+CREATE OR REPLACE FUNCTION organizations_block_delete_with_learning()
+RETURNS trigger AS $$
+DECLARE t text; n bigint; rel regclass;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+      'nl_feedback_corrections','execution_records','execution_embeddings',
+      'anti_patterns','learning_anchors','kw_query_patterns',
+      'test_runs','workflow_metrics','llm_traces','run_groups','hint_review_pages'
+  ] LOOP
+    rel := to_regclass(t);
+    IF rel IS NOT NULL AND EXISTS (
+         SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = rel AND a.attname = 'org_id'
+           AND a.attnum > 0 AND NOT a.attisdropped
+       ) THEN
+      EXECUTE format('SELECT count(*) FROM %s WHERE org_id = $1', rel)
+        INTO n USING OLD.id::text;
+      IF n > 0 THEN
+        RAISE EXCEPTION 'org % still owns % row(s) in %', OLD.id, n, t
+          USING ERRCODE = 'foreign_key_violation';
+      END IF;
+    END IF;
+  END LOOP;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql SET search_path FROM CURRENT
+"""
+
+# CREATE OR REPLACE TRIGGER (PG14+) rather than DROP + CREATE: it leaves no
+# window in which the guard is absent, which matters because this runs on
+# every boot.
+_ORG_DELETE_GUARD_TRIGGER_DDL = """
+CREATE OR REPLACE TRIGGER trg_organizations_block_delete
+    BEFORE DELETE ON organizations
+    FOR EACH ROW EXECUTE FUNCTION organizations_block_delete_with_learning()
+"""
+
 
 def init_org_db() -> None:
     """Create the organizations + org_members tables and index if absent.
@@ -55,6 +198,10 @@ def init_org_db() -> None:
     with pool.connection() as conn:
         conn.execute(_ORGANIZATIONS_DDL)
         conn.execute(_ORG_MEMBERS_DDL)
+        conn.execute(_ORG_OWNER_COLUMN_DDL)
+        conn.execute(_ORG_OWNER_INDEX_DDL)
+        conn.execute(_ORG_DELETE_GUARD_FN_DDL)
+        conn.execute(_ORG_DELETE_GUARD_TRIGGER_DDL)
         for ddl in _INDEXES_DDL:
             conn.execute(ddl)
         conn.commit()
@@ -67,14 +214,35 @@ def init_org_db() -> None:
     # concurrent boots can't both run it. Best-effort: an unset marker retries.
     from src.backend.auth.migration_state import run_migration_once
 
+    def _run_data_migration(name: str, fn) -> None:
+        """One data migration, guarded on its own.
+
+        Every one of these is best-effort by construction: run_migration_once
+        writes the marker only after fn() returns, so a failure leaves the
+        marker unset and the next boot retries. What a failure must NOT do is
+        skip the migrations behind it or init_invitations_db() — main.py wraps
+        init_auth_db + init_org_db + init_invitations_db in ONE try/except and
+        logs "auth unavailable until Postgres is reachable", which names
+        Postgres for what can be a data race (a concurrent login claiming a
+        personal org while the owner backfill is picking candidates). Log the
+        real exception, leave the marker unset, let boot continue.
+        """
+        try:
+            if run_migration_once(name, fn):
+                logger.info("[AUTH] data migration %s applied", name)
+            else:
+                logger.info("[AUTH] data migration %s already applied; skipping", name)
+        except Exception as exc:  # noqa: BLE001 — one migration must not end boot
+            logger.warning(
+                "[AUTH] data migration %s failed; marker left unset so the next "
+                "boot retries: %s", name, exc,
+            )
+
     def _provision_personal_orgs() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().backfill_personal_orgs()
 
-    if run_migration_once("personal_org_backfill", _provision_personal_orgs):
-        logger.info("[AUTH] personal-org backfill applied")
-    else:
-        logger.info("[AUTH] personal-org backfill already applied; skipping")
+    _run_data_migration("personal_org_backfill", _provision_personal_orgs)
 
     # Collapse any pre-existing multi-org memberships to a single active org — a
     # one-time migration gated by the same advisory lock so concurrent boots can't
@@ -88,7 +256,16 @@ def init_org_db() -> None:
         from src.backend.auth.org_repository import OrgRepository
         OrgRepository().collapse_all_to_single_org()
 
-    if run_migration_once("collapse_to_single_org", _collapse_single_org):
-        logger.info("[AUTH] single-active-org collapse applied")
-    else:
-        logger.info("[AUTH] single-active-org collapse already applied; skipping")
+    _run_data_migration("collapse_to_single_org", _collapse_single_org)
+
+    # Stamp owner_user_id on personal orgs that predate the column — a
+    # one-time migration, gated by the same advisory lock. Two passes (sole
+    # remaining member, then name==email); see
+    # OrgRepository.backfill_personal_org_owners for what each pass claims
+    # and the ambiguous cases it deliberately leaves NULL rather than
+    # aborting.
+    def _backfill_personal_org_owners() -> None:
+        from src.backend.auth.org_repository import OrgRepository
+        OrgRepository().backfill_personal_org_owners()
+
+    _run_data_migration("personal_org_owner_backfill", _backfill_personal_org_owners)
