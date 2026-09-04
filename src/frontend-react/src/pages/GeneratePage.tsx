@@ -458,8 +458,13 @@ interface FeedbackResponse { status?: string; outcome?: string; message?: string
     auth/ownership.py — the same rule that gates the admin dashboard's hint
     mutations): true for the hint's own author or an org admin, false for
     anyone else. Optional because an older backend, or the learning-disabled
-    response shape, never sends it — absence must render exactly like false. */
-interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; can_retract?: boolean }
+    response shape, never sends it — absence must render exactly like false.
+
+    active is the server's own word for is_active. Optional for the same
+    reason can_retract is: an older backend, or the learning-disabled
+    response shape, never sends it — absence must render exactly like today,
+    never like switched off. */
+interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; active?: boolean; can_retract?: boolean }
 interface RecordedResponse { corrections?: RecordedCorrection[] }
 
 /** A recorded correction as the PANEL holds it: the server's row plus what
@@ -770,15 +775,21 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
                 <div className="flex items-center justify-between gap-2">
                   <span>
                     “{c.feedback_text}”
-                    {/* Set only by this session's own retract. The server
-                        never says "retracted" on this route — it answers
-                        can_retract, which is false for plenty of hints that
-                        are still perfectly active. */}
-                    {c.retracted && (
+                    {/* Exactly one marker, in precedence order. `retracted` is
+                        client-only, set by THIS session's own retract click,
+                        and wins because it is the more specific fact — it
+                        knows WHO did it. `active === false` covers every
+                        other way the hint went inactive (another caller's
+                        retract, auto-disable, an LLM review) — the server
+                        can't tell those apart, so this marker doesn't
+                        pretend to either. */}
+                    {c.retracted ? (
                       <span className="ml-1.5 italic">
                         {c.retracted === 'already' ? '— already retracted' : '— retracted'}
                       </span>
-                    )}
+                    ) : c.active === false ? (
+                      <span className="ml-1.5 italic">— switched off</span>
+                    ) : null}
                   </span>
                   {/* can_retract is absent or false on an older backend and on
                       the learning-disabled shape — both render exactly like
@@ -837,7 +848,13 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
                because this fires BEFORE the click: it is the only thing that
                warns while the user can still change their mind. */
             ? 'You retracted this correction. Sending it again on this run won’t restore it.'
-            : 'You already sent this for this run — it won’t be counted again.'}
+            : alreadySent.active === false
+              /* Same "won't come back" fact as the branch above, minus the
+                 claim of WHO — active===false alone doesn't know it was this
+                 user's own retract, so unlike the branch above this must not
+                 say "you". */
+              ? 'This correction is switched off. Sending it again on this run won’t turn it back on.'
+              : 'You already sent this for this run — it won’t be counted again.'}
         </p>
       )}
       <div className="flex items-center justify-between">

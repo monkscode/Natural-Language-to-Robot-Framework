@@ -8,11 +8,14 @@ may act on a hint they wrote — list_hints/get_hint stay gated on
 is_dashboard_viewer (a deliberate non-change; widening those would open a
 cross-user visibility surface the permission design relies on not existing).
 
-The three columns the predicate needs (org_id, created_by_user_id, is_active)
-travel from the engine to this handler only. They must never reach the
-response body, so one test pins the exact key set of a correction item — an
-explicit projection built field-by-field, not the row dict with keys
-deleted, so a column added to that SELECT later cannot leak silently.
+Two of the columns the predicate needs (org_id, created_by_user_id) travel
+from the engine to this handler only and must never reach the response
+body. A third, is_active, also travels that path, but it now reaches the
+client too, as active — the caller already reads the hint's own text, and
+the backend already discloses the same state in the hint_inactive message.
+One test pins the exact key set of a correction item — an explicit
+projection built field-by-field, not the row dict with keys deleted, so a
+column added to that SELECT later cannot leak silently.
 
 can_retract is an OFFER of an action, not just a permission check.
 hint_mutation_verdict answers who may act on a hint; it says nothing about
@@ -140,12 +143,26 @@ class TestCanRetract:
         assert body["corrections"][0]["can_retract"] is True
 
     def test_the_raw_permission_columns_never_reach_the_client(self):
-        """org_id, created_by_user_id and is_active feed the can_retract
-        computation but are not part of the client's contract."""
+        """org_id and created_by_user_id feed the can_retract computation but
+        are not part of the client's contract. is_active feeds the same
+        computation and now also reaches the client, as active."""
         body = _get([_row(author_id=_AUTHOR["user_id"])], caller=_AUTHOR)
 
         assert set(body["corrections"][0].keys()) == {
-            "hint_id", "feedback_text", "recorded_at", "can_retract"}
+            "hint_id", "feedback_text", "recorded_at", "active", "can_retract"}
+
+    def test_active_mirrors_is_active_for_the_client(self):
+        """active is a direct mirror of is_active, computed independently of
+        hint_mutation_verdict — unlike can_retract, which ANDs the two
+        together."""
+        inactive = _get(
+            [_row(author_id=_AUTHOR["user_id"], is_active=0)], caller=_AUTHOR)
+        assert inactive["corrections"][0]["active"] is False
+        assert inactive["corrections"][0]["can_retract"] is False
+
+        active = _get(
+            [_row(author_id=_AUTHOR["user_id"], is_active=1)], caller=_AUTHOR)
+        assert active["corrections"][0]["active"] is True
 
     def test_a_token_less_caller_is_offered_nothing(self):
         """Minor 9. AUTH_ENFORCED off resolves an anonymous request to None,
@@ -282,6 +299,8 @@ class TestCanRetractReflectsHintState:
         before = self._get_as(client, app, _AUTHOR)
         assert before["corrections"][0]["can_retract"] is True, (
             "sanity: the seeded hint starts active and the author may act on it")
+        assert before["corrections"][0]["active"] is True, (
+            "sanity: same fact, from the field a client actually reads")
 
         app.dependency_overrides[require_user] = lambda: _AUTHOR
         retract_resp = client.post(
@@ -298,13 +317,17 @@ class TestCanRetractReflectsHintState:
         assert item["can_retract"] is False, (
             "a retracted hint must not still offer Retract to its own "
             "author on the next page load — this is the defect being fixed")
+        assert item["active"] is False, (
+            "the reload proves active flips too, not just can_retract — end "
+            "to end against real Postgres, not the mocked projection above")
         assert item["feedback_text"] == "wait for the spinner", (
             "the row must still be RETURNED — get_corrections_for_run stays "
             "unfiltered on is_active, so a retracted hint is still the "
             "user's own recorded words, not hidden")
         assert set(item.keys()) == {
-            "hint_id", "feedback_text", "recorded_at", "can_retract"}, (
-            "is_active must not have joined the response body")
+            "hint_id", "feedback_text", "recorded_at", "active", "can_retract"}, (
+            "active joined the response body; org_id and created_by_user_id "
+            "still must not")
 
         # Property of the HINT's state, not the caller's tier: an org admin
         # and a platform admin, who would otherwise pass
