@@ -1,19 +1,20 @@
 /**
  * Read-only list of the corrections a run has already contributed to the
  * learning store — GET /api/feedback/{run_id}'s `corrections` array,
- * rendered. Two consumers: GeneratePage's FeedbackPanel (while the run is
- * still on screen) and HistoryPage's drawer (the same run, read days
- * later). Presentational only — no fetch, no Retract control, no error
- * slot, no props to configure a control — because only the panel offers
- * Retract, and only for the caller's own hint on the live run.
+ * rendered. Its one render consumer is HistoryPage's drawer, reading a run
+ * days after the run itself (and GeneratePage's panel with it) is gone from
+ * screen. Presentational only — no fetch, no Retract control, no error
+ * slot, no props to configure a control — because the drawer offers no
+ * action on these rows.
  *
- * The panel does NOT render through this component: it also draws the
- * Retract button, a per-row retract error and the client-only `retracted`
- * marker (this session's own click, which this component must never know
- * about). What this module owns instead is the two strings that must not
- * drift between the panel's markup and this one — the heading and the
- * switched-off marker — exported so GeneratePage.tsx imports them rather
- * than keeping its own copy.
+ * GeneratePage's FeedbackPanel does NOT render through this component — it
+ * keeps its own list markup, because it also draws the Retract button, a
+ * per-row retract error and the client-only `retracted` marker (this
+ * session's own click, which this component must never know about). What
+ * the panel imports from here instead is the two strings that must not
+ * drift between its markup and this one — the heading and the switched-off
+ * marker, both exported below — so it keeps its own render but not a
+ * second hand-typed copy of either string.
  */
 
 /** Heading above the list. Exported so GeneratePage's FeedbackPanel renders

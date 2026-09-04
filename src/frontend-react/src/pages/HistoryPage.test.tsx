@@ -8,11 +8,16 @@
  * HintDrawer.test.tsx already use for the same three hooks.
  *
  * What this pins: opening a run in the drawer fires
- * GET /api/feedback/{run_id}, and a refused (or still-pending) read renders
- * no error text — the two behaviours HistoryPage.tsx's corrections block
- * promises and GeneratePage's FeedbackPanel already proved once for its own
- * surface. It does not re-test RecordedCorrections' own rendering rules
- * (RecordedCorrections.test.tsx already does that) or the rest of the page.
+ * GET /api/feedback/{run_id}; a refused read renders no error text (the
+ * behaviour GeneratePage's FeedbackPanel already proved once for its own
+ * surface); and a row switch never shows a PREVIOUS row's corrections under
+ * the newly-selected row — neither while that row's own fetch is still in
+ * flight, nor once it has settled to an error (useFetch clears neither
+ * `data` nor, on the error path, anything at all beyond `error` itself —
+ * see HistoryPage.tsx's comment above `feedbackPath` for why both `loading`
+ * and `error` have to gate `corrections`). It does not re-test
+ * RecordedCorrections' own rendering rules (RecordedCorrections.test.tsx
+ * already does that) or the rest of the page.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -114,5 +119,32 @@ describe('HistoryPage drawer — the corrections fetch', () => {
     await openDrawer()
 
     expect(screen.queryByText(/stale from the last row/)).toBeNull()
+  })
+
+  it('does not render a previous row’s stale corrections when this row’s fetch fails (e.g. a 403 refusing a colleague’s shared run)', async () => {
+    // useFetch never clears `data` in its catch branch (useFetch.ts) — only
+    // `error` is set, and `loading` is already back to false by then. This
+    // is the fix-round-1 repro: open an owned run with corrections on
+    // file, then a colleague's shared run whose corrections read the
+    // server refuses (GET /api/history/{id} passes is_grouped=true and
+    // 200s; GET /api/feedback/{id} deliberately does not and 403s). A
+    // loading-only guard is blind to this: `loading` has already settled
+    // false by the time the failure lands, so the FIRST run's stale `data`
+    // — its correction text, and a "filed against" notice that may
+    // describe a run that isn't even a re-run — would render under the
+    // SECOND run's drawer.
+    setup({
+      data: {
+        applied_to: 'run-A',
+        corrections: [{ hint_id: 1, feedback_text: 'ROW A STALE TEXT MUST NOT APPEAR' }],
+      },
+      error: 'You cannot read feedback for this run',
+      loading: false,
+    })
+
+    await openDrawer()
+
+    expect(screen.queryByText(/ROW A STALE TEXT MUST NOT APPEAR/)).toBeNull()
+    expect(screen.queryByText(/Filed against the original run/)).toBeNull()
   })
 })

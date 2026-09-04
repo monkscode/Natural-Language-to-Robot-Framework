@@ -311,23 +311,31 @@ export default function HistoryPage() {
   // against `selected` (only `applied_to`, the resolved ORIGINAL run, which
   // legitimately differs from `selected` on a re-run — see the block below),
   // so the same "does the response match the open row" trick doesn't apply
-  // here. `loading` is the substitute: useFetch holds it true from the
-  // moment `feedbackPath` changes until the fetch for THAT path lands, so
-  // forcing `corrections` empty while it is true stops a just-left row's
-  // corrections rendering under the newly-selected row while its own fetch
-  // is still catching up.
+  // here. `loading` and `error` are the substitute, and BOTH are required:
+  // useFetch's reload() sets loading true and error '' at the START of every
+  // attempt for the CURRENT path (useFetch.ts), so together they answer "is
+  // THIS path's fetch still in flight, or did IT fail" — but useFetch never
+  // clears `data` in either case, in its catch branch least of all (only
+  // setError runs there). So a fetch that FAILS for a freshly-selected row
+  // — the 403 below is the everyday case, not an edge one — leaves the
+  // PREVIOUS row's data sitting there with loading already back to false.
+  // Gating on loading alone closes only the in-flight window; without error
+  // too, opening an owned run with corrections on file and then a
+  // colleague's shared run (whose corrections read the gate below refuses)
+  // would go on showing the FIRST run's corrections, and a "filed against"
+  // notice that may be entirely fabricated, under the SECOND run's drawer.
   //
-  // Errors are read but never rendered. A 403 here is EXPECTED and correct:
-  // GET /api/history/{run_id} above passes is_grouped=true (a colleague's
-  // run published into a shared folder opens in this drawer), while
-  // GET /api/feedback/{run_id} deliberately does not — publishing a test
-  // does not publish the corrections filed against it (get_run_corrections,
-  // endpoints.py). An error banner would put a red box on every shared run
-  // in the org. An empty list degrades the same way, silently: silence
-  // claims nothing either way.
+  // Errors are read but never rendered as their own text. A 403 here is
+  // EXPECTED and correct: GET /api/history/{run_id} above passes
+  // is_grouped=true (a colleague's run published into a shared folder opens
+  // in this drawer), while GET /api/feedback/{run_id} deliberately does not
+  // — publishing a test does not publish the corrections filed against it
+  // (get_run_corrections, endpoints.py). An error banner would put a red
+  // box on every shared run in the org. An empty list degrades the same
+  // way, silently: silence claims nothing either way.
   const feedbackPath = selected ? `/api/feedback/${selected}` : null
-  const { data: feedback, loading: feedbackLoading } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
-  const corrections = feedbackLoading || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
+  const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
+  const corrections = feedbackLoading || feedbackError || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -1023,15 +1031,22 @@ export default function HistoryPage() {
           {corrections.length > 0 && (
             <div className="space-y-1.5">
               {feedback?.applied_to && feedback.applied_to !== selected && (
-                /* Same treatment as the header's "re-run of" id above:
-                   font-mono, never truncated. This run is a re-run, so the
-                   corrections just listed are filed against the run the
-                   code was cloned from, not this one. */
+                /* Same treatment as the header's own id control above
+                   (the "Copy run id" button): font-mono, never truncated,
+                   click-to-copy. This run is a re-run, so the corrections
+                   just listed are filed against the run the code was
+                   cloned from, not this one. */
                 <p className="text-xs text-muted-foreground">
                   Filed against the original run{' '}
-                  <span className="font-mono" title="Corrections on a re-run are recorded against the run the code was cloned from">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+                    title="Copy the original run’s id"
+                    onClick={() => void copyText(feedback.applied_to!, 'drawer-applied-to')}
+                  >
                     {feedback.applied_to}
-                  </span>
+                    {copied === 'drawer-applied-to' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                  </button>
                 </p>
               )}
               <RecordedCorrections corrections={corrections} />
