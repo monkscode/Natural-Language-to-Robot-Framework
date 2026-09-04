@@ -1326,8 +1326,20 @@ class FeedbackLoop:
                     )
                     outcome = "no_org"
                 else:
+                    # Local, like Step 3b's conflict-detection import above,
+                    # and for a reason worth keeping: __init__ imports
+                    # NLFeedbackEngine inside a try and degrades to
+                    # nl_engine=None if that module cannot be imported. A
+                    # module-level import here would turn the same failure into
+                    # a FeedbackLoop that cannot be constructed at all — every
+                    # feedback submission answered 503 instead of "error". This
+                    # branch only runs when nl_engine is not None, so the
+                    # module is already imported and this cannot fail.
+                    from src.backend.crew_ai.optimization.nl_feedback_engine import (
+                        GATED_INACTIVE_HINT,
+                    )
                     try:
-                        verdict, _detail = self.write_queue.submit_and_wait(
+                        verdict, detail = self.write_queue.submit_and_wait(
                             self.nl_engine.learn_from_feedback, record, triage,
                         )
                     except Exception as e:
@@ -1340,8 +1352,39 @@ class FeedbackLoop:
                         if verdict == "failed":
                             outcome = "error"
                         elif verdict == "timeout":
+                            # The job is still running and its return value
+                            # arrives after this response — including the
+                            # sentinel below, which is why it is only read on
+                            # the "ok" branch. Reporting a signal we do not
+                            # have yet would be the same lie in a new place.
                             outcome = "queued"
-                        # verdict == "ok": outcome stays "processed"
+                        elif detail == GATED_INACTIVE_HINT:
+                            # The write ran, refused a resubmission whose
+                            # matched hint is switched off, and changed
+                            # nothing. "processed" here is what thanked a user
+                            # for retyping a correction that reaches no prompt
+                            # — and re-sending on this run can never work,
+                            # because the claim row that gates it is permanent.
+                            #
+                            # WHO switched it off is not known and must not be
+                            # implied downstream: the engine reads is_active
+                            # and nothing else, and a user retract, an org
+                            # admin's retract, _auto_disable_hint's
+                            # unused_count retirement and an LLM review disable
+                            # are identical in it.
+                            #
+                            # A string literal, not the constant: this is the
+                            # OUTCOME vocabulary, which belongs to this module
+                            # and is pinned to the endpoint's message table by
+                            # test_feedback_response_honesty.py. The constant
+                            # is the engine's own signal; keeping the two
+                            # apart is what stops one rename silently changing
+                            # the other.
+                            outcome = "hint_inactive"
+                        # verdict == "ok" and no signal: outcome stays
+                        # "processed". That includes the gate refusing a
+                        # duplicate on an ACTIVE hint, where the guidance IS on
+                        # file and injecting.
 
             # Step 4b: "no_text" narrows the success path only. Every other
             # outcome from Step 4 (learning_paused, no_record, error, no_org,

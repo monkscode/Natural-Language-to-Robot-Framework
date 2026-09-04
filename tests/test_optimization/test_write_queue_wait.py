@@ -49,8 +49,62 @@ class TestHappyPath:
             verdict = queue.submit_and_wait(calls.append, "did-run")
         finally:
             queue.shutdown()
+        # The None is `list.append`'s OWN return value, not a constant this
+        # branch supplies — see TestTheWriteFunctionsAnswer below, which is
+        # what keeps this assertion from passing for the wrong reason.
         assert verdict == ("ok", None)
         assert calls == ["did-run"]
+
+
+class TestTheWriteFunctionsAnswer:
+    """The second element on the "ok" branch is the write function's return.
+
+    `_wrapped` used to call `write_fn(...)` and drop the result on the floor,
+    so a write that ran and deliberately changed nothing was indistinguishable
+    from one that stored a correction. The one awaited caller
+    (feedback_loop.process_user_feedback) turned that into "Thanks - your
+    feedback helps the system learn" for a resubmission the engine's run-level
+    gate had refused on a switched-off hint.
+
+    Every assertion in this file that reads ("ok", None) does so because its
+    write function returns None; these two pin that the None is carried, not
+    manufactured.
+    """
+
+    def test_the_return_value_is_carried_back_to_the_caller(self):
+        queue = LearningWriteQueue()
+        try:
+            verdict = queue.submit_and_wait(lambda: "gated_inactive_hint")
+        finally:
+            queue.shutdown()
+
+        assert verdict == ("ok", "gated_inactive_hint")
+
+    def test_a_write_that_returns_nothing_still_answers_none(self):
+        """The other half, and the reason the sibling tests above stay valid:
+        a write function with no return value must keep producing exactly the
+        ("ok", None) they assert."""
+        queue = LearningWriteQueue()
+        try:
+            verdict = queue.submit_and_wait(lambda: None)
+        finally:
+            queue.shutdown()
+
+        assert verdict == ("ok", None)
+
+    def test_a_falsy_return_is_carried_rather_than_normalised(self):
+        """`if value:` in the wrong place would turn 0, "" or False into None
+        and lose a real answer. The reader compares against a constant, so the
+        value must arrive exactly as the write function produced it."""
+        queue = LearningWriteQueue()
+        try:
+            verdicts = [
+                queue.submit_and_wait(lambda v=v: v) for v in (0, "", False)
+            ]
+        finally:
+            queue.shutdown()
+
+        assert verdicts == [("ok", 0), ("ok", ""), ("ok", False)]
 
 
 class TestFailure:

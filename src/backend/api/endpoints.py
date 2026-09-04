@@ -269,6 +269,36 @@ _FEEDBACK_OUTCOME_MESSAGES = {
         "Your correction was received and is still being saved. You do not "
         "need to send it again."
     ),
+    # Four clauses, each checked against what the engine can actually see.
+    #
+    # "already on file": the dedup SELECT matched an existing row in this run's
+    # org — the user's words are stored.
+    # "currently switched off": is_active = 0 on that row, read in the same
+    # transaction, and every retrieval query filters is_active = 1, so the hint
+    # reaches no prompt.
+    # "did not change it": the run-level gate returned before every effect —
+    # evidence_count, last_seen, is_active, conflict_flagged and its metadata,
+    # unused_count, and both hint_audit rows. Scoped to the CORRECTION on
+    # purpose: the submission's raw text still went to the run's execution
+    # record (Step 2's unconditional submit), so an unqualified "changed
+    # nothing" would be the same overstatement no_org and error were fixed for.
+    # "an organisation admin can switch it back on": reactivate is gated by
+    # hint_mutation_verdict with author_tier_applies=False — org_admin or
+    # above, within the hint's own org — and ensure_personal_org seats a solo
+    # user as org_admin of their personal org, so the sentence is true for a
+    # team member and a solo user alike.
+    #
+    # What it must NOT say, and does not: that the CALLER retracted it. The
+    # engine reads one bit, is_active, and a user retract, an admin retract,
+    # _auto_disable_hint's unused_count retirement and an LLM review disable
+    # are indistinguishable in it. It also does not say "send it again" — that
+    # is the one action which provably does nothing on this run, because the
+    # claim row gating it is permanent.
+    "hint_inactive": (
+        "This correction is already on file but is currently switched off, so "
+        "this submission did not change it. An organisation admin can switch "
+        "it back on."
+    ),
     "no_org": (
         "This run is not associated with an organisation, so the correction "
         "could not be filed in the learning store, though this submission was "
@@ -373,7 +403,8 @@ async def submit_feedback(request: FeedbackRequest, user: dict | None = Depends(
 
       * `outcome` is the only authority on what happened to the CORRECTION —
         "processed" | "no_text" | "no_record" | "learning_paused" | "no_org" |
-        "queued" | "error", straight from process_user_feedback. Read this
+        "queued" | "hint_inactive" | "error", straight from
+        process_user_feedback. Read this
         one. `_FEEDBACK_OUTCOME_MESSAGES` above is the full list; the two are
         pinned together by test_feedback_response_honesty.py.
       * `status` keeps the meaning it has across this router: could the

@@ -307,6 +307,62 @@ class TestTheFourOutcomes:
 
         assert "was not recorded" in message, message
 
+    def test_hint_inactive_says_the_correction_is_off_not_that_it_landed(
+        self, client_and_loop,
+    ):
+        """Fix wave D: the resubmission the run-level gate refused because the
+        matched hint is switched off.
+
+        Nothing was stored and nothing broke, so neither "Thanks" nor "send it
+        again" is available. What is left is the state and the way out."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="hint_inactive")
+
+        body = _post(client).json()
+
+        assert body["outcome"] == "hint_inactive"
+        assert body["status"] == "success"
+        assert "helps the system learn" not in body["message"]
+        assert "already on file" in body["message"].lower()
+        assert "switched off" in body["message"].lower()
+
+    def test_hint_inactive_does_not_attribute_the_deactivation_to_anyone(
+        self, client_and_loop,
+    ):
+        """The engine knows `is_active = 0` and NOTHING else.
+
+        A user retract, an org admin's retract, _auto_disable_hint's
+        unused_count retirement and the LLM hint review all leave the identical
+        row, and the gate reads no audit trail. "You retracted this" would be a
+        brand-new false claim on the three paths where the caller did not — the
+        exact defect class this branch has been fixing, so it is pinned rather
+        than trusted."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="hint_inactive")
+
+        message = _post(client).json()["message"].lower()
+
+        assert "you retracted" not in message, message
+        assert "your retract" not in message, message
+        assert "retracted" not in message, (
+            "the deactivation is unattributable here - see the docstring", message,
+        )
+
+    def test_hint_inactive_does_not_advise_the_one_thing_that_cannot_work(
+        self, client_and_loop,
+    ):
+        """Re-sending on this run hits the same claim row and the same gate,
+        forever. Every other non-success message here ends "send it again";
+        this is the one where that advice is provably empty, so it names the
+        control that does work instead."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="hint_inactive")
+
+        message = _post(client).json()["message"]
+
+        assert "send it again" not in message.lower(), message
+        assert "admin" in message.lower(), message
+
     def test_every_outcome_carries_its_own_message(self, client_and_loop):
         """Derived from the shipped dict, never from a hand-written tuple.
 

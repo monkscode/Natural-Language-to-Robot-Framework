@@ -257,6 +257,33 @@ def run_source_hash(workflow_id: str) -> str:
     return hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
 
 
+# What learn_from_feedback returns when the run-level gate (T5) stopped a
+# resubmission whose matched hint was already switched off — the one case in
+# which the caller was thanked for a submission that changed nothing.
+#
+# One definition for the two sides that must agree, exactly like
+# run_source_hash above: learn_from_feedback returns it, and
+# feedback_loop.process_user_feedback compares against it to pick the outcome
+# it reports. A second copy of the literal would drift silently — the compare
+# would simply stop matching, and /api/feedback would go back to answering
+# "Thanks - your feedback helps the system learn" for a no-op.
+#
+# NOT the outcome name /api/feedback ships. That vocabulary belongs to
+# feedback_loop and is pinned to the endpoint's message table by
+# tests/test_api/test_feedback_response_honesty.py; this is the engine's
+# private signal to its one awaited caller, and keeping the two strings
+# different is what stops them being mistaken for one shared constant.
+#
+# Says only what the engine can see: the matched hint is inactive. It cannot
+# say who deactivated it — a user retract, an admin retract,
+# _auto_disable_hint's unused_count retirement and an LLM review disable all
+# leave the same is_active = 0.
+#
+# Referenced by: learn_from_feedback (this module),
+#                feedback_loop.process_user_feedback.
+GATED_INACTIVE_HINT = "gated_inactive_hint"
+
+
 # ---------------------------------------------------------------------------
 # NLFeedbackEngine
 # ---------------------------------------------------------------------------
@@ -382,7 +409,7 @@ class NLFeedbackEngine(LearningEngine):
         """No-op. NL engine learns from user feedback, not executions."""
         pass
 
-    def learn_from_feedback(self, record, feedback_insight) -> None:
+    def learn_from_feedback(self, record, feedback_insight) -> str | None:
         """
         Store user feedback as a queryable correction in nl_feedback_corrections.
 
@@ -406,6 +433,16 @@ class NLFeedbackEngine(LearningEngine):
         Args:
             record: ExecutionRecord for the workflow being given feedback.
             feedback_insight: Triage result dict (must include 'feedback_text').
+
+        Returns:
+            GATED_INACTIVE_HINT when the run-level gate above refused a
+            resubmission whose matched hint was already switched off — the one
+            path through this method that changes nothing AND leaves nothing
+            injecting. None on every other path, including a refusal on an
+            ACTIVE hint, which the caller may still honestly call processed.
+            LearningWriteQueue.submit_and_wait carries it to the one awaited
+            caller, feedback_loop.process_user_feedback; the fire-and-forget
+            `submit` path ignores it, as it ignores every write's return.
         """
         if not self._em:
             return
@@ -471,6 +508,12 @@ class NLFeedbackEngine(LearningEngine):
             # deduplicating, and the correction is lost rather than counted.
             # `IS NOT DISTINCT FROM` and the index's COALESCE(x,'') agree on
             # NULL and on every non-empty value, and would disagree on ''.
+            # is_active is read but never used by the write below (the UPDATE
+            # sets it unconditionally): it is the gated path's answer to
+            # "did this submission change anything the user can see?" — a
+            # switched-off hint is filtered out of every retrieval query
+            # (is_active = 1), so a refused resubmission against one changed
+            # nothing AND left nothing injecting.
             # `domain` cannot BE '' here: extract_domain returns 'unknown' for
             # an unparseable url, and the `or` below turns an empty
             # record.domain into that result or None. True everywhere now, not
@@ -480,7 +523,7 @@ class NLFeedbackEngine(LearningEngine):
             # longer reach storage from either origin.
             if scope == "url":
                 existing = self._em._writer_conn.execute(
-                    "SELECT id, evidence_count, conflict_flagged "
+                    "SELECT id, evidence_count, conflict_flagged, is_active "
                     "FROM nl_feedback_corrections "
                     "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? "
                     "AND url IS NOT DISTINCT FROM ? AND scope = ? "
@@ -489,7 +532,7 @@ class NLFeedbackEngine(LearningEngine):
                 ).fetchone()
             elif scope == "global":
                 existing = self._em._writer_conn.execute(
-                    "SELECT id, evidence_count, conflict_flagged "
+                    "SELECT id, evidence_count, conflict_flagged, is_active "
                     "FROM nl_feedback_corrections "
                     "WHERE feedback_text = ? AND scope = 'global' "
                     "AND org_id IS NOT DISTINCT FROM ?",
@@ -497,7 +540,7 @@ class NLFeedbackEngine(LearningEngine):
                 ).fetchone()
             else:
                 existing = self._em._writer_conn.execute(
-                    "SELECT id, evidence_count, conflict_flagged "
+                    "SELECT id, evidence_count, conflict_flagged, is_active "
                     "FROM nl_feedback_corrections "
                     "WHERE feedback_text = ? AND domain IS NOT DISTINCT FROM ? AND scope = ? "
                     "AND org_id IS NOT DISTINCT FROM ?",
@@ -521,10 +564,23 @@ class NLFeedbackEngine(LearningEngine):
                     self._em._writer_conn.commit()
                     logger.info(
                         "[LEARNING:NL] Feedback '%s' already counted for hint %s "
-                        "from this run — not counted again",
+                        "from this run — not counted again (hint is %s)",
                         feedback_text[:50], existing["id"],
+                        "active" if existing["is_active"] else "inactive",
                     )
-                    return
+                    # The ONE return value this method has. On an ACTIVE hint
+                    # the caller's "Thanks — your feedback helps the system
+                    # learn" is true: the guidance is on file and injecting,
+                    # and only the double-count was refused. On an INACTIVE one
+                    # nothing the user can observe happened, and re-sending on
+                    # this run never will — the claim row above is permanent —
+                    # so the caller is told, and says so instead of thanking
+                    # them. is_active is NOT NULL DEFAULT 1 (pg_schema.py), and
+                    # every retrieval filters `is_active = 1`, so 0 is exactly
+                    # "not injecting".
+                    if not existing["is_active"]:
+                        return GATED_INACTIVE_HINT
+                    return None
                 # Gap 7: user re-submitting identical feedback text is the
                 # strongest possible authoritative signal that the hint is
                 # correct — strictly more reliable than any LLM judgment.

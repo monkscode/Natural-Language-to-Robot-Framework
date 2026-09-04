@@ -24,7 +24,10 @@ import hashlib
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
-from src.backend.crew_ai.optimization.nl_feedback_engine import NLFeedbackEngine
+from src.backend.crew_ai.optimization.nl_feedback_engine import (
+    GATED_INACTIVE_HINT,
+    NLFeedbackEngine,
+)
 
 
 _NOW = datetime.now(timezone.utc)
@@ -312,11 +315,13 @@ class TestRetractThenResubmit:
     This is deliberate behaviour, not a defect being enshrined: every effect in
     that UPDATE is a per-run fact and T5 gates them together, and carving
     `is_active` out would let one effect fire without the evidence token that
-    authorises it. What is wrong is what the USER is told — POST /api/feedback
-    answers outcome "processed" and the SPA renders "Thanks - your feedback
+    authorises it. What was wrong is what the USER was told — POST /api/feedback
+    answered outcome "processed" and the SPA rendered "Thanks - your feedback
     helps the system learn" for the same-run case below, in which nothing at
-    all happened. That half is a separate wave; these two tests exist so the
-    engine side is visible and cannot drift silently underneath it.
+    all happened. Fix wave D closed that half: the gate now RETURNS
+    GATED_INACTIVE_HINT when the hint it declined to reinstate was inactive, and
+    the return value is what /api/feedback reports. Both rows are asserted here
+    — the row that must signal, and the row that must not.
     """
 
     def test_the_same_run_cannot_reinstate_a_hint_it_retracted(self, in_memory_db):
@@ -331,7 +336,18 @@ class TestRetractThenResubmit:
         )
         in_memory_db.commit()
 
-        engine.learn_from_feedback(_record("wf-retract"), _triage())
+        signal = engine.learn_from_feedback(_record("wf-retract"), _triage())
+
+        # The user typed their correction and got "Thanks - your feedback helps
+        # the system learn" for a submission that did nothing, and could not
+        # undo it: /learning is closed to a plain org member and reactivate is
+        # org-admin-and-above. The gate is the only place that knows, so the
+        # gate is what has to say so.
+        assert signal == GATED_INACTIVE_HINT, (
+            "the gate declined to reinstate an INACTIVE hint and returned "
+            "nothing, so every layer above it reports this no-op as a stored "
+            "correction"
+        )
 
         row = _hints(in_memory_db)[0]
         assert row["is_active"] == 0, (
@@ -355,7 +371,14 @@ class TestRetractThenResubmit:
         )
         in_memory_db.commit()
 
-        engine.learn_from_feedback(_record("wf-retract-b"), _triage())
+        signal = engine.learn_from_feedback(_record("wf-retract-b"), _triage())
+
+        # Nothing to report: the hint IS reinstated, so "processed" is the true
+        # answer and the endpoint must keep giving it.
+        assert signal is None, (
+            "a resubmission that DID reinstate the hint must not be reported "
+            "as a no-op"
+        )
 
         row = _hints(in_memory_db)[0]
         assert row["is_active"] == 1, (
@@ -363,3 +386,57 @@ class TestRetractThenResubmit:
             "that is the cross-run recovery path"
         )
         assert row["evidence_count"] == 2
+        assert row["evidence_count"] == 2
+
+
+class TestTheGateOnlySignalsTheInactiveCase:
+    """The sentinel is not "the gate fired" — it is "the gate fired AND the
+    hint it declined to reinstate is switched off".
+
+    An ordinary same-run duplicate hits the identical `return`, and there
+    "Thanks - your feedback helps the system learn" is TRUE: the guidance is on
+    file, active, and injecting into every matching prompt. Reporting that as a
+    no-op would trade one false statement for another.
+    """
+
+    def test_a_duplicate_on_an_ACTIVE_hint_still_reports_nothing(self, in_memory_db):
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-dup"), _triage())
+        assert _hints(in_memory_db)[0]["is_active"] == 1
+
+        signal = engine.learn_from_feedback(_record("wf-dup"), _triage())
+
+        assert signal is None, (
+            "the ordinary same-run duplicate must stay 'processed' - the hint "
+            "is on file and injecting, which is what the message claims"
+        )
+
+    def test_a_first_submission_reports_nothing(self, in_memory_db):
+        """The create branch has its own claim site and never reaches the
+        gate's `return`."""
+        engine = NLFeedbackEngine(in_memory_db)
+
+        signal = engine.learn_from_feedback(_record("wf-new"), _triage())
+
+        assert signal is None
+        assert len(_hints(in_memory_db)) == 1
+
+    def test_empty_text_cannot_reach_the_gate_at_all(self, in_memory_db):
+        """Why `no_text` still wins over the new outcome, structurally rather
+        than by ordering: learn_from_feedback returns on empty/blank text
+        BEFORE the dedup SELECT and before the claim, so the gate can never
+        fire for a submission Step 4b would refine. Asserted on a run that has
+        already claimed a retracted hint — the exact state in which the gate
+        WOULD fire if the text carried words."""
+        engine = NLFeedbackEngine(in_memory_db)
+        engine.learn_from_feedback(_record("wf-blank"), _triage())
+        hid = _hints(in_memory_db)[0]["id"]
+        in_memory_db.execute(
+            "UPDATE nl_feedback_corrections SET is_active = 0 WHERE id = ?",
+            (hid,),
+        )
+        in_memory_db.commit()
+
+        assert engine.learn_from_feedback(_record("wf-blank"), _triage("")) is None
+        assert engine.learn_from_feedback(_record("wf-blank"), _triage("   ")) is None
+
