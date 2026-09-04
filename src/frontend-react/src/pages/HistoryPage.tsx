@@ -313,17 +313,20 @@ export default function HistoryPage() {
   // so the same "does the response match the open row" trick doesn't apply
   // here. `loading` and `error` are the substitute, and BOTH are required:
   // useFetch's reload() sets loading true and error '' at the START of every
-  // attempt for the CURRENT path (useFetch.ts), so together they answer "is
-  // THIS path's fetch still in flight, or did IT fail" — but useFetch never
-  // clears `data` in either case, in its catch branch least of all (only
-  // setError runs there). So a fetch that FAILS for a freshly-selected row
-  // — the 403 below is the everyday case, not an edge one — leaves the
-  // PREVIOUS row's data sitting there with loading already back to false.
-  // Gating on loading alone closes only the in-flight window; without error
-  // too, opening an owned run with corrections on file and then a
-  // colleague's shared run (whose corrections read the gate below refuses)
-  // would go on showing the FIRST run's corrections, and a "filed against"
-  // notice that may be entirely fabricated, under the SECOND run's drawer.
+  // attempt for the CURRENT path (useFetch.ts) — from inside an EFFECT, so
+  // for the one render between `feedbackPath` changing and that effect
+  // firing, both still describe the PREVIOUS path. From the render after
+  // that on, together they answer "is THIS path's fetch still in flight, or
+  // did IT fail" — but useFetch never clears `data` in either case, in its
+  // catch branch least of all (only setError runs there). So a fetch that
+  // FAILS for a freshly-selected row — the 403 below is the everyday case,
+  // not an edge one — leaves the PREVIOUS row's data sitting there with
+  // loading already back to false. Gating on loading alone closes only the
+  // in-flight window; without error too, opening an owned run with
+  // corrections on file and then a colleague's shared run (whose
+  // corrections read the gate below refuses) would go on showing the FIRST
+  // run's corrections, and a "filed against" notice that may be entirely
+  // fabricated, under the SECOND run's drawer.
   //
   // Errors are read but never rendered as their own text. A 403 here is
   // EXPECTED and correct: GET /api/history/{run_id} above passes

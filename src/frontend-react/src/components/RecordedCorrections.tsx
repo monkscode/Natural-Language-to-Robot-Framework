@@ -28,7 +28,7 @@ export const ALREADY_RECORDED_HEADING = 'Already recorded for this run'
 export const SWITCHED_OFF_MARKER = '— switched off'
 
 /** The subset of a correction row this read-only view needs. A structural
-    subtype of GeneratePage's PanelCorrection: this component takes whatever
+    supertype of GeneratePage's PanelCorrection: this component takes whatever
     shape supplies these three fields, whether that is the panel's
     session-augmented rows or the drawer's plain server response. `active` is
     optional for the same reason it is on the server response — an older

@@ -750,6 +750,17 @@ describe('T7: retracting a hint from the feedback panel', () => {
       expect(screen.queryByText(/^— (already )?retracted$/)).toBeNull()
     })
 
+    // RETRACTABLE[0] carries can_retract: true, which the real server only
+    // ever sends alongside is_active (get_run_corrections ANDs the two,
+    // endpoints.py) — so a live GET can never pair it with active: false.
+    // Clicking Retract here can't produce that combination either: the
+    // panel's retract() (GeneratePage.tsx) spreads the existing row and
+    // only overrides can_retract/retracted, so active stays whatever it
+    // was at mount — true, since that is what made can_retract: true
+    // realistic to begin with. This fixture is server-impossible by
+    // construction, on purpose: the test pins the render's DEFENSIVE
+    // branch order (retracted beats active === false) for a combination
+    // that cannot currently arise, not a live path.
     it('lets the in-session retracted marker win over active: false', async () => {
       answersConfirm(true)
       onFile([{ ...RETRACTABLE[0], active: false }])

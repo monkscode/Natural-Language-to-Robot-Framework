@@ -8,14 +8,20 @@
  * HintDrawer.test.tsx already use for the same three hooks.
  *
  * What this pins: opening a run in the drawer fires
- * GET /api/feedback/{run_id}; a refused read renders no error text (the
- * behaviour GeneratePage's FeedbackPanel already proved once for its own
- * surface); and a row switch never shows a PREVIOUS row's corrections under
- * the newly-selected row — neither while that row's own fetch is still in
- * flight, nor once it has settled to an error (useFetch clears neither
- * `data` nor, on the error path, anything at all beyond `error` itself —
- * see HistoryPage.tsx's comment above `feedbackPath` for why both `loading`
- * and `error` have to gate `corrections`). It does not re-test
+ * GET /api/feedback/{run_id}; a successful read renders the correction
+ * text on screen, and — when `applied_to` differs from the open row — the
+ * "filed against the original run" notice with its full, untruncated id;
+ * a refused read renders no error text (the behaviour GeneratePage's
+ * FeedbackPanel already proved once for its own surface); and a row
+ * switch never shows a PREVIOUS row's corrections under the newly-selected
+ * row — neither while that row's own fetch is still in flight, nor once it
+ * has settled to an error (useFetch clears neither `data` nor, on the
+ * error path, anything at all beyond `error` itself — see HistoryPage.tsx's
+ * comment above `feedbackPath` for why both `loading` and `error` have to
+ * gate `corrections`). The two positive-rendering tests exist because the
+ * others are all absence-assertions, which a mutation that hardcodes
+ * `corrections` to `[]` sails through undetected — see the `it`s below for
+ * that finding's own account. This file does not re-test
  * RecordedCorrections' own rendering rules (RecordedCorrections.test.tsx
  * already does that) or the rest of the page.
  */
@@ -146,5 +152,37 @@ describe('HistoryPage drawer — the corrections fetch', () => {
 
     expect(screen.queryByText(/ROW A STALE TEXT MUST NOT APPEAR/)).toBeNull()
     expect(screen.queryByText(/Filed against the original run/)).toBeNull()
+  })
+
+  // The four tests above are all absence-assertions (no fetch call target,
+  // no error text, no stale text twice) — every one of them still passes if
+  // `corrections` were hardcoded to [], which would silently disable this
+  // task's whole feature. These two are the ones that actually prove a
+  // correction reaches the screen.
+  it('renders a correction’s text once the fetch succeeds', async () => {
+    setup({
+      data: { applied_to: 'run-1', corrections: [{ hint_id: 1, feedback_text: 'the search box locator was off' }] },
+      error: '', loading: false,
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByText(/the search box locator was off/)).toBeInTheDocument()
+  })
+
+  it('renders the "filed against the original run" notice with the full, untruncated id', async () => {
+    // Long and clearly not an 8-char prefix, so a truncation regression
+    // (the owner's standing "never truncate a run id" rule) would be
+    // visible as a failed exact-text match, not just a shorter match.
+    const ORIGINAL_ID = 'run-A-0123456789abcdef0123456789'
+    setup({
+      data: { applied_to: ORIGINAL_ID, corrections: [{ hint_id: 1, feedback_text: 'x' }] },
+      error: '', loading: false,
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByText(/Filed against the original run/)).toBeInTheDocument()
+    expect(screen.getByText(ORIGINAL_ID)).toBeInTheDocument()
   })
 })
