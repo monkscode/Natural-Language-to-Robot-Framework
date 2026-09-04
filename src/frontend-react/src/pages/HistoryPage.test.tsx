@@ -14,12 +14,14 @@
  * a refused read renders no error text (the behaviour GeneratePage's
  * FeedbackPanel already proved once for its own surface); and a row
  * switch never shows a PREVIOUS row's corrections under the newly-selected
- * row — neither while that row's own fetch is still in flight, nor once it
- * has settled to an error (useFetch clears neither `data` nor, on the
- * error path, anything at all beyond `error` itself — see HistoryPage.tsx's
- * comment above `feedbackPath` for why both `loading` and `error` have to
- * gate `corrections`). The two positive-rendering tests exist because the
- * others are all absence-assertions, which a mutation that hardcodes
+ * row — not while that row's own fetch is still in flight, not once it has
+ * settled to an error, and not in the single stale commit between the row
+ * changing and the run-detail fetch catching up to it (useFetch clears
+ * neither `data` nor, on the error path, anything at all beyond `error`
+ * itself — see HistoryPage.tsx's comment above `feedbackPath` for why
+ * `loading`, `error` AND `d` all have to gate `corrections`). The two
+ * positive-rendering tests exist because the others are all
+ * absence-assertions, which a mutation that hardcodes
  * `corrections` to `[]` sails through undetected — see the `it`s below for
  * that finding's own account. This file does not re-test
  * RecordedCorrections' own rendering rules (RecordedCorrections.test.tsx
@@ -57,7 +59,7 @@ const RUN = {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function setup(feedbackFetch: { data: any; error: string; loading?: boolean }) {
+function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, detailRunId: string = RUN.run_id) {
   mockUseAuth.mockReturnValue({
     user: { id: 'u1', email: 'a@b.com', display_name: 'A', role: 'user', status: 'active' },
     loading: false, isAuthenticated: true, isAdmin: false, status: 'active',
@@ -73,11 +75,16 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }) {
   mockApi.mockResolvedValue({ runs: [RUN], total: 1, scope: 'own' })
   // Keyed by path: the drawer fires useFetch twice (run detail + this
   // task's corrections fetch), and only the second is this test's subject.
+  // The detail fetch defaults to a payload for the OPENED row itself
+  // (detailRunId defaults to RUN.run_id) — HistoryPage.tsx only trusts
+  // `detail` once its own run_id echoes `selected` (its `d`), and now folds
+  // `d` into `corrections` too, so a caller that passes a mismatched
+  // detailRunId reproduces the stale-commit window on demand.
   mockUseFetch.mockImplementation((path: string | null) => {
     if (path?.startsWith('/api/feedback/')) {
       return { data: feedbackFetch.data, loading: feedbackFetch.loading ?? false, error: feedbackFetch.error, reload: vi.fn() }
     }
-    return { data: null, loading: false, error: '', reload: vi.fn() }
+    return { data: { ...RUN, run_id: detailRunId, robot_code: null }, loading: false, error: '', reload: vi.fn() }
   })
 }
 
@@ -154,11 +161,36 @@ describe('HistoryPage drawer — the corrections fetch', () => {
     expect(screen.queryByText(/Filed against the original run/)).toBeNull()
   })
 
-  // The four tests above are all absence-assertions (no fetch call target,
-  // no error text, no stale text twice) — every one of them still passes if
-  // `corrections` were hardcoded to [], which would silently disable this
-  // task's whole feature. These two are the ones that actually prove a
-  // correction reaches the screen.
+  it('does not render a previous row’s corrections in the single stale commit before the detail fetch has caught up to the newly-selected row', async () => {
+    // This is the one window `loading`/`error` alone cannot see: feedback
+    // for the new row has already landed and settled (loading: false,
+    // error: '') carrying a real correction, but the run-detail fetch
+    // (mocked via detailRunId below) still names a DIFFERENT run — the
+    // render between `selected` changing and useFetch's own effect firing,
+    // where useFetch still returns the PREVIOUS path's fully settled state.
+    // Only `d`, folded into `corrections` in HistoryPage.tsx, catches this.
+    setup(
+      {
+        data: {
+          applied_to: 'run-9',
+          corrections: [{ hint_id: 1, feedback_text: 'STALE COMMIT TEXT MUST NOT APPEAR' }],
+        },
+        error: '', loading: false,
+      },
+      'run-DIFFERENT-FROM-OPENED-ROW',
+    )
+
+    await openDrawer()
+
+    expect(screen.queryByText(/STALE COMMIT TEXT MUST NOT APPEAR/)).toBeNull()
+    expect(screen.queryByText(/Filed against the original run/)).toBeNull()
+  })
+
+  // The five tests above are all absence-assertions (no fetch call target,
+  // no error text, no stale text across three different staleness windows)
+  // — every one of them still passes if `corrections` were hardcoded to
+  // [], which would silently disable this task's whole feature. These two
+  // are the ones that actually prove a correction reaches the screen.
   it('renders a correction’s text once the fetch succeeds', async () => {
     setup({
       data: { applied_to: 'run-1', corrections: [{ hint_id: 1, feedback_text: 'the search box locator was off' }] },

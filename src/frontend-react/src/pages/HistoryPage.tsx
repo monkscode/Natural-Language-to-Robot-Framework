@@ -311,22 +311,33 @@ export default function HistoryPage() {
   // against `selected` (only `applied_to`, the resolved ORIGINAL run, which
   // legitimately differs from `selected` on a re-run — see the block below),
   // so the same "does the response match the open row" trick doesn't apply
-  // here. `loading` and `error` are the substitute, and BOTH are required:
-  // useFetch's reload() sets loading true and error '' at the START of every
-  // attempt for the CURRENT path (useFetch.ts) — from inside an EFFECT, so
-  // for the one render between `feedbackPath` changing and that effect
-  // firing, both still describe the PREVIOUS path. From the render after
-  // that on, together they answer "is THIS path's fetch still in flight, or
-  // did IT fail" — but useFetch never clears `data` in either case, in its
-  // catch branch least of all (only setError runs there). So a fetch that
-  // FAILS for a freshly-selected row — the 403 below is the everyday case,
-  // not an edge one — leaves the PREVIOUS row's data sitting there with
-  // loading already back to false. Gating on loading alone closes only the
-  // in-flight window; without error too, opening an owned run with
-  // corrections on file and then a colleague's shared run (whose
-  // corrections read the gate below refuses) would go on showing the FIRST
-  // run's corrections, and a "filed against" notice that may be entirely
-  // fabricated, under the SECOND run's drawer.
+  // to it directly. `loading` and `error` are the first substitute, and
+  // BOTH are required: useFetch's reload() sets loading true and error ''
+  // at the START of every attempt for the CURRENT path (useFetch.ts) — from
+  // inside an EFFECT, so for the one render between `feedbackPath` changing
+  // and that effect firing, both still describe the PREVIOUS path; only
+  // from the render after that on do they answer "is THIS path's fetch
+  // still in flight, or did IT fail". useFetch never clears `data` in
+  // either case, in its catch branch least of all (only setError runs
+  // there), so a fetch that FAILS for a freshly-selected row — the 403
+  // below is the everyday case, not an edge one — leaves the PREVIOUS
+  // row's data sitting there with loading already back to false. Gating on
+  // loading alone closes only the in-flight window; without error too,
+  // opening an owned run with corrections on file and then a colleague's
+  // shared run (whose corrections read the gate below refuses) would go on
+  // showing the FIRST run's corrections, and a "filed against" notice that
+  // may be entirely fabricated, under the SECOND run's drawer.
+  //
+  // That leaves exactly the one render loading/error can't cover on their
+  // own — and it is exactly the render where `d` (above) is ALSO null, for
+  // the same reason (detail hasn't caught up to `selected` either).
+  // `corrections` below requires `d` too, which closes it. Borrowing it
+  // costs nothing on the success path: GET /api/history/{run_id} passes
+  // is_grouped=true while GET /api/feedback/{run_id} deliberately does not
+  // (see below), and is_grouped only ADDS an allow rule (caller_can_access,
+  // ownership.py) — so feedback-allowed strictly implies detail-allowed,
+  // and `d` is never null for permission reasons while the corrections
+  // fetch itself succeeds.
   //
   // Errors are read but never rendered as their own text. A 403 here is
   // EXPECTED and correct: GET /api/history/{run_id} above passes
@@ -338,7 +349,7 @@ export default function HistoryPage() {
   // way, silently: silence claims nothing either way.
   const feedbackPath = selected ? `/api/feedback/${selected}` : null
   const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
-  const corrections = feedbackLoading || feedbackError || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
+  const corrections = !d || feedbackLoading || feedbackError || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -1027,10 +1038,10 @@ export default function HistoryPage() {
           {/* What this run has already told the learning system — read-only
               here; Retract stays the Generate panel's action alone (see
               feedbackPath above). `corrections` above is already [] for
-              every case that must render nothing — still loading, refused,
-              or genuinely empty — so this needs no separate loading/error
-              check: silence claims nothing, same as RecordedCorrections'
-              own empty-array case. */}
+              every case that must render nothing — still loading, stale
+              for this row, refused, or genuinely empty — so this needs no
+              separate loading/error/staleness check: silence claims
+              nothing, same as RecordedCorrections' own empty-array case. */}
           {corrections.length > 0 && (
             <div className="space-y-1.5">
               {feedback?.applied_to && feedback.applied_to !== selected && (
