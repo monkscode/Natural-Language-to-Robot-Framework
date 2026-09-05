@@ -3,11 +3,11 @@
  * (light/dark/system mode, and the professional/neo visual toggle). Both
  * controls are built from a .map() over three/two near-identical buttons, so
  * the failure mode worth guarding is a button calling back with the WRONG
- * id/theme — a neighbour's instead of its own. PAGE_LABELS is a hand
- * -maintained path->label table; its fallback branch, and a gap in the table
- * that predates this test file, are pinned below.
+ * id/theme — a neighbour's instead of its own. The breadcrumb label is no
+ * longer a hand-maintained table: it is derived from the nav tables, and the
+ * drift guard below is what makes that derivation load-bearing.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,6 +15,7 @@ vi.mock('@/components/theme-provider', () => ({ useTheme: vi.fn() }))
 
 import { useTheme } from '@/components/theme-provider'
 import { SidebarProvider } from '@/components/ui/sidebar'
+import { NAV_PLATFORM, NAV_WORKSPACE } from '@/components/app-sidebar'
 import { AppHeader } from './app-header'
 
 const mockUseTheme = vi.mocked(useTheme)
@@ -58,27 +59,41 @@ describe('AppHeader — breadcrumb page label', () => {
     ['/history', 'Test Runs'],
     ['/metrics', 'Metrics'],
     ['/learning', 'Learning'],
+    ['/access', 'Access'],
+    ['/team', 'Team'],
     ['/settings', 'Settings'],
-    ['/docs', 'Documentation'],
   ])('labels %s as "%s"', (path, label) => {
     renderAt(path, 'system', 'professional')
     expect(screen.getByText('Platform')).toBeInTheDocument()
     expect(screen.getByText(label)).toBeInTheDocument()
   })
 
-  it('falls back to Overview for a path with no PAGE_LABELS entry', () => {
+  it('falls back to Overview for a path that is not a page', () => {
     renderAt('/some-unmapped-path', 'system', 'professional')
     expect(screen.getByText('Overview')).toBeInTheDocument()
   })
 
-  // PAGE_LABELS was never extended when /access and /team shipped — App.tsx's
-  // PAGES table gates both (see App.test.tsx) but neither path is a key in
-  // this component's PAGE_LABELS map. Pinning what actually happens today,
-  // not endorsing it: reported in the task write-up, not fixed here (surgical
-  // -diff / no-source-edits rule — this file only adds tests).
-  it('SURPRISING: /team has no PAGE_LABELS entry either, so it also falls back to Overview', () => {
-    renderAt('/team', 'system', 'professional')
+  /* The bug this replaced: /access and /team shipped as real gated routes and
+   * the header's own path->label table was never extended, so both rendered
+   * "Overview" on every load — while the table still carried a /docs entry for
+   * a route that was never declared. A third hand-maintained table of the same
+   * paths is what made that possible, so the fix removed the table rather than
+   * adding two rows to it. This is the guard that keeps it removed: a nav entry
+   * whose label the header cannot produce is a regression, whoever adds it. */
+  it('labels every navigable page with the SAME words the sidebar uses for it', () => {
+    for (const item of [...NAV_PLATFORM, ...NAV_WORKSPACE]) {
+      cleanup()
+      renderAt(item.url, 'system', 'professional')
+      expect(screen.queryByText('Overview'), `"${item.title}" (${item.url}) has no header label`)
+        .not.toBeInTheDocument()
+      expect(screen.getByText(item.title)).toBeInTheDocument()
+    }
+  })
+
+  it('no longer labels /docs, which is not a declared route', () => {
+    renderAt('/docs', 'system', 'professional')
     expect(screen.getByText('Overview')).toBeInTheDocument()
+    expect(screen.queryByText('Documentation')).not.toBeInTheDocument()
   })
 })
 
