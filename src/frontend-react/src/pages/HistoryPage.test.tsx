@@ -657,15 +657,23 @@ describe('HistoryPage — running a row again', () => {
 describe('HistoryPage — the drawer’s remaining actions', () => {
   it('Download builds a .robot file containing the exact stored code, named after the run', async () => {
     const { getParts, getAnchor } = stubDownload()
-    setupList([RUN_A])
-    withDetail('run-A')
+    // Local fixture with id longer than 8 chars to test truncation.
+    const RUN_WITH_LONG_ID = { ...RUN_A, run_id: 'run-A-0123456789abc' }
+    setupList([RUN_WITH_LONG_ID])
+    withDetail('run-A-0123456789abc')
     renderPage()
     fireEvent.click(await screen.findByText('search flipkart for shoes'))
     const downloadBtn = await screen.findByTitle('Download .robot file')
 
     fireEvent.click(downloadBtn)
 
-    expect(getAnchor()?.download).toBe('test-run-A.robot')
+    // Filename truncates run id to 8 chars: test-<first 8>-.robot.
+    // This is a filename convention (not displayed in UI), distinct from the
+    // "never truncate displayed ids" rule.
+    const filename = getAnchor()?.download
+    expect(filename).toBe('test-run-A-01.robot')
+    // Ensure truncation happens: 9th char onward must NOT appear in filename.
+    expect(filename).not.toContain('23456789')
     expect(getParts()).toEqual([CODE])
   })
 

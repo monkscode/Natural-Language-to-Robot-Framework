@@ -467,7 +467,8 @@ describe('GeneratePage — prefilled from History’s Regenerate', () => {
     renderPage({ prefillQuery: 'search flipkart for shoes' })
 
     expect(screen.getByPlaceholderText(/Open Google, search for/)).toHaveValue('search flipkart for shoes')
-    expect(replaceStateSpy).toHaveBeenCalled()
+    // Verify the state is actually cleared: replaceState called with empty state and empty title.
+    expect(replaceStateSpy).toHaveBeenCalledWith({}, '')
     replaceStateSpy.mockRestore()
   })
 })
