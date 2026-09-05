@@ -31,7 +31,7 @@ function nowTs() {
 /** /reports/{run_id}/log.html -> run_id (for feedback attribution) */
 function runIdFromReport(url: string | null): string | null {
   if (!url) return null
-  const m = url.match(/\/reports\/([^/]+)\//)
+  const m = /\/reports\/([^/]+)\//.exec(url)
   return m ? m[1] : null
 }
 
@@ -48,19 +48,19 @@ function parseRobotSummary(blob: string): RobotSummary {
   const failures: RobotSummary['failures'] = []
   let failing: string | null = null
   for (const line of blob.split('\n')) {
-    const t = line.match(/^\s*Test: (.+) - (PASS|FAIL)$/)
+    const t = /^\s*Test: (.+) - (PASS|FAIL)$/.exec(line)
     if (t) {
       tests.push({ name: t[1], status: t[2] as 'PASS' | 'FAIL' })
       failing = t[2] === 'FAIL' ? t[1] : null
       continue
     }
-    const e = line.match(/^\s*Error: (.+)$/)
+    const e = /^\s*Error: (.+)$/.exec(line)
     if (e && failing) {
       failures.push({ test: failing, message: e[1] })
       failing = null
     }
   }
-  const counts = blob.match(/^Results: (\d+) passed, (\d+) failed$/m)
+  const counts = /^Results: (\d+) passed, (\d+) failed$/m.exec(blob)
   return {
     tests,
     failures,
@@ -209,7 +209,7 @@ function AssembleActivity() {
 function VerifyActivity() {
   return (
     <div className="ghost-line flex items-center gap-2.5 text-xs text-[#8b949e]">
-      <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#30363d] border-t-sky-400" />
+      <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#30363d] border-t-sky-400" />{' '}
       Compiling the test in a clean Docker container — auto-fixing anything that fails
     </div>
   )
@@ -218,7 +218,7 @@ function VerifyActivity() {
 function GenerationPipeline({ progress, stage, logs }: { progress: number; stage: string; logs: LogEntry[] }) {
   // The element-scan SSE event carries the only real artifact count we get
   // ("📍 Found N elements on the page") — surface it in the Locate block.
-  const elMatch = logs.map(l => l.msg.match(/Found (\d+) elements/)).find(Boolean)
+  const elMatch = logs.map(l => /Found (\d+) elements/.exec(l.msg)).find(Boolean)
   const elementCount = elMatch ? Number(elMatch[1]) : null
   return (
     <div className="flex min-h-[300px] flex-1 flex-col overflow-hidden rounded-lg border border-border bg-[#0d1117] shadow-sm">
@@ -305,7 +305,7 @@ function GenerationPipeline({ progress, stage, logs }: { progress: number; stage
 
 /* ── Live elapsed-seconds counter for the execution strip ── */
 function ExecElapsed({ start }: { start: number | null }) {
-  const [, force] = useState(0)
+  const [_tick, force] = useState(0)
   useEffect(() => {
     const id = setInterval(() => force(t => t + 1), 1000)
     return () => clearInterval(id)
@@ -350,7 +350,7 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
   const pass = outcome === 'pass'
   const tests = summary?.tests ?? []
   const failures = summary?.failures ?? []
-  const total = summary && summary.passed != null && summary.failed != null
+  const total = summary?.passed != null && summary?.failed != null
     ? summary.passed + summary.failed
     : tests.length || null
   // Single-test runs are the norm — counts and the per-test list only earn

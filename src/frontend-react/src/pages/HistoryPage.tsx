@@ -301,7 +301,7 @@ export default function HistoryPage() {
   // useFetch keeps stale data during a refetch, so a just-clicked row would
   // briefly render the PREVIOUS run's code/query. Only trust detail once it
   // matches the open row.
-  const d = detail && detail.run_id === selected ? detail : null
+  const d = detail?.run_id === selected ? detail : null
 
   // What this run has already contributed to the learning store — the
   // History drawer's read of the same data GeneratePage's FeedbackPanel
