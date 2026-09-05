@@ -42,14 +42,40 @@ const COST_VARIANTS = [
  * What "this variant survived that dataset" actually has to mean.
  *
  * `select.toHaveValue(key)` proves nothing — the select changes whether or not
- * the chart rendered. These three checks are what catch the real failure modes:
- * a variant that renders NOTHING on data the others handle, and a variant that
+ * the chart rendered. These checks are what catch the real failure modes: a
+ * variant that renders NOTHING on data the others handle, and a variant that
  * lets NaN or Infinity reach an SVG attribute, which recharts does not throw on
  * — it silently draws nothing, so the page looks fine and the chart is empty.
+ *
+ * Two things here are less obvious than they look, both found by diffing an
+ * all-zero multi-metric render against the same render with normalize()'s
+ * `max > 0 ?` guard deleted (the mutation that survived this file before):
+ *
+ * 1. `svg.recharts-surface` is not unique to the chart itself — every
+ *    <Legend> entry is ALSO rendered as its own `<svg class="recharts-surface"
+ *    width="14" height="14">` (a fixed decorative line-glyph, one per series),
+ *    and for every variant that renders a Legend it sits BEFORE the chart's
+ *    own svg in DOM order. A bare `document.querySelector('svg.recharts-surface')`
+ *    was therefore reading a 14×14 legend icon — whose markup never changes
+ *    with the data — for most of the 22 variants. The direct-child
+ *    combinator below is what actually reaches the chart: the legend icons
+ *    are nested inside `.recharts-legend-wrapper`, several levels down, so
+ *    they never match it.
+ * 2. Even pointed at the right node, an outerHTML string search for "NaN"
+ *    would still have missed the bug. recharts never writes that literal for
+ *    a shape whose own coordinates went NaN: d3-shape's line/area generator
+ *    returns `null` instead, and recharts maps that to `d: undefined`, which
+ *    React drops from the DOM rather than rendering as an empty attribute.
+ *    The <path> element survives with everything except its geometry — no
+ *    "NaN" substring anywhere, no missing element to count, just a shape with
+ *    no `d`. That is what the loop at the end checks directly. (Confirmed:
+ *    with the guard removed, the three normalized series — cost/time/llm —
+ *    each lost their `d` outright; only "success", never divided because it
+ *    is already a 0–100 percentage, kept its path.)
  */
 function assertChartIsSane(key: string, rowCount: number) {
   if (rowCount === 0) return          // an empty dataset legitimately draws nothing
-  const svg = document.querySelector('svg.recharts-surface')
+  const svg = document.querySelector<SVGSVGElement>('.recharts-wrapper > svg.recharts-surface')
   if (!svg) {
     // A variant may legitimately decline to draw - but only by SAYING so.
     // A silently blank card is the failure this helper exists to catch, and
@@ -61,6 +87,15 @@ function assertChartIsSane(key: string, rowCount: number) {
   const markup = svg.outerHTML
   expect(markup, `${key} leaked NaN into the SVG`).not.toMatch(/NaN/)
   expect(markup, `${key} leaked Infinity into the SVG`).not.toMatch(/Infinity/)
+
+  // Line, Area (both its stroke and its fill), Bar and Pie all render as a
+  // <path> carrying their computed geometry in `d`. A shape whose inputs went
+  // NaN keeps its element and its class but drops `d` (see above) — so
+  // "the element exists" is not the same claim as "it drew anything".
+  for (const shape of svg.querySelectorAll('path.recharts-curve, path.recharts-rectangle, path.recharts-sector')) {
+    const d = shape.getAttribute('d')
+    expect(d, `${key} drew a "${shape.getAttribute('class')}" with no geometry (d=${JSON.stringify(d)})`).toBeTruthy()
+  }
 }
 
 /** One located element, at the given locator fallback depth. */
@@ -80,13 +115,12 @@ function row(over: Partial<MetricsRow> = {}): MetricsRow {
 
 /** Four datasets that between them cover the shapes that break naive maths. */
 const DATASETS: [string, MetricsRow[]][] = [
-  ['a normal multi-row set', [row(), row({ workflow_id: 'wf-2', url: 'https://amazon.in/x', total_cost: 0.12, success: false })]],
+  ['a normal multi-row set', [row(), row({ workflow_id: 'wf-2', url: 'https://amazon.in/x', total_cost: 0.12 })]],
   ['a single row', [row()]],
   ['an empty set', []],
   ['rows with null urls and zeroed denominators', [
     row({ url: null, total_elements: 0, successful_elements: 0, failed_elements: 0,
-          total_llm_calls: 0, total_cost: 0, execution_time: 0,
-          prompt_tokens: 0, completion_tokens: 0 }),
+          total_llm_calls: 0, total_cost: 0, execution_time: 0 }),
   ]],
 ]
 
