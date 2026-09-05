@@ -804,6 +804,29 @@ describe('T7: retracting a hint from the feedback panel', () => {
   })
 
   describe('the duplicate notice, once active is known', () => {
+    it('does not say "you retracted" when the retract found it already off', async () => {
+      /* changed: false is the route's own answer for a hint that was ALREADY
+       * inactive - an org admin retracted it between this panel's GET and this
+       * click. The click happened, but it is not what switched the correction
+       * off, and the panel has no business telling the user it was. The
+       * "won't come back" half is still true and still has to be said, so the
+       * neutral switched-off sentence is the right one - not the third branch,
+       * which drops that fact entirely. */
+      answersConfirm(true)
+      onFile(RETRACTABLE)
+      const { box } = renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce({ hint: {}, changed: false })
+      fireEvent.click(retractBtn)
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+
+      fireEvent.change(box, { target: { value: RETRACTABLE[0].feedback_text } })
+
+      expect(await screen.findByText(/This correction is switched off/)).toBeInTheDocument()
+      expect(screen.queryByText(/You retracted this correction/)).toBeNull()
+      expect(screen.queryByText(/already sent this/)).toBeNull()
+    })
+
     it('shows the switched-off sentence — not "already sent" — when active is false', async () => {
       onFile([{ ...RETRACTABLE[0], can_retract: false, active: false }])
       const { box } = renderFailPanel()

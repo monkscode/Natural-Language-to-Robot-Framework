@@ -508,11 +508,18 @@ function correctionMarker(c: PanelCorrection): string | null {
  *
  * The first two say the same "won't come back" fact; only the first claims WHO.
  * `active === false` alone does not know the retract was this user's own, so
- * the second must not say "you".
+ * the second must not say "you" — and neither may `retracted: 'already'`, which
+ * is the route answering that the hint was inactive BEFORE this click. The
+ * click happened; it is not what switched the correction off. It cannot fall
+ * through to the third sentence either: `active` is whatever the GET said and
+ * is not refreshed by the retract, so a stale `active: true` would drop the
+ * "won't come back" fact altogether.
  */
 function alreadySentNotice(c: PanelCorrection): string {
-  if (c.retracted) return 'You retracted this correction. Sending it again on this run won’t restore it.'
-  if (c.active === false) return 'This correction is switched off. Sending it again on this run won’t turn it back on.'
+  if (c.retracted === 'now') return 'You retracted this correction. Sending it again on this run won’t restore it.'
+  if (c.retracted === 'already' || c.active === false) {
+    return 'This correction is switched off. Sending it again on this run won’t turn it back on.'
+  }
   return 'You already sent this for this run — it won’t be counted again.'
 }
 
