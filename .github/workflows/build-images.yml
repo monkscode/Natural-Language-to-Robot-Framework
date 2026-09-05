@@ -289,8 +289,14 @@ jobs:
         working-directory: src/frontend-react
 
     steps:
+      # persist-credentials: false keeps GITHUB_TOKEN out of .git/config. The
+      # steps below run code this pull request authored - `npm ci` executes its
+      # package.json lifecycle scripts, `npm test` runs its test files - and no
+      # step here needs git authentication afterwards.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Same major as Dockerfile.frontend's `node:22-alpine` build stage, so a
       # failure here means the same thing a failure in the image build does.

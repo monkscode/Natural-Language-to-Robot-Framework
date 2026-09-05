@@ -187,6 +187,25 @@ def test_the_frontend_image_waits_for_the_frontend_suite():
         "publish an image built from React code the frontend suite rejected")
 
 
+def test_the_frontend_gate_checks_out_without_persisting_the_token():
+    """actions/checkout writes GITHUB_TOKEN into .git/config unless told not to.
+
+    This job then runs code the pull request itself authored - `npm ci` executes
+    lifecycle scripts from the PR's package.json, and `npm test` runs its test
+    files - so anything the PR wants can read that token off disk. No step in
+    the job needs git authentication afterwards. check-browser-service-release.yml
+    already sets this for the same reason.
+    """
+    steps = _build_images_workflow()["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout")]
+    assert checkouts, f"'{FRONTEND_GATE_JOB}' has no checkout step"
+    for s in checkouts:
+        assert s.get("with", {}).get("persist-credentials") is False, (
+            f"'{FRONTEND_GATE_JOB}' checks out with credential persistence on, "
+            "then runs pull-request-authored npm scripts and tests that can read "
+            "the token out of .git/config")
+
+
 def test_the_frontend_gate_runs_the_same_node_major_as_the_image_build():
     # A suite that passes on a different Node major than the image builds on is
     # not a gate on the thing being shipped. Dockerfile.frontend's build stage
