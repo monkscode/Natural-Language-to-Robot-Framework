@@ -59,7 +59,7 @@ const RUN = {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, detailRunId: string = RUN.run_id) {
+function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, detailRunId: string = RUN.run_id, detailExtra: Record<string, unknown> = {}) {
   mockUseAuth.mockReturnValue({
     user: { id: 'u1', email: 'a@b.com', display_name: 'A', role: 'user', status: 'active' },
     loading: false, isAuthenticated: true, isAdmin: false, status: 'active',
@@ -84,7 +84,7 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, d
     if (path?.startsWith('/api/feedback/')) {
       return { data: feedbackFetch.data, loading: feedbackFetch.loading ?? false, error: feedbackFetch.error, reload: vi.fn() }
     }
-    return { data: { ...RUN, run_id: detailRunId, robot_code: null }, loading: false, error: '', reload: vi.fn() }
+    return { data: { ...RUN, run_id: detailRunId, robot_code: null, ...detailExtra }, loading: false, error: '', reload: vi.fn() }
   })
 }
 
@@ -216,5 +216,39 @@ describe('HistoryPage drawer — the corrections fetch', () => {
 
     expect(await screen.findByText(/Filed against the original run/)).toBeInTheDocument()
     expect(screen.getByText(ORIGINAL_ID)).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage drawer — the re-run-of id', () => {
+  // The owner's standing rule is unconditional: a run/workflow id shown in
+  // any UI is full AND click-to-copy. The accessible branch already satisfies
+  // it — that id is a button (it opens the original). The INACCESSIBLE
+  // branch deliberately is not a link, because it would 404, and it lost the
+  // copy control along with the navigation. Losing the link is right; losing
+  // the copy is not, and this is the case where copying matters most: the
+  // only thing a user can still do with an id they cannot open is paste it to
+  // someone who can.
+  const ORIGINAL_ID = 'run-orig-0123456789abcdef0123456789'
+
+  it('gives the id a copy control even when the original is inaccessible', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { rerun_of: ORIGINAL_ID, rerun_of_accessible: false })
+
+    await openDrawer()
+
+    const id = await screen.findByText(ORIGINAL_ID)
+    expect(id.closest('button')).not.toBeNull()
+  })
+
+  it('still shows that id in full, and does not turn it into an open-the-original link', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { rerun_of: ORIGINAL_ID, rerun_of_accessible: false })
+
+    await openDrawer()
+
+    // Full id, not a prefix.
+    const id = await screen.findByText(ORIGINAL_ID)
+    expect(id.textContent).toContain(ORIGINAL_ID)
+    // Copy, not navigate: the accessible branch's button is titled "Open the
+    // original run", and this one must not be.
+    expect(id.closest('button')!.getAttribute('title')).toMatch(/copy/i)
   })
 })

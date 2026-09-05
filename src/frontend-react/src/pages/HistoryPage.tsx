@@ -946,13 +946,22 @@ export default function HistoryPage() {
                     </button>
                   ) : (
                     /* The same rule as the row pill: the id is still shown in
-                       full, but it is text rather than a link that 404s. */
-                    <span
-                      className="font-mono"
-                      title="You no longer have access to the original run"
+                       full, but it is not a link, because that link would
+                       404. It keeps the copy control the accessible branch
+                       gets for free from being a button — the id rule is
+                       full-AND-copyable unconditionally, and this is the case
+                       where copying earns the most: the only thing left to do
+                       with an id you cannot open is hand it to someone who
+                       can. */
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+                      title="Copy the original run’s id — you no longer have access to open it"
+                      onClick={() => void copyText(d.rerun_of!, 'drawer-rerun-of')}
                     >
                       {d.rerun_of}
-                    </span>
+                      {copied === 'drawer-rerun-of' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    </button>
                   )}
                   {/* The leading space in the string below is load-bearing.
                       JSX strips the newline between two adjacent elements, so
