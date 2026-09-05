@@ -44,7 +44,11 @@ function pwStrength(pw: string): 0 | 1 | 2 | 3 {
   return Math.min(s, 3) as 0 | 1 | 2 | 3
 }
 
-const STRENGTH_LABEL = ['', 'Weak', 'Fair', 'Strong'] as const
+// Index 0 is reachable: pwStrength returns 0 for any non-empty password that
+// earns nothing, and the meter renders whenever the field is non-empty. It was
+// the empty string, so the weakest password on the scale was the only one the
+// meter refused to name. The empty field never reaches here at all.
+const STRENGTH_LABEL = ['Very weak', 'Weak', 'Fair', 'Strong'] as const
 const STRENGTH_COLOR = ['bg-muted', 'bg-red-500', 'bg-yellow-500', 'bg-green-500'] as const
 
 export default function SignupPage() {

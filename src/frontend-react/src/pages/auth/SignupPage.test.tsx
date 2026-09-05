@@ -174,21 +174,25 @@ describe('SignupPage — the password strength meter', () => {
   it('shows nothing until something is typed', () => {
     setup()
 
+    // The whole meter is behind `password.length > 0`, so index 0 of
+    // STRENGTH_LABEL is unreachable while the field is empty - which is what
+    // makes it free to carry a real word for the case below.
+    expect(screen.queryByText('Very weak')).toBeNull()
     expect(screen.queryByText('Weak')).toBeNull()
     expect(screen.queryByText('Fair')).toBeNull()
     expect(screen.queryByText('Strong')).toBeNull()
   })
 
-  it('shows NO label for a password that scores zero', () => {
-    // 'abc' earns nothing: under 8 characters, not mixed case, no digit. The
-    // score indexes STRENGTH_LABEL, whose 0 entry is the empty string - so a
-    // very weak password is silent rather than labelled "Weak". Pinned
-    // because it is surprising, and because a future label added at index 0
-    // would change what an empty-ish field says.
+  it('calls a password that scores zero Very weak, rather than saying nothing', () => {
+    // 'abc' earns nothing: under 8 characters, not mixed case, no digit. Its
+    // score indexes STRENGTH_LABEL[0], which used to be the empty string - so
+    // the weakest password on the scale was the one the meter refused to
+    // describe, and the bars stayed grey exactly as they do for a field
+    // nobody has touched.
     setup()
     fireEvent.change(pw(), { target: { value: 'abc' } })
 
-    expect(screen.queryByText('Weak')).toBeNull()
+    expect(screen.getByText('Very weak')).toBeInTheDocument()
     expect(screen.queryByText('Fair')).toBeNull()
     expect(screen.queryByText('Strong')).toBeNull()
   })
