@@ -44,7 +44,7 @@ export interface RecordedCorrectionItem {
 /** Renders nothing for an empty list — silence claims nothing, the same
     degrade-to-silence the panel already uses for a run that contributed
     nothing (or a corrections read that failed). */
-export function RecordedCorrections({ corrections }: { corrections: RecordedCorrectionItem[] }) {
+export function RecordedCorrections({ corrections }: Readonly<{ corrections: RecordedCorrectionItem[] }>) {
   if (corrections.length === 0) return null
   return (
     <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">

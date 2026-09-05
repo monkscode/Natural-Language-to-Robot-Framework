@@ -774,6 +774,33 @@ describe('T7: retracting a hint from the feedback panel', () => {
       expect(screen.getByText('— retracted')).toBeInTheDocument()
       expect(screen.queryByText('— switched off')).toBeNull()
     })
+
+    it('lets the in-session retract win in the NOTICE too, not just the marker', async () => {
+      // The same precedence as the marker above, one layer down - and it was
+      // NOT covered: swapping the two branches of the duplicate notice left
+      // all 48 tests green. Both sentences state the same "it will not come
+      // back on this run" fact; only the retracted one claims WHO, and
+      // active === false alone cannot know the retract was this user's own.
+      //
+      // The fixture is unreachable by construction, exactly like the marker
+      // test above: can_retract ANDs in is_active server-side, so a row cannot
+      // arrive both retractable and inactive. Pinned because the ORDERING is
+      // deliberate - if the state ever becomes reachable, the more specific
+      // sentence has to win.
+      answersConfirm(true)
+      onFile([{ ...RETRACTABLE[0], active: false }])
+      const { box } = renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce({ hint: {}, changed: true })
+      fireEvent.click(retractBtn)
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+
+      // The notice only appears once the typed text matches a correction on file.
+      fireEvent.change(box, { target: { value: RETRACTABLE[0].feedback_text } })
+
+      expect(await screen.findByText(/You retracted this correction/)).toBeInTheDocument()
+      expect(screen.queryByText(/This correction is switched off/)).toBeNull()
+    })
   })
 
   describe('the duplicate notice, once active is known', () => {

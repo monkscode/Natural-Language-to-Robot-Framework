@@ -475,6 +475,47 @@ interface RecordedResponse { corrections?: RecordedCorrection[] }
     the changed:false answer below: retracted, but not by this click. */
 interface PanelCorrection extends RecordedCorrection { retracted?: 'now' | 'already' }
 
+/**
+ * The ONE marker a recorded correction shows, in precedence order.
+ *
+ * `retracted` is client-only, set by THIS session's own retract click, and it
+ * wins because it is the more specific fact — it knows WHO did it.
+ * `active === false` covers every other way the hint went inactive (another
+ * caller's retract, auto-disable, an LLM review); the server cannot tell those
+ * apart, so this marker does not pretend to either.
+ *
+ * The test is `active === false`, never `!active`, so a missing field — an
+ * older backend, or the learning-disabled response — renders exactly as it
+ * does today, with no marker at all.
+ */
+function correctionMarker(c: PanelCorrection): string | null {
+  if (c.retracted === 'already') return '— already retracted'
+  if (c.retracted) return '— retracted'
+  if (c.active === false) return SWITCHED_OFF_MARKER
+  return null
+}
+
+/**
+ * What to say about a correction this run has already contributed.
+ *
+ * All three sentences are scoped to THIS run on purpose. Sending the same text
+ * again here dedups to the existing hint and the claim row for this run already
+ * exists, so nothing reactivates it — but the same text from a LATER run does
+ * reinforce, and an unqualified "it can't come back" would be a new false
+ * claim. These fire BEFORE the click: they are the only thing that warns while
+ * the user can still change their mind, which is why they are kept even though
+ * the backend now answers such a resubmission honestly ("hint_inactive").
+ *
+ * The first two say the same "won't come back" fact; only the first claims WHO.
+ * `active === false` alone does not know the retract was this user's own, so
+ * the second must not say "you".
+ */
+function alreadySentNotice(c: PanelCorrection): string {
+  if (c.retracted) return 'You retracted this correction. Sending it again on this run won’t restore it.'
+  if (c.active === false) return 'This correction is switched off. Sending it again on this run won’t turn it back on.'
+  return 'You already sent this for this run — it won’t be counted again.'
+}
+
 /** POST /api/learning/hints/{id}/retract → { hint, changed, note }
     (learning_endpoints.py). `changed: false` is the route's own answer for a
     hint that was ALREADY inactive — an org admin who retracted it between
@@ -784,13 +825,9 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
                         retract, auto-disable, an LLM review) — the server
                         can't tell those apart, so this marker doesn't
                         pretend to either. */}
-                    {c.retracted ? (
-                      <span className="ml-1.5 italic">
-                        {c.retracted === 'already' ? '— already retracted' : '— retracted'}
-                      </span>
-                    ) : c.active === false ? (
-                      <span className="ml-1.5 italic">{SWITCHED_OFF_MARKER}</span>
-                    ) : null}
+                    {correctionMarker(c) && (
+                      <span className="ml-1.5 italic">{correctionMarker(c)}</span>
+                    )}
                   </span>
                   {/* can_retract is absent or false on an older backend and on
                       the learning-disabled shape — both render exactly like
@@ -839,23 +876,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           this width the sentence wraps and collides with the 0/500 counter. */}
       {alreadySent && (
         <p className="text-xs text-muted-foreground">
-          {alreadySent.retracted
-            /* Scoped to THIS run on purpose. Sending it again here dedups to
-               the hint that was just retracted and the claim row for this run
-               already exists, so nothing reactivates it — but the same text
-               from a LATER run does reinforce, and an unqualified "it can't
-               come back" would be a new false claim. Kept now that the
-               backend answers such a resubmission honestly ("hint_inactive"),
-               because this fires BEFORE the click: it is the only thing that
-               warns while the user can still change their mind. */
-            ? 'You retracted this correction. Sending it again on this run won’t restore it.'
-            : alreadySent.active === false
-              /* Same "won't come back" fact as the branch above, minus the
-                 claim of WHO — active===false alone doesn't know it was this
-                 user's own retract, so unlike the branch above this must not
-                 say "you". */
-              ? 'This correction is switched off. Sending it again on this run won’t turn it back on.'
-              : 'You already sent this for this run — it won’t be counted again.'}
+          {alreadySentNotice(alreadySent)}
         </p>
       )}
       <div className="flex items-center justify-between">
