@@ -678,7 +678,7 @@ describe('ReviewSessionPanel: recommendations, decisions, and applying', () => {
 
   it('shows the failure and does not refetch when saving a decision rejects', async () => {
     const { detailReload } = renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue(null)
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('note')
     mockApi.mockRejectedValueOnce(new Error('Request failed (409)'))
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
@@ -720,7 +720,7 @@ describe('ReviewSessionPanel: recommendations, decisions, and applying', () => {
 
   it('sends the id of the SPECIFIC recommendation clicked, not the other one on screen', async () => {
     renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED, REC_APPROVED_UNAPPLIED] })
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue(null)
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('note')
     mockApi.mockResolvedValueOnce({})
 
     // REC_APPROVED_UNAPPLIED renders second — its Reject button is index 1.
@@ -731,14 +731,27 @@ describe('ReviewSessionPanel: recommendations, decisions, and applying', () => {
     promptSpy.mockRestore()
   })
 
-  /* Surprising, and real: unlike Retract's window.confirm, decide()'s
-   * window.prompt does not GATE the request — dismissing the note prompt
-   * (returns null) still submits the decision, with admin_notes: null. Pinned
-   * here rather than weakened, per source: `const notes = window.prompt(...)`
-   * has no `if (!notes) return` before the api() call. */
-  it('still submits the decision when the note prompt is dismissed — prompt does not gate the call', async () => {
-    renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
+  /* window.prompt reports three distinct outcomes and decide() must not
+   * collapse them: null = the admin dismissed the dialog (Escape/Cancel),
+   * '' = they pressed OK on an empty box, and any text = a real note. The
+   * prompt is labelled "leave blank to skip", so only the FIRST is an
+   * abandoned action — and this one writes to the learning store, so it must
+   * send nothing at all. The next three tests pin one outcome each. */
+  it('sends nothing when the note prompt is dismissed — Cancel abandons the decision', async () => {
+    const { detailReload } = renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
     const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue(null)
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
+
+    await waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1))
+    expect(mockApi).not.toHaveBeenCalled()
+    expect(detailReload).not.toHaveBeenCalled()
+    promptSpy.mockRestore()
+  })
+
+  it('still submits, with no note, when the admin presses OK on an empty prompt', async () => {
+    renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('')
     mockApi.mockResolvedValueOnce({})
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
@@ -746,6 +759,39 @@ describe('ReviewSessionPanel: recommendations, decisions, and applying', () => {
     await waitFor(() => expect(mockApi).toHaveBeenCalledTimes(1))
     const body = JSON.parse((mockApi.mock.calls[0][1] as { body: string }).body)
     expect(body).toEqual({ admin_decision: 'approved', admin_notes: null })
+    promptSpy.mockRestore()
+  })
+
+  it('stores a whitespace-only note as no note, not as blanks in the audit trail', async () => {
+    renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('   ')
+    mockApi.mockResolvedValueOnce({})
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
+
+    await waitFor(() => expect(mockApi).toHaveBeenCalledTimes(1))
+    const body = JSON.parse((mockApi.mock.calls[0][1] as { body: string }).body)
+    expect(body).toEqual({ admin_decision: 'approved', admin_notes: null })
+    promptSpy.mockRestore()
+  })
+
+  /* A dismissed prompt abandons the whole action, so it must not clear the
+   * error left by a previous failed decide() either — the guard has to run
+   * before setActErr(''). */
+  it('leaves a previous error on screen when a later note prompt is dismissed', async () => {
+    renderPanel({ session: SESSION_REVIEWABLE, recommendations: [REC_UNDECIDED] })
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('note')
+    mockApi.mockRejectedValueOnce(new Error('Request failed (409)'))
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
+    expect(await screen.findByText('Request failed (409)')).toBeInTheDocument()
+
+    promptSpy.mockReturnValue(null)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[0])
+
+    await waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Request failed (409)')).toBeInTheDocument()
+    expect(mockApi).toHaveBeenCalledTimes(1)
     promptSpy.mockRestore()
   })
 
