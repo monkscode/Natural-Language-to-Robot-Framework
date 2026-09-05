@@ -81,6 +81,40 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: true
 
+      # sonar-project.properties points sonar.javascript.lcov.reportPaths at
+      # src/frontend-react/coverage/lcov.info. Nothing else in CI produces it,
+      # and Sonar does not fail when an lcov path is missing - it silently
+      # reports the whole SPA as 0% covered, which fails the new-code gate on
+      # every frontend PR for a reason that looks nothing like the cause. So
+      # this runs BEFORE the scan, and its failure is not suppressed.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/frontend-react/package-lock.json
+
+      - name: Frontend coverage (produces lcov for SonarQube)
+        working-directory: src/frontend-react
+        run: |
+          npm ci
+          npx vitest run --coverage
+          # vitest writes lcov paths relative to ITS root, so every record reads
+          # `SF:src/App.tsx`. Sonar resolves those against the repo root, where
+          # `src/` is the PYTHON backend — so every path would miss, and Sonar
+          # would report the SPA as 0% covered without erroring. Rewrite them to
+          # repo-root-relative. Verified by the grep below, which fails the job
+          # rather than letting a silent 0% through.
+          sed -i 's|^SF:src/|SF:src/frontend-react/src/|' coverage/lcov.info
+          # Fail loudly if the rewrite did not take: every record must now be
+          # repo-root-relative, and none may still be bare `SF:src/...`.
+          grep -q '^SF:src/frontend-react/src/' coverage/lcov.info
+          if grep -c '^SF:' coverage/lcov.info | grep -qv "^$(grep -c '^SF:src/frontend-react/src/' coverage/lcov.info)$"; then
+            echo "lcov path rewrite incomplete — Sonar would report 0% coverage" >&2
+            grep '^SF:' coverage/lcov.info | grep -v '^SF:src/frontend-react/src/' >&2
+            exit 1
+          fi
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6
         env:

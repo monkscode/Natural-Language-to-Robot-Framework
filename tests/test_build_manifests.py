@@ -208,3 +208,95 @@ def test_the_frontend_gate_runs_the_same_node_major_as_the_image_build():
     assert all(v.split(".")[0] == image_major for v in versions), (
         f"'{FRONTEND_GATE_JOB}' runs Node {versions} but Dockerfile.frontend "
         f"builds on node:{image_major}")
+
+
+# ---------------------------------------------------------------------------
+# SonarQube's view of the frontend.
+#
+# src/frontend-react was excluded from Sonar analysis entirely while it had no
+# test harness. It has one now, so the exclusion came off and lcov is wired in.
+# Both halves are silent when broken, which is why they are guarded here:
+#
+#   - Sonar does NOT fail when an lcov path is missing. It reports the whole SPA
+#     as 0% covered, which fails the new-code gate on every frontend PR for a
+#     reason that looks nothing like the cause.
+#   - Re-adding src/frontend-react to sonar.exclusions would make the analysis
+#     pass by not looking, which is how this started.
+# ---------------------------------------------------------------------------
+
+SONAR_PROPS = REPO_ROOT / "sonar-project.properties"
+SONAR_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "sonarqube.yml"
+
+
+def _sonar_props() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in SONAR_PROPS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def test_the_frontend_is_not_excluded_from_sonar_analysis():
+    excl = _sonar_props().get("sonar.exclusions", "")
+    offenders = [
+        p for p in excl.split(",")
+        if p.strip().startswith("src/frontend-react")
+        and not p.strip().startswith(("src/frontend-react/dist", "src/frontend-react/coverage"))
+    ]
+    assert not offenders, (
+        f"sonar.exclusions hides frontend SOURCE from analysis: {offenders}. "
+        "Build output and coverage output may be excluded; source may not.")
+
+
+def test_sonar_reads_the_frontend_lcov():
+    props = _sonar_props()
+    assert props.get("sonar.javascript.lcov.reportPaths") == "src/frontend-react/coverage/lcov.info", (
+        "sonar.javascript.lcov.reportPaths is missing or wrong — Sonar would "
+        "silently report the SPA as 0% covered rather than failing")
+
+
+def test_vendored_shadcn_is_excluded_from_coverage_but_not_from_analysis():
+    props = _sonar_props()
+    cov_excl = props.get("sonar.coverage.exclusions", "")
+    assert "src/frontend-react/src/components/ui/**" in cov_excl, (
+        "vendored shadcn/ui must be excluded from COVERAGE (it is generated and "
+        "never edited here) — but it must stay in analysis, since it ships")
+
+
+def test_the_sonar_workflow_produces_the_lcov_before_it_scans():
+    import yaml
+    wf = yaml.safe_load(SONAR_WORKFLOW.read_text(encoding="utf-8"))
+    steps = wf["jobs"]["sonarqube"]["steps"]
+    names = [s.get("name") or s.get("uses", "") for s in steps]
+    runs = "\n".join(s.get("run", "") for s in steps)
+    assert "vitest run --coverage" in runs, (
+        "sonarqube.yml never generates the frontend lcov it tells Sonar to read")
+    scan = next(i for i, s in enumerate(steps)
+                if "sonarqube-scan-action" in s.get("uses", ""))
+    cov = next(i for i, s in enumerate(steps)
+               if "vitest run --coverage" in s.get("run", ""))
+    assert cov < scan, (
+        f"the frontend coverage step (index {cov}) must run BEFORE the scan "
+        f"(index {scan}), or the lcov does not exist when Sonar reads it")
+    assert names, "sonarqube job has no steps"
+
+
+def test_the_sonar_workflow_rewrites_lcov_paths_to_repo_root():
+    """vitest writes lcov paths relative to ITS OWN root, so every record reads
+    `SF:src/App.tsx`. Sonar resolves those against the repo root, where `src/`
+    is the PYTHON backend - measured 2026-09-05, all 41 records unresolvable
+    and the SPA reported as 0% covered, with no error from Sonar. The rewrite
+    is what makes the lcov usable, and it is one `sed` away from being lost.
+    """
+    steps = __import__("yaml").safe_load(
+        SONAR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sonarqube"]["steps"]
+    runs = chr(10).join(s.get("run", "") for s in steps)
+    assert "SF:src/frontend-react/src/" in runs, (
+        "sonarqube.yml does not rewrite the lcov paths to repo-root-relative - "
+        "Sonar will silently report src/frontend-react as 0% covered")
+    assert "exit 1" in runs, (
+        "the lcov rewrite is not verified in CI; a partial rewrite would pass "
+        "silently and produce a wrong coverage number rather than a failure")
