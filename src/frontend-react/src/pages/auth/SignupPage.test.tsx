@@ -91,12 +91,11 @@ describe('SignupPage — validate() blocks each bad field', () => {
   })
 
   it('blocks a malformed email — the browser refuses the submit before validate() runs', () => {
-    // The field is type="email" with no `required`. A NON-EMPTY malformed
-    // value fails the browser's own constraint validation, so handleSubmit
-    // never runs and the component's `!email.includes('@')` rule is
-    // unreachable for this case. It IS reachable for an empty email, which
-    // type="email" considers valid - that path is covered by the
-    // "reports every bad field at once" test below.
+    // The field is type="email" with no `required` and the form has no
+    // noValidate, so a NON-EMPTY malformed value fails the browser's own
+    // constraint validation and handleSubmit never runs. That is why the
+    // component's own `!email.includes('@')` rule reaches the user only when
+    // the field is EMPTY, and why its message names that case and not this one.
     const signup = setup()
     fillValid()
     fireEvent.change(email(), { target: { value: 'not-an-email' } })
@@ -104,17 +103,21 @@ describe('SignupPage — validate() blocks each bad field', () => {
     fireEvent.click(submit())
 
     expect(signup).not.toHaveBeenCalled()
-    expect(screen.queryByText('Enter a valid email')).toBeNull()
+    expect(screen.queryByText('Enter your work email')).toBeNull()
   })
 
-  it('rejects an EMPTY email through validate(), since type="email" allows it', async () => {
+  it('asks for the email, in the words of the only case that reaches the user — an empty field', async () => {
     const signup = setup()
     fillValid()
     fireEvent.change(email(), { target: { value: '' } })
 
     fireEvent.click(submit())
 
-    expect(await screen.findByText('Enter a valid email')).toBeInTheDocument()
+    expect(await screen.findByText('Enter your work email')).toBeInTheDocument()
+    // The old wording, "Enter a valid email", described the malformed-input
+    // case the browser had already taken over - it accused a visitor who had
+    // typed nothing of typing something wrong.
+    expect(screen.queryByText('Enter a valid email')).toBeNull()
     expect(signup).not.toHaveBeenCalled()
   })
 
@@ -160,7 +163,7 @@ describe('SignupPage — validate() blocks each bad field', () => {
     fireEvent.click(submit())
 
     expect(await screen.findByText('Required')).toBeInTheDocument()
-    expect(screen.getByText('Enter a valid email')).toBeInTheDocument()
+    expect(screen.getByText('Enter your work email')).toBeInTheDocument()
     expect(screen.getByText('Minimum 8 characters')).toBeInTheDocument()
     expect(screen.getByText('Please accept the terms')).toBeInTheDocument()
     expect(signup).not.toHaveBeenCalled()
