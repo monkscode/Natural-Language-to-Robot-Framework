@@ -70,9 +70,9 @@ function parseRobotSummary(blob: string): RobotSummary {
 }
 
 /* ── Collapsible logs card with an indeterminate bar while running ── */
-function LogsSection({ title, desc, logs, running, collapseOnDone }: {
+function LogsSection({ title, desc, logs, running, collapseOnDone }: Readonly<{
   title: string; desc: string; logs: LogEntry[]; running: boolean; collapseOnDone?: boolean
-}) {
+}>) {
   const [open, setOpen] = useState(true)
   const listRef = useRef<HTMLDivElement>(null)
   // Keep the newest log line in view while streaming (legacy-UI behaviour)
@@ -142,7 +142,7 @@ const PIPELINE_STAGES = [
 ] as const
 
 /* Plan: numbered ghost steps, revealed as the planner's SSE events arrive */
-function PlanActivity({ progress }: { progress: number }) {
+function PlanActivity({ progress }: Readonly<{ progress: number }>) {
   const widths = ['w-64', 'w-52', 'w-72']
   return (
     <div>
@@ -157,7 +157,7 @@ function PlanActivity({ progress }: { progress: number }) {
 }
 
 /* Locate: element → locator pairs being captured from the live page */
-function LocateActivity({ progress, elementCount }: { progress: number; elementCount: number | null }) {
+function LocateActivity({ progress, elementCount }: Readonly<{ progress: number; elementCount: number | null }>) {
   const widths: [string, string][] = [['w-24', 'w-48'], ['w-28', 'w-40'], ['w-20', 'w-56']]
   return (
     <div>
@@ -215,7 +215,7 @@ function VerifyActivity() {
   )
 }
 
-function GenerationPipeline({ progress, stage, logs }: { progress: number; stage: string; logs: LogEntry[] }) {
+function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: number; stage: string; logs: LogEntry[] }>) {
   // The element-scan SSE event carries the only real artifact count we get
   // ("📍 Found N elements on the page") — surface it in the Locate block.
   const elMatch = logs.map(l => /Found (\d+) elements/.exec(l.msg)).find(Boolean)
@@ -304,7 +304,7 @@ function GenerationPipeline({ progress, stage, logs }: { progress: number; stage
 }
 
 /* ── Live elapsed-seconds counter for the execution strip ── */
-function ExecElapsed({ start }: { start: number | null }) {
+function ExecElapsed({ start }: Readonly<{ start: number | null }>) {
   // useReducer, not useState: this value is never read, only ever bumped to
   // force a re-render every second, so there is no "state" here to name.
   const [, forceRerender] = useReducer(x => x + 1, 0)
@@ -345,10 +345,10 @@ function ConfettiBurst() {
 
 /* ── Post-run result card: outcome banner, per-test breakdown, report links,
    and an optional feedback footer (children) ── */
-function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: {
+function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: Readonly<{
   outcome: Exclude<Outcome, null>; summary: RobotSummary | null; secs: number | null
   reportUrl: string | null; logUrl: string | null; children?: ReactNode
-}) {
+}>) {
   const pass = outcome === 'pass'
   const tests = summary?.tests ?? []
   const failures = summary?.failures ?? []
@@ -547,7 +547,7 @@ const RETRACT_ACTOR_PLACEHOLDER = 'feedback-panel'
    Fail: form open by default; Skip still records an empty completely_wrong
    label on the execution record, but nothing is learned from it (outcome
    "no_text") — the empty text carries nothing for any engine to route. ── */
-export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
+export function FeedbackPanel({ outcome, workflowId }: Readonly<{ outcome: Exclude<Outcome, null>; workflowId: string | null }>) {
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
