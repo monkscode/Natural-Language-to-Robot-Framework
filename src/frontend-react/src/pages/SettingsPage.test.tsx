@@ -8,11 +8,13 @@
  * exercised here to avoid the pointer-capture/scrollIntoView polyfills a real
  * open would need in jsdom).
  *
- * FINDING (surprising, not fixed — no source edits per the task rules): the
- * "Discard changes" and "Save settings" buttons carry no onClick at all. This
- * page does not yet persist or discard anything; clicking either button is a
- * no-op. Reported in the task write-up; not asserted here, since "nothing
- * happens" has no non-tautological way to observe from outside.
+ * The page is a mockup: nothing here persists. There is no settings route and
+ * no settings table in src/backend/ — MODEL_PROVIDER, GEMINI_API_KEY and the
+ * rest are process-level .env values read once at startup — and the two action
+ * buttons never had an onClick. Wiring it up is a feature (persistence, auth
+ * scoping, and a hot-reload story for values read at boot), not a fix, so the
+ * controls are disabled and the page says so. The tests below pin that: a
+ * platform admin must not be able to type a real API key into a dead field.
  */
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -77,5 +79,47 @@ describe('SettingsPage — actions', () => {
 
     expect(screen.getByRole('button', { name: 'Discard changes' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save settings' })).toBeInTheDocument()
+  })
+
+  it('disables both action buttons, because neither one saves or discards anything', () => {
+    render(<SettingsPage />)
+
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled()
+  })
+})
+
+describe('SettingsPage — inactive until a backend exists', () => {
+  it('tells the reader the page is not active yet and where the settings really live', () => {
+    render(<SettingsPage />)
+
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent(/not active yet/i)
+    expect(notice).toHaveTextContent(/src\/backend\/\.env/)
+  })
+
+  /* The API Key field is the one with real damage attached: it carries the
+   * placeholder "Enter your Gemini API key…", so a platform admin can paste a
+   * live secret into it and get total silence. It must not accept input. */
+  it('disables the API Key field so a real secret cannot be typed into a dead form', () => {
+    render(<SettingsPage />)
+
+    expect(screen.getByLabelText('API Key')).toBeDisabled()
+  })
+
+  it('disables every text field', () => {
+    render(<SettingsPage />)
+
+    for (const label of ['App Port', 'Browser Service URL', 'Execution Timeout (s)']) {
+      expect(screen.getByLabelText(label), `"${label}" is still editable`).toBeDisabled()
+    }
+  })
+
+  it('disables every select trigger', () => {
+    render(<SettingsPage />)
+
+    for (const label of ['Model Provider', 'Model', 'Library', 'Browser', 'Headless Mode']) {
+      expect(screen.getByLabelText(label), `"${label}" is still selectable`).toBeDisabled()
+    }
   })
 })
