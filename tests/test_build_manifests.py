@@ -285,6 +285,89 @@ def test_vendored_shadcn_is_excluded_from_coverage_but_not_from_analysis():
         "never edited here) — but it must stay in analysis, since it ships")
 
 
+def _ant_match(path: str, pattern: str) -> bool:
+    """Approximate Sonar's ant path matching well enough for the patterns here.
+
+    `**` spans directories and `*` does not, but every pattern this repo uses is
+    either `<dir>/**` or `**/*.<ext>`, for which collapsing both to ".*" gives
+    the same answer.
+    """
+    import re
+    rx = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", ".*")
+    return re.fullmatch(rx, path) is not None
+
+
+def _sonar_scope(path: str) -> str:
+    """Which scope Sonar puts `path` in: 'test', 'source', or 'dropped'.
+
+    sonar.tests sets where test code is looked for; sonar.test.inclusions then
+    NARROWS that set. A file under sonar.tests that matches no inclusion is not
+    a test - and if it is not under sonar.sources either, it leaves the analysis
+    entirely.
+    """
+    props = _sonar_props()
+    csv = lambda k: [v.strip() for v in props.get(k, "").split(",") if v.strip()]
+
+    under = lambda roots: any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+    test_incl = csv("sonar.test.inclusions")
+    matches_test_incl = any(_ant_match(path, p) for p in test_incl)
+    if under(csv("sonar.tests")):
+        if not test_incl or matches_test_incl:
+            if not any(_ant_match(path, p) for p in csv("sonar.test.exclusions")):
+                return "test"
+    # A file matching sonar.test.inclusions is never indexed as source, whether
+    # or not a sonar.tests root reaches it - so an inclusion without a matching
+    # root removes the file from the analysis instead of reclassifying it.
+    # Confirmed on PR #100: app-header.test.tsx and tests/test_build_manifests.py
+    # were both changed by the PR and neither is indexed, while GeneratePage.tsx
+    # and useFetch.ts from the same diff are both indexed as FIL.
+    if under(csv("sonar.sources")) and not matches_test_incl:
+        if not any(_ant_match(path, p) for p in csv("sonar.exclusions")):
+            return "source"
+    return "dropped"
+
+
+def test_the_python_suite_is_still_in_sonars_test_scope():
+    """Adding sonar.test.inclusions for the frontend silently emptied it.
+
+    sonar.test.inclusions narrows sonar.tests, so `**/*.test.ts,**/*.test.tsx`
+    matched no Python file and dropped the entire tests/ tree out of the
+    analysis. Measured on PR #100: SonarCloud indexed 0 unit-test files against
+    the PR while the main branch indexed 187, and Sonar reported nothing wrong.
+    """
+    for path in ("tests/test_build_manifests.py", "tests/test_api/test_feedback_can_retract.py"):
+        assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real test file"
+        assert _sonar_scope(path) == "test", (
+            f"{path} is not in Sonar's test scope - the Python suite is being "
+            "analysed as though it did not exist")
+
+
+def test_the_frontend_suite_is_in_sonars_test_scope():
+    """A test.inclusions pattern with no sonar.tests root behind it deletes files.
+
+    `**/*.test.tsx` matched every frontend test and took them out of the source
+    scope, but nothing put them into the test scope, so 37 files and ~7,300
+    lines simply left the analysis. Measured on PR #100: app-header.test.tsx is
+    in the diff and is not indexed at all, while GeneratePage.tsx and
+    useFetch.ts from the same diff are indexed as FIL.
+    """
+    path = "src/frontend-react/src/components/app-header.test.tsx"
+    assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real test file"
+    assert _sonar_scope(path) == "test", (
+        f"{path} is not in Sonar's test scope - the frontend suite is either "
+        "graded as production code or dropped from the analysis entirely")
+
+
+def test_frontend_production_code_is_still_analysed_as_source():
+    # The counterweight: whatever pulls the test files out must not take the
+    # pages with them. This is the file carrying most of the PR's Sonar issues.
+    path = "src/frontend-react/src/pages/GeneratePage.tsx"
+    assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real page"
+    assert _sonar_scope(path) == "source", (
+        f"{path} left the source scope - the SPA would stop being analysed, "
+        "which is exactly the exclusion this branch removed")
+
+
 def test_the_sonar_workflow_produces_the_lcov_before_it_scans():
     import yaml
     wf = yaml.safe_load(SONAR_WORKFLOW.read_text(encoding="utf-8"))
