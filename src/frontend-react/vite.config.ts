@@ -32,12 +32,36 @@ export default defineConfig({
   // Unit tests for the pieces whose bugs are invisible in a type check: the
   // group-state hooks and the folder chip row, plus page components where
   // the wiring itself is the feature (LearningPage.test.tsx — see its own
-  // docstring). Deliberately narrow — still no browser suite, no coverage
-  // gate.
+  // docstring). No browser suite.
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     globals: false,
     css: false,
+    coverage: {
+      provider: 'v8',
+      // lcov is what SonarQube reads (sonar.javascript.lcov.reportPaths);
+      // text is for the terminal; json-summary lets a script assert on totals
+      // without re-parsing lcov.
+      reporter: ['text', 'lcov', 'json-summary'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        // Vendored shadcn/ui. Not our code: it arrives generated, is not
+        // edited here, and testing it would measure the upstream project.
+        // Excluded from COVERAGE only — sonar still analyses it for defects.
+        'src/components/ui/**',
+        // Bootstrap and generated/ambient type surfaces: no branches to cover.
+        'src/main.tsx',
+        'src/vite-env.d.ts',
+        'src/**/*.d.ts',
+        'src/test/**',
+        'src/**/*.test.{ts,tsx}',
+      ],
+      // The gate. Set at the level the suite actually reaches so a regression
+      // fails CI rather than quietly eroding; raise it when coverage rises,
+      // never lower it to make a red run green.
+      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
+    },
   },
 })
