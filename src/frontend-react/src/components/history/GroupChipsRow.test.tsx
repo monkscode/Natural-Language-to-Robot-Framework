@@ -8,7 +8,7 @@
  * offered a button that can only answer 404 — and never denied one that
  * would have worked.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { GroupChipsRow } from './GroupChipsRow'
@@ -98,5 +98,204 @@ describe('GroupChipsRow', () => {
     renderRow({ groups: [], active: 'ungrouped' })
 
     expect(screen.getByText('Ungrouped')).toBeInTheDocument()
+  })
+})
+
+/** Unique to the browse dialog's own copy — never collides with the "All
+ *  Groups"/active-group CHIP, which stays mounted behind the dialog. */
+const browseDialogOpen = () => screen.queryByText(/Pick a group to filter the runs/) !== null
+
+describe('GroupChipsRow — the Ungrouped chip toggles the filter', () => {
+  it('selects "ungrouped" when clicked while nothing is filtered', () => {
+    const onSelect = vi.fn()
+    renderRow({ active: null, onSelect })
+
+    fireEvent.click(screen.getByText('Ungrouped'))
+
+    expect(onSelect).toHaveBeenCalledWith('ungrouped')
+  })
+
+  it('clears the filter when clicked while Ungrouped IS already active', () => {
+    const onSelect = vi.fn()
+    renderRow({ active: 'ungrouped', onSelect })
+
+    fireEvent.click(screen.getByText('Ungrouped'))
+
+    expect(onSelect).toHaveBeenCalledWith(null)
+  })
+})
+
+describe('GroupChipsRow — the groups control opens the browse dialog', () => {
+  it('reads "All Groups" and opens the dialog when nothing is filtered', () => {
+    renderRow({ active: null })
+    expect(screen.getByText('All Groups')).toBeInTheDocument()
+
+    openBrowse()
+
+    expect(browseDialogOpen()).toBe(true)
+  })
+
+  it('reads as the active group’s own chip, and its LEFT side also opens the dialog', () => {
+    renderRow({ active: 'g-1' })
+    // "All Groups" must NOT be showing — the chip has switched identity.
+    expect(screen.queryByText('All Groups')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Switch or manage groups'))
+
+    expect(browseDialogOpen()).toBe(true)
+  })
+
+  it('the chip’s own ✕ clears the filter directly, WITHOUT opening the dialog', () => {
+    const onSelect = vi.fn()
+    renderRow({ active: 'g-1', onSelect })
+
+    fireEvent.click(screen.getByLabelText('Clear the group filter'))
+
+    expect(onSelect).toHaveBeenCalledWith(null)
+    expect(browseDialogOpen()).toBe(false)
+  })
+
+  it('picking a group row in the dialog selects it and closes the dialog', () => {
+    const onSelect = vi.fn()
+    renderRow({ onSelect })
+    openBrowse()
+
+    fireEvent.click(screen.getByText('Checkout'))
+
+    expect(onSelect).toHaveBeenCalledWith('g-1')
+    expect(browseDialogOpen()).toBe(false)
+  })
+})
+
+describe('GroupChipsRow — "Clear filter" inside the browse dialog', () => {
+  it('is offered only while a group is actually active', () => {
+    renderRow({ active: 'g-1' })
+    fireEvent.click(screen.getByTitle('Switch or manage groups'))
+    expect(screen.getByText('Clear filter')).toBeInTheDocument()
+  })
+
+  it('is absent with no active filter — nothing to clear', () => {
+    renderRow({ active: null })
+    openBrowse()
+    expect(screen.queryByText('Clear filter')).not.toBeInTheDocument()
+  })
+
+  it('clears the selection and closes the dialog when clicked', () => {
+    const onSelect = vi.fn()
+    renderRow({ active: 'g-1', onSelect })
+    fireEvent.click(screen.getByTitle('Switch or manage groups'))
+
+    fireEvent.click(screen.getByText('Clear filter'))
+
+    expect(onSelect).toHaveBeenCalledWith(null)
+    expect(browseDialogOpen()).toBe(false)
+  })
+})
+
+describe('GroupChipsRow — creating a group', () => {
+  it('disables Create until a name is entered, then submits the TRIMMED value', async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined)
+    renderRow({ onCreate })
+    fireEvent.click(screen.getByText('New'))
+    expect(screen.getByText('Create')).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText('e.g. Checkout flows'), { target: { value: '  Regression  ' } })
+    expect(screen.getByText('Create')).not.toBeDisabled()
+
+    fireEvent.click(screen.getByText('Create'))
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith('Regression'))
+  })
+
+  it('shows the server’s rejection and keeps the dialog open', async () => {
+    const onCreate = vi.fn().mockRejectedValue(new Error('A group named "Dup" already exists'))
+    renderRow({ onCreate })
+    fireEvent.click(screen.getByText('New'))
+    fireEvent.change(screen.getByPlaceholderText('e.g. Checkout flows'), { target: { value: 'Dup' } })
+
+    fireEvent.click(screen.getByText('Create'))
+
+    expect(await screen.findByText('A group named "Dup" already exists')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('e.g. Checkout flows')).toBeInTheDocument()
+  })
+})
+
+describe('GroupChipsRow — renaming a group', () => {
+  it('calls onRename with the group id and the TRIMMED new name', async () => {
+    const onRename = vi.fn().mockResolvedValue(undefined)
+    renderRow({ canRename: () => true, onRename })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Rename Checkout'))
+
+    fireEvent.change(screen.getByDisplayValue('Checkout'), { target: { value: '  Checkout Flow  ' } })
+    fireEvent.click(screen.getByText('Rename'))
+
+    await waitFor(() => expect(onRename).toHaveBeenCalledWith('g-1', 'Checkout Flow'))
+  })
+
+  it('starts with Rename disabled — the freshly-opened field equals the current name', () => {
+    // submitDisabled treats an UNCHANGED name as nothing to submit, so the
+    // button must not invite a no-op rename before the user edits anything.
+    renderRow({ canRename: () => true, onRename: vi.fn() })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Rename Checkout'))
+
+    expect(screen.getByText('Rename')).toBeDisabled()
+  })
+
+  it('skips the onRename call when the form is submitted with the name unchanged', async () => {
+    // The button's disabled attribute already defends this (previous test);
+    // this pins the SEPARATE guard inside submit() itself
+    // (`if (name.trim() !== overlay.group.name)`) by submitting the form
+    // directly, bypassing the disabled button — a realistic path if the two
+    // guards ever drift apart.
+    const onRename = vi.fn()
+    renderRow({ canRename: () => true, onRename })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Rename Checkout'))
+
+    // The dialog is portalled to document.body (a sibling of render()'s own
+    // container, not a descendant), so find the form via the input rather
+    // than container.querySelector.
+    fireEvent.submit(screen.getByDisplayValue('Checkout').closest('form')!)
+
+    await waitFor(() => expect(browseDialogOpen()).toBe(true))
+    expect(onRename).not.toHaveBeenCalled()
+  })
+
+  it('shows the server’s rejection and keeps the dialog open', async () => {
+    const onRename = vi.fn().mockRejectedValue(new Error('Only the creator or an org admin may rename this group'))
+    renderRow({ canRename: () => true, onRename })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Rename Checkout'))
+    fireEvent.change(screen.getByDisplayValue('Checkout'), { target: { value: 'Renamed' } })
+
+    fireEvent.click(screen.getByText('Rename'))
+
+    expect(await screen.findByText('Only the creator or an org admin may rename this group')).toBeInTheDocument()
+  })
+})
+
+describe('GroupChipsRow — deleting a group', () => {
+  it('confirms, then calls onDelete with the group id', async () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    renderRow({ canDelete: () => true, onDelete })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Delete Checkout'))
+
+    fireEvent.click(screen.getByText('Delete group'))
+
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith('g-1'))
+  })
+
+  it('shows the server’s refusal and leaves the confirmation open', async () => {
+    const onDelete = vi.fn().mockRejectedValue(new Error('Only an org admin may delete a group'))
+    renderRow({ canDelete: () => true, onDelete })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Delete Checkout'))
+
+    fireEvent.click(screen.getByText('Delete group'))
+
+    expect(await screen.findByText('Only an org admin may delete a group')).toBeInTheDocument()
   })
 })
