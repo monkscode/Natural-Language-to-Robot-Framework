@@ -32,6 +32,7 @@
  * two.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
+import { StrictMode, createElement, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./api', () => ({ api: vi.fn() }))
@@ -187,6 +188,131 @@ describe('useFetch — data must not outlive the path it answered', () => {
     rerender({ p: '/runs?status=failed' })
 
     await waitFor(() => expect(result.current.data).toEqual(ROWS_B))
+    expect(result.current.error).toBe('')
+  })
+})
+
+// StrictMode is ON in this app (main.tsx wraps <App/> in it), so in dev every
+// effect mounts, unmounts and mounts again — reload() fires twice per mount and
+// the FIRST request is superseded before it resolves. These re-run the two
+// behaviours that matter under that double-invocation, because the rest of this
+// file renders without it and would not catch a regression that only appears
+// there.
+const strict = {
+  wrapper: ({ children }: { children: ReactNode }) => createElement(StrictMode, null, children),
+}
+
+describe('useFetch — under StrictMode double-invocation', () => {
+  it('still clears data on a cross-path failure', async () => {
+    mockApi.mockResolvedValue(ROWS_A)
+    const { result, rerender } = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), {
+      initialProps: { p: '/runs' }, ...strict,
+    })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+
+    mockApi.mockRejectedValue(new Error('403 refused'))
+    rerender({ p: '/runs?status=failed' })
+
+    await waitFor(() => expect(result.current.error).toBe('403 refused'))
+    expect(result.current.data).toBeNull()
+  })
+
+  it('still keeps data when a same-path reload() fails', async () => {
+    mockApi.mockResolvedValue(ROWS_A)
+    const { result } = renderHook(() => useFetch<typeof ROWS_A>('/runs'), strict)
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+
+    mockApi.mockRejectedValue(new Error('500 on refresh'))
+    await act(async () => { await result.current.reload() })
+
+    expect(result.current.data).toEqual(ROWS_A)
+  })
+})
+
+describe('useFetch — paths that pass through null', () => {
+  // Two call sites do this: HistoryPage's detail and corrections fetches are
+  // `selected ? \`/api/.../${selected}\` : null`, so closing the drawer sends
+  // the path to null and reload() early-returns without touching anything.
+  it('clears data when the path goes A -> null -> B and B fails', async () => {
+    mockApi.mockResolvedValueOnce(ROWS_A)
+    const { result, rerender } = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), {
+      initialProps: { p: '/runs' as string | null },
+    })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+
+    rerender({ p: null })
+    expect(result.current.data).toEqual(ROWS_A)   // nothing runs on a null path
+
+    mockApi.mockRejectedValueOnce(new Error('B refused'))
+    rerender({ p: '/runs?status=failed' })
+
+    await waitFor(() => expect(result.current.error).toBe('B refused'))
+    expect(result.current.data).toBeNull()
+  })
+
+  it('KEEPS data when the path goes A -> null -> A and A fails', async () => {
+    // Reopening the SAME row. What is on screen is still that path's own
+    // answer, so this is the keep case, not the drop case.
+    mockApi.mockResolvedValueOnce(ROWS_A)
+    const { result, rerender } = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), {
+      initialProps: { p: '/runs' as string | null },
+    })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+
+    rerender({ p: null })
+    mockApi.mockRejectedValueOnce(new Error('A refused'))
+    rerender({ p: '/runs' })
+
+    await waitFor(() => expect(result.current.error).toBe('A refused'))
+    expect(result.current.data).toEqual(ROWS_A)
+  })
+})
+
+describe('useFetch — teardown and pile-ups', () => {
+  it('does not throw when the component unmounts with a request still in flight', async () => {
+    let settle: (v: unknown) => void = () => {}
+    mockApi.mockImplementationOnce(() => new Promise(r => { settle = r }))
+    const { unmount } = renderHook(() => useFetch<typeof ROWS_A>('/runs'))
+
+    unmount()
+
+    await act(async () => { settle(ROWS_A) })
+    // Reaching here without an unhandled rejection or a React warning IS the
+    // assertion; the explicit one keeps the test from being vacuous.
+    expect(mockApi).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not throw when the component unmounts with a request about to FAIL', async () => {
+    let boom: (e: unknown) => void = () => {}
+    mockApi.mockImplementationOnce(() => new Promise((_, rej) => { boom = rej }))
+    const { unmount } = renderHook(() => useFetch<typeof ROWS_A>('/runs'))
+
+    unmount()
+
+    await act(async () => { boom(new Error('late failure')) })
+    expect(mockApi).toHaveBeenCalledTimes(1)
+  })
+
+  it('a superseded request that FAILS late never clears the current path’s data', async () => {
+    // A -> B -> C where B rejects after C has already landed. B is not the
+    // newest request, so its catch must not run at all - if it did, its clear
+    // would wipe C's perfectly good data.
+    let failB: (e: unknown) => void = () => {}
+    mockApi.mockResolvedValueOnce(ROWS_A)
+    mockApi.mockImplementationOnce(() => new Promise((_, rej) => { failB = rej }))
+    mockApi.mockResolvedValueOnce(ROWS_B)
+
+    const { result, rerender } = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), {
+      initialProps: { p: '/runs' },
+    })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+    rerender({ p: '/runs?status=passed' })
+    rerender({ p: '/runs?status=failed' })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_B))
+
+    await act(async () => { failB(new Error('late B failure')) })
+
+    expect(result.current.data).toEqual(ROWS_B)
     expect(result.current.error).toBe('')
   })
 })
