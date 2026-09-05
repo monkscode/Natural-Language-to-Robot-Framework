@@ -43,6 +43,19 @@ interface RobotSummary {
   failed: number | null
 }
 
+/** One pass/fail count: the `Results:` line's own number when there is one,
+    else a count of the per-test lines this blob actually parsed. */
+function testCount(
+  counts: RegExpExecArray | null,
+  index: 1 | 2,
+  tests: RobotSummary['tests'],
+  status: 'PASS' | 'FAIL',
+): number | null {
+  if (counts) return Number(counts[index])
+  if (tests.length) return tests.filter(t => t.status === status).length
+  return null
+}
+
 function parseRobotSummary(blob: string): RobotSummary {
   const tests: RobotSummary['tests'] = []
   const failures: RobotSummary['failures'] = []
@@ -64,9 +77,15 @@ function parseRobotSummary(blob: string): RobotSummary {
   return {
     tests,
     failures,
-    passed: counts ? Number(counts[1]) : tests.length ? tests.filter(t => t.status === 'PASS').length : null,
-    failed: counts ? Number(counts[2]) : tests.length ? tests.filter(t => t.status === 'FAIL').length : null,
+    passed: testCount(counts, 1, tests, 'PASS'),
+    failed: testCount(counts, 2, tests, 'FAIL'),
   }
+}
+
+const LOG_BORDER_CLASS: Record<LogEntry['kind'], string> = {
+  success: 'border-l-green-500',
+  error: 'border-l-destructive',
+  info: 'border-l-blue-400',
 }
 
 /* ── Collapsible logs card with an indeterminate bar while running ── */
@@ -110,9 +129,7 @@ function LogsSection({ title, desc, logs, running, collapseOnDone }: Readonly<{
                 key={i}
                 className={cn(
                   'flex gap-3 border-b px-4 py-1.5 last:border-0 border-l-2',
-                  log.kind === 'success' ? 'border-l-green-500'
-                    : log.kind === 'error' ? 'border-l-destructive'
-                      : 'border-l-blue-400',
+                  LOG_BORDER_CLASS[log.kind],
                 )}
               >
                 <span className="shrink-0 text-muted-foreground">{log.ts}</span>
@@ -215,6 +232,26 @@ function VerifyActivity() {
   )
 }
 
+type StageState = 'done' | 'active' | 'pending'
+
+function stageState(done: boolean, active: boolean): StageState {
+  if (done) return 'done'
+  if (active) return 'active'
+  return 'pending'
+}
+
+const STAGE_ICON_CLASSES: Record<StageState, string> = {
+  done: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400',
+  active: 'stage-active border-sky-400/50 bg-sky-400/10 text-sky-300',
+  pending: 'border-[#30363d] text-[#484f58]',
+}
+
+const STAGE_LABEL_CLASSES: Record<StageState, string> = {
+  done: 'text-[#8b949e]',
+  active: 'text-[#e6edf3]',
+  pending: 'text-[#484f58]',
+}
+
 function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: number; stage: string; logs: LogEntry[] }>) {
   // The element-scan SSE event carries the only real artifact count we get
   // ("📍 Found N elements on the page") — surface it in the Locate block.
@@ -229,21 +266,19 @@ function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: numb
             const nextAt = PIPELINE_STAGES[i + 1]?.at ?? 100
             const done = progress >= nextAt
             const active = !done && progress >= s.at
+            const state = stageState(done, active)
             const Icon = s.icon
             return (
               <div key={s.label} className="flex items-center gap-2">
                 <span
                   className={cn(
                     'flex h-6 w-6 items-center justify-center rounded-full border transition-colors',
-                    done ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400'
-                      : active ? 'stage-active border-sky-400/50 bg-sky-400/10 text-sky-300'
-                        : 'border-[#30363d] text-[#484f58]',
+                    STAGE_ICON_CLASSES[state],
                   )}
                 >
                   {done ? <Check className="h-3.5 w-3.5" /> : <Icon className="h-3.5 w-3.5" />}
                 </span>
-                <span className={cn('text-xs font-medium',
-                  done ? 'text-[#8b949e]' : active ? 'text-[#e6edf3]' : 'text-[#484f58]')}>
+                <span className={cn('text-xs font-medium', STAGE_LABEL_CLASSES[state])}>
                   {s.label}
                 </span>
                 {i < PIPELINE_STAGES.length - 1 && (
@@ -343,6 +378,14 @@ function ConfettiBurst() {
   )
 }
 
+/** The result card's headline. Single-test runs are the norm — counts and the
+    per-test list only earn their place when there is more than one test. */
+function resultTitle(pass: boolean, total: number | null, failed: number | null | undefined): string {
+  if (pass) return total === 1 ? 'Test passed! 🎉' : 'All tests passed! 🎉'
+  if (failed && total) return total > 1 ? `${failed} of ${total} tests failed` : 'Test failed'
+  return 'Test execution failed'
+}
+
 /* ── Post-run result card: outcome banner, per-test breakdown, report links,
    and an optional feedback footer (children) ── */
 function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: Readonly<{
@@ -355,13 +398,7 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
   const total = summary?.passed != null && summary?.failed != null
     ? summary.passed + summary.failed
     : tests.length || null
-  // Single-test runs are the norm — counts and the per-test list only earn
-  // their place when there is more than one test.
-  const title = pass
-    ? total === 1 ? 'Test passed! 🎉' : 'All tests passed! 🎉'
-    : summary?.failed && total
-      ? total > 1 ? `${summary.failed} of ${total} tests failed` : 'Test failed'
-      : 'Test execution failed'
+  const title = resultTitle(pass, total, summary?.failed)
   const subtitle = pass
     ? [total && total > 1 ? `${total} tests` : null, secs != null ? `finished in ${secs.toFixed(1)}s` : null]
         .filter(Boolean).join(' · ') || 'Execution finished'
@@ -922,6 +959,22 @@ export function FeedbackPanel({ outcome, workflowId }: Readonly<{ outcome: Exclu
   )
 }
 
+/* ── The single adaptive action button: code present → Run Test; otherwise
+   a query → Generate Test (see the button's own comment at its call site
+   for why this stays one control rather than a combined generate-and-run) ── */
+function runButtonIcon(busy: boolean, hasCode: boolean): ReactNode {
+  if (busy) return <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+  return hasCode ? <Play className="h-4 w-4" /> : <Zap className="h-4 w-4" />
+}
+
+function runButtonLabel(phase: Phase, genProgress: number, hasCode: boolean, hasQuery: boolean): string {
+  if (phase === 'generating') return `Generating… ${genProgress}%`
+  if (phase === 'executing') return 'Executing…'
+  if (hasCode) return 'Run Test'
+  if (hasQuery) return 'Generate Test'
+  return 'Enter a query or paste code'
+}
+
 /* ── Main page ── */
 export default function GeneratePage() {
   const [query, setQuery]   = useState('')
@@ -1151,14 +1204,8 @@ export default function GeneratePage() {
                 disabled={busy || (!code.trim() && !query.trim())}
                 className="h-10 flex-1 gap-2"
               >
-                {busy
-                  ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  : code.trim() ? <Play className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
-                {phase === 'generating' ? `Generating… ${genProgress}%`
-                  : phase === 'executing' ? 'Executing…'
-                    : code.trim() ? 'Run Test'
-                      : query.trim() ? 'Generate Test'
-                        : 'Enter a query or paste code'}
+                {runButtonIcon(busy, !!code.trim())}
+                {runButtonLabel(phase, genProgress, !!code.trim(), !!query.trim())}
               </Button>
               {!busy && code.trim() && query.trim() && (
                 <Button variant="outline" onClick={handleGenerate} className="h-10 gap-1.5" title="Discard the current code and regenerate from the description">

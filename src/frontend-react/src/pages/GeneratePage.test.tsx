@@ -99,6 +99,32 @@ describe('GeneratePage — idle state', () => {
   })
 })
 
+describe('GeneratePage — the run button’s icon and label', () => {
+  it('shows the Zap icon for "Generate Test", and swaps to Play once code exists', () => {
+    renderPage()
+    typeQuery()
+    expect(screen.getByRole('button', { name: /Generate Test/ }).querySelector('svg')).toHaveClass('lucide-zap')
+
+    pasteCode()
+    expect(screen.getByRole('button', { name: /^Run Test/ }).querySelector('svg')).toHaveClass('lucide-play')
+  })
+
+  it('shows a spinner (no icon glyph) and "Generating… N%" while a generation is in flight', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 42, message: 'working…' })
+      return new Promise(() => {})
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    const busyBtn = await screen.findByRole('button', { name: /Generating… 42%/ })
+    expect(busyBtn).toBeDisabled()
+    expect(busyBtn.querySelector('svg')).toBeNull()
+  })
+})
+
 describe('GeneratePage — starting a generation', () => {
   it('enables "Generate Test" once a query is typed, and sends it verbatim', async () => {
     mockStreamSSE.mockImplementation(() => new Promise(() => {}))
@@ -171,12 +197,39 @@ describe('GeneratePage — the generation pipeline rail', () => {
     expect(screen.getByText('Element locators captured')).toBeInTheDocument()
     expect(screen.getByText('test.robot assembled')).toBeInTheDocument()
     expect(screen.getByText('90%')).toBeInTheDocument()
+    // A finished stage (Plan) and the current one (Verify, the last stage —
+    // there is no later `at` to pass, so it can only ever be active or done)
+    // must read as visually distinct, not just as different text.
+    const planIcon = screen.getByText('Plan').parentElement!.querySelector('span')!
+    const verifyIcon = screen.getByText('Verify').parentElement!.querySelector('span')!
+    expect(planIcon).toHaveClass('border-emerald-500/40')
+    expect(verifyIcon).toHaveClass('stage-active')
+  })
+
+  it('leaves a not-yet-reached stage in its pending style while an earlier one is active', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 10, message: 'working…' })
+      return new Promise(() => {})
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    await screen.findByText('Plan')
+    const planIcon = screen.getByText('Plan').parentElement!.querySelector('span')!
+    const locateIcon = screen.getByText('Locate').parentElement!.querySelector('span')!
+    const locateLabel = screen.getByText('Locate')
+    expect(planIcon).toHaveClass('stage-active')
+    expect(locateIcon).toHaveClass('border-[#30363d]')
+    expect(locateLabel).toHaveClass('text-[#484f58]')
   })
 })
 
 describe('GeneratePage — a completed generation', () => {
   it('shows the generated code and a success log line once delivery is clean', async () => {
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Doing work…' })
       onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
     })
     renderPage()
@@ -186,6 +239,10 @@ describe('GeneratePage — a completed generation', () => {
 
     await screen.findByRole('button', { name: /^Run Test/ })
     expect(screen.getByText('Generated test.robot (6 lines)')).toBeInTheDocument()
+    // Info and success log lines get their own left-border color, not just
+    // their own text.
+    expect(screen.getByText('Doing work…').parentElement).toHaveClass('border-l-blue-400')
+    expect(screen.getByText('Generated test.robot (6 lines)').parentElement).toHaveClass('border-l-green-500')
   })
 
   it('flags a delivered-but-unverified dryrun without inventing a cause', async () => {
@@ -218,6 +275,8 @@ describe('GeneratePage — a completed generation', () => {
 
     expect(await screen.findByText('Delivered — dryrun found issues you may want to review')).toBeInTheDocument()
     expect(screen.getByText('Keyword not found: Click Buttonn')).toBeInTheDocument()
+    // Error-kind log lines get their own left-border color too.
+    expect(screen.getByText('Keyword not found: Click Buttonn').parentElement).toHaveClass('border-l-destructive')
   })
 
   it('shows the SSE error message and re-enables the form on status: error', async () => {
@@ -301,6 +360,99 @@ describe('GeneratePage — a completed execution', () => {
     expect(screen.getByText('Login flow')).toBeInTheDocument()
     expect(screen.getByText('Checkout flow')).toBeInTheDocument()
     expect(screen.getByText(/Element not found: #submit/)).toBeInTheDocument()
+  })
+
+  it('derives pass/fail counts by counting per-test lines when the summary has no Results: line', async () => {
+    // Every other fixture in this file includes a "Results: N passed, M
+    // failed" line, so the count always comes from that regex match. This
+    // one omits it on purpose, forcing the fallback that counts parsed
+    // per-test lines instead — 2 passes and 1 fail, deliberately unequal so
+    // a mixed-up PASS/FAIL count would show up as a wrong total.
+    allowFeedbackMount()
+    const logs = [
+      'Test: Login flow - PASS',
+      'Test: Search flow - PASS',
+      'Test: Checkout flow - FAIL',
+      'Error: Element not found: #submit',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-2/log.html', logs }, test_status: 'failed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('1 of 3 tests failed')).toBeInTheDocument()
+  })
+
+  it('says "Test failed" (not "N of M") for a single failing test', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Checkout flow - FAIL',
+      'Error: Element not found: #submit',
+      'Results: 0 passed, 1 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-5/log.html', logs }, test_status: 'failed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('Test failed')).toBeInTheDocument()
+  })
+
+  it('says "All tests passed!" (not the single-test wording) for a multi-test run with no failures', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Login flow - PASS',
+      'Test: Search flow - PASS',
+      'Results: 2 passed, 0 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-3/log.html', logs }, test_status: 'passed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('All tests passed! 🎉')).toBeInTheDocument()
+  })
+
+  it('falls back to "Test execution failed" when a failing run reports no parseable summary', async () => {
+    allowFeedbackMount()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-4/log.html' }, test_status: 'failed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('Test execution failed')).toBeInTheDocument()
   })
 
   it('shows the SSE error message and no result card on status: error', async () => {

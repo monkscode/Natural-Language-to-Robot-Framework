@@ -11,7 +11,7 @@
  * already recorded the query→code evidence). "Regenerate" prefills Generate
  * instead, for when the site changed and the stored locators went stale.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -30,7 +30,7 @@ import { streamSSE } from '@/lib/sse'
 import { useFetch } from '@/lib/useFetch'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
-import { useRunGroups } from '@/components/history/RunGroupsContext'
+import { useRunGroups, type GroupFilter } from '@/components/history/RunGroupsContext'
 import type { RunGroup } from '@/components/history/useGroups'
 import { useAuth } from '@/auth/AuthContext'
 import { RecordedCorrections, type RecordedCorrectionItem } from '@/components/RecordedCorrections'
@@ -122,6 +122,52 @@ function timeAgo(iso: string): string {
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days}d ago`
   return new Date(iso).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
+}
+
+/** scope='all' means "no per-user narrowing", NOT "every user on the
+    platform": the server returns it to any org_admin, and every solo signup
+    is org_admin of their own personal org. Reading it as a platform-admin
+    signal told ordinary users they were looking at everyone's runs. Only
+    role='admin' answers that question, so the three cases are separate. */
+function historySubtitle(isAdminScope: boolean, isAdmin: boolean): string {
+  if (!isAdminScope) {
+    return 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'
+  }
+  if (isAdmin) return 'All users’ test runs (admin view) — click any run to view its script and details'
+  return 'Every test run in your organization — click any run to view its script and re-run it as-is'
+}
+
+/** Which empty-state sentence explains why the table has no rows, in
+    precedence order: an active search wins over an active group filter,
+    which wins over the status filter, which wins over the plain "nothing
+    yet" default. */
+function noRunsMessage(debouncedSearch: string, groupFilter: GroupFilter, filter: Filter): string {
+  if (debouncedSearch) return 'No runs match your search.'
+  if (groupFilter === 'ungrouped') return 'No ungrouped runs — everything is filed.'
+  if (groupFilter) return 'No runs in this group yet — move runs here with the folder button on any row.'
+  if (filter === 'all') return 'No test runs yet — generate your first test from the Generate page.'
+  return `No ${filter} runs yet.`
+}
+
+/** The drawer's code panel. `d` is null while the fetch is pending OR still
+    resolving a row switch (useFetch keeps stale data), so gate the body on
+    it to avoid flashing the previous run's code. */
+function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
+  if (detailError) return <p className="py-6 text-center text-xs text-destructive">{detailError}</p>
+  if (!d) return <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
+  if (d.robot_code) {
+    return (
+      <pre className="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
+        {d.robot_code}
+      </pre>
+    )
+  }
+  return (
+    <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs italic text-muted-foreground">
+      No stored code — this run predates code persistence.
+      {d.user_query ? ' Use Regenerate to produce it again.' : ''}
+    </p>
+  )
 }
 
 export default function HistoryPage() {
@@ -420,16 +466,7 @@ export default function HistoryPage() {
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
 
-  // scope='all' means "no per-user narrowing", NOT "every user on the
-  // platform": the server returns it to any org_admin, and every solo signup
-  // is org_admin of their own personal org. Reading it as a platform-admin
-  // signal told ordinary users they were looking at everyone's runs. Only
-  // role='admin' answers that question, so the three cases are separate.
-  const subtitle = !isAdminScope
-    ? 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'
-    : isAdmin
-      ? 'All users’ test runs (admin view) — click any run to view its script and details'
-      : 'Every test run in your organization — click any run to view its script and re-run it as-is'
+  const subtitle = historySubtitle(isAdminScope, isAdmin)
 
   // Who ran each test. A group is shared, so a member's table now contains
   // colleagues' runs, and a row with no author would leave the org unable to
@@ -659,15 +696,7 @@ export default function HistoryPage() {
           )}
           {!loading && !error && visible.length === 0 && (
             <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
-              {debouncedSearch
-                ? 'No runs match your search.'
-                : groupFilter === 'ungrouped'
-                  ? 'No ungrouped runs — everything is filed.'
-                  : groupFilter
-                    ? 'No runs in this group yet — move runs here with the folder button on any row.'
-                    : filter === 'all'
-                      ? 'No test runs yet — generate your first test from the Generate page.'
-                      : `No ${filter} runs yet.`}
+              {noRunsMessage(debouncedSearch, groupFilter, filter)}
             </p>
           )}
 
@@ -1105,23 +1134,7 @@ export default function HistoryPage() {
               )}
             </div>
 
-            {/* d is null while the fetch is pending OR still resolving a row
-                switch (useFetch keeps stale data), so gate the body on d to
-                avoid flashing the previous run's code. */}
-            {detailError ? (
-              <p className="py-6 text-center text-xs text-destructive">{detailError}</p>
-            ) : !d ? (
-              <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
-            ) : d.robot_code ? (
-              <pre className="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
-                {d.robot_code}
-              </pre>
-            ) : (
-              <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs italic text-muted-foreground">
-                No stored code — this run predates code persistence.
-                {d.user_query ? ' Use Regenerate to produce it again.' : ''}
-              </p>
-            )}
+            {drawerCodeBody(detailError, d)}
           </div>
         </SheetContent>
       </Sheet>

@@ -403,6 +403,48 @@ describe('HistoryPage — the runs table', () => {
     expect(await screen.findByText('No test runs yet — generate your first test from the Generate page.')).toBeInTheDocument()
   })
 
+  it('shows "No runs match your search." when a text search returns nothing', async () => {
+    setupList([RUN_A])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history')) return { runs: [], total: 0, scope: 'own' }
+      throw new Error(`unexpected api(${path})`)
+    })
+
+    fireEvent.change(screen.getByPlaceholderText(/Search description/), { target: { value: 'nonexistent' } })
+
+    expect(await screen.findByText('No runs match your search.', {}, { timeout: 1000 })).toBeInTheDocument()
+  })
+
+  it('shows the ungrouped-empty message when the Ungrouped filter has no runs', async () => {
+    setupList([], { total: 0, groupFilter: 'ungrouped' })
+    renderPage()
+
+    expect(await screen.findByText('No ungrouped runs — everything is filed.')).toBeInTheDocument()
+  })
+
+  it('shows the group-empty message when a specific group has no runs', async () => {
+    setupList([], { total: 0, groupFilter: 'g-1' })
+    renderPage()
+
+    expect(await screen.findByText('No runs in this group yet — move runs here with the folder button on any row.')).toBeInTheDocument()
+  })
+
+  it('falls back to "No {filter} runs yet." for a non-all filter with no matches', async () => {
+    setupList([RUN_A])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history')) return { runs: [], total: 0, scope: 'own' }
+      throw new Error(`unexpected api(${path})`)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'failed' }))
+
+    expect(await screen.findByText('No failed runs yet.')).toBeInTheDocument()
+  })
+
   it('re-queries the server, rather than filtering client-side, when a status filter is clicked', async () => {
     setupList([RUN_A])
     renderPage()
@@ -453,6 +495,13 @@ describe('HistoryPage — the runs table', () => {
     renderPage()
 
     expect(await screen.findByText(expected)).toBeInTheDocument()
+  })
+
+  it('shows the "your work in progress" subtitle for scope=own', async () => {
+    setupList([RUN_A])
+    renderPage()
+
+    expect(await screen.findByText(/Your work in progress, plus every test your team has filed/)).toBeInTheDocument()
   })
 })
 
@@ -665,6 +714,11 @@ describe('HistoryPage — the drawer’s remaining actions', () => {
     fireEvent.click(await screen.findByText('search flipkart for shoes'))
     const downloadBtn = await screen.findByTitle('Download .robot file')
 
+    // The drawer's code panel itself renders the stored code, not just the
+    // download it produces. Radix's Sheet portals its content onto
+    // document.body, outside the render container, so query the document.
+    expect(document.querySelector('pre')?.textContent).toBe(CODE)
+
     fireEvent.click(downloadBtn)
 
     // Filename truncates run id to 8 chars: test-<first 8>-.robot.
@@ -728,6 +782,31 @@ describe('HistoryPage — the drawer’s remaining actions', () => {
     expect(await screen.findByText('Run unavailable')).toBeInTheDocument()
     expect(screen.getByText('You cannot read this run')).toBeInTheDocument()
     expect(screen.queryByText('Loading…')).toBeNull()
+  })
+
+  it('shows "Loading…" while the run detail fetch is still pending, with no stale code and no error', async () => {
+    setupList([RUN_A])
+    mockUseFetch.mockImplementation((path: string | null) => {
+      if (path === '/api/history/run-A') return { data: null, loading: true, error: '', reload: vi.fn() }
+      return { data: null, loading: false, error: '', reload: vi.fn() }
+    })
+    renderPage()
+
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
+
+    expect(await screen.findByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByText('Run unavailable')).toBeNull()
+  })
+
+  it('shows "No stored code" with the Regenerate hint for a run with a query but nothing saved', async () => {
+    setupList([RUN_A])
+    withDetail('run-A', { robot_code: null })
+    renderPage()
+
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
+
+    expect(await screen.findByText(/No stored code — this run predates code persistence\./)).toBeInTheDocument()
+    expect(screen.getByText(/Use Regenerate to produce it again\./)).toBeInTheDocument()
   })
 
   it('shows a message above the table when the groups list fails to load', async () => {
