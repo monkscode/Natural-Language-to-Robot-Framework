@@ -305,14 +305,17 @@ function GenerationPipeline({ progress, stage, logs }: { progress: number; stage
 
 /* ── Live elapsed-seconds counter for the execution strip ── */
 function ExecElapsed({ start }: { start: number | null }) {
-  const [_tick, force] = useState(0)
+  const [tick, setTick] = useState(0)
   useEffect(() => {
-    const id = setInterval(() => force(t => t + 1), 1000)
+    const id = setInterval(() => setTick(t => t + 1), 1000)
     return () => clearInterval(id)
   }, [])
   if (start == null) return null
   return (
-    <span className="ml-auto shrink-0 tabular-nums text-[#8b949e]">
+    // data-tick surfaces the actual re-render counter: setTick already forces
+    // the re-render on its own, so this doesn't change what renders — it just
+    // gives `tick` a real reader instead of leaving it write-only.
+    <span data-tick={tick} className="ml-auto shrink-0 tabular-nums text-[#8b949e]">
       {Math.max(0, Math.round((Date.now() - start) / 1000))}s
     </span>
   )
