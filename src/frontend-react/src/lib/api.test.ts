@@ -31,10 +31,28 @@ function stubFetch(impl: () => Promise<unknown>) {
   return fn
 }
 
+/* Restoring window.location is afterEach's job, not the caller's.
+ * vi.unstubAllGlobals() reverts what vi.stubGlobal installed and nothing else,
+ * so it has no record of this defineProperty - and a restore() written at the
+ * end of a test body is precisely the line that does not run when an assertion
+ * above it throws. Registering the undo here means one red test stays one red
+ * test instead of handing a fake location to every test after it. */
+let restoreLocation: (() => void) | null = null
+
+/** jsdom's real location, read before anything has had a chance to stub it. */
+const REAL_PATHNAME = window.location.pathname
+
 function stubLocation(pathname: string, href: string) {
-  const original = window.location
-  Object.defineProperty(window, 'location', { writable: true, value: { pathname, href } })
-  return () => Object.defineProperty(window, 'location', { writable: true, value: original })
+  // jsdom defines `location` as an own property of window, so there is always a
+  // descriptor to put back. If that ever stops being true, defineProperty
+  // throws here in afterEach - which is the loud failure this whole helper is
+  // for, and better than a silent fallback branch no test can reach.
+  const original = Object.getOwnPropertyDescriptor(window, 'location')!
+  Object.defineProperty(window, 'location', { configurable: true, writable: true, value: { pathname, href } })
+  restoreLocation = () => {
+    restoreLocation = null
+    Object.defineProperty(window, 'location', original)
+  }
 }
 
 /** Resolves to the rejection reason, or fails the test if the promise resolved. */
@@ -46,6 +64,7 @@ async function reasonOf(p: Promise<unknown>): Promise<unknown> {
 }
 
 afterEach(() => {
+  restoreLocation?.()
   clearToken()
   vi.unstubAllGlobals()
   vi.resetAllMocks()
@@ -171,7 +190,7 @@ describe('api — the 401 contract', () => {
   it('clears the token and redirects to /login before the promise rejects', async () => {
     setToken('secret-token')
     stubFetch(async () => ({ status: 401, ok: false, json: async () => ({}) }))
-    const restore = stubLocation('/generate', '')
+    stubLocation('/generate', '')
 
     const err = await reasonOf(api('/runs'))
 
@@ -180,18 +199,16 @@ describe('api — the 401 contract', () => {
     expect((err as Error).message).toBe('Session expired. Please sign in again.')
     expect(getToken()).toBeNull()
     expect((window.location as unknown as { href: string }).href).toBe('/login')
-    restore()
   })
 
   it('does not redirect again when already on the login page', async () => {
     setToken('secret-token')
     stubFetch(async () => ({ status: 401, ok: false, json: async () => ({}) }))
-    const restore = stubLocation('/login', 'unchanged')
+    stubLocation('/login', 'unchanged')
 
     await reasonOf(api('/runs'))
 
     expect((window.location as unknown as { href: string }).href).toBe('unchanged')
-    restore()
   })
 
   it('does NOT clear the token or redirect on a 401 when auth is false', async () => {
@@ -202,7 +219,7 @@ describe('api — the 401 contract', () => {
     // using. It falls through to the plain error branch below instead.
     setToken('someone-elses-still-valid-token')
     stubFetch(async () => ({ status: 401, ok: false, json: async () => ({ detail: 'Incorrect email or password' }) }))
-    const restore = stubLocation('/login', 'unchanged')
+    stubLocation('/login', 'unchanged')
 
     const err = await reasonOf(api('/auth/login', { auth: false }))
 
@@ -211,7 +228,6 @@ describe('api — the 401 contract', () => {
     expect((err as Error).message).toBe('Incorrect email or password')
     expect(getToken()).toBe('someone-elses-still-valid-token')
     expect((window.location as unknown as { href: string }).href).toBe('unchanged')
-    restore()
   })
 })
 
@@ -266,5 +282,34 @@ describe('extractDetail — normalizing FastAPI’s error body shapes', () => {
     expect(extractDetail('a bare string body', 'fallback')).toBe('fallback')
     expect(extractDetail(null, 'fallback')).toBe('fallback')
     expect(extractDetail(undefined, 'fallback')).toBe('fallback')
+  })
+})
+
+/* The guard on stubLocation's afterEach cleanup. Undoing the stub used to be
+ * the caller's job, at the end of each test body - the one line that does NOT
+ * run when an assertion above it throws - and vi.unstubAllGlobals() cannot
+ * cover for it, because it reverts only what vi.stubGlobal installed. One
+ * failing 401 test would have handed every later test in this file a fake
+ * window.location, turning one red test into a cascade pointing nowhere near
+ * the cause.
+ *
+ * These two run as a pair: the first leaks on purpose, exactly the way a
+ * mid-test failure does, and the second is the one that would have paid for
+ * it. Deleting either leaves the other passing for the wrong reason. */
+describe('stubLocation cleans up even when a test fails partway', () => {
+  it('installs a stub and never restores it, as a failing test would not', () => {
+    stubLocation('/leaked-from-the-previous-test', 'leaked')
+
+    expect(window.location.pathname).toBe('/leaked-from-the-previous-test')
+    // deliberately no restore() here
+  })
+
+  it('still sees the real window.location afterwards', () => {
+    // The real one, not merely "not the fake one": putting back some other
+    // object would also clear the leaked pathname while leaving window.location
+    // a stub.
+    expect(window.location.pathname).toBe(REAL_PATHNAME)
+    expect(window.location).toBeInstanceOf(Object)
+    expect(typeof window.location.assign).toBe('function')
   })
 })
