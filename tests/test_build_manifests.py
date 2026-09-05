@@ -143,3 +143,68 @@ def test_every_image_build_waits_for_the_suite(job):
     assert GATE_JOB in needs, (
         f"'{job}' does not depend on '{GATE_JOB}' — it can publish an image "
         "built from code the suite rejected")
+
+
+# ---------------------------------------------------------------------------
+# The FRONTEND publish gate.
+#
+# Until test-frontend existed, no workflow ran a single frontend test. Both
+# pytest lanes are backend-only, and sonar-project.properties excludes
+# src/frontend-react outright, so the only thing standing between a broken
+# React change and a published frontend image was `tsc -b` inside
+# Dockerfile.frontend. That catches a type error and nothing else.
+#
+# Guarded for the same reason as the backend gate above: a `needs:` line and a
+# test command are exactly what gets dropped while making a job faster.
+# ---------------------------------------------------------------------------
+
+FRONTEND_GATE_JOB = "test-frontend"
+
+
+def test_the_frontend_publish_gate_exists_and_runs_the_suite():
+    wf = _build_images_workflow()
+    assert FRONTEND_GATE_JOB in wf["jobs"], (
+        f"build-images.yml has no '{FRONTEND_GATE_JOB}' job — nothing runs the "
+        "frontend suite before its image is published")
+    steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    run_text = "\n".join(s.get("run", "") for s in steps)
+    # `npm test` is package.json's `vitest run`; accept either spelling so the
+    # job may call vitest directly without silently losing the gate.
+    assert "npm test" in run_text or "vitest" in run_text, (
+        f"the '{FRONTEND_GATE_JOB}' job does not run the frontend suite")
+    assert "tsc" in run_text, (
+        f"the '{FRONTEND_GATE_JOB}' job does not typecheck — tsc is the only "
+        "check that covers the TSX the suite does not reach")
+
+
+def test_the_frontend_image_waits_for_the_frontend_suite():
+    wf = _build_images_workflow()
+    needs = wf["jobs"]["build-frontend"].get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert FRONTEND_GATE_JOB in needs, (
+        f"'build-frontend' does not depend on '{FRONTEND_GATE_JOB}' — it can "
+        "publish an image built from React code the frontend suite rejected")
+
+
+def test_the_frontend_gate_runs_the_same_node_major_as_the_image_build():
+    # A suite that passes on a different Node major than the image builds on is
+    # not a gate on the thing being shipped. Dockerfile.frontend's build stage
+    # is the authority.
+    import re
+    wf = _build_images_workflow()
+    dockerfile = (REPO_ROOT / "Dockerfile.frontend").read_text(encoding="utf-8")
+    m = re.search(r"^FROM\s+node:(\d+)", dockerfile, re.MULTILINE)
+    assert m, "Dockerfile.frontend has no `FROM node:<major>` build stage"
+    image_major = m.group(1)
+
+    steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    versions = [
+        str(s["with"]["node-version"])
+        for s in steps
+        if s.get("uses", "").startswith("actions/setup-node") and "node-version" in s.get("with", {})
+    ]
+    assert versions, f"'{FRONTEND_GATE_JOB}' does not pin a Node version"
+    assert all(v.split(".")[0] == image_major for v in versions), (
+        f"'{FRONTEND_GATE_JOB}' runs Node {versions} but Dockerfile.frontend "
+        f"builds on node:{image_major}")
