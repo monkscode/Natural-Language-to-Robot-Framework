@@ -124,6 +124,10 @@ function LogsSection({ title, desc, logs, running, collapseOnDone }: Readonly<{
             </div>
           )}
           <div ref={listRef} className="max-h-56 overflow-y-auto font-mono text-xs">
+            {/* Index is a correct key: addGen/addExec only ever append, this
+                array is reset to [] (not spliced or resorted) at the start of
+                the next run, so no index here is ever reused for a different
+                line. */}
             {logs.map((log, i) => (
               <div
                 key={i}
@@ -207,6 +211,9 @@ const ASSEMBLE_LINES: { header?: string; w?: string; indent?: boolean }[] = [
 function AssembleActivity() {
   return (
     <div>
+      {/* Index is a correct key: ASSEMBLE_LINES is a fixed module-level
+          constant, mapped in full and in the same order on every render —
+          there is no filter, reorder or runtime source that could shift it. */}
       {ASSEMBLE_LINES.map((l, i) => (
         <div key={i} className="ghost-line flex h-[20px] items-center" style={{ animationDelay: `${i * 110}ms` }}>
           {/* Muted gray, NOT the editor's red section-header token: in a
@@ -444,6 +451,11 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
         </div>
         {tests.length > 1 && (
           <div className="max-h-36 divide-y overflow-y-auto rounded-lg border bg-background/70">
+            {/* Index is a correct key: `tests` is written once, at the same
+                moment `outcome` turns truthy, and the parent's `{outcome &&
+                ...}` gate (GeneratePage) unmounts this whole card at the
+                start of every new run — so this array is never reordered or
+                filtered while a single instance of this list stays mounted. */}
             {tests.map((t, i) => (
               <div key={i} className="flex items-center gap-2.5 px-3 py-2 text-sm">
                 {t.status === 'PASS'
@@ -460,6 +472,9 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
         )}
         {!pass && failures.length > 0 && (
           <div className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
+            {/* Index is a correct key here for the same reason as the tests
+                list above: `failures` comes from the same once-per-run
+                `summary`, and this card remounts before a next one exists. */}
             {failures.slice(0, 3).map((f, i) => (
               <div key={i} className="break-words">
                 {tests.length > 1 ? `${f.test}: ` : ''}{f.message}
