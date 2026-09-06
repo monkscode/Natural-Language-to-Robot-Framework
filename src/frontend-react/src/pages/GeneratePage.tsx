@@ -1267,9 +1267,19 @@ export default function GeneratePage() {
               <GenerationPipeline progress={genProgress} stage={genStage} logs={genLogs} />
             ) : (
               /* Inset, bordered dark code block (GitHub-style) rather than an
-                  edge-to-edge black panel */
+                  edge-to-edge black panel.
+                  role="presentation": this div is not a control — it only
+                  relays the Ctrl/Cmd+Enter keydown that bubbles up from the
+                  editor's own textarea inside it. A bare div with a key
+                  handler and no role reads to Sonar's S6848 as a fake
+                  interactive element, but jsx-a11y's own docs name this exact
+                  shape ("an element catching bubbled events from elements it
+                  contains") and prescribe role="presentation" as the fix.
+                  It is purely an ARIA hint — the shortcut still fires
+                  identically for mouse and keyboard users either way. */
               <div
                 className="relative flex min-h-0 flex-1 flex-col"
+                role="presentation"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
                     e.preventDefault(); handleRun()

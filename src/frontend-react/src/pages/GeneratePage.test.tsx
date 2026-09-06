@@ -332,6 +332,45 @@ describe('GeneratePage — running pasted code (no generation)', () => {
     // correction to — the panel must not mount (and so must never fetch).
     expect(mockApi).not.toHaveBeenCalled()
   })
+
+  it('Ctrl+Enter inside the code editor runs the pasted code too, from the keyboard alone', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({
+        status: 'complete',
+        result: { report_html: '/reports/RUN-PASTE-KBD/log.html', logs: 'Results: 1 passed, 0 failed' },
+        test_status: 'passed',
+      })
+    })
+    renderPage()
+    pasteCode()
+
+    // The Run button's own click is covered by the test above; this fires
+    // the same handleRun through the code editor's Ctrl+Enter shortcut
+    // instead — the keydown starts on the editor's own textarea and must
+    // bubble up to the wrapping div's handler, exactly as it does for real.
+    fireEvent.keyDown(screen.getByPlaceholderText(/Generated code appears here/), { key: 'Enter', ctrlKey: true })
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledWith(
+      '/execute-test',
+      { robot_code: CODE, user_query: null, workflow_id: null },
+      expect.any(Function),
+    ))
+    await screen.findByText('Test passed! 🎉')
+  })
+
+  it('marks the code-editor keydown wrapper as presentational, not a fake control', () => {
+    renderPage()
+    pasteCode()
+
+    // The wrapper div only relays the bubbled Ctrl+Enter above; it is not
+    // itself a button, so it must say "ignore me" (role="presentation") to
+    // assistive tech rather than nothing at all (S6848) or a role it doesn't
+    // behave like. Requiring the role to sit on the element that actually
+    // contains the editor rules out a role planted on some unrelated div.
+    expect(screen.getByRole('presentation')).toContainElement(
+      screen.getByPlaceholderText(/Generated code appears here/),
+    )
+  })
 })
 
 describe('GeneratePage — a completed execution', () => {
