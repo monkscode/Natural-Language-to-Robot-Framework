@@ -1058,6 +1058,83 @@ function runButtonLabel(phase: Phase, genProgress: number, hasCode: boolean, has
   return 'Enter a query or paste code'
 }
 
+/* ── Left workspace card: the plain-English description, and the single
+   adaptive action beneath it (legacy-UI pattern) — code present → Run Test,
+   otherwise a query → Generate Test. Review-before-run is deliberate: there
+   is no combined generate-and-run ── */
+function TestDescriptionCard({ query, code, phase, genProgress, busy, onQueryChange, onGenerate, onRun }: Readonly<{
+  query: string; code: string; phase: Phase; genProgress: number; busy: boolean
+  onQueryChange: (value: string) => void; onGenerate: () => void; onRun: () => void
+}>) {
+  return (
+    <Card className="col-span-2 flex flex-col max-lg:col-span-1">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Test Description</CardTitle>
+        <CardDescription className="text-xs">Write what you want to test in plain English</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-1 flex-col gap-3 pt-0">
+        <Textarea
+          className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
+          placeholder={PLACEHOLDER}
+          value={query}
+          onChange={e => onQueryChange(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !code.trim()) {
+              e.preventDefault(); onGenerate()
+            }
+          }}
+          disabled={busy}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={code.trim() ? onRun : onGenerate}
+            disabled={busy || (!code.trim() && !query.trim())}
+            className="h-10 flex-1 gap-2"
+          >
+            {runButtonIcon(busy, !!code.trim())}
+            {runButtonLabel(phase, genProgress, !!code.trim(), !!query.trim())}
+          </Button>
+          {!busy && code.trim() && query.trim() && (
+            <Button variant="outline" onClick={onGenerate} className="h-10 gap-1.5" title="Discard the current code and regenerate from the description">
+              <Zap className="h-3.5 w-3.5" /> Regenerate
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── The code card's header controls: the live run-status badges, then copy
+   and export. Both buttons stay mounted and merely disable with no code, so
+   the header's width never jumps mid-run ── */
+function CodePanelControls({ phase, outcome, execSecs, copied, hasCode, onCopy, onDownload }: Readonly<{
+  phase: Phase; outcome: Outcome; execSecs: number | null; copied: boolean; hasCode: boolean
+  onCopy: () => void; onDownload: () => void
+}>) {
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      {phase === 'executing' && (
+        <Badge variant="secondary" className="gap-1.5 text-xs">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> Executing
+        </Badge>
+      )}
+      {outcome === 'pass' && (
+        <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs border-green-200">
+          Passed{execSecs != null ? ` in ${execSecs.toFixed(1)}s` : ''}
+        </Badge>
+      )}
+      {outcome === 'fail' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 text-xs border-red-200">Failed</Badge>}
+      <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={onCopy} disabled={!hasCode}>
+        {copied ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />} Copy
+      </Button>
+      <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={onDownload} disabled={!hasCode}>
+        <Download className="h-3 w-3" /> Export
+      </Button>
+    </div>
+  )
+}
+
 /* ── Main page ── */
 export default function GeneratePage() {
   const [query, setQuery]   = useState('')
@@ -1246,45 +1323,16 @@ export default function GeneratePage() {
 
       {/* Two-column workspace — fills the viewport like the legacy runner */}
       <div className="mb-6 grid grid-cols-5 gap-4 max-lg:grid-cols-1 lg:h-[calc(100vh-235px)] lg:min-h-[480px]">
-        {/* Input card */}
-        <Card className="col-span-2 flex flex-col max-lg:col-span-1">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Test Description</CardTitle>
-            <CardDescription className="text-xs">Write what you want to test in plain English</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-1 flex-col gap-3 pt-0">
-            <Textarea
-              className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
-              placeholder={PLACEHOLDER}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !code.trim()) {
-                  e.preventDefault(); handleGenerate()
-                }
-              }}
-              disabled={busy}
-            />
-            {/* Single adaptive action (legacy-UI pattern): code present → Run Test;
-                otherwise a query → Generate Test. Review-before-run is deliberate —
-                there is no combined generate-and-run. */}
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={code.trim() ? handleRun : handleGenerate}
-                disabled={busy || (!code.trim() && !query.trim())}
-                className="h-10 flex-1 gap-2"
-              >
-                {runButtonIcon(busy, !!code.trim())}
-                {runButtonLabel(phase, genProgress, !!code.trim(), !!query.trim())}
-              </Button>
-              {!busy && code.trim() && query.trim() && (
-                <Button variant="outline" onClick={handleGenerate} className="h-10 gap-1.5" title="Discard the current code and regenerate from the description">
-                  <Zap className="h-3.5 w-3.5" /> Regenerate
-                </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <TestDescriptionCard
+          query={query}
+          code={code}
+          phase={phase}
+          genProgress={genProgress}
+          busy={busy}
+          onQueryChange={setQuery}
+          onGenerate={handleGenerate}
+          onRun={handleRun}
+        />
 
         {/* Generated / editable code card. overflow-hidden is load-bearing: as a
             grid item its automatic minimum size would otherwise be the editor's
@@ -1297,25 +1345,15 @@ export default function GeneratePage() {
               <CardTitle className="text-sm">Generated Code</CardTitle>
               <CardDescription className="text-xs">Editable — tweak it or paste your own, then run</CardDescription>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {phase === 'executing' && (
-                <Badge variant="secondary" className="gap-1.5 text-xs">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> Executing
-                </Badge>
-              )}
-              {outcome === 'pass' && (
-                <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs border-green-200">
-                  Passed{execSecs != null ? ` in ${execSecs.toFixed(1)}s` : ''}
-                </Badge>
-              )}
-              {outcome === 'fail' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 text-xs border-red-200">Failed</Badge>}
-              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleCopy} disabled={!code}>
-                {copied ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />} Copy
-              </Button>
-              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleDownload} disabled={!code}>
-                <Download className="h-3 w-3" /> Export
-              </Button>
-            </div>
+            <CodePanelControls
+              phase={phase}
+              outcome={outcome}
+              execSecs={execSecs}
+              copied={copied}
+              hasCode={!!code}
+              onCopy={handleCopy}
+              onDownload={handleDownload}
+            />
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-0">
             {phase === 'generating' ? (
