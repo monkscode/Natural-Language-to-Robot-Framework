@@ -222,6 +222,33 @@ def test_the_shared_coverage_script_actually_measures_coverage():
         "prove coverage is measured")
 
 
+# A run with an empty coverage map still exits 0: vitest reports
+# "All files | 0 | 0 | 0 | 0" and every threshold trivially "passes" against
+# zero measured files. The checker script closes that gap; this test makes
+# sure the script keeps existing and stays wired into test:coverage, since
+# both are silent failure modes (a missing/renamed file, or a script edited
+# back to the bare `vitest run --coverage` form) that no other test here would
+# catch.
+COVERAGE_EMPTY_MAP_CHECKER = "src/frontend-react/scripts/assert-coverage-not-empty.mjs"
+
+
+def test_the_coverage_script_guards_against_an_empty_coverage_map():
+    checker_path = REPO_ROOT / COVERAGE_EMPTY_MAP_CHECKER
+    assert checker_path.exists(), (
+        f"{COVERAGE_EMPTY_MAP_CHECKER} is missing - nothing would fail a "
+        "test:coverage run whose coverage.include matches no file, even "
+        "though vitest itself exits 0 on an empty coverage map")
+
+    package_json = json.loads(
+        (REPO_ROOT / "src" / "frontend-react" / "package.json").read_text(encoding="utf-8"))
+    script_name = FRONTEND_COVERAGE_SCRIPT.split(" ")[-1]
+    scripts = package_json.get("scripts", {})
+    assert "assert-coverage-not-empty.mjs" in scripts.get(script_name, ""), (
+        f"src/frontend-react/package.json's '{script_name}' script no longer "
+        "invokes assert-coverage-not-empty.mjs - a collapsed coverage map "
+        "would once again exit 0 in both CI lanes")
+
+
 def test_the_frontend_image_waits_for_the_frontend_suite():
     wf = _build_images_workflow()
     needs = wf["jobs"]["build-frontend"].get("needs", [])
