@@ -512,6 +512,9 @@ describe('HistoryPage — who ran it', () => {
     await screen.findByText('search flipkart for shoes')
 
     expect(screen.queryByText('Ran by')).toBeNull()
+    // With no other author on screen there is nothing to search users BY,
+    // so the placeholder must not offer it.
+    expect(screen.getByPlaceholderText('Search description or id…')).toBeInTheDocument()
   })
 
   it('shows "Ran by" once any row belongs to someone else, and filters by that email on click', async () => {
@@ -519,6 +522,7 @@ describe('HistoryPage — who ran it', () => {
     renderPage()
     await screen.findByText('search flipkart for shoes')
     expect(screen.getByText('Ran by')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Search description, user or id…')).toBeInTheDocument()
 
     fireEvent.click(screen.getByText('colleague@x.com'))
 
@@ -783,6 +787,33 @@ describe('HistoryPage — the drawer’s remaining actions', () => {
     expect(screen.getByText('You cannot read this run')).toBeInTheDocument()
     expect(screen.queryByText('Loading…')).toBeNull()
   })
+
+  // Run again needs stored code, an open row, no re-run of that row already
+  // in flight, and a run that is not still executing. The last of those is
+  // the only one no other test reaches: this run HAS code, so nothing but its
+  // status can be what disables the button.
+  it('disables Run again while the open run is still executing, even with code stored', async () => {
+    setupList([RUN_A])
+    withDetail('run-A', { status: 'running' })
+    renderPage()
+
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
+
+    const runAgain = await screen.findByRole('button', { name: 'Run again' })
+    expect(runAgain).toBeDisabled()
+  })
+
+  it('enables Run again for a finished run with code stored', async () => {
+    setupList([RUN_A])
+    withDetail('run-A')
+    renderPage()
+
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
+
+    const runAgain = await screen.findByRole('button', { name: 'Run again' })
+    expect(runAgain).toBeEnabled()
+  })
+
 
   it('shows "Loading…" while the run detail fetch is still pending, with no stale code and no error', async () => {
     setupList([RUN_A])

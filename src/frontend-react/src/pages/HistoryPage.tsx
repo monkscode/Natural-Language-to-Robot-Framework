@@ -439,6 +439,215 @@ function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<
   )
 }
 
+/**
+ * The corrections the drawer may show for the open row, or [] for every case
+ * that must render nothing.
+ *
+ * `d` is borrowed on purpose. This payload carries no run_id of its own to
+ * check against `selected` (only `applied_to`, the resolved ORIGINAL run,
+ * which legitimately differs from `selected` on a re-run), so the "does the
+ * response match the open row" trick doesn't apply to it directly. `loading`
+ * and `error` are the first substitute, and BOTH are required: useFetch's
+ * reload() sets loading true and error '' at the START of every attempt for
+ * the CURRENT path (useFetch.ts) — from inside an EFFECT, so for the one
+ * render between `feedbackPath` changing and that effect firing, both still
+ * describe the PREVIOUS path. useFetch never clears `data` in either case, in
+ * its catch branch least of all (only setError runs there), so a fetch that
+ * FAILS for a freshly-selected row — the 403 case below is the everyday one,
+ * not an edge one — leaves the PREVIOUS row's data sitting there with loading
+ * already back to false. Gating on loading alone closes only the in-flight
+ * window; without error too, opening an owned run with corrections on file
+ * and then a colleague's shared run (whose corrections read the server
+ * refuses) would go on showing the FIRST run's corrections, and a "filed
+ * against" notice that may be entirely fabricated, under the SECOND run's
+ * drawer.
+ *
+ * That leaves exactly the one render loading/error can't cover on their own —
+ * and it is exactly the render where `d` is ALSO null, for the same reason
+ * (detail hasn't caught up to `selected` either). Requiring `d` closes it,
+ * and costs nothing on the success path: GET /api/history/{run_id} passes
+ * is_grouped=true while GET /api/feedback/{run_id} deliberately does not, and
+ * is_grouped only ADDS an allow rule (caller_can_access, ownership.py) — so
+ * feedback-allowed strictly implies detail-allowed, and `d` is never null for
+ * permission reasons while the corrections fetch itself succeeds.
+ */
+function visibleCorrections(
+  d: RunDetail | null,
+  feedbackLoading: boolean,
+  feedbackError: string,
+  feedback: FeedbackCorrectionsResponse | null,
+): RecordedCorrectionItem[] {
+  if (!d) return []
+  if (feedbackLoading || feedbackError) return []
+  return Array.isArray(feedback?.corrections) ? feedback.corrections : []
+}
+
+/** Run again needs stored code, an open row, no re-run of that row already in
+    flight, and a run that is not still executing. */
+function isRerunDisabled(d: RunDetail | null, selected: string | null, inFlight: Set<string>): boolean {
+  if (!selected) return true
+  return !d?.robot_code || inFlight.has(selected) || d?.status === 'running'
+}
+
+/* ── Status tabs, the text search and the "N of M runs" counter. Status AND
+   text search are both SERVER-side, so the counter is that filter+search's
+   own truth rather than a count of the loaded page ── */
+function HistoryFilterBar({ filter, onFilter, search, onSearch, showAuthor, shown, total }: Readonly<{
+  filter: Filter
+  onFilter: (next: Filter) => void
+  search: string
+  onSearch: (next: string) => void
+  showAuthor: boolean
+  shown: number
+  total: number
+}>) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {FILTERS.map(f => (
+          <Button
+            key={f}
+            size="sm"
+            variant={filter === f ? 'default' : 'outline'}
+            className="h-7 w-24 text-xs capitalize"
+            onClick={() => onFilter(f)}
+          >
+            {f === 'all' ? 'All Runs' : f}
+          </Button>
+        ))}
+      </div>
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={e => onSearch(e.target.value)}
+            placeholder={showAuthor ? 'Search description, user or id…' : 'Search description or id…'}
+            className="h-7 w-56 pl-8 text-xs"
+          />
+        </div>
+        <span className="whitespace-nowrap text-xs text-muted-foreground">
+          {shown} of {total} run{total === 1 ? '' : 's'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/* ── The bulk-move toolbar. Everything in here is a mutation, and every one of
+   them answers 403 without an identity — so with no user they are not offered
+   at all ── */
+function BulkSelectControls({ hasUser, selectMode, groups, checkedCount, onMoveChecked, onCreateGroup, onEnterSelectMode, onExitSelectMode }: Readonly<{
+  hasUser: boolean
+  selectMode: boolean
+  groups: RunGroup[]
+  checkedCount: number
+  onMoveChecked: (groupId: string | null) => void
+  onCreateGroup: (name: string) => Promise<RunGroup>
+  onEnterSelectMode: () => void
+  onExitSelectMode: () => void
+}>) {
+  if (!hasUser) return null
+  if (!selectMode) {
+    return (
+      <Button
+        size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+        title="Select multiple runs to move them into a group"
+        onClick={onEnterSelectMode}
+      >
+        <ListChecks className="h-3 w-3" /> Select
+      </Button>
+    )
+  }
+  return (
+    <>
+      <MoveToGroupMenu
+        groups={groups}
+        showRemove
+        onMove={onMoveChecked}
+        onCreateGroup={onCreateGroup}
+        trigger={
+          <Button size="sm" className="h-7 text-xs gap-1.5" disabled={checkedCount === 0}>
+            <FolderInput className="h-3 w-3" />
+            Move{checkedCount ? ` ${checkedCount}` : ''} to…
+          </Button>
+        }
+      />
+      <Button
+        size="sm" variant="outline" className="h-7 text-xs"
+        onClick={onExitSelectMode}
+      >
+        Cancel
+      </Button>
+    </>
+  )
+}
+
+/* ── The three mutually exclusive things the table area says when it has no
+   rows to draw: still loading, failed to load, or genuinely empty ── */
+function HistoryEmptyState({ loading, error, isEmpty, debouncedSearch, groupFilter, filter }: Readonly<{
+  loading: boolean
+  error: string
+  isEmpty: boolean
+  debouncedSearch: string
+  groupFilter: GroupFilter
+  filter: Filter
+}>) {
+  if (loading && isEmpty) {
+    return <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">Loading runs…</p>
+  }
+  if (!loading && error) {
+    return <p className="flex min-h-[420px] items-center justify-center text-sm text-destructive">{error}</p>
+  }
+  if (!loading && !error && isEmpty) {
+    return (
+      <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
+        {noRunsMessage(debouncedSearch, groupFilter, filter)}
+      </p>
+    )
+  }
+  return null
+}
+
+/* ── The runs table's header row. Column geometry is constant (table-fixed),
+   so only the select-all and Ran-by columns come and go ── */
+function RunsTableHead({ selectMode, showAuthor, allVisibleSelected, someVisibleSelected, onToggleAll }: Readonly<{
+  selectMode: boolean
+  showAuthor: boolean
+  allVisibleSelected: boolean
+  someVisibleSelected: boolean
+  onToggleAll: () => void
+}>) {
+  return (
+    <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_hsl(var(--border))]">
+      <tr className="bg-muted/40">
+        {selectMode && (
+          <th className="w-10 py-2.5 pl-4">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle"
+              title="Select all loaded runs"
+              aria-label="Select all loaded runs"
+              checked={allVisibleSelected}
+              ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+              onChange={onToggleAll}
+            />
+          </th>
+        )}
+        <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
+        <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
+        {showAuthor && (
+          <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">Ran by</th>
+        )}
+        <th className="w-[320px] py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden md:table-cell">ID</th>
+        <th className="w-24 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:table-cell">When</th>
+        <th className="w-20 py-2.5 px-4"></th>
+        <th className="w-9 py-2.5 pr-3"></th>
+      </tr>
+    </thead>
+  )
+}
+
 export default function HistoryPage() {
   const navigate = useNavigate()
 
@@ -622,37 +831,9 @@ export default function HistoryPage() {
   // History drawer's read of the same data GeneratePage's FeedbackPanel
   // shows while the run is still on screen.
   //
-  // Unlike detail above, this payload carries no run_id of its own to check
-  // against `selected` (only `applied_to`, the resolved ORIGINAL run, which
-  // legitimately differs from `selected` on a re-run — see the block below),
-  // so the same "does the response match the open row" trick doesn't apply
-  // to it directly. `loading` and `error` are the first substitute, and
-  // BOTH are required: useFetch's reload() sets loading true and error ''
-  // at the START of every attempt for the CURRENT path (useFetch.ts) — from
-  // inside an EFFECT, so for the one render between `feedbackPath` changing
-  // and that effect firing, both still describe the PREVIOUS path; only
-  // from the render after that on do they answer "is THIS path's fetch
-  // still in flight, or did IT fail". useFetch never clears `data` in
-  // either case, in its catch branch least of all (only setError runs
-  // there), so a fetch that FAILS for a freshly-selected row — the 403
-  // below is the everyday case, not an edge one — leaves the PREVIOUS
-  // row's data sitting there with loading already back to false. Gating on
-  // loading alone closes only the in-flight window; without error too,
-  // opening an owned run with corrections on file and then a colleague's
-  // shared run (whose corrections read the gate below refuses) would go on
-  // showing the FIRST run's corrections, and a "filed against" notice that
-  // may be entirely fabricated, under the SECOND run's drawer.
-  //
-  // That leaves exactly the one render loading/error can't cover on their
-  // own — and it is exactly the render where `d` (above) is ALSO null, for
-  // the same reason (detail hasn't caught up to `selected` either).
-  // `corrections` below requires `d` too, which closes it. Borrowing it
-  // costs nothing on the success path: GET /api/history/{run_id} passes
-  // is_grouped=true while GET /api/feedback/{run_id} deliberately does not
-  // (see below), and is_grouped only ADDS an allow rule (caller_can_access,
-  // ownership.py) — so feedback-allowed strictly implies detail-allowed,
-  // and `d` is never null for permission reasons while the corrections
-  // fetch itself succeeds.
+  // Which of those rows may actually be shown for the open drawer is a
+  // question about staleness rather than about fetching — visibleCorrections
+  // above states the rule and why each half of it is required.
   //
   // Errors are read but never rendered as their own text. A 403 here is
   // EXPECTED and correct: GET /api/history/{run_id} above passes
@@ -664,7 +845,7 @@ export default function HistoryPage() {
   // way, silently: silence claims nothing either way.
   const feedbackPath = selected ? `/api/feedback/${selected}` : null
   const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
-  const corrections = !d || feedbackLoading || feedbackError || !Array.isArray(feedback?.corrections) ? [] : feedback.corrections
+  const corrections = visibleCorrections(d, feedbackLoading, feedbackError, feedback)
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -833,7 +1014,7 @@ export default function HistoryPage() {
   }, [])
 
   const selectedNote = selected ? rerunNote[selected] : undefined
-  const rerunDisabled = !d?.robot_code || !selected || inFlight.has(selected) || d?.status === 'running'
+  const rerunDisabled = isRerunDisabled(d, selected, inFlight)
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -854,35 +1035,15 @@ export default function HistoryPage() {
 
       <Card>
         <CardHeader className="gap-3 space-y-0 pb-3 px-5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {FILTERS.map(f => (
-                <Button
-                  key={f}
-                  size="sm"
-                  variant={filter === f ? 'default' : 'outline'}
-                  className="h-7 w-24 text-xs capitalize"
-                  onClick={() => setFilter(f)}
-                >
-                  {f === 'all' ? 'All Runs' : f}
-                </Button>
-              ))}
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  placeholder={showAuthor ? 'Search description, user or id…' : 'Search description or id…'}
-                  className="h-7 w-56 pl-8 text-xs"
-                />
-              </div>
-              <span className="whitespace-nowrap text-xs text-muted-foreground">
-                {visible.length} of {total} run{total === 1 ? '' : 's'}
-              </span>
-            </div>
-          </div>
+          <HistoryFilterBar
+            filter={filter}
+            onFilter={setFilter}
+            search={search}
+            onSearch={setSearch}
+            showAuthor={showAuthor}
+            shown={visible.length}
+            total={total}
+          />
           {/* Group chips row (design option C) + the bulk-move toolbar. The
               toolbar is pinned top-right: only the CHIPS wrap onto new lines
               (min-w-0 flex-1), so Select/Move never drift down as groups grow. */}
@@ -904,36 +1065,16 @@ export default function HistoryPage() {
             {/* Everything in here is a mutation, and every one of them answers
                 403 without an identity — so they are not offered at all. */}
             <div className="flex shrink-0 items-center gap-1.5">
-              {user && (selectMode ? (
-                <>
-                  <MoveToGroupMenu
-                    groups={groups}
-                    showRemove
-                    onMove={gid => { if (checkedIds.size) void moveRuns([...checkedIds], gid, true) }}
-                    onCreateGroup={createGroup}
-                    trigger={
-                      <Button size="sm" className="h-7 text-xs gap-1.5" disabled={checkedIds.size === 0}>
-                        <FolderInput className="h-3 w-3" />
-                        Move{checkedIds.size ? ` ${checkedIds.size}` : ''} to…
-                      </Button>
-                    }
-                  />
-                  <Button
-                    size="sm" variant="outline" className="h-7 text-xs"
-                    onClick={() => { setSelectMode(false); setCheckedIds(new Set()) }}
-                  >
-                    Cancel
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  size="sm" variant="outline" className="h-7 text-xs gap-1.5"
-                  title="Select multiple runs to move them into a group"
-                  onClick={() => setSelectMode(true)}
-                >
-                  <ListChecks className="h-3 w-3" /> Select
-                </Button>
-              ))}
+              <BulkSelectControls
+                hasUser={!!user}
+                selectMode={selectMode}
+                groups={groups}
+                checkedCount={checkedIds.size}
+                onMoveChecked={gid => { if (checkedIds.size) void moveRuns([...checkedIds], gid, true) }}
+                onCreateGroup={createGroup}
+                onEnterSelectMode={() => setSelectMode(true)}
+                onExitSelectMode={() => { setSelectMode(false); setCheckedIds(new Set()) }}
+              />
             </div>
           </div>
           {/* A failed /api/groups leaves the chips showing whatever the last
@@ -957,17 +1098,14 @@ export default function HistoryPage() {
               collapsing the card. Column geometry is constant (table-fixed),
               so switching filters only changes the values. */}
           <div className="min-h-[420px]">
-          {loading && visible.length === 0 && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">Loading runs…</p>
-          )}
-          {!loading && error && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-destructive">{error}</p>
-          )}
-          {!loading && !error && visible.length === 0 && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
-              {noRunsMessage(debouncedSearch, groupFilter, filter)}
-            </p>
-          )}
+          <HistoryEmptyState
+            loading={loading}
+            error={error}
+            isEmpty={visible.length === 0}
+            debouncedSearch={debouncedSearch}
+            groupFilter={groupFilter}
+            filter={filter}
+          />
 
           {/* Filter/search changes keep the PREVIOUS rows on screen and dim
               them while the refetch is in flight, then swap in place — no
@@ -979,32 +1117,13 @@ export default function HistoryPage() {
                   recomputed from row content, so switching status filters
                   keeps the exact same grid — only the values change. */}
               <table className="w-full table-fixed text-sm">
-                <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_hsl(var(--border))]">
-                  <tr className="bg-muted/40">
-                    {selectMode && (
-                      <th className="w-10 py-2.5 pl-4">
-                        <input
-                          type="checkbox"
-                          className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle"
-                          title="Select all loaded runs"
-                          aria-label="Select all loaded runs"
-                          checked={allVisibleSelected}
-                          ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
-                          onChange={toggleAllVisible}
-                        />
-                      </th>
-                    )}
-                    <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
-                    <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
-                    {showAuthor && (
-                      <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">Ran by</th>
-                    )}
-                    <th className="w-[320px] py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden md:table-cell">ID</th>
-                    <th className="w-24 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:table-cell">When</th>
-                    <th className="w-20 py-2.5 px-4"></th>
-                    <th className="w-9 py-2.5 pr-3"></th>
-                  </tr>
-                </thead>
+                <RunsTableHead
+                  selectMode={selectMode}
+                  showAuthor={showAuthor}
+                  allVisibleSelected={allVisibleSelected}
+                  someVisibleSelected={someVisibleSelected}
+                  onToggleAll={toggleAllVisible}
+                />
                 <tbody>
                   {visible.map(row => (
                     <tr
