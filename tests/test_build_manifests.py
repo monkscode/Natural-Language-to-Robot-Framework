@@ -275,8 +275,21 @@ def test_the_coverage_thresholds_are_not_silently_gutted():
         "nothing, so both CI lanes go green on collapsed coverage")
 
     thresholds_body = match.group(1)
+    # This repo's habit when changing a number is to leave the previous
+    # value behind in a `//` comment, e.g.:
+    #   // was lines: 80, functions: 80, branches: 80, statements: 80
+    #   lines: 0, functions: 0, branches: 0, statements: 0,
+    # A bare substring search finds the commented-out 80 before the real 0.
+    # Strip `//` comments per physical line first, then split on commas so
+    # each metric's declaration starts its own line - re.M anchors the
+    # search to that start, so a metric can only match its own live value,
+    # never a substring surviving in a comment or inside another metric's
+    # entry.
+    code_only = "\n".join(
+        line.split("//", 1)[0] for line in thresholds_body.splitlines())
+    declarations = "\n".join(code_only.split(","))
     for metric in ("lines", "functions", "branches", "statements"):
-        metric_match = re.search(rf"\b{metric}\s*:\s*(\d+)", thresholds_body)
+        metric_match = re.search(rf"^\s*{metric}\s*:\s*(\d+)", declarations, re.MULTILINE)
         assert metric_match, (
             f"vite.config.ts's `thresholds` has no `{metric}` metric - without "
             "it, that metric is never gated and both CI lanes go green on "
