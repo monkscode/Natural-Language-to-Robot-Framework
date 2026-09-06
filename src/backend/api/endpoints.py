@@ -625,14 +625,18 @@ async def get_run_corrections(run_id: str, response: Response,
             engine.get_corrections_for_run, target_id)
 
     # Explicit projection, field by field — never the row dict with keys
-    # deleted. org_id, created_by_user_id and is_active ride along on each
-    # row only to compute can_retract; building the response any other way
-    # would let a future column added to that SELECT leak to the client
-    # silently. can_retract surfaces the Author tier: the feedback panel is
-    # the only place a plain org member ever sees their own hint text
-    # (list_hints and get_hint stay gated on is_dashboard_viewer), so it is
-    # also the only place they can be offered a control to act on it — the
-    # client never decides this, it only draws what the server permits.
+    # deleted. org_id and created_by_user_id ride along on each row only to
+    # compute can_retract; building the response any other way would let a
+    # future column added to that SELECT leak to the client silently.
+    # is_active rides along for the same can_retract computation, but it is
+    # also safe to forward as active: the caller already reads the hint's
+    # own text, and the backend already discloses the same state in the
+    # hint_inactive message. can_retract surfaces the Author tier: the
+    # feedback panel is the only place a plain org member ever sees their
+    # own hint text (list_hints and get_hint stay gated on
+    # is_dashboard_viewer), so it is also the only place they can be offered
+    # a control to act on it — the client never decides this, it only draws
+    # what the server permits.
     #
     # can_retract is an OFFER of an action, not just a permission check, so
     # it is not hint_mutation_verdict alone. get_corrections_for_run stays
@@ -649,6 +653,7 @@ async def get_run_corrections(run_id: str, response: Response,
             "hint_id": c.get("hint_id"),
             "feedback_text": c.get("feedback_text"),
             "recorded_at": c.get("recorded_at"),
+            "active": bool(c.get("is_active")),
             "can_retract": (
                 # user is not None FIRST, mirroring _require_caller: this
                 # route family does not honour the AUTH_ENFORCED-off escape

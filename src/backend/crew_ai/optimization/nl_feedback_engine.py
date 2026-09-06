@@ -814,13 +814,17 @@ class NLFeedbackEngine(LearningEngine):
         this task removes. What the LLM thought of it is not exposed here;
         that is a product decision, not a UI one.
 
-        THREE of the columns selected are permission inputs, not content:
-        org_id, created_by_user_id and is_active exist only so the API layer
-        can compute can_retract (hint_mutation_verdict AND still-active). They
-        must NEVER be forwarded to a client — api/endpoints.get_run_corrections
-        builds an explicit four-field projection rather than passing these rows
-        through, precisely so a column added here cannot leak by default. Add a
-        column to this SELECT only with that projection in mind.
+        TWO of the columns selected are permission inputs, not content: org_id
+        and created_by_user_id exist only so the API layer can compute
+        can_retract (hint_mutation_verdict AND still-active). They must NEVER
+        be forwarded to a client — api/endpoints.get_run_corrections builds an
+        explicit five-field projection rather than passing these rows through,
+        precisely so a column added here cannot leak by default. is_active is
+        also read here for that same can_retract computation, but it is no
+        longer permission-only: it is now forwarded as active too, because the
+        caller already reads the hint's text and hint_inactive already
+        discloses the same state on submission. Add a column to this SELECT
+        only with that projection in mind.
 
         Uncapped on purpose: every row here was typed by a human against this
         one run, and a silent LIMIT would under-report a user's own history.

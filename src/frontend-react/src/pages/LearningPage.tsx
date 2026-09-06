@@ -556,11 +556,16 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
         ? 'Optional note — why you agree with this recommendation (leave blank to skip):'
         : 'Optional note — why you are overriding this recommendation (leave blank to skip):',
     )
+    // window.prompt returns null only when the dialog was DISMISSED (Cancel or
+    // Escape), which abandons the action — and this PATCH writes a decision
+    // into the learning store, so it must not fire. '' is different: it is the
+    // "leave blank to skip" the label offers, so it submits with no note.
+    if (notes === null) return
     setBusyId(recId); setActErr(''); setAppliedMsg('')
     try {
       await api(`/api/learning/review-hints/sessions/${id}/recommendations/${recId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ admin_decision: decision, admin_notes: notes || null }),
+        body: JSON.stringify({ admin_decision: decision, admin_notes: notes.trim() || null }),
       })
       await reload()
     } catch (e) {

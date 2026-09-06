@@ -77,6 +77,12 @@ docs/superpowers/specs/
 docs/superpowers/*.md
 .agents/workflows/development-workflow.md
 logs/crewai.log.txt
+# The deferred-work register: an index of technical debt that was found and
+# consciously not fixed. Gitignored for the same reason CLAUDE.md is - it is the
+# owner's working state, and it points at follow-up docs that are not committed
+# (one of which names a client).
+docs/TODO.md
+
 CLAUDE.md
 credentials.json
 

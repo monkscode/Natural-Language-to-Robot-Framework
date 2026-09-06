@@ -57,6 +57,21 @@ def _libdoc_version(library: str) -> str:
     return json.loads(path.read_text(encoding="utf-8"))["version"]
 
 
+def _run_shell(steps: list[dict]) -> str:
+    """Join steps' `run:` bodies, dropping shell-comment lines first.
+
+    This repo's comments are checkable claims: a `#`-commented command is not
+    an invocation, so it must not satisfy an "X runs" assertion just because
+    the text is present. A `run: |` block's own `#` lines land in `run:` and
+    would otherwise read as a real command; a YAML `#` comment above a step
+    never reaches `run:` at all, so this only ever strips the former.
+    """
+    return "\n".join(
+        line for s in steps for line in s.get("run", "").splitlines()
+        if not line.strip().startswith("#")
+    )
+
+
 def test_playwright_pin_matches_between_bench_venv_and_shipped_image():
     """The bench must resolve locators on the engine the image ships."""
     bench = _pin(_read("requirements-bus.txt"), "playwright", "requirements-bus.txt")
@@ -129,7 +144,7 @@ def test_the_publish_gate_job_exists_and_runs_the_suite():
         f"build-images.yml has no '{GATE_JOB}' job — nothing stops a red suite "
         "from publishing images")
     steps = wf["jobs"][GATE_JOB].get("steps", [])
-    run_text = "\n".join(s.get("run", "") for s in steps)
+    run_text = _run_shell(steps)
     assert "pytest" in run_text, f"the '{GATE_JOB}' job does not run pytest"
 
 
@@ -143,3 +158,377 @@ def test_every_image_build_waits_for_the_suite(job):
     assert GATE_JOB in needs, (
         f"'{job}' does not depend on '{GATE_JOB}' — it can publish an image "
         "built from code the suite rejected")
+
+
+# ---------------------------------------------------------------------------
+# The FRONTEND publish gate.
+#
+# Until test-frontend existed, no workflow ran a single frontend test. Both
+# pytest lanes are backend-only, and sonar-project.properties excluded
+# src/frontend-react outright at the time, so the only thing standing between a
+# broken React change and a published frontend image was `tsc -b` inside
+# Dockerfile.frontend. That catches a type error and nothing else. That
+# exclusion is gone now, and test_the_frontend_is_not_excluded_from_sonar_analysis
+# below is what keeps it gone.
+#
+# Guarded for the same reason as the backend gate above: a `needs:` line and a
+# test command are exactly what gets dropped while making a job faster.
+# ---------------------------------------------------------------------------
+
+FRONTEND_GATE_JOB = "test-frontend"
+
+# The shared coverage invocation both CI lanes must call. vite.config.ts's
+# coverage thresholds are only evaluated when vitest runs with `--coverage` -
+# a bare `npm test` (or `vitest run`) exits 0 without checking them at all, so
+# "the suite ran" is not proof the thresholds were enforced.
+FRONTEND_COVERAGE_SCRIPT = "npm run test:coverage"
+
+
+def test_the_frontend_publish_gate_exists_and_runs_the_suite():
+    wf = _build_images_workflow()
+    assert FRONTEND_GATE_JOB in wf["jobs"], (
+        f"build-images.yml has no '{FRONTEND_GATE_JOB}' job — nothing runs the "
+        "frontend suite before its image is published")
+    steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    run_text = _run_shell(steps)
+    assert FRONTEND_COVERAGE_SCRIPT in run_text, (
+        f"the '{FRONTEND_GATE_JOB}' job does not run '{FRONTEND_COVERAGE_SCRIPT}' — "
+        "vitest only evaluates vite.config.ts's coverage thresholds under "
+        "--coverage, so without it this job publishes images on collapsed "
+        "coverage")
+    assert "tsc" in run_text, (
+        f"the '{FRONTEND_GATE_JOB}' job does not typecheck — tsc is the only "
+        "check that covers the TSX the suite does not reach")
+
+
+def test_the_shared_coverage_script_actually_measures_coverage():
+    # Both workflows above call FRONTEND_COVERAGE_SCRIPT by name and trust it to
+    # run vitest with --coverage. Without this test, both lanes could be pointed
+    # at a script that silently stopped measuring coverage and nothing here
+    # would notice.
+    package_json = json.loads(
+        (REPO_ROOT / "src" / "frontend-react" / "package.json").read_text(encoding="utf-8"))
+    script_name = FRONTEND_COVERAGE_SCRIPT.split(" ")[-1]
+    scripts = package_json.get("scripts", {})
+    assert script_name in scripts, (
+        f"src/frontend-react/package.json has no '{script_name}' script — "
+        f"'{FRONTEND_COVERAGE_SCRIPT}' would fail in CI")
+    assert "--coverage" in scripts[script_name], (
+        f"src/frontend-react/package.json's '{script_name}' script no longer "
+        "runs vitest with --coverage, so vite.config.ts's thresholds would "
+        "silently stop being evaluated in both CI lanes")
+    assert "vitest" in scripts[script_name], (
+        f"src/frontend-react/package.json's '{script_name}' script does not "
+        "invoke vitest at all - '--coverage' could belong to any other "
+        "command (e.g. 'echo --coverage'), so its presence alone does not "
+        "prove coverage is measured")
+
+
+# A run with an empty coverage map still exits 0: vitest reports
+# "All files | 0 | 0 | 0 | 0" and every threshold trivially "passes" against
+# zero measured files. The checker script closes that gap; this test makes
+# sure the script keeps existing and stays wired into test:coverage, since
+# both are silent failure modes (a missing/renamed file, or a script edited
+# back to the bare `vitest run --coverage` form) that no other test here would
+# catch.
+COVERAGE_EMPTY_MAP_CHECKER = "src/frontend-react/scripts/assert-coverage-not-empty.mjs"
+
+
+def test_the_coverage_script_guards_against_an_empty_coverage_map():
+    checker_path = REPO_ROOT / COVERAGE_EMPTY_MAP_CHECKER
+    assert checker_path.exists(), (
+        f"{COVERAGE_EMPTY_MAP_CHECKER} is missing - nothing would fail a "
+        "test:coverage run whose coverage.include matches no file, even "
+        "though vitest itself exits 0 on an empty coverage map")
+
+    package_json = json.loads(
+        (REPO_ROOT / "src" / "frontend-react" / "package.json").read_text(encoding="utf-8"))
+    script_name = FRONTEND_COVERAGE_SCRIPT.split(" ")[-1]
+    scripts = package_json.get("scripts", {})
+    # Chained with `&&` specifically, not `;` and not `|| true`: `;` would run
+    # the checker even after vitest itself failed (masking a real test
+    # failure as a coverage pass/fail), and `|| true` would restore exit 0
+    # after the checker caught a collapsed map. Only `&&` makes the checker's
+    # exit code the script's exit code.
+    assert "&& node scripts/assert-coverage-not-empty.mjs" in scripts.get(script_name, ""), (
+        f"src/frontend-react/package.json's '{script_name}' script does not "
+        "chain assert-coverage-not-empty.mjs with `&&` - a `;` would run the "
+        "checker even when vitest already failed, and `|| true` would swallow "
+        "the checker's own failure, so a collapsed coverage map would once "
+        "again exit 0 in both CI lanes")
+
+
+# The floor the two CI lanes enforce - the value must never be lowered to make
+# a red run green (matches vite.config.ts's own comment on `thresholds`).
+FRONTEND_COVERAGE_THRESHOLD_FLOOR = 80
+
+
+def test_the_coverage_thresholds_are_not_silently_gutted():
+    """`--coverage` MEASURES coverage; vite.config.ts's `thresholds` is the only
+    thing that GATES it. Nothing in this file otherwise reads vite.config.ts,
+    so a threshold silently zeroed, lowered or deleted would leave every test
+    above green while both CI lanes pass on collapsed coverage.
+    """
+    vite_config = _read("src/frontend-react/vite.config.ts")
+    match = re.search(r"thresholds:\s*\{([^}]*)\}", vite_config)
+    assert match, (
+        "src/frontend-react/vite.config.ts has no `thresholds` block under "
+        "coverage - without it, `--coverage` measures and reports but gates "
+        "nothing, so both CI lanes go green on collapsed coverage")
+
+    thresholds_body = match.group(1)
+    # This repo's habit when changing a number is to leave the previous
+    # value behind in a `//` comment, e.g.:
+    #   // was lines: 80, functions: 80, branches: 80, statements: 80
+    #   lines: 0, functions: 0, branches: 0, statements: 0,
+    # A bare substring search finds the commented-out 80 before the real 0.
+    # Strip `//` comments per physical line first, then split on commas so
+    # each metric's declaration starts its own line - re.M anchors the
+    # search to that start, so a metric can only match its own live value,
+    # never a substring surviving in a comment or inside another metric's
+    # entry.
+    code_only = "\n".join(
+        line.split("//", 1)[0] for line in thresholds_body.splitlines())
+    declarations = "\n".join(code_only.split(","))
+    for metric in ("lines", "functions", "branches", "statements"):
+        metric_match = re.search(rf"^\s*{metric}\s*:\s*(\d+)", declarations, re.MULTILINE)
+        assert metric_match, (
+            f"vite.config.ts's `thresholds` has no `{metric}` metric - without "
+            "it, that metric is never gated and both CI lanes go green on "
+            "collapsed coverage for it")
+        value = int(metric_match.group(1))
+        assert value >= FRONTEND_COVERAGE_THRESHOLD_FLOOR, (
+            f"vite.config.ts's `thresholds.{metric}` is {value}, below the "
+            f"floor of {FRONTEND_COVERAGE_THRESHOLD_FLOOR} - lowering it "
+            "weakens the only real gate on frontend coverage and both CI "
+            "lanes would go green on a regression")
+
+
+def test_the_frontend_image_waits_for_the_frontend_suite():
+    wf = _build_images_workflow()
+    needs = wf["jobs"]["build-frontend"].get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert FRONTEND_GATE_JOB in needs, (
+        f"'build-frontend' does not depend on '{FRONTEND_GATE_JOB}' — it can "
+        "publish an image built from React code the frontend suite rejected")
+
+
+def test_the_frontend_gate_checks_out_without_persisting_the_token():
+    """actions/checkout writes GITHUB_TOKEN into .git/config unless told not to.
+
+    This job then runs code the pull request itself authored - `npm ci` executes
+    lifecycle scripts from the PR's package.json, and `npm run test:coverage`
+    runs its test files - so anything the PR wants can read that token off disk. No step in
+    the job needs git authentication afterwards. check-browser-service-release.yml
+    already sets this for the same reason.
+    """
+    steps = _build_images_workflow()["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    checkouts = [s for s in steps if s.get("uses", "").startswith("actions/checkout")]
+    assert checkouts, f"'{FRONTEND_GATE_JOB}' has no checkout step"
+    for s in checkouts:
+        assert s.get("with", {}).get("persist-credentials") is False, (
+            f"'{FRONTEND_GATE_JOB}' checks out with credential persistence on, "
+            "then runs pull-request-authored npm scripts and tests that can read "
+            "the token out of .git/config")
+
+
+def test_the_frontend_gate_runs_the_same_node_major_as_the_image_build():
+    # A suite that passes on a different Node major than the image builds on is
+    # not a gate on the thing being shipped. Dockerfile.frontend's build stage
+    # is the authority.
+    import re
+    wf = _build_images_workflow()
+    dockerfile = (REPO_ROOT / "Dockerfile.frontend").read_text(encoding="utf-8")
+    m = re.search(r"^FROM\s+node:(\d+)", dockerfile, re.MULTILINE)
+    assert m, "Dockerfile.frontend has no `FROM node:<major>` build stage"
+    image_major = m.group(1)
+
+    steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
+    versions = [
+        str(s["with"]["node-version"])
+        for s in steps
+        if s.get("uses", "").startswith("actions/setup-node") and "node-version" in s.get("with", {})
+    ]
+    assert versions, f"'{FRONTEND_GATE_JOB}' does not pin a Node version"
+    assert all(v.split(".")[0] == image_major for v in versions), (
+        f"'{FRONTEND_GATE_JOB}' runs Node {versions} but Dockerfile.frontend "
+        f"builds on node:{image_major}")
+
+
+# ---------------------------------------------------------------------------
+# SonarQube's view of the frontend.
+#
+# src/frontend-react was excluded from Sonar analysis entirely while it had no
+# test harness. It has one now, so the exclusion came off and lcov is wired in.
+# Both halves are silent when broken, which is why they are guarded here:
+#
+#   - Sonar does NOT fail when an lcov path is missing. It reports the whole SPA
+#     as 0% covered, which fails the new-code gate on every frontend PR for a
+#     reason that looks nothing like the cause.
+#   - Re-adding src/frontend-react to sonar.exclusions would make the analysis
+#     pass by not looking, which is how this started.
+# ---------------------------------------------------------------------------
+
+SONAR_PROPS = REPO_ROOT / "sonar-project.properties"
+SONAR_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "sonarqube.yml"
+
+
+def _sonar_props() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in SONAR_PROPS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def test_the_frontend_is_not_excluded_from_sonar_analysis():
+    excl = _sonar_props().get("sonar.exclusions", "")
+    offenders = [
+        p for p in excl.split(",")
+        if p.strip().startswith("src/frontend-react")
+        and not p.strip().startswith(("src/frontend-react/dist", "src/frontend-react/coverage"))
+    ]
+    assert not offenders, (
+        f"sonar.exclusions hides frontend SOURCE from analysis: {offenders}. "
+        "Build output and coverage output may be excluded; source may not.")
+
+
+def test_sonar_reads_the_frontend_lcov():
+    props = _sonar_props()
+    assert props.get("sonar.javascript.lcov.reportPaths") == "src/frontend-react/coverage/lcov.info", (
+        "sonar.javascript.lcov.reportPaths is missing or wrong — Sonar would "
+        "silently report the SPA as 0% covered rather than failing")
+
+
+def test_vendored_shadcn_is_excluded_from_coverage_but_not_from_analysis():
+    props = _sonar_props()
+    cov_excl = props.get("sonar.coverage.exclusions", "")
+    assert "src/frontend-react/src/components/ui/**" in cov_excl, (
+        "vendored shadcn/ui must be excluded from COVERAGE (it is generated and "
+        "never edited here) — but it must stay in analysis, since it ships")
+
+
+def _ant_match(path: str, pattern: str) -> bool:
+    """Approximate Sonar's ant path matching well enough for the patterns here.
+
+    `**` spans directories and `*` does not, but every pattern this repo uses is
+    either `<dir>/**` or `**/*.<ext>`, for which collapsing both to ".*" gives
+    the same answer.
+    """
+    import re
+    rx = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", ".*")
+    return re.fullmatch(rx, path) is not None
+
+
+def _sonar_scope(path: str) -> str:
+    """Which scope Sonar puts `path` in: 'test', 'source', or 'dropped'.
+
+    sonar.tests sets where test code is looked for; sonar.test.inclusions then
+    NARROWS that set. A file under sonar.tests that matches no inclusion is not
+    a test - and if it is not under sonar.sources either, it leaves the analysis
+    entirely.
+    """
+    props = _sonar_props()
+    csv = lambda k: [v.strip() for v in props.get(k, "").split(",") if v.strip()]
+
+    under = lambda roots: any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+    test_incl = csv("sonar.test.inclusions")
+    matches_test_incl = any(_ant_match(path, p) for p in test_incl)
+    if under(csv("sonar.tests")):
+        if not test_incl or matches_test_incl:
+            if not any(_ant_match(path, p) for p in csv("sonar.test.exclusions")):
+                return "test"
+    # A file matching sonar.test.inclusions is never indexed as source, whether
+    # or not a sonar.tests root reaches it - so an inclusion without a matching
+    # root removes the file from the analysis instead of reclassifying it.
+    # Confirmed on PR #100: app-header.test.tsx and tests/test_build_manifests.py
+    # were both changed by the PR and neither is indexed, while GeneratePage.tsx
+    # and useFetch.ts from the same diff are both indexed as FIL.
+    if under(csv("sonar.sources")) and not matches_test_incl:
+        if not any(_ant_match(path, p) for p in csv("sonar.exclusions")):
+            return "source"
+    return "dropped"
+
+
+def test_the_python_suite_is_still_in_sonars_test_scope():
+    """Adding sonar.test.inclusions for the frontend silently emptied it.
+
+    sonar.test.inclusions narrows sonar.tests, so `**/*.test.ts,**/*.test.tsx`
+    matched no Python file and dropped the entire tests/ tree out of the
+    analysis. Measured on PR #100: SonarCloud indexed 0 unit-test files against
+    the PR while the main branch indexed 187, and Sonar reported nothing wrong.
+    """
+    for path in ("tests/test_build_manifests.py", "tests/test_api/test_feedback_can_retract.py"):
+        assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real test file"
+        assert _sonar_scope(path) == "test", (
+            f"{path} is not in Sonar's test scope - the Python suite is being "
+            "analysed as though it did not exist")
+
+
+def test_the_frontend_suite_is_in_sonars_test_scope():
+    """A test.inclusions pattern with no sonar.tests root behind it deletes files.
+
+    `**/*.test.tsx` matched every frontend test and took them out of the source
+    scope, but nothing put them into the test scope, so 37 files and ~7,300
+    lines simply left the analysis. Measured on PR #100: app-header.test.tsx is
+    in the diff and is not indexed at all, while GeneratePage.tsx and
+    useFetch.ts from the same diff are indexed as FIL.
+    """
+    path = "src/frontend-react/src/components/app-header.test.tsx"
+    assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real test file"
+    assert _sonar_scope(path) == "test", (
+        f"{path} is not in Sonar's test scope - the frontend suite is either "
+        "graded as production code or dropped from the analysis entirely")
+
+
+def test_frontend_production_code_is_still_analysed_as_source():
+    # The counterweight: whatever pulls the test files out must not take the
+    # pages with them. This is the file carrying most of the PR's Sonar issues.
+    path = "src/frontend-react/src/pages/GeneratePage.tsx"
+    assert (REPO_ROOT / path).exists(), f"{path} moved; pick another real page"
+    assert _sonar_scope(path) == "source", (
+        f"{path} left the source scope - the SPA would stop being analysed, "
+        "which is exactly the exclusion this branch removed")
+
+
+def test_the_sonar_workflow_produces_the_lcov_before_it_scans():
+    import yaml
+    wf = yaml.safe_load(SONAR_WORKFLOW.read_text(encoding="utf-8"))
+    steps = wf["jobs"]["sonarqube"]["steps"]
+    names = [s.get("name") or s.get("uses", "") for s in steps]
+    runs = _run_shell(steps)
+    assert FRONTEND_COVERAGE_SCRIPT in runs, (
+        "sonarqube.yml never generates the frontend lcov it tells Sonar to read")
+    scan = next(i for i, s in enumerate(steps)
+                if "sonarqube-scan-action" in s.get("uses", ""))
+    cov = next((i for i, s in enumerate(steps)
+                if FRONTEND_COVERAGE_SCRIPT in _run_shell([s])), None)
+    assert cov is not None, (
+        f"no step in sonarqube.yml runs '{FRONTEND_COVERAGE_SCRIPT}' — the lcov "
+        "SonarQube reads would never be produced")
+    assert cov < scan, (
+        f"the frontend coverage step (index {cov}) must run BEFORE the scan "
+        f"(index {scan}), or the lcov does not exist when Sonar reads it")
+    assert names, "sonarqube job has no steps"
+
+
+def test_the_sonar_workflow_rewrites_lcov_paths_to_repo_root():
+    """vitest writes lcov paths relative to ITS OWN root, so every record reads
+    `SF:src/App.tsx`. Sonar resolves those against the repo root, where `src/`
+    is the PYTHON backend - measured 2026-09-05, all 41 records unresolvable
+    and the SPA reported as 0% covered, with no error from Sonar. The rewrite
+    is what makes the lcov usable, and it is one `sed` away from being lost.
+    """
+    steps = __import__("yaml").safe_load(
+        SONAR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sonarqube"]["steps"]
+    runs = _run_shell(steps)
+    assert "SF:src/frontend-react/src/" in runs, (
+        "sonarqube.yml does not rewrite the lcov paths to repo-root-relative - "
+        "Sonar will silently report src/frontend-react as 0% covered")
+    assert "exit 1" in runs, (
+        "the lcov rewrite is not verified in CI; a partial rewrite would pass "
+        "silently and produce a wrong coverage number rather than a failure")

@@ -11,16 +11,18 @@ import {
 } from '@/components/ui/breadcrumb'
 import { Sun, Moon, Monitor, Zap } from 'lucide-react'
 import { useTheme } from '@/components/theme-provider'
+import { NAV_PLATFORM, NAV_WORKSPACE } from '@/components/app-sidebar'
 import { cn } from '@/lib/utils'
 
-const PAGE_LABELS: Record<string, string> = {
-  '/generate':  'Generate',
-  '/history':   'Test Runs',
-  '/metrics':   'Metrics',
-  '/learning':  'Learning',
-  '/settings':  'Settings',
-  '/docs':      'Documentation',
-}
+// Derived from the nav tables rather than kept as a third hand-maintained copy
+// of the same paths. As a literal it drifted in both directions: /access and
+// /team shipped as real gated routes with no entry, so both rendered
+// "Overview" on every load, while a '/docs': 'Documentation' entry outlived a
+// route that was never declared. The sidebar already names every page, so the
+// header now reuses those exact words and the two cannot disagree.
+const PAGE_LABELS: Record<string, string> = Object.fromEntries(
+  [...NAV_PLATFORM, ...NAV_WORKSPACE].map(item => [item.url, item.title]),
+)
 
 export function AppHeader() {
   const { pathname } = useLocation()

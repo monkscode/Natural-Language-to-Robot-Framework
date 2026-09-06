@@ -266,10 +266,70 @@ jobs:
             echo "image_size=unknown" >> "$GITHUB_OUTPUT"
           fi
 
+  # The frontend suite. Until this job existed NOTHING in CI ran it: both
+  # pytest lanes here and in sonarqube.yml pass --ignore=tests/test_integration
+  # and are backend-only, and the only frontend gate was `tsc -b` inside
+  # Dockerfile.frontend's `npm run build`. That catches a type error and
+  # nothing else, so a React behavioural regression published a green frontend
+  # image. sonar-project.properties excluded src/frontend-react entirely back
+  # then, so SonarQube did not cover it either; that exclusion has since been
+  # removed and the SPA is analysed.
+  #
+  # Gates build-frontend only, not the other four image jobs: this suite judges
+  # src/frontend-react and nothing else, and a red React test is no reason to
+  # hold back a FastAPI fix. Kept honest by tests/test_build_manifests.py, the
+  # same way the backend gate is.
+  test-frontend:
+    name: Frontend suite (publish gate)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: src/frontend-react
+
+    steps:
+      # persist-credentials: false keeps GITHUB_TOKEN out of .git/config. The
+      # steps below run code this pull request authored - `npm ci` executes its
+      # package.json lifecycle scripts, `npm run test:coverage` runs its test
+      # files - and no step here needs git authentication afterwards.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same major as Dockerfile.frontend's `node:22-alpine` build stage, so a
+      # failure here means the same thing a failure in the image build does.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/frontend-react/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # vite.config.ts's coverage thresholds are only evaluated when vitest
+      # runs with --coverage - plain `npm test` never checks them. This is the
+      # job that gates build-frontend, so the thresholds must be evaluated
+      # HERE and not only in sonarqube.yml: that workflow races build-images.yml
+      # on the same push rather than gating it, so a coverage collapse there
+      # would not stop this job from publishing an image.
+      - name: Run the frontend suite
+        run: npm run test:coverage
+
+      # `npm run build` runs `tsc -b` too, but only inside the Docker build this
+      # job gates. Running it here fails in seconds rather than partway through
+      # an image build, and keeps the whole frontend verdict in one job.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
   build-frontend:
     name: Build Frontend Image
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, test-frontend]
     outputs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:

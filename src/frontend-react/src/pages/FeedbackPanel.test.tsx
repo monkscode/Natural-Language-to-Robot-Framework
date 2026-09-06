@@ -599,7 +599,9 @@ describe('T7: retracting a hint from the feedback panel', () => {
 
     it('does not re-fetch the list to find that out', async () => {
       // The server would hand back this same row: the GET is unfiltered on
-      // is_active, and only can_retract flips. A round trip buys nothing.
+      // is_active, so can_retract and active would both flip. A round trip
+      // still buys nothing — the local retracted marker already outranks
+      // active === false, so the render is identical either way.
       await retractIt()
 
       expect(mockApi.mock.calls.filter(([path]) => path === '/api/feedback/wf-1')).toHaveLength(1)
@@ -608,11 +610,11 @@ describe('T7: retracting a hint from the feedback panel', () => {
     it('tells the user a re-send will not undo it — scoped to this run', async () => {
       // The warning this arms: retract by mistake, retype the identical
       // text, and the panel warns before the resend instead of staying
-      // silent about it, while the writer thread dedupes to the retracted
-      // hint and returns before the reinforcement that sets is_active back
-      // to 1. The resend still goes through and still gets thanked; closing
-      // that is a separate, owner-deferred change (the engine's claim gate
-      // is not reported upward).
+      // silent about it. The resend itself is answered honestly too — the
+      // writer thread dedupes to the retracted hint and the engine reports
+      // outcome "hint_inactive" rather than thanking the user for a no-op —
+      // but that response only exists after the click, so this warning is
+      // still the only thing that reaches the user BEFORE it.
       const { box } = await retractIt()
 
       fireEvent.change(box, { target: { value: 'wait for the spinner' } })
@@ -712,6 +714,138 @@ describe('T7: retracting a hint from the feedback panel', () => {
       await waitFor(() => expect(b).toBeDisabled())
 
       expect(screen.getByText('Failed to retract hint')).toBeInTheDocument()
+    })
+  })
+
+  /* `active` is the server's own signal (is_active, forwarded by
+     get_run_corrections) — orthogonal to `retracted`, which is client-only
+     and knows only about THIS session's own click. Global Constraint 1 is
+     why the marker for it says "switched off", never "retracted": is_active
+     going to 0 has four possible causes and the client cannot tell them
+     apart. */
+  describe('active: false — switched off by something other than this session', () => {
+    it('renders "— switched off" and no Retract control', async () => {
+      onFile([{ ...RETRACTABLE[0], can_retract: false, active: false }])
+      renderFailPanel()
+
+      await screen.findByText('— switched off')
+      expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull()
+    })
+
+    it('renders no marker at all when active is true', async () => {
+      onFile([{ ...RETRACTABLE[0], active: true }])
+      renderFailPanel()
+      await screen.findByText(/wait for the spinner/)
+
+      expect(screen.queryByText('— switched off')).toBeNull()
+      expect(screen.queryByText(/^— (already )?retracted$/)).toBeNull()
+    })
+
+    it('renders no marker when the field is absent (older backend)', async () => {
+      onFile(RETRACTABLE)
+      renderFailPanel()
+      await screen.findByText(/wait for the spinner/)
+
+      expect(screen.queryByText('— switched off')).toBeNull()
+      expect(screen.queryByText(/^— (already )?retracted$/)).toBeNull()
+    })
+
+    // RETRACTABLE[0] carries can_retract: true, which the real server only
+    // ever sends alongside is_active (get_run_corrections ANDs the two,
+    // endpoints.py) — so a live GET can never pair it with active: false.
+    // Clicking Retract here can't produce that combination either: the
+    // panel's retract() (GeneratePage.tsx) spreads the existing row and
+    // only overrides can_retract/retracted, so active stays whatever it
+    // was at mount — true, since that is what made can_retract: true
+    // realistic to begin with. This fixture is server-impossible by
+    // construction, on purpose: the test pins the render's DEFENSIVE
+    // branch order (retracted beats active === false) for a combination
+    // that cannot currently arise, not a live path.
+    it('lets the in-session retracted marker win over active: false', async () => {
+      answersConfirm(true)
+      onFile([{ ...RETRACTABLE[0], active: false }])
+      renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce({ hint: {}, changed: true })
+
+      fireEvent.click(retractBtn)
+
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+      expect(screen.getByText('— retracted')).toBeInTheDocument()
+      expect(screen.queryByText('— switched off')).toBeNull()
+    })
+
+    it('lets the in-session retract win in the NOTICE too, not just the marker', async () => {
+      // The same precedence as the marker above, one layer down - and it was
+      // NOT covered: swapping the two branches of the duplicate notice left
+      // all 48 tests green. Both sentences state the same "it will not come
+      // back on this run" fact; only the retracted one claims WHO, and
+      // active === false alone cannot know the retract was this user's own.
+      //
+      // The fixture is unreachable by construction, exactly like the marker
+      // test above: can_retract ANDs in is_active server-side, so a row cannot
+      // arrive both retractable and inactive. Pinned because the ORDERING is
+      // deliberate - if the state ever becomes reachable, the more specific
+      // sentence has to win.
+      answersConfirm(true)
+      onFile([{ ...RETRACTABLE[0], active: false }])
+      const { box } = renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce({ hint: {}, changed: true })
+      fireEvent.click(retractBtn)
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+
+      // The notice only appears once the typed text matches a correction on file.
+      fireEvent.change(box, { target: { value: RETRACTABLE[0].feedback_text } })
+
+      expect(await screen.findByText(/You retracted this correction/)).toBeInTheDocument()
+      expect(screen.queryByText(/This correction is switched off/)).toBeNull()
+    })
+  })
+
+  describe('the duplicate notice, once active is known', () => {
+    it('does not say "you retracted" when the retract found it already off', async () => {
+      /* changed: false is the route's own answer for a hint that was ALREADY
+       * inactive - an org admin retracted it between this panel's GET and this
+       * click. The click happened, but it is not what switched the correction
+       * off, and the panel has no business telling the user it was. The
+       * "won't come back" half is still true and still has to be said, so the
+       * neutral switched-off sentence is the right one - not the third branch,
+       * which drops that fact entirely. */
+      answersConfirm(true)
+      onFile(RETRACTABLE)
+      const { box } = renderFailPanel()
+      const retractBtn = await screen.findByRole('button', { name: /Retract/ })
+      mockApi.mockResolvedValueOnce({ hint: {}, changed: false })
+      fireEvent.click(retractBtn)
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Retract/ })).toBeNull())
+
+      fireEvent.change(box, { target: { value: RETRACTABLE[0].feedback_text } })
+
+      expect(await screen.findByText(/This correction is switched off/)).toBeInTheDocument()
+      expect(screen.queryByText(/You retracted this correction/)).toBeNull()
+      expect(screen.queryByText(/already sent this/)).toBeNull()
+    })
+
+    it('shows the switched-off sentence — not "already sent" — when active is false', async () => {
+      onFile([{ ...RETRACTABLE[0], can_retract: false, active: false }])
+      const { box } = renderFailPanel()
+      await screen.findByText(/Already recorded for this run/)
+
+      fireEvent.change(box, { target: { value: 'wait for the spinner' } })
+
+      await screen.findByText(/turn it back on/)
+      expect(screen.queryByText(/already sent this/)).toBeNull()
+    })
+
+    it('still shows "already sent" when active is true', async () => {
+      onFile([{ ...RETRACTABLE[0], can_retract: false, active: true }])
+      const { box } = renderFailPanel()
+      await screen.findByText(/Already recorded for this run/)
+
+      fireEvent.change(box, { target: { value: 'wait for the spinner' } })
+
+      await screen.findByText(/won’t be counted again/)
     })
   })
 })

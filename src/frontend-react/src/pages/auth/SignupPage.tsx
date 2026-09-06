@@ -44,7 +44,11 @@ function pwStrength(pw: string): 0 | 1 | 2 | 3 {
   return Math.min(s, 3) as 0 | 1 | 2 | 3
 }
 
-const STRENGTH_LABEL = ['', 'Weak', 'Fair', 'Strong'] as const
+// Index 0 is reachable: pwStrength returns 0 for any non-empty password that
+// earns nothing, and the meter renders whenever the field is non-empty. It was
+// the empty string, so the weakest password on the scale was the only one the
+// meter refused to name. The empty field never reaches here at all.
+const STRENGTH_LABEL = ['Very weak', 'Weak', 'Fair', 'Strong'] as const
 const STRENGTH_COLOR = ['bg-muted', 'bg-red-500', 'bg-yellow-500', 'bg-green-500'] as const
 
 export default function SignupPage() {
@@ -65,7 +69,10 @@ export default function SignupPage() {
   function validate() {
     const e: Record<string, string> = {}
     if (!firstName.trim())        e.firstName = 'Required'
-    if (!email.includes('@'))     e.email     = 'Enter a valid email'
+    // type="email" (no noValidate on the form) means the browser blocks a
+    // non-empty malformed address before handleSubmit runs, so the only way
+    // this rule reaches a visitor is an empty field. The message names that.
+    if (!email.includes('@'))     e.email     = 'Enter your work email'
     if (password.length < 8)      e.password  = 'Minimum 8 characters'
     if (password !== confirm)     e.confirm   = 'Passwords do not match'
     if (!agreed)                  e.terms     = 'Please accept the terms'

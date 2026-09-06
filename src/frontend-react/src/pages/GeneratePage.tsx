@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useReducer, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -9,6 +9,7 @@ import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle, Info } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
+import { ALREADY_RECORDED_HEADING, SWITCHED_OFF_MARKER } from '@/components/RecordedCorrections'
 
 /* ── Types ── */
 type Phase = 'idle' | 'generating' | 'executing'
@@ -30,7 +31,7 @@ function nowTs() {
 /** /reports/{run_id}/log.html -> run_id (for feedback attribution) */
 function runIdFromReport(url: string | null): string | null {
   if (!url) return null
-  const m = url.match(/\/reports\/([^/]+)\//)
+  const m = /\/reports\/([^/]+)\//.exec(url)
   return m ? m[1] : null
 }
 
@@ -42,36 +43,55 @@ interface RobotSummary {
   failed: number | null
 }
 
+/** One pass/fail count: the `Results:` line's own number when there is one,
+    else a count of the per-test lines this blob actually parsed. */
+function testCount(
+  counts: RegExpExecArray | null,
+  index: 1 | 2,
+  tests: RobotSummary['tests'],
+  status: 'PASS' | 'FAIL',
+): number | null {
+  if (counts) return Number(counts[index])
+  if (tests.length) return tests.filter(t => t.status === status).length
+  return null
+}
+
 function parseRobotSummary(blob: string): RobotSummary {
   const tests: RobotSummary['tests'] = []
   const failures: RobotSummary['failures'] = []
   let failing: string | null = null
   for (const line of blob.split('\n')) {
-    const t = line.match(/^\s*Test: (.+) - (PASS|FAIL)$/)
+    const t = /^\s*Test: (.+) - (PASS|FAIL)$/.exec(line)
     if (t) {
       tests.push({ name: t[1], status: t[2] as 'PASS' | 'FAIL' })
       failing = t[2] === 'FAIL' ? t[1] : null
       continue
     }
-    const e = line.match(/^\s*Error: (.+)$/)
+    const e = /^\s*Error: (.+)$/.exec(line)
     if (e && failing) {
       failures.push({ test: failing, message: e[1] })
       failing = null
     }
   }
-  const counts = blob.match(/^Results: (\d+) passed, (\d+) failed$/m)
+  const counts = /^Results: (\d+) passed, (\d+) failed$/m.exec(blob)
   return {
     tests,
     failures,
-    passed: counts ? Number(counts[1]) : tests.length ? tests.filter(t => t.status === 'PASS').length : null,
-    failed: counts ? Number(counts[2]) : tests.length ? tests.filter(t => t.status === 'FAIL').length : null,
+    passed: testCount(counts, 1, tests, 'PASS'),
+    failed: testCount(counts, 2, tests, 'FAIL'),
   }
 }
 
+const LOG_BORDER_CLASS: Record<LogEntry['kind'], string> = {
+  success: 'border-l-green-500',
+  error: 'border-l-destructive',
+  info: 'border-l-blue-400',
+}
+
 /* ── Collapsible logs card with an indeterminate bar while running ── */
-function LogsSection({ title, desc, logs, running, collapseOnDone }: {
+function LogsSection({ title, desc, logs, running, collapseOnDone }: Readonly<{
   title: string; desc: string; logs: LogEntry[]; running: boolean; collapseOnDone?: boolean
-}) {
+}>) {
   const [open, setOpen] = useState(true)
   const listRef = useRef<HTMLDivElement>(null)
   // Keep the newest log line in view while streaming (legacy-UI behaviour)
@@ -104,14 +124,16 @@ function LogsSection({ title, desc, logs, running, collapseOnDone }: {
             </div>
           )}
           <div ref={listRef} className="max-h-56 overflow-y-auto font-mono text-xs">
+            {/* Index is a correct key: addGen/addExec only ever append, this
+                array is reset to [] (not spliced or resorted) at the start of
+                the next run, so no index here is ever reused for a different
+                line. */}
             {logs.map((log, i) => (
               <div
                 key={i}
                 className={cn(
                   'flex gap-3 border-b px-4 py-1.5 last:border-0 border-l-2',
-                  log.kind === 'success' ? 'border-l-green-500'
-                    : log.kind === 'error' ? 'border-l-destructive'
-                      : 'border-l-blue-400',
+                  LOG_BORDER_CLASS[log.kind],
                 )}
               >
                 <span className="shrink-0 text-muted-foreground">{log.ts}</span>
@@ -141,7 +163,7 @@ const PIPELINE_STAGES = [
 ] as const
 
 /* Plan: numbered ghost steps, revealed as the planner's SSE events arrive */
-function PlanActivity({ progress }: { progress: number }) {
+function PlanActivity({ progress }: Readonly<{ progress: number }>) {
   const widths = ['w-64', 'w-52', 'w-72']
   return (
     <div>
@@ -156,7 +178,7 @@ function PlanActivity({ progress }: { progress: number }) {
 }
 
 /* Locate: element → locator pairs being captured from the live page */
-function LocateActivity({ progress, elementCount }: { progress: number; elementCount: number | null }) {
+function LocateActivity({ progress, elementCount }: Readonly<{ progress: number; elementCount: number | null }>) {
   const widths: [string, string][] = [['w-24', 'w-48'], ['w-28', 'w-40'], ['w-20', 'w-56']]
   return (
     <div>
@@ -189,6 +211,9 @@ const ASSEMBLE_LINES: { header?: string; w?: string; indent?: boolean }[] = [
 function AssembleActivity() {
   return (
     <div>
+      {/* Index is a correct key: ASSEMBLE_LINES is a fixed module-level
+          constant, mapped in full and in the same order on every render —
+          there is no filter, reorder or runtime source that could shift it. */}
       {ASSEMBLE_LINES.map((l, i) => (
         <div key={i} className="ghost-line flex h-[20px] items-center" style={{ animationDelay: `${i * 110}ms` }}>
           {/* Muted gray, NOT the editor's red section-header token: in a
@@ -208,16 +233,36 @@ function AssembleActivity() {
 function VerifyActivity() {
   return (
     <div className="ghost-line flex items-center gap-2.5 text-xs text-[#8b949e]">
-      <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#30363d] border-t-sky-400" />
+      <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[#30363d] border-t-sky-400" />{' '}
       Compiling the test in a clean Docker container — auto-fixing anything that fails
     </div>
   )
 }
 
-function GenerationPipeline({ progress, stage, logs }: { progress: number; stage: string; logs: LogEntry[] }) {
+type StageState = 'done' | 'active' | 'pending'
+
+function stageState(done: boolean, active: boolean): StageState {
+  if (done) return 'done'
+  if (active) return 'active'
+  return 'pending'
+}
+
+const STAGE_ICON_CLASSES: Record<StageState, string> = {
+  done: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400',
+  active: 'stage-active border-sky-400/50 bg-sky-400/10 text-sky-300',
+  pending: 'border-[#30363d] text-[#484f58]',
+}
+
+const STAGE_LABEL_CLASSES: Record<StageState, string> = {
+  done: 'text-[#8b949e]',
+  active: 'text-[#e6edf3]',
+  pending: 'text-[#484f58]',
+}
+
+function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: number; stage: string; logs: LogEntry[] }>) {
   // The element-scan SSE event carries the only real artifact count we get
   // ("📍 Found N elements on the page") — surface it in the Locate block.
-  const elMatch = logs.map(l => l.msg.match(/Found (\d+) elements/)).find(Boolean)
+  const elMatch = logs.map(l => /Found (\d+) elements/.exec(l.msg)).find(Boolean)
   const elementCount = elMatch ? Number(elMatch[1]) : null
   return (
     <div className="flex min-h-[300px] flex-1 flex-col overflow-hidden rounded-lg border border-border bg-[#0d1117] shadow-sm">
@@ -228,21 +273,19 @@ function GenerationPipeline({ progress, stage, logs }: { progress: number; stage
             const nextAt = PIPELINE_STAGES[i + 1]?.at ?? 100
             const done = progress >= nextAt
             const active = !done && progress >= s.at
+            const state = stageState(done, active)
             const Icon = s.icon
             return (
               <div key={s.label} className="flex items-center gap-2">
                 <span
                   className={cn(
                     'flex h-6 w-6 items-center justify-center rounded-full border transition-colors',
-                    done ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400'
-                      : active ? 'stage-active border-sky-400/50 bg-sky-400/10 text-sky-300'
-                        : 'border-[#30363d] text-[#484f58]',
+                    STAGE_ICON_CLASSES[state],
                   )}
                 >
                   {done ? <Check className="h-3.5 w-3.5" /> : <Icon className="h-3.5 w-3.5" />}
                 </span>
-                <span className={cn('text-xs font-medium',
-                  done ? 'text-[#8b949e]' : active ? 'text-[#e6edf3]' : 'text-[#484f58]')}>
+                <span className={cn('text-xs font-medium', STAGE_LABEL_CLASSES[state])}>
                   {s.label}
                 </span>
                 {i < PIPELINE_STAGES.length - 1 && (
@@ -303,10 +346,12 @@ function GenerationPipeline({ progress, stage, logs }: { progress: number; stage
 }
 
 /* ── Live elapsed-seconds counter for the execution strip ── */
-function ExecElapsed({ start }: { start: number | null }) {
-  const [, force] = useState(0)
+function ExecElapsed({ start }: Readonly<{ start: number | null }>) {
+  // useReducer, not useState: this value is never read, only ever bumped to
+  // force a re-render every second, so there is no "state" here to name.
+  const [, forceRerender] = useReducer(x => x + 1, 0)
   useEffect(() => {
-    const id = setInterval(() => force(t => t + 1), 1000)
+    const id = setInterval(forceRerender, 1000)
     return () => clearInterval(id)
   }, [])
   if (start == null) return null
@@ -340,29 +385,124 @@ function ConfettiBurst() {
   )
 }
 
+/** The result card's headline. Single-test runs are the norm — counts and the
+    per-test list only earn their place when there is more than one test. */
+function resultTitle(pass: boolean, total: number | null, failed: number | null | undefined): string {
+  if (pass) return total === 1 ? 'Test passed! 🎉' : 'All tests passed! 🎉'
+  if (failed && total) return total > 1 ? `${failed} of ${total} tests failed` : 'Test failed'
+  return 'Test execution failed'
+}
+
+/** The result card's second line. Pass runs get whichever facts we actually
+    have — a test count only when there is more than one, a duration only when
+    the run was timed — and a neutral sentence when we have neither. */
+function resultSubtitle(pass: boolean, total: number | null, secs: number | null): string {
+  if (!pass) return 'Open the detailed log to see exactly which step went wrong.'
+  const parts: string[] = []
+  if (total && total > 1) parts.push(`${total} tests`)
+  if (secs != null) parts.push(`finished in ${secs.toFixed(1)}s`)
+  return parts.join(' · ') || 'Execution finished'
+}
+
+/* ── Result card banner: outcome icon, headline, and the two report links ── */
+function ResultBanner({ pass, title, subtitle, reportUrl, logUrl }: Readonly<{
+  pass: boolean; title: string; subtitle: string
+  reportUrl: string | null; logUrl: string | null
+}>) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center gap-3">
+        {pass
+          ? <CheckCircle2 className="check-pop h-10 w-10 shrink-0 text-green-500" />
+          : <XCircle className="h-10 w-10 shrink-0 text-destructive" />}
+        <div>
+          <div className="text-lg font-bold leading-tight">{title}</div>
+          <p className="text-sm text-muted-foreground">{subtitle}</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        {reportUrl && (
+          <Button asChild size="sm" className={cn('gap-1.5', pass && 'bg-green-600 text-white hover:bg-green-700')}>
+            <a href={reportUrl} target="_blank" rel="noopener noreferrer">
+              <ExternalLink className="h-3.5 w-3.5" /> View Report
+            </a>
+          </Button>
+        )}
+        {logUrl && (
+          <Button asChild variant="outline" size="sm" className="gap-1.5">
+            <a href={logUrl} target="_blank" rel="noopener noreferrer">
+              <FileText className="h-3.5 w-3.5" /> Detailed Log
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Per-test breakdown. Renders nothing for a single-test run: the banner
+   already says everything a one-line list could add ── */
+function ResultTestList({ tests }: Readonly<{ tests: RobotSummary['tests'] }>) {
+  if (tests.length <= 1) return null
+  return (
+    <div className="max-h-36 divide-y overflow-y-auto rounded-lg border bg-background/70">
+      {/* Index is a correct key: `tests` is written once, at the same
+          moment `outcome` turns truthy, and the parent's `{outcome &&
+          ...}` gate (GeneratePage) unmounts this whole card at the
+          start of every new run — so this array is never reordered or
+          filtered while a single instance of this list stays mounted. */}
+      {tests.map((t, i) => (
+        <div key={i} className="flex items-center gap-2.5 px-3 py-2 text-sm">
+          {t.status === 'PASS'
+            ? <Check className="h-4 w-4 shrink-0 text-green-500" />
+            : <X className="h-4 w-4 shrink-0 text-destructive" />}
+          <span className="min-w-0 truncate">{t.name}</span>
+          <span className={cn('ml-auto shrink-0 text-xs font-bold tracking-wide',
+            t.status === 'PASS' ? 'text-green-600 dark:text-green-400' : 'text-destructive')}>
+            {t.status}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ── The first three failure messages. Renders nothing when the run recorded
+   no failure message at all, so a failed run with an empty list stays silent
+   rather than drawing an empty red box ── */
+function ResultFailureList({ failures, withTestName }: Readonly<{
+  failures: RobotSummary['failures']; withTestName: boolean
+}>) {
+  if (failures.length === 0) return null
+  return (
+    <div className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
+      {/* Index is a correct key here for the same reason as the tests
+          list above: `failures` comes from the same once-per-run
+          `summary`, and this card remounts before a next one exists. */}
+      {failures.slice(0, 3).map((f, i) => (
+        <div key={i} className="break-words">
+          {withTestName ? `${f.test}: ` : ''}{f.message}
+        </div>
+      ))}
+      {failures.length > 3 && (
+        <div className="text-destructive/70">…and {failures.length - 3} more — see the detailed log</div>
+      )}
+    </div>
+  )
+}
+
 /* ── Post-run result card: outcome banner, per-test breakdown, report links,
    and an optional feedback footer (children) ── */
-function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: {
+function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: Readonly<{
   outcome: Exclude<Outcome, null>; summary: RobotSummary | null; secs: number | null
   reportUrl: string | null; logUrl: string | null; children?: ReactNode
-}) {
+}>) {
   const pass = outcome === 'pass'
   const tests = summary?.tests ?? []
   const failures = summary?.failures ?? []
-  const total = summary && summary.passed != null && summary.failed != null
+  const total = summary?.passed != null && summary?.failed != null
     ? summary.passed + summary.failed
     : tests.length || null
-  // Single-test runs are the norm — counts and the per-test list only earn
-  // their place when there is more than one test.
-  const title = pass
-    ? total === 1 ? 'Test passed! 🎉' : 'All tests passed! 🎉'
-    : summary?.failed && total
-      ? total > 1 ? `${summary.failed} of ${total} tests failed` : 'Test failed'
-      : 'Test execution failed'
-  const subtitle = pass
-    ? [total && total > 1 ? `${total} tests` : null, secs != null ? `finished in ${secs.toFixed(1)}s` : null]
-        .filter(Boolean).join(' · ') || 'Execution finished'
-    : 'Open the detailed log to see exactly which step went wrong.'
   return (
     <Card className={cn('result-pop relative overflow-hidden', pass ? 'border-green-500/40' : 'border-destructive/40')}>
       <div
@@ -375,61 +515,15 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
       />
       {pass && <ConfettiBurst />}
       <CardContent className="relative space-y-3 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            {pass
-              ? <CheckCircle2 className="check-pop h-10 w-10 shrink-0 text-green-500" />
-              : <XCircle className="h-10 w-10 shrink-0 text-destructive" />}
-            <div>
-              <div className="text-lg font-bold leading-tight">{title}</div>
-              <p className="text-sm text-muted-foreground">{subtitle}</p>
-            </div>
-          </div>
-          <div className="flex shrink-0 gap-2">
-            {reportUrl && (
-              <Button asChild size="sm" className={cn('gap-1.5', pass && 'bg-green-600 text-white hover:bg-green-700')}>
-                <a href={reportUrl} target="_blank" rel="noopener noreferrer">
-                  <ExternalLink className="h-3.5 w-3.5" /> View Report
-                </a>
-              </Button>
-            )}
-            {logUrl && (
-              <Button asChild variant="outline" size="sm" className="gap-1.5">
-                <a href={logUrl} target="_blank" rel="noopener noreferrer">
-                  <FileText className="h-3.5 w-3.5" /> Detailed Log
-                </a>
-              </Button>
-            )}
-          </div>
-        </div>
-        {tests.length > 1 && (
-          <div className="max-h-36 divide-y overflow-y-auto rounded-lg border bg-background/70">
-            {tests.map((t, i) => (
-              <div key={i} className="flex items-center gap-2.5 px-3 py-2 text-sm">
-                {t.status === 'PASS'
-                  ? <Check className="h-4 w-4 shrink-0 text-green-500" />
-                  : <X className="h-4 w-4 shrink-0 text-destructive" />}
-                <span className="min-w-0 truncate">{t.name}</span>
-                <span className={cn('ml-auto shrink-0 text-xs font-bold tracking-wide',
-                  t.status === 'PASS' ? 'text-green-600 dark:text-green-400' : 'text-destructive')}>
-                  {t.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-        {!pass && failures.length > 0 && (
-          <div className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
-            {failures.slice(0, 3).map((f, i) => (
-              <div key={i} className="break-words">
-                {tests.length > 1 ? `${f.test}: ` : ''}{f.message}
-              </div>
-            ))}
-            {failures.length > 3 && (
-              <div className="text-destructive/70">…and {failures.length - 3} more — see the detailed log</div>
-            )}
-          </div>
-        )}
+        <ResultBanner
+          pass={pass}
+          title={resultTitle(pass, total, summary?.failed)}
+          subtitle={resultSubtitle(pass, total, secs)}
+          reportUrl={reportUrl}
+          logUrl={logUrl}
+        />
+        <ResultTestList tests={tests} />
+        {!pass && <ResultFailureList failures={failures} withTestName={tests.length > 1} />}
         {children && (
           <div className={cn('border-t pt-3', pass ? 'border-green-500/20' : 'border-destructive/20')}>
             {children}
@@ -458,8 +552,13 @@ interface FeedbackResponse { status?: string; outcome?: string; message?: string
     auth/ownership.py — the same rule that gates the admin dashboard's hint
     mutations): true for the hint's own author or an org admin, false for
     anyone else. Optional because an older backend, or the learning-disabled
-    response shape, never sends it — absence must render exactly like false. */
-interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; can_retract?: boolean }
+    response shape, never sends it — absence must render exactly like false.
+
+    active is the server's own word for is_active. Optional for the same
+    reason can_retract is: an older backend, or the learning-disabled
+    response shape, never sends it — absence must render exactly like today,
+    never like switched off. */
+interface RecordedCorrection { hint_id: number; feedback_text: string; recorded_at: string; active?: boolean; can_retract?: boolean }
 interface RecordedResponse { corrections?: RecordedCorrection[] }
 
 /** A recorded correction as the PANEL holds it: the server's row plus what
@@ -468,6 +567,54 @@ interface RecordedResponse { corrections?: RecordedCorrection[] }
     is perfectly active and simply not this caller's to touch. 'already' is
     the changed:false answer below: retracted, but not by this click. */
 interface PanelCorrection extends RecordedCorrection { retracted?: 'now' | 'already' }
+
+/**
+ * The ONE marker a recorded correction shows, in precedence order.
+ *
+ * `retracted` is client-only, set by THIS session's own retract click, and it
+ * wins because it is the more specific fact — it knows WHO did it.
+ * `active === false` covers every other way the hint went inactive (another
+ * caller's retract, auto-disable, an LLM review); the server cannot tell those
+ * apart, so this marker does not pretend to either.
+ *
+ * The test is `active === false`, never `!active`, so a missing field — an
+ * older backend, or the learning-disabled response — renders exactly as it
+ * does today, with no marker at all.
+ */
+function correctionMarker(c: PanelCorrection): string | null {
+  if (c.retracted === 'already') return '— already retracted'
+  if (c.retracted) return '— retracted'
+  if (c.active === false) return SWITCHED_OFF_MARKER
+  return null
+}
+
+/**
+ * What to say about a correction this run has already contributed.
+ *
+ * All three sentences are scoped to THIS run on purpose. Sending the same text
+ * again here dedups to the existing hint and the claim row for this run already
+ * exists, so nothing reactivates it — but the same text from a LATER run does
+ * reinforce, and an unqualified "it can't come back" would be a new false
+ * claim. These fire BEFORE the click: they are the only thing that warns while
+ * the user can still change their mind, which is why they are kept even though
+ * the backend now answers such a resubmission honestly ("hint_inactive").
+ *
+ * The first two say the same "won't come back" fact; only the first claims WHO.
+ * `active === false` alone does not know the retract was this user's own, so
+ * the second must not say "you" — and neither may `retracted: 'already'`, which
+ * is the route answering that the hint was inactive BEFORE this click. The
+ * click happened; it is not what switched the correction off. It cannot fall
+ * through to the third sentence either: `active` is whatever the GET said and
+ * is not refreshed by the retract, so a stale `active: true` would drop the
+ * "won't come back" fact altogether.
+ */
+function alreadySentNotice(c: PanelCorrection): string {
+  if (c.retracted === 'now') return 'You retracted this correction. Sending it again on this run won’t restore it.'
+  if (c.retracted === 'already' || c.active === false) {
+    return 'This correction is switched off. Sending it again on this run won’t turn it back on.'
+  }
+  return 'You already sent this for this run — it won’t be counted again.'
+}
 
 /** POST /api/learning/hints/{id}/retract → { hint, changed, note }
     (learning_endpoints.py). `changed: false` is the route's own answer for a
@@ -491,7 +638,7 @@ const RETRACT_ACTOR_PLACEHOLDER = 'feedback-panel'
    Fail: form open by default; Skip still records an empty completely_wrong
    label on the execution record, but nothing is learned from it (outcome
    "no_text") — the empty text carries nothing for any engine to route. ── */
-export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcome, null>; workflowId: string | null }) {
+export function FeedbackPanel({ outcome, workflowId }: Readonly<{ outcome: Exclude<Outcome, null>; workflowId: string | null }>) {
   const [open, setOpen] = useState(outcome === 'fail')
   const [ack, setAck] = useState(false)
   const [text, setText] = useState('')
@@ -763,21 +910,23 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
       ))}
       {recorded.length > 0 && (
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
-          <div className="font-medium">Already recorded for this run</div>
+          <div className="font-medium">{ALREADY_RECORDED_HEADING}</div>
           <ul className="mt-1 space-y-0.5 text-muted-foreground">
             {recorded.map(c => (
               <li key={c.hint_id}>
                 <div className="flex items-center justify-between gap-2">
                   <span>
                     “{c.feedback_text}”
-                    {/* Set only by this session's own retract. The server
-                        never says "retracted" on this route — it answers
-                        can_retract, which is false for plenty of hints that
-                        are still perfectly active. */}
-                    {c.retracted && (
-                      <span className="ml-1.5 italic">
-                        {c.retracted === 'already' ? '— already retracted' : '— retracted'}
-                      </span>
+                    {/* Exactly one marker, in precedence order. `retracted` is
+                        client-only, set by THIS session's own retract click,
+                        and wins because it is the more specific fact — it
+                        knows WHO did it. `active === false` covers every
+                        other way the hint went inactive (another caller's
+                        retract, auto-disable, an LLM review) — the server
+                        can't tell those apart, so this marker doesn't
+                        pretend to either. */}
+                    {correctionMarker(c) && (
+                      <span className="ml-1.5 italic">{correctionMarker(c)}</span>
                     )}
                   </span>
                   {/* can_retract is absent or false on an older backend and on
@@ -827,17 +976,7 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           this width the sentence wraps and collides with the 0/500 counter. */}
       {alreadySent && (
         <p className="text-xs text-muted-foreground">
-          {alreadySent.retracted
-            /* Scoped to THIS run on purpose. Sending it again here dedups to
-               the hint that was just retracted and the claim row for this run
-               already exists, so nothing reactivates it — but the same text
-               from a LATER run does reinforce, and an unqualified "it can't
-               come back" would be a new false claim. Kept now that the
-               backend answers such a resubmission honestly ("hint_inactive"),
-               because this fires BEFORE the click: it is the only thing that
-               warns while the user can still change their mind. */
-            ? 'You retracted this correction. Sending it again on this run won’t restore it.'
-            : 'You already sent this for this run — it won’t be counted again.'}
+          {alreadySentNotice(alreadySent)}
         </p>
       )}
       <div className="flex items-center justify-between">
@@ -870,6 +1009,128 @@ export function FeedbackPanel({ outcome, workflowId }: { outcome: Exclude<Outcom
           </Button>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The generation-log lines a completed /generate-test event has to record,
+ * in the order they must appear.
+ *
+ * Do NOT name a cause for 'unverified'. It means the dryrun gate could not
+ * run, and Docker being down is only one of several reasons — the backend
+ * sends the actual one as dryrun_message. Asserting "Docker unavailable" sent
+ * people to check a healthy Docker while the real fault was elsewhere.
+ */
+function generationCompleteLogs(data: {
+  robot_code?: unknown
+  dryrun_status?: unknown
+  dryrun_message?: unknown
+  dryrun_errors?: unknown
+}): { kind: LogEntry['kind']; msg: string }[] {
+  if (data.dryrun_status !== 'failed' && data.dryrun_status !== 'unverified') {
+    return [{ kind: 'success', msg: `Generated test.robot (${String(data.robot_code).split('\n').length} lines)` }]
+  }
+  const lines: { kind: LogEntry['kind']; msg: string }[] = [{
+    kind: 'error',
+    msg: data.dryrun_status === 'failed'
+      ? 'Delivered — dryrun found issues you may want to review'
+      : 'Delivered — this test was NOT verified, because the dryrun could not run',
+  }]
+  if (data.dryrun_message) lines.push({ kind: 'error', msg: String(data.dryrun_message) })
+  if (data.dryrun_errors) lines.push({ kind: 'error', msg: String(data.dryrun_errors) })
+  return lines
+}
+
+/* ── The single adaptive action button: code present → Run Test; otherwise
+   a query → Generate Test (see the button's own comment at its call site
+   for why this stays one control rather than a combined generate-and-run) ── */
+function runButtonIcon(busy: boolean, hasCode: boolean): ReactNode {
+  if (busy) return <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+  return hasCode ? <Play className="h-4 w-4" /> : <Zap className="h-4 w-4" />
+}
+
+function runButtonLabel(phase: Phase, genProgress: number, hasCode: boolean, hasQuery: boolean): string {
+  if (phase === 'generating') return `Generating… ${genProgress}%`
+  if (phase === 'executing') return 'Executing…'
+  if (hasCode) return 'Run Test'
+  if (hasQuery) return 'Generate Test'
+  return 'Enter a query or paste code'
+}
+
+/* ── Left workspace card: the plain-English description, and the single
+   adaptive action beneath it (legacy-UI pattern) — code present → Run Test,
+   otherwise a query → Generate Test. Review-before-run is deliberate: there
+   is no combined generate-and-run ── */
+function TestDescriptionCard({ query, code, phase, genProgress, busy, onQueryChange, onGenerate, onRun }: Readonly<{
+  query: string; code: string; phase: Phase; genProgress: number; busy: boolean
+  onQueryChange: (value: string) => void; onGenerate: () => void; onRun: () => void
+}>) {
+  return (
+    <Card className="col-span-2 flex flex-col max-lg:col-span-1">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Test Description</CardTitle>
+        <CardDescription className="text-xs">Write what you want to test in plain English</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-1 flex-col gap-3 pt-0">
+        <Textarea
+          className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
+          placeholder={PLACEHOLDER}
+          value={query}
+          onChange={e => onQueryChange(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !code.trim()) {
+              e.preventDefault(); onGenerate()
+            }
+          }}
+          disabled={busy}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={code.trim() ? onRun : onGenerate}
+            disabled={busy || (!code.trim() && !query.trim())}
+            className="h-10 flex-1 gap-2"
+          >
+            {runButtonIcon(busy, !!code.trim())}
+            {runButtonLabel(phase, genProgress, !!code.trim(), !!query.trim())}
+          </Button>
+          {!busy && code.trim() && query.trim() && (
+            <Button variant="outline" onClick={onGenerate} className="h-10 gap-1.5" title="Discard the current code and regenerate from the description">
+              <Zap className="h-3.5 w-3.5" /> Regenerate
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── The code card's header controls: the live run-status badges, then copy
+   and export. Both buttons stay mounted and merely disable with no code, so
+   the header's width never jumps mid-run ── */
+function CodePanelControls({ phase, outcome, execSecs, copied, hasCode, onCopy, onDownload }: Readonly<{
+  phase: Phase; outcome: Outcome; execSecs: number | null; copied: boolean; hasCode: boolean
+  onCopy: () => void; onDownload: () => void
+}>) {
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      {phase === 'executing' && (
+        <Badge variant="secondary" className="gap-1.5 text-xs">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> Executing
+        </Badge>
+      )}
+      {outcome === 'pass' && (
+        <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs border-green-200">
+          Passed{execSecs != null ? ` in ${execSecs.toFixed(1)}s` : ''}
+        </Badge>
+      )}
+      {outcome === 'fail' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 text-xs border-red-200">Failed</Badge>}
+      <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={onCopy} disabled={!hasCode}>
+        {copied ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />} Copy
+      </Button>
+      <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={onDownload} disabled={!hasCode}>
+        <Download className="h-3 w-3" /> Export
+      </Button>
     </div>
   )
 }
@@ -952,20 +1213,7 @@ export default function GeneratePage() {
           setGenProgress(100)
           setCode(data.robot_code)
           workflowId.current = data.workflow_id || null
-          if (data.dryrun_status === 'failed' || data.dryrun_status === 'unverified') {
-            // Do NOT name a cause here. 'unverified' means the gate could not
-            // run, and Docker being down is only one of several reasons — the
-            // backend sends the actual one as dryrun_message. Asserting
-            // "Docker unavailable" sent people to check a healthy Docker while
-            // the real fault was elsewhere.
-            addGen('error', data.dryrun_status === 'failed'
-              ? 'Delivered — dryrun found issues you may want to review'
-              : 'Delivered — this test was NOT verified, because the dryrun could not run')
-            if (data.dryrun_message) addGen('error', String(data.dryrun_message))
-            if (data.dryrun_errors) addGen('error', String(data.dryrun_errors))
-          } else {
-            addGen('success', `Generated test.robot (${String(data.robot_code).split('\n').length} lines)`)
-          }
+          generationCompleteLogs(data).forEach(line => addGen(line.kind, line.msg))
         } else if (data.status === 'error') {
           addGen('error', data.message || 'Generation failed')
           setError(data.message || 'Generation failed')
@@ -1075,51 +1323,16 @@ export default function GeneratePage() {
 
       {/* Two-column workspace — fills the viewport like the legacy runner */}
       <div className="mb-6 grid grid-cols-5 gap-4 max-lg:grid-cols-1 lg:h-[calc(100vh-235px)] lg:min-h-[480px]">
-        {/* Input card */}
-        <Card className="col-span-2 flex flex-col max-lg:col-span-1">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Test Description</CardTitle>
-            <CardDescription className="text-xs">Write what you want to test in plain English</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-1 flex-col gap-3 pt-0">
-            <Textarea
-              className="min-h-[260px] flex-1 resize-none font-mono text-[13px]"
-              placeholder={PLACEHOLDER}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !code.trim()) {
-                  e.preventDefault(); handleGenerate()
-                }
-              }}
-              disabled={busy}
-            />
-            {/* Single adaptive action (legacy-UI pattern): code present → Run Test;
-                otherwise a query → Generate Test. Review-before-run is deliberate —
-                there is no combined generate-and-run. */}
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={code.trim() ? handleRun : handleGenerate}
-                disabled={busy || (!code.trim() && !query.trim())}
-                className="h-10 flex-1 gap-2"
-              >
-                {busy
-                  ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  : code.trim() ? <Play className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
-                {phase === 'generating' ? `Generating… ${genProgress}%`
-                  : phase === 'executing' ? 'Executing…'
-                    : code.trim() ? 'Run Test'
-                      : query.trim() ? 'Generate Test'
-                        : 'Enter a query or paste code'}
-              </Button>
-              {!busy && code.trim() && query.trim() && (
-                <Button variant="outline" onClick={handleGenerate} className="h-10 gap-1.5" title="Discard the current code and regenerate from the description">
-                  <Zap className="h-3.5 w-3.5" /> Regenerate
-                </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <TestDescriptionCard
+          query={query}
+          code={code}
+          phase={phase}
+          genProgress={genProgress}
+          busy={busy}
+          onQueryChange={setQuery}
+          onGenerate={handleGenerate}
+          onRun={handleRun}
+        />
 
         {/* Generated / editable code card. overflow-hidden is load-bearing: as a
             grid item its automatic minimum size would otherwise be the editor's
@@ -1132,25 +1345,15 @@ export default function GeneratePage() {
               <CardTitle className="text-sm">Generated Code</CardTitle>
               <CardDescription className="text-xs">Editable — tweak it or paste your own, then run</CardDescription>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {phase === 'executing' && (
-                <Badge variant="secondary" className="gap-1.5 text-xs">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> Executing
-                </Badge>
-              )}
-              {outcome === 'pass' && (
-                <Badge className="bg-green-100 text-green-700 hover:bg-green-100 text-xs border-green-200">
-                  Passed{execSecs != null ? ` in ${execSecs.toFixed(1)}s` : ''}
-                </Badge>
-              )}
-              {outcome === 'fail' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 text-xs border-red-200">Failed</Badge>}
-              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleCopy} disabled={!code}>
-                {copied ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />} Copy
-              </Button>
-              <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" onClick={handleDownload} disabled={!code}>
-                <Download className="h-3 w-3" /> Export
-              </Button>
-            </div>
+            <CodePanelControls
+              phase={phase}
+              outcome={outcome}
+              execSecs={execSecs}
+              copied={copied}
+              hasCode={!!code}
+              onCopy={handleCopy}
+              onDownload={handleDownload}
+            />
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-0">
             {phase === 'generating' ? (
@@ -1158,14 +1361,7 @@ export default function GeneratePage() {
             ) : (
               /* Inset, bordered dark code block (GitHub-style) rather than an
                   edge-to-edge black panel */
-              <div
-                className="relative flex min-h-0 flex-1 flex-col"
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
-                    e.preventDefault(); handleRun()
-                  }
-                }}
-              >
+              <div className="relative flex min-h-0 flex-1 flex-col">
                 <RobotCodeEditor
                   value={code}
                   onChange={v => {
@@ -1183,6 +1379,16 @@ export default function GeneratePage() {
                   disabled={busy}
                   placeholder={'*** Settings ***\nLibrary    Browser\n\nGenerated code appears here, or paste your own…'}
                   className="min-h-[300px] flex-1 rounded-lg border border-border shadow-sm"
+                  // Ctrl/Cmd+Enter runs the current code. Wired onto the
+                  // editor's own textarea (forwarded through RobotCodeEditor)
+                  // rather than a wrapping div, so there is no non-native
+                  // element listening for input in the first place — S6848
+                  // never gets anything to fire on.
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
+                      e.preventDefault(); handleRun()
+                    }
+                  }}
                 />
                 {/* Live-run strip while the scenario executes: the code is not
                     being "scanned" — it is running against a real browser in an
