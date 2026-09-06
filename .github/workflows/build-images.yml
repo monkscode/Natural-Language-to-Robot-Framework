@@ -271,8 +271,9 @@ jobs:
   # and are backend-only, and the only frontend gate was `tsc -b` inside
   # Dockerfile.frontend's `npm run build`. That catches a type error and
   # nothing else, so a React behavioural regression published a green frontend
-  # image. sonar-project.properties excludes src/frontend-react entirely, so
-  # SonarQube did not cover it either.
+  # image. sonar-project.properties excluded src/frontend-react entirely back
+  # then, so SonarQube did not cover it either; that exclusion has since been
+  # removed and the SPA is analysed.
   #
   # Gates build-frontend only, not the other four image jobs: this suite judges
   # src/frontend-react and nothing else, and a red React test is no reason to

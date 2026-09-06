@@ -164,10 +164,12 @@ def test_every_image_build_waits_for_the_suite(job):
 # The FRONTEND publish gate.
 #
 # Until test-frontend existed, no workflow ran a single frontend test. Both
-# pytest lanes are backend-only, and sonar-project.properties excludes
-# src/frontend-react outright, so the only thing standing between a broken
-# React change and a published frontend image was `tsc -b` inside
-# Dockerfile.frontend. That catches a type error and nothing else.
+# pytest lanes are backend-only, and sonar-project.properties excluded
+# src/frontend-react outright at the time, so the only thing standing between a
+# broken React change and a published frontend image was `tsc -b` inside
+# Dockerfile.frontend. That catches a type error and nothing else. That
+# exclusion is gone now, and test_the_frontend_is_not_excluded_from_sonar_analysis
+# below is what keeps it gone.
 #
 # Guarded for the same reason as the backend gate above: a `needs:` line and a
 # test command are exactly what gets dropped while making a job faster.
