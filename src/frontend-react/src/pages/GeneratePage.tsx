@@ -1013,6 +1013,35 @@ export function FeedbackPanel({ outcome, workflowId }: Readonly<{ outcome: Exclu
   )
 }
 
+/**
+ * The generation-log lines a completed /generate-test event has to record,
+ * in the order they must appear.
+ *
+ * Do NOT name a cause for 'unverified'. It means the dryrun gate could not
+ * run, and Docker being down is only one of several reasons — the backend
+ * sends the actual one as dryrun_message. Asserting "Docker unavailable" sent
+ * people to check a healthy Docker while the real fault was elsewhere.
+ */
+function generationCompleteLogs(data: {
+  robot_code?: unknown
+  dryrun_status?: unknown
+  dryrun_message?: unknown
+  dryrun_errors?: unknown
+}): { kind: LogEntry['kind']; msg: string }[] {
+  if (data.dryrun_status !== 'failed' && data.dryrun_status !== 'unverified') {
+    return [{ kind: 'success', msg: `Generated test.robot (${String(data.robot_code).split('\n').length} lines)` }]
+  }
+  const lines: { kind: LogEntry['kind']; msg: string }[] = [{
+    kind: 'error',
+    msg: data.dryrun_status === 'failed'
+      ? 'Delivered — dryrun found issues you may want to review'
+      : 'Delivered — this test was NOT verified, because the dryrun could not run',
+  }]
+  if (data.dryrun_message) lines.push({ kind: 'error', msg: String(data.dryrun_message) })
+  if (data.dryrun_errors) lines.push({ kind: 'error', msg: String(data.dryrun_errors) })
+  return lines
+}
+
 /* ── The single adaptive action button: code present → Run Test; otherwise
    a query → Generate Test (see the button's own comment at its call site
    for why this stays one control rather than a combined generate-and-run) ── */
@@ -1107,20 +1136,7 @@ export default function GeneratePage() {
           setGenProgress(100)
           setCode(data.robot_code)
           workflowId.current = data.workflow_id || null
-          if (data.dryrun_status === 'failed' || data.dryrun_status === 'unverified') {
-            // Do NOT name a cause here. 'unverified' means the gate could not
-            // run, and Docker being down is only one of several reasons — the
-            // backend sends the actual one as dryrun_message. Asserting
-            // "Docker unavailable" sent people to check a healthy Docker while
-            // the real fault was elsewhere.
-            addGen('error', data.dryrun_status === 'failed'
-              ? 'Delivered — dryrun found issues you may want to review'
-              : 'Delivered — this test was NOT verified, because the dryrun could not run')
-            if (data.dryrun_message) addGen('error', String(data.dryrun_message))
-            if (data.dryrun_errors) addGen('error', String(data.dryrun_errors))
-          } else {
-            addGen('success', `Generated test.robot (${String(data.robot_code).split('\n').length} lines)`)
-          }
+          generationCompleteLogs(data).forEach(line => addGen(line.kind, line.msg))
         } else if (data.status === 'error') {
           addGen('error', data.message || 'Generation failed')
           setError(data.message || 'Generation failed')
