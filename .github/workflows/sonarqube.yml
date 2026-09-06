@@ -98,7 +98,7 @@ jobs:
         working-directory: src/frontend-react
         run: |
           npm ci
-          npx vitest run --coverage
+          npm run test:coverage
           # vitest writes lcov paths relative to ITS root, so every record reads
           # `SF:src/App.tsx`. Sonar resolves those against the repo root, where
           # `src/` is the PYTHON backend — so every path would miss, and Sonar

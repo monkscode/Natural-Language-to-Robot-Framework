@@ -291,8 +291,8 @@ jobs:
     steps:
       # persist-credentials: false keeps GITHUB_TOKEN out of .git/config. The
       # steps below run code this pull request authored - `npm ci` executes its
-      # package.json lifecycle scripts, `npm test` runs its test files - and no
-      # step here needs git authentication afterwards.
+      # package.json lifecycle scripts, `npm run test:coverage` runs its test
+      # files - and no step here needs git authentication afterwards.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -310,8 +310,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # vite.config.ts's coverage thresholds are only evaluated when vitest
+      # runs with --coverage - plain `npm test` never checks them. This is the
+      # job that gates build-frontend, so the thresholds must be evaluated
+      # HERE and not only in sonarqube.yml: that workflow races build-images.yml
+      # on the same push rather than gating it, so a coverage collapse there
+      # would not stop this job from publishing an image.
       - name: Run the frontend suite
-        run: npm test
+        run: npm run test:coverage
 
       # `npm run build` runs `tsc -b` too, but only inside the Docker build this
       # job gates. Running it here fails in seconds rather than partway through

@@ -160,6 +160,12 @@ def test_every_image_build_waits_for_the_suite(job):
 
 FRONTEND_GATE_JOB = "test-frontend"
 
+# The shared coverage invocation both CI lanes must call. vite.config.ts's
+# coverage thresholds are only evaluated when vitest runs with `--coverage` -
+# a bare `npm test` (or `vitest run`) exits 0 without checking them at all, so
+# "the suite ran" is not proof the thresholds were enforced.
+FRONTEND_COVERAGE_SCRIPT = "npm run test:coverage"
+
 
 def test_the_frontend_publish_gate_exists_and_runs_the_suite():
     wf = _build_images_workflow()
@@ -168,13 +174,32 @@ def test_the_frontend_publish_gate_exists_and_runs_the_suite():
         "frontend suite before its image is published")
     steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
     run_text = "\n".join(s.get("run", "") for s in steps)
-    # `npm test` is package.json's `vitest run`; accept either spelling so the
-    # job may call vitest directly without silently losing the gate.
-    assert "npm test" in run_text or "vitest" in run_text, (
-        f"the '{FRONTEND_GATE_JOB}' job does not run the frontend suite")
+    assert FRONTEND_COVERAGE_SCRIPT in run_text, (
+        f"the '{FRONTEND_GATE_JOB}' job does not run '{FRONTEND_COVERAGE_SCRIPT}' — "
+        "vitest only evaluates vite.config.ts's coverage thresholds under "
+        "--coverage, so without it this job publishes images on collapsed "
+        "coverage")
     assert "tsc" in run_text, (
         f"the '{FRONTEND_GATE_JOB}' job does not typecheck — tsc is the only "
         "check that covers the TSX the suite does not reach")
+
+
+def test_the_shared_coverage_script_actually_measures_coverage():
+    # Both workflows above call FRONTEND_COVERAGE_SCRIPT by name and trust it to
+    # run vitest with --coverage. Without this test, both lanes could be pointed
+    # at a script that silently stopped measuring coverage and nothing here
+    # would notice.
+    package_json = json.loads(
+        (REPO_ROOT / "src" / "frontend-react" / "package.json").read_text(encoding="utf-8"))
+    script_name = FRONTEND_COVERAGE_SCRIPT.split(" ")[-1]
+    scripts = package_json.get("scripts", {})
+    assert script_name in scripts, (
+        f"src/frontend-react/package.json has no '{script_name}' script — "
+        f"'{FRONTEND_COVERAGE_SCRIPT}' would fail in CI")
+    assert "--coverage" in scripts[script_name], (
+        f"src/frontend-react/package.json's '{script_name}' script no longer "
+        "runs vitest with --coverage, so vite.config.ts's thresholds would "
+        "silently stop being evaluated in both CI lanes")
 
 
 def test_the_frontend_image_waits_for_the_frontend_suite():
@@ -374,12 +399,15 @@ def test_the_sonar_workflow_produces_the_lcov_before_it_scans():
     steps = wf["jobs"]["sonarqube"]["steps"]
     names = [s.get("name") or s.get("uses", "") for s in steps]
     runs = "\n".join(s.get("run", "") for s in steps)
-    assert "vitest run --coverage" in runs, (
+    assert FRONTEND_COVERAGE_SCRIPT in runs, (
         "sonarqube.yml never generates the frontend lcov it tells Sonar to read")
     scan = next(i for i, s in enumerate(steps)
                 if "sonarqube-scan-action" in s.get("uses", ""))
-    cov = next(i for i, s in enumerate(steps)
-               if "vitest run --coverage" in s.get("run", ""))
+    cov = next((i for i, s in enumerate(steps)
+                if FRONTEND_COVERAGE_SCRIPT in s.get("run", "")), None)
+    assert cov is not None, (
+        f"no step in sonarqube.yml runs '{FRONTEND_COVERAGE_SCRIPT}' — the lcov "
+        "SonarQube reads would never be produced")
     assert cov < scan, (
         f"the frontend coverage step (index {cov}) must run BEFORE the scan "
         f"(index {scan}), or the lcov does not exist when Sonar reads it")
