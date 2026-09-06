@@ -393,6 +393,104 @@ function resultTitle(pass: boolean, total: number | null, failed: number | null 
   return 'Test execution failed'
 }
 
+/** The result card's second line. Pass runs get whichever facts we actually
+    have — a test count only when there is more than one, a duration only when
+    the run was timed — and a neutral sentence when we have neither. */
+function resultSubtitle(pass: boolean, total: number | null, secs: number | null): string {
+  if (!pass) return 'Open the detailed log to see exactly which step went wrong.'
+  const parts: string[] = []
+  if (total && total > 1) parts.push(`${total} tests`)
+  if (secs != null) parts.push(`finished in ${secs.toFixed(1)}s`)
+  return parts.join(' · ') || 'Execution finished'
+}
+
+/* ── Result card banner: outcome icon, headline, and the two report links ── */
+function ResultBanner({ pass, title, subtitle, reportUrl, logUrl }: Readonly<{
+  pass: boolean; title: string; subtitle: string
+  reportUrl: string | null; logUrl: string | null
+}>) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center gap-3">
+        {pass
+          ? <CheckCircle2 className="check-pop h-10 w-10 shrink-0 text-green-500" />
+          : <XCircle className="h-10 w-10 shrink-0 text-destructive" />}
+        <div>
+          <div className="text-lg font-bold leading-tight">{title}</div>
+          <p className="text-sm text-muted-foreground">{subtitle}</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        {reportUrl && (
+          <Button asChild size="sm" className={cn('gap-1.5', pass && 'bg-green-600 text-white hover:bg-green-700')}>
+            <a href={reportUrl} target="_blank" rel="noopener noreferrer">
+              <ExternalLink className="h-3.5 w-3.5" /> View Report
+            </a>
+          </Button>
+        )}
+        {logUrl && (
+          <Button asChild variant="outline" size="sm" className="gap-1.5">
+            <a href={logUrl} target="_blank" rel="noopener noreferrer">
+              <FileText className="h-3.5 w-3.5" /> Detailed Log
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Per-test breakdown. Renders nothing for a single-test run: the banner
+   already says everything a one-line list could add ── */
+function ResultTestList({ tests }: Readonly<{ tests: RobotSummary['tests'] }>) {
+  if (tests.length <= 1) return null
+  return (
+    <div className="max-h-36 divide-y overflow-y-auto rounded-lg border bg-background/70">
+      {/* Index is a correct key: `tests` is written once, at the same
+          moment `outcome` turns truthy, and the parent's `{outcome &&
+          ...}` gate (GeneratePage) unmounts this whole card at the
+          start of every new run — so this array is never reordered or
+          filtered while a single instance of this list stays mounted. */}
+      {tests.map((t, i) => (
+        <div key={i} className="flex items-center gap-2.5 px-3 py-2 text-sm">
+          {t.status === 'PASS'
+            ? <Check className="h-4 w-4 shrink-0 text-green-500" />
+            : <X className="h-4 w-4 shrink-0 text-destructive" />}
+          <span className="min-w-0 truncate">{t.name}</span>
+          <span className={cn('ml-auto shrink-0 text-xs font-bold tracking-wide',
+            t.status === 'PASS' ? 'text-green-600 dark:text-green-400' : 'text-destructive')}>
+            {t.status}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ── The first three failure messages. Renders nothing when the run recorded
+   no failure message at all, so a failed run with an empty list stays silent
+   rather than drawing an empty red box ── */
+function ResultFailureList({ failures, withTestName }: Readonly<{
+  failures: RobotSummary['failures']; withTestName: boolean
+}>) {
+  if (failures.length === 0) return null
+  return (
+    <div className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
+      {/* Index is a correct key here for the same reason as the tests
+          list above: `failures` comes from the same once-per-run
+          `summary`, and this card remounts before a next one exists. */}
+      {failures.slice(0, 3).map((f, i) => (
+        <div key={i} className="break-words">
+          {withTestName ? `${f.test}: ` : ''}{f.message}
+        </div>
+      ))}
+      {failures.length > 3 && (
+        <div className="text-destructive/70">…and {failures.length - 3} more — see the detailed log</div>
+      )}
+    </div>
+  )
+}
+
 /* ── Post-run result card: outcome banner, per-test breakdown, report links,
    and an optional feedback footer (children) ── */
 function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: Readonly<{
@@ -405,11 +503,6 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
   const total = summary?.passed != null && summary?.failed != null
     ? summary.passed + summary.failed
     : tests.length || null
-  const title = resultTitle(pass, total, summary?.failed)
-  const subtitle = pass
-    ? [total && total > 1 ? `${total} tests` : null, secs != null ? `finished in ${secs.toFixed(1)}s` : null]
-        .filter(Boolean).join(' · ') || 'Execution finished'
-    : 'Open the detailed log to see exactly which step went wrong.'
   return (
     <Card className={cn('result-pop relative overflow-hidden', pass ? 'border-green-500/40' : 'border-destructive/40')}>
       <div
@@ -422,69 +515,15 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
       />
       {pass && <ConfettiBurst />}
       <CardContent className="relative space-y-3 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            {pass
-              ? <CheckCircle2 className="check-pop h-10 w-10 shrink-0 text-green-500" />
-              : <XCircle className="h-10 w-10 shrink-0 text-destructive" />}
-            <div>
-              <div className="text-lg font-bold leading-tight">{title}</div>
-              <p className="text-sm text-muted-foreground">{subtitle}</p>
-            </div>
-          </div>
-          <div className="flex shrink-0 gap-2">
-            {reportUrl && (
-              <Button asChild size="sm" className={cn('gap-1.5', pass && 'bg-green-600 text-white hover:bg-green-700')}>
-                <a href={reportUrl} target="_blank" rel="noopener noreferrer">
-                  <ExternalLink className="h-3.5 w-3.5" /> View Report
-                </a>
-              </Button>
-            )}
-            {logUrl && (
-              <Button asChild variant="outline" size="sm" className="gap-1.5">
-                <a href={logUrl} target="_blank" rel="noopener noreferrer">
-                  <FileText className="h-3.5 w-3.5" /> Detailed Log
-                </a>
-              </Button>
-            )}
-          </div>
-        </div>
-        {tests.length > 1 && (
-          <div className="max-h-36 divide-y overflow-y-auto rounded-lg border bg-background/70">
-            {/* Index is a correct key: `tests` is written once, at the same
-                moment `outcome` turns truthy, and the parent's `{outcome &&
-                ...}` gate (GeneratePage) unmounts this whole card at the
-                start of every new run — so this array is never reordered or
-                filtered while a single instance of this list stays mounted. */}
-            {tests.map((t, i) => (
-              <div key={i} className="flex items-center gap-2.5 px-3 py-2 text-sm">
-                {t.status === 'PASS'
-                  ? <Check className="h-4 w-4 shrink-0 text-green-500" />
-                  : <X className="h-4 w-4 shrink-0 text-destructive" />}
-                <span className="min-w-0 truncate">{t.name}</span>
-                <span className={cn('ml-auto shrink-0 text-xs font-bold tracking-wide',
-                  t.status === 'PASS' ? 'text-green-600 dark:text-green-400' : 'text-destructive')}>
-                  {t.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-        {!pass && failures.length > 0 && (
-          <div className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 font-mono text-xs text-destructive">
-            {/* Index is a correct key here for the same reason as the tests
-                list above: `failures` comes from the same once-per-run
-                `summary`, and this card remounts before a next one exists. */}
-            {failures.slice(0, 3).map((f, i) => (
-              <div key={i} className="break-words">
-                {tests.length > 1 ? `${f.test}: ` : ''}{f.message}
-              </div>
-            ))}
-            {failures.length > 3 && (
-              <div className="text-destructive/70">…and {failures.length - 3} more — see the detailed log</div>
-            )}
-          </div>
-        )}
+        <ResultBanner
+          pass={pass}
+          title={resultTitle(pass, total, summary?.failed)}
+          subtitle={resultSubtitle(pass, total, secs)}
+          reportUrl={reportUrl}
+          logUrl={logUrl}
+        />
+        <ResultTestList tests={tests} />
+        {!pass && <ResultFailureList failures={failures} withTestName={tests.length > 1} />}
         {children && (
           <div className={cn('border-t pt-3', pass ? 'border-green-500/20' : 'border-destructive/20')}>
             {children}

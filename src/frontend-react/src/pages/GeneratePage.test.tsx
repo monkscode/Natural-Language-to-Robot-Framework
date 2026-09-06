@@ -466,6 +466,55 @@ describe('GeneratePage — a completed execution', () => {
     expect(await screen.findByText('All tests passed! 🎉')).toBeInTheDocument()
   })
 
+  // The result card's SECOND line, which nothing else in this file asserts.
+  // It is assembled from two optional facts — a test count that only earns
+  // its place above one test, and a duration only when the run was timed —
+  // so a multi-test pass and a single-test pass exercise different halves.
+  it('lists the test count and the duration in the pass subtitle for a multi-test run', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Login flow - PASS',
+      'Test: Search flow - PASS',
+      'Results: 2 passed, 0 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-5/log.html', logs }, test_status: 'passed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText(/^2 tests · finished in \d+\.\ds$/)).toBeInTheDocument()
+  })
+
+  it('drops the count from the pass subtitle for a single-test run, keeping the duration', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Login flow - PASS',
+      'Results: 1 passed, 0 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-6/log.html', logs }, test_status: 'passed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText(/^finished in \d+\.\ds$/)).toBeInTheDocument()
+  })
+
   it('falls back to "Test execution failed" when a failing run reports no parseable summary', async () => {
     allowFeedbackMount()
     mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
