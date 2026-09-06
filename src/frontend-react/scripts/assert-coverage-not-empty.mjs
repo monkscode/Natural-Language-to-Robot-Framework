@@ -44,9 +44,9 @@ function fail(message) {
 let raw;
 try {
   raw = readFileSync(SUMMARY_PATH, 'utf-8');
-} catch {
+} catch (err) {
   fail(
-    `${SUMMARY_PATH} does not exist. Check that vite.config.ts's ` +
+    `${SUMMARY_PATH} does not exist (${err.code}). Check that vite.config.ts's ` +
       "coverage.reporter still includes 'json-summary' and that vitest ran " +
       'with --coverage.'
   );
@@ -57,6 +57,14 @@ try {
   summary = JSON.parse(raw);
 } catch (err) {
   fail(`${SUMMARY_PATH} is not valid JSON (${err.message}).`);
+}
+
+if (summary === null || typeof summary !== 'object') {
+  fail(
+    `${SUMMARY_PATH} parsed to ${JSON.stringify(summary)}, not an object. ` +
+      "Check that vite.config.ts's coverage.reporter still includes " +
+      "'json-summary' and that vitest ran with --coverage."
+  );
 }
 
 const fileEntries = Object.keys(summary).filter((key) => key !== 'total');

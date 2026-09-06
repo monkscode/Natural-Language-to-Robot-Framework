@@ -243,10 +243,50 @@ def test_the_coverage_script_guards_against_an_empty_coverage_map():
         (REPO_ROOT / "src" / "frontend-react" / "package.json").read_text(encoding="utf-8"))
     script_name = FRONTEND_COVERAGE_SCRIPT.split(" ")[-1]
     scripts = package_json.get("scripts", {})
-    assert "assert-coverage-not-empty.mjs" in scripts.get(script_name, ""), (
-        f"src/frontend-react/package.json's '{script_name}' script no longer "
-        "invokes assert-coverage-not-empty.mjs - a collapsed coverage map "
-        "would once again exit 0 in both CI lanes")
+    # Chained with `&&` specifically, not `;` and not `|| true`: `;` would run
+    # the checker even after vitest itself failed (masking a real test
+    # failure as a coverage pass/fail), and `|| true` would restore exit 0
+    # after the checker caught a collapsed map. Only `&&` makes the checker's
+    # exit code the script's exit code.
+    assert "&& node scripts/assert-coverage-not-empty.mjs" in scripts.get(script_name, ""), (
+        f"src/frontend-react/package.json's '{script_name}' script does not "
+        "chain assert-coverage-not-empty.mjs with `&&` - a `;` would run the "
+        "checker even when vitest already failed, and `|| true` would swallow "
+        "the checker's own failure, so a collapsed coverage map would once "
+        "again exit 0 in both CI lanes")
+
+
+# The floor the two CI lanes enforce - the value must never be lowered to make
+# a red run green (matches vite.config.ts's own comment on `thresholds`).
+FRONTEND_COVERAGE_THRESHOLD_FLOOR = 80
+
+
+def test_the_coverage_thresholds_are_not_silently_gutted():
+    """`--coverage` MEASURES coverage; vite.config.ts's `thresholds` is the only
+    thing that GATES it. Nothing in this file otherwise reads vite.config.ts,
+    so a threshold silently zeroed, lowered or deleted would leave every test
+    above green while both CI lanes pass on collapsed coverage.
+    """
+    vite_config = _read("src/frontend-react/vite.config.ts")
+    match = re.search(r"thresholds:\s*\{([^}]*)\}", vite_config)
+    assert match, (
+        "src/frontend-react/vite.config.ts has no `thresholds` block under "
+        "coverage - without it, `--coverage` measures and reports but gates "
+        "nothing, so both CI lanes go green on collapsed coverage")
+
+    thresholds_body = match.group(1)
+    for metric in ("lines", "functions", "branches", "statements"):
+        metric_match = re.search(rf"\b{metric}\s*:\s*(\d+)", thresholds_body)
+        assert metric_match, (
+            f"vite.config.ts's `thresholds` has no `{metric}` metric - without "
+            "it, that metric is never gated and both CI lanes go green on "
+            "collapsed coverage for it")
+        value = int(metric_match.group(1))
+        assert value >= FRONTEND_COVERAGE_THRESHOLD_FLOOR, (
+            f"vite.config.ts's `thresholds.{metric}` is {value}, below the "
+            f"floor of {FRONTEND_COVERAGE_THRESHOLD_FLOOR} - lowering it "
+            "weakens the only real gate on frontend coverage and both CI "
+            "lanes would go green on a regression")
 
 
 def test_the_frontend_image_waits_for_the_frontend_suite():
