@@ -1267,25 +1267,8 @@ export default function GeneratePage() {
               <GenerationPipeline progress={genProgress} stage={genStage} logs={genLogs} />
             ) : (
               /* Inset, bordered dark code block (GitHub-style) rather than an
-                  edge-to-edge black panel.
-                  role="presentation": this div is not a control — it only
-                  relays the Ctrl/Cmd+Enter keydown that bubbles up from the
-                  editor's own textarea inside it. A bare div with a key
-                  handler and no role reads to Sonar's S6848 as a fake
-                  interactive element, but jsx-a11y's own docs name this exact
-                  shape ("an element catching bubbled events from elements it
-                  contains") and prescribe role="presentation" as the fix.
-                  It is purely an ARIA hint — the shortcut still fires
-                  identically for mouse and keyboard users either way. */
-              <div
-                className="relative flex min-h-0 flex-1 flex-col"
-                role="presentation"
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
-                    e.preventDefault(); handleRun()
-                  }
-                }}
-              >
+                  edge-to-edge black panel */
+              <div className="relative flex min-h-0 flex-1 flex-col">
                 <RobotCodeEditor
                   value={code}
                   onChange={v => {
@@ -1303,6 +1286,16 @@ export default function GeneratePage() {
                   disabled={busy}
                   placeholder={'*** Settings ***\nLibrary    Browser\n\nGenerated code appears here, or paste your own…'}
                   className="min-h-[300px] flex-1 rounded-lg border border-border shadow-sm"
+                  // Ctrl/Cmd+Enter runs the current code. Wired onto the
+                  // editor's own textarea (forwarded through RobotCodeEditor)
+                  // rather than a wrapping div, so there is no non-native
+                  // element listening for input in the first place — S6848
+                  // never gets anything to fire on.
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
+                      e.preventDefault(); handleRun()
+                    }
+                  }}
                 />
                 {/* Live-run strip while the scenario executes: the code is not
                     being "scanned" — it is running against a real browser in an

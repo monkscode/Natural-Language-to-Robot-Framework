@@ -333,7 +333,10 @@ describe('GeneratePage — running pasted code (no generation)', () => {
     expect(mockApi).not.toHaveBeenCalled()
   })
 
-  it('Ctrl+Enter inside the code editor runs the pasted code too, from the keyboard alone', async () => {
+  it.each([
+    ['Ctrl', { ctrlKey: true }],
+    ['Cmd', { metaKey: true }],
+  ])('%s+Enter inside the code editor runs the pasted code too, from the keyboard alone', async (_label, modifier) => {
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
       onEvent({
         status: 'complete',
@@ -345,10 +348,11 @@ describe('GeneratePage — running pasted code (no generation)', () => {
     pasteCode()
 
     // The Run button's own click is covered by the test above; this fires
-    // the same handleRun through the code editor's Ctrl+Enter shortcut
-    // instead — the keydown starts on the editor's own textarea and must
-    // bubble up to the wrapping div's handler, exactly as it does for real.
-    fireEvent.keyDown(screen.getByPlaceholderText(/Generated code appears here/), { key: 'Enter', ctrlKey: true })
+    // the same handleRun through the code editor's own Ctrl/Cmd+Enter
+    // shortcut instead — the handler now lives directly on the editor's
+    // textarea (RobotCodeEditor forwards onKeyDown to it), not a wrapping
+    // div, so this exercises the real, current wiring rather than bubbling.
+    fireEvent.keyDown(screen.getByPlaceholderText(/Generated code appears here/), { key: 'Enter', ...modifier })
 
     await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledWith(
       '/execute-test',
@@ -356,20 +360,6 @@ describe('GeneratePage — running pasted code (no generation)', () => {
       expect.any(Function),
     ))
     await screen.findByText('Test passed! 🎉')
-  })
-
-  it('marks the code-editor keydown wrapper as presentational, not a fake control', () => {
-    renderPage()
-    pasteCode()
-
-    // The wrapper div only relays the bubbled Ctrl+Enter above; it is not
-    // itself a button, so it must say "ignore me" (role="presentation") to
-    // assistive tech rather than nothing at all (S6848) or a role it doesn't
-    // behave like. Requiring the role to sit on the element that actually
-    // contains the editor rules out a role planted on some unrelated div.
-    expect(screen.getByRole('presentation')).toContainElement(
-      screen.getByPlaceholderText(/Generated code appears here/),
-    )
   })
 })
 
