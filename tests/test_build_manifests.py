@@ -57,6 +57,21 @@ def _libdoc_version(library: str) -> str:
     return json.loads(path.read_text(encoding="utf-8"))["version"]
 
 
+def _run_shell(steps: list[dict]) -> str:
+    """Join steps' `run:` bodies, dropping shell-comment lines first.
+
+    This repo's comments are checkable claims: a `#`-commented command is not
+    an invocation, so it must not satisfy an "X runs" assertion just because
+    the text is present. A `run: |` block's own `#` lines land in `run:` and
+    would otherwise read as a real command; a YAML `#` comment above a step
+    never reaches `run:` at all, so this only ever strips the former.
+    """
+    return "\n".join(
+        line for s in steps for line in s.get("run", "").splitlines()
+        if not line.strip().startswith("#")
+    )
+
+
 def test_playwright_pin_matches_between_bench_venv_and_shipped_image():
     """The bench must resolve locators on the engine the image ships."""
     bench = _pin(_read("requirements-bus.txt"), "playwright", "requirements-bus.txt")
@@ -129,7 +144,7 @@ def test_the_publish_gate_job_exists_and_runs_the_suite():
         f"build-images.yml has no '{GATE_JOB}' job — nothing stops a red suite "
         "from publishing images")
     steps = wf["jobs"][GATE_JOB].get("steps", [])
-    run_text = "\n".join(s.get("run", "") for s in steps)
+    run_text = _run_shell(steps)
     assert "pytest" in run_text, f"the '{GATE_JOB}' job does not run pytest"
 
 
@@ -173,7 +188,7 @@ def test_the_frontend_publish_gate_exists_and_runs_the_suite():
         f"build-images.yml has no '{FRONTEND_GATE_JOB}' job — nothing runs the "
         "frontend suite before its image is published")
     steps = wf["jobs"][FRONTEND_GATE_JOB].get("steps", [])
-    run_text = "\n".join(s.get("run", "") for s in steps)
+    run_text = _run_shell(steps)
     assert FRONTEND_COVERAGE_SCRIPT in run_text, (
         f"the '{FRONTEND_GATE_JOB}' job does not run '{FRONTEND_COVERAGE_SCRIPT}' — "
         "vitest only evaluates vite.config.ts's coverage thresholds under "
@@ -200,6 +215,11 @@ def test_the_shared_coverage_script_actually_measures_coverage():
         f"src/frontend-react/package.json's '{script_name}' script no longer "
         "runs vitest with --coverage, so vite.config.ts's thresholds would "
         "silently stop being evaluated in both CI lanes")
+    assert "vitest" in scripts[script_name], (
+        f"src/frontend-react/package.json's '{script_name}' script does not "
+        "invoke vitest at all - '--coverage' could belong to any other "
+        "command (e.g. 'echo --coverage'), so its presence alone does not "
+        "prove coverage is measured")
 
 
 def test_the_frontend_image_waits_for_the_frontend_suite():
@@ -216,8 +236,8 @@ def test_the_frontend_gate_checks_out_without_persisting_the_token():
     """actions/checkout writes GITHUB_TOKEN into .git/config unless told not to.
 
     This job then runs code the pull request itself authored - `npm ci` executes
-    lifecycle scripts from the PR's package.json, and `npm test` runs its test
-    files - so anything the PR wants can read that token off disk. No step in
+    lifecycle scripts from the PR's package.json, and `npm run test:coverage`
+    runs its test files - so anything the PR wants can read that token off disk. No step in
     the job needs git authentication afterwards. check-browser-service-release.yml
     already sets this for the same reason.
     """
@@ -398,13 +418,13 @@ def test_the_sonar_workflow_produces_the_lcov_before_it_scans():
     wf = yaml.safe_load(SONAR_WORKFLOW.read_text(encoding="utf-8"))
     steps = wf["jobs"]["sonarqube"]["steps"]
     names = [s.get("name") or s.get("uses", "") for s in steps]
-    runs = "\n".join(s.get("run", "") for s in steps)
+    runs = _run_shell(steps)
     assert FRONTEND_COVERAGE_SCRIPT in runs, (
         "sonarqube.yml never generates the frontend lcov it tells Sonar to read")
     scan = next(i for i, s in enumerate(steps)
                 if "sonarqube-scan-action" in s.get("uses", ""))
     cov = next((i for i, s in enumerate(steps)
-                if FRONTEND_COVERAGE_SCRIPT in s.get("run", "")), None)
+                if FRONTEND_COVERAGE_SCRIPT in _run_shell([s])), None)
     assert cov is not None, (
         f"no step in sonarqube.yml runs '{FRONTEND_COVERAGE_SCRIPT}' — the lcov "
         "SonarQube reads would never be produced")
@@ -423,7 +443,7 @@ def test_the_sonar_workflow_rewrites_lcov_paths_to_repo_root():
     """
     steps = __import__("yaml").safe_load(
         SONAR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sonarqube"]["steps"]
-    runs = chr(10).join(s.get("run", "") for s in steps)
+    runs = _run_shell(steps)
     assert "SF:src/frontend-react/src/" in runs, (
         "sonarqube.yml does not rewrite the lcov paths to repo-root-relative - "
         "Sonar will silently report src/frontend-react as 0% covered")
