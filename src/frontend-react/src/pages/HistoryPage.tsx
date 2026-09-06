@@ -170,6 +170,275 @@ function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
   )
 }
 
+/* ── The drawer's "re-run of {id}" trail. The original id is always shown in
+   full; whether it is a link depends on rerun_of_accessible, and the
+   inaccessible branch keeps a copy control so an id you cannot open can still
+   be handed to someone who can ── */
+function RerunOriginLine({ d, copied, onCopy, onOpenRun }: Readonly<{
+  d: RunDetail | null
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onOpenRun: (runId: string) => void
+}>) {
+  if (!d?.rerun_of) return null
+  return (
+    <span className="basis-full">
+      re-run of{' '}
+      {d.rerun_of_accessible ? (
+        <button
+          type="button"
+          className="font-mono hover:text-foreground hover:underline"
+          title="Open the original run — feedback on this re-run applies to it"
+          onClick={() => onOpenRun(d.rerun_of!)}
+        >
+          {d.rerun_of}
+        </button>
+      ) : (
+        /* The same rule as the row pill: the id is still shown in
+           full, but it is not a link, because that link would
+           404. It keeps the copy control the accessible branch
+           gets for free from being a button — the id rule is
+           full-AND-copyable unconditionally, and this is the case
+           where copying earns the most: the only thing left to do
+           with an id you cannot open is hand it to someone who
+           can. */
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+          title="Copy the original run’s id — you no longer have access to open it"
+          onClick={() => onCopy(d.rerun_of!, 'drawer-rerun-of')}
+        >
+          {d.rerun_of}
+          {copied === 'drawer-rerun-of' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        </button>
+      )}
+      {/* The leading space in the string below is load-bearing.
+          JSX strips the newline between two adjacent elements, so
+          without it textContent, a copy-paste and every screen
+          reader read "…b05c23967b51(no longer available to you)".
+          The ml-2 that used to sit here moved 8px on screen and
+          nothing anywhere else. */}
+      {!d.rerun_of_accessible && (
+        <span className="text-muted-foreground">
+          {' (no longer available to you)'}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/* ── The drawer's header: status, who ran it, the description, and the id and
+   timestamp line ── */
+function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy, onOpenRun }: Readonly<{
+  selected: string | null
+  d: RunDetail | null
+  detailError: string
+  viewerEmail: string | undefined
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onOpenRun: (runId: string) => void
+}>) {
+  return (
+    <SheetHeader className="space-y-2 pr-6 text-left">
+      <div className="flex items-center gap-2">
+        {d && STATUS_BADGE[d.status]}
+        {d?.rerun_of && (
+          <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
+            <Repeat2 className="h-3 w-3" />
+            <span>Re-run</span>
+          </Badge>
+        )}
+        {d?.user_email && d.user_email !== viewerEmail && (
+          <span className="text-xs text-muted-foreground" title="Who ran this test">
+            {d.user_email}
+          </span>
+        )}
+      </div>
+      {/* detailError means d is null because the fetch was REFUSED,
+          not because the run has no description — so the "Pasted code
+          run" fallback would assert something false about a run we
+          could not read at all. The reason itself renders in the body
+          (see RunDrawerCode); the header only stops lying. */}
+      <SheetTitle className="text-base leading-snug">
+        {detailError ? 'Run unavailable' : d?.user_query || 'Pasted code run'}
+      </SheetTitle>
+      <SheetDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        {selected && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+            title="Copy run id"
+            onClick={() => onCopy(selected, 'drawer-id')}
+          >
+            {selected}
+            {copied === 'drawer-id' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </button>
+        )}
+        {d && <span>created {formatDate(d.created_at)}</span>}
+        {d && d.updated_at !== d.created_at && (
+          <span>last update {formatDate(d.updated_at)}</span>
+        )}
+        <RerunOriginLine d={d} copied={copied} onCopy={onCopy} onOpenRun={onOpenRun} />
+      </SheetDescription>
+    </SheetHeader>
+  )
+}
+
+/* ── The drawer's action row: re-run, open report, regenerate, and where the
+   run is filed. A run this caller may read but not file still shows WHERE it
+   lives — that is the shared folder doing its job — but as a label rather
+   than a control that could only 404 ── */
+function RunDrawerActions({ d, selected, hasUser, groups, rerunDisabled, onRunAgain, onRegenerate, onMove, onCreateGroup }: Readonly<{
+  d: RunDetail | null
+  selected: string | null
+  hasUser: boolean
+  groups: RunGroup[]
+  rerunDisabled: boolean
+  onRunAgain: (runId: string) => void
+  onRegenerate: (query: string) => void
+  onMove: (runIds: string[], groupId: string | null) => void
+  onCreateGroup: (name: string) => Promise<RunGroup>
+}>) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <Button
+        size="sm"
+        className="h-8 gap-1.5 text-xs"
+        disabled={rerunDisabled}
+        title={d?.robot_code
+          ? 'Execute this exact saved code as a new run — no regeneration, no LLM cost'
+          : 'No stored code for this run'}
+        onClick={() => selected && onRunAgain(selected)}
+      >
+        <Play className="h-3.5 w-3.5" /> Run again
+      </Button>
+      {d?.has_report && (
+        <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+          <a href={`/reports/${d.run_id}/log.html`} target="_blank" rel="noreferrer">
+            <FileTerminal className="h-3.5 w-3.5" /> Open report
+          </a>
+        </Button>
+      )}
+      {d?.user_query && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          title="Start a fresh generation from this description (for when the site changed)"
+          onClick={() => onRegenerate(d.user_query!)}
+        >
+          <RotateCw className="h-3.5 w-3.5" /> Regenerate
+        </Button>
+      )}
+      {d && hasUser && (d.can_move ? (
+        <MoveToGroupMenu
+          groups={groups}
+          currentGroupId={d.group_id}
+          onMove={gid => onMove([d.run_id], gid)}
+          onCreateGroup={onCreateGroup}
+          trigger={
+            <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+              <FolderInput className="h-3.5 w-3.5" />
+              {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
+            </Button>
+          }
+        />
+      ) : d.group_name && (
+        <span
+          className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs text-muted-foreground"
+          title="Only the owner of a run, or an org admin, can move it"
+        >
+          <Folder className="h-3.5 w-3.5" />
+          Group: {d.group_name}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * What this run has already told the learning system — read-only here;
+ * Retract stays the Generate panel's action alone (see feedbackPath in
+ * HistoryPage). `corrections` is already [] for every case that must render
+ * nothing — still loading, stale for this row, refused, or genuinely empty —
+ * so this needs no separate loading/error/staleness check: silence claims
+ * nothing, same as RecordedCorrections' own empty-array case.
+ */
+function RunDrawerCorrections({ corrections, appliedTo, selected, copied, onCopy }: Readonly<{
+  corrections: RecordedCorrectionItem[]
+  appliedTo: string | undefined
+  selected: string | null
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  if (corrections.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      {appliedTo && appliedTo !== selected && (
+        /* Same treatment as the header's own id control above
+           (the "Copy run id" button): font-mono, never truncated,
+           click-to-copy. This run is a re-run, so the corrections
+           just listed are filed against the run the code was
+           cloned from, not this one. */
+        <p className="text-xs text-muted-foreground">
+          Filed against the original run{' '}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+            title="Copy the original run’s id"
+            onClick={() => onCopy(appliedTo, 'drawer-applied-to')}
+          >
+            {appliedTo}
+            {copied === 'drawer-applied-to' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </button>
+        </p>
+      )}
+      <RecordedCorrections corrections={corrections} />
+    </div>
+  )
+}
+
+/* ── The drawer's code panel and its copy/download controls ── */
+function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<{
+  d: RunDetail | null
+  detailError: string
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onDownload: (code: string, runId: string) => void
+}>) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot code</span>
+        {d?.robot_code && (
+          <div className="flex gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              title="Copy code"
+              onClick={() => onCopy(d.robot_code!, 'drawer-code')}
+            >
+              {copied === 'drawer-code' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              title="Download .robot file"
+              onClick={() => onDownload(d.robot_code!, d.run_id)}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {drawerCodeBody(detailError, d)}
+    </div>
+  )
+}
+
 export default function HistoryPage() {
   const navigate = useNavigate()
 
@@ -922,220 +1191,53 @@ export default function HistoryPage() {
 
       <Sheet open={!!selected} onOpenChange={open => { if (!open) setSelected(null) }}>
         <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-2xl">
-          <SheetHeader className="space-y-2 pr-6 text-left">
-            <div className="flex items-center gap-2">
-              {d && STATUS_BADGE[d.status]}
-              {d?.rerun_of && (
-                <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
-                  <Repeat2 className="h-3 w-3" />
-                  <span>Re-run</span>
-                </Badge>
-              )}
-              {d?.user_email && d.user_email !== user?.email && (
-                <span className="text-xs text-muted-foreground" title="Who ran this test">
-                  {d.user_email}
-                </span>
-              )}
-            </div>
-            {/* detailError means d is null because the fetch was REFUSED,
-                not because the run has no description — so the "Pasted code
-                run" fallback would assert something false about a run we
-                could not read at all. The reason itself renders in the body
-                (see detailError below); the header only stops lying. */}
-            <SheetTitle className="text-base leading-snug">
-              {detailError ? 'Run unavailable' : d?.user_query || 'Pasted code run'}
-            </SheetTitle>
-            <SheetDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              {selected && (
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-                  title="Copy run id"
-                  onClick={() => void copyText(selected, 'drawer-id')}
-                >
-                  {selected}
-                  {copied === 'drawer-id' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                </button>
-              )}
-              {d && <span>created {formatDate(d.created_at)}</span>}
-              {d && d.updated_at !== d.created_at && (
-                <span>last update {formatDate(d.updated_at)}</span>
-              )}
-              {d?.rerun_of && (
-                <span className="basis-full">
-                  re-run of{' '}
-                  {d.rerun_of_accessible ? (
-                    <button
-                      type="button"
-                      className="font-mono hover:text-foreground hover:underline"
-                      title="Open the original run — feedback on this re-run applies to it"
-                      onClick={() => setSelected(d.rerun_of!)}
-                    >
-                      {d.rerun_of}
-                    </button>
-                  ) : (
-                    /* The same rule as the row pill: the id is still shown in
-                       full, but it is not a link, because that link would
-                       404. It keeps the copy control the accessible branch
-                       gets for free from being a button — the id rule is
-                       full-AND-copyable unconditionally, and this is the case
-                       where copying earns the most: the only thing left to do
-                       with an id you cannot open is hand it to someone who
-                       can. */
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-                      title="Copy the original run’s id — you no longer have access to open it"
-                      onClick={() => void copyText(d.rerun_of!, 'drawer-rerun-of')}
-                    >
-                      {d.rerun_of}
-                      {copied === 'drawer-rerun-of' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                    </button>
-                  )}
-                  {/* The leading space in the string below is load-bearing.
-                      JSX strips the newline between two adjacent elements, so
-                      without it textContent, a copy-paste and every screen
-                      reader read "…b05c23967b51(no longer available to you)".
-                      The ml-2 that used to sit here moved 8px on screen and
-                      nothing anywhere else. */}
-                  {!d.rerun_of_accessible && (
-                    <span className="text-muted-foreground">
-                      {' (no longer available to you)'}
-                    </span>
-                  )}
-                </span>
-              )}
-            </SheetDescription>
-          </SheetHeader>
+          <RunDrawerHeader
+            selected={selected}
+            d={d}
+            detailError={detailError}
+            viewerEmail={user?.email}
+            copied={copied}
+            onCopy={copyText}
+            onOpenRun={setSelected}
+          />
 
           {selectedNote && (
             <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs">{selectedNote}</p>
           )}
 
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              disabled={rerunDisabled}
-              title={d?.robot_code
-                ? 'Execute this exact saved code as a new run — no regeneration, no LLM cost'
-                : 'No stored code for this run'}
-              onClick={() => selected && void runAgain(selected)}
-            >
-              <Play className="h-3.5 w-3.5" /> Run again
-            </Button>
-            {d?.has_report && (
-              <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
-                <a href={`/reports/${d.run_id}/log.html`} target="_blank" rel="noreferrer">
-                  <FileTerminal className="h-3.5 w-3.5" /> Open report
-                </a>
-              </Button>
-            )}
-            {d?.user_query && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 gap-1.5 text-xs"
-                title="Start a fresh generation from this description (for when the site changed)"
-                onClick={() => navigate('/generate', { state: { prefillQuery: d.user_query } })}
-              >
-                <RotateCw className="h-3.5 w-3.5" /> Regenerate
-              </Button>
-            )}
-            {/* A run this caller may read but not file still shows WHERE it
-                lives — that is the shared folder doing its job — but as a
-                label rather than a control that could only 404. */}
-            {d && user && (d.can_move ? (
-              <MoveToGroupMenu
-                groups={groups}
-                currentGroupId={d.group_id}
-                onMove={gid => void moveRuns([d.run_id], gid)}
-                onCreateGroup={createGroup}
-                trigger={
-                  <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
-                    <FolderInput className="h-3.5 w-3.5" />
-                    {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
-                  </Button>
-                }
-              />
-            ) : d.group_name && (
-              <span
-                className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs text-muted-foreground"
-                title="Only the owner of a run, or an org admin, can move it"
-              >
-                <Folder className="h-3.5 w-3.5" />
-                Group: {d.group_name}
-              </span>
-            ))}
-          </div>
+          <RunDrawerActions
+            d={d}
+            selected={selected}
+            hasUser={!!user}
+            groups={groups}
+            rerunDisabled={rerunDisabled}
+            onRunAgain={runAgain}
+            onRegenerate={q => navigate('/generate', { state: { prefillQuery: q } })}
+            onMove={moveRuns}
+            onCreateGroup={createGroup}
+          />
 
           {/* The card header's copy of this sits BEHIND the drawer overlay, so
               a move that failed from in here would otherwise be silent. */}
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
 
-          {/* What this run has already told the learning system — read-only
-              here; Retract stays the Generate panel's action alone (see
-              feedbackPath above). `corrections` above is already [] for
-              every case that must render nothing — still loading, stale
-              for this row, refused, or genuinely empty — so this needs no
-              separate loading/error/staleness check: silence claims
-              nothing, same as RecordedCorrections' own empty-array case. */}
-          {corrections.length > 0 && (
-            <div className="space-y-1.5">
-              {feedback?.applied_to && feedback.applied_to !== selected && (
-                /* Same treatment as the header's own id control above
-                   (the "Copy run id" button): font-mono, never truncated,
-                   click-to-copy. This run is a re-run, so the corrections
-                   just listed are filed against the run the code was
-                   cloned from, not this one. */
-                <p className="text-xs text-muted-foreground">
-                  Filed against the original run{' '}
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-                    title="Copy the original run’s id"
-                    onClick={() => void copyText(feedback.applied_to!, 'drawer-applied-to')}
-                  >
-                    {feedback.applied_to}
-                    {copied === 'drawer-applied-to' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                  </button>
-                </p>
-              )}
-              <RecordedCorrections corrections={corrections} />
-            </div>
-          )}
+          <RunDrawerCorrections
+            corrections={corrections}
+            appliedTo={feedback?.applied_to}
+            selected={selected}
+            copied={copied}
+            onCopy={copyText}
+          />
 
           <Separator />
 
-          <div className="flex min-h-0 flex-1 flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot code</span>
-              {d?.robot_code && (
-                <div className="flex gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    title="Copy code"
-                    onClick={() => void copyText(d.robot_code!, 'drawer-code')}
-                  >
-                    {copied === 'drawer-code' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    title="Download .robot file"
-                    onClick={() => downloadCode(d.robot_code!, d.run_id)}
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {drawerCodeBody(detailError, d)}
-          </div>
+          <RunDrawerCode
+            d={d}
+            detailError={detailError}
+            copied={copied}
+            onCopy={copyText}
+            onDownload={downloadCode}
+          />
         </SheetContent>
       </Sheet>
     </div>
