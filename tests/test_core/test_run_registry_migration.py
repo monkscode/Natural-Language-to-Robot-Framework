@@ -131,7 +131,15 @@ def test_a_code_less_run_attaches_but_produces_no_version(scratch):
 
 
 def test_null_queries_never_group_with_each_other(scratch):
-    """NULL never equals NULL, so two pasted runs stay two tests."""
+    """NULL never equals NULL, so two pasted runs stay two tests.
+
+    A row-count assertion alone is blind to a swallow: if the only_run
+    guard were ever deleted from the NULL branch, p1 and p2 would BOTH
+    attach to the first test the loop builds and the second INSERT would
+    still fire (its inner loop just finds nothing to attach), leaving 2
+    rows in `tests` but only one of them actually used. Pin the real
+    attachment, not just the shell count.
+    """
     name, dsn, admin = scratch
     _bare_schema(admin, name)
     _seed(admin, name, [
@@ -143,6 +151,14 @@ def test_null_queries_never_group_with_each_other(scratch):
     _migrate(dsn)
 
     assert admin.execute(f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 2
+    p1_test = admin.execute(
+        f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'p1'").fetchone()[0]
+    p2_test = admin.execute(
+        f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'p2'").fetchone()[0]
+    assert p1_test is not None and p2_test is not None
+    assert p1_test != p2_test
+    assert admin.execute(
+        f"SELECT count(DISTINCT test_id) FROM {name}.test_runs").fetchone()[0] == 2
 
 
 def test_the_same_sentence_from_two_authors_stays_two_tests(scratch):
@@ -176,6 +192,58 @@ def test_keys_are_sequential_per_org_starting_at_one(scratch):
         f"SELECT key_n FROM {name}.tests WHERE org_id = 'org-a'").fetchall()) == [1, 2]
     assert [r[0] for r in admin.execute(
         f"SELECT key_n FROM {name}.tests WHERE org_id = 'org-b'").fetchall()] == [1]
+
+
+def test_org_less_runs_get_sequential_keys_in_their_own_bucket(scratch):
+    """The bench and every AUTH_ENFORCED=false run write org_id NULL. Key
+    allocation depends on `org_id IS NOT DISTINCT FROM g.org_id` rather than
+    `org_id = g.org_id`: NULL = NULL is unknown, so `=` would make every
+    org-less group compute key_n 1, collide on idx_tests_org_key (NULLS NOT
+    DISTINCT), abort the DO block, and make RunRegistry.__init__ raise --
+    the app stops starting, with the rest of the suite still green."""
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "d1", "org_id": None, "user_query": "q1",
+         "robot_code": "c", "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "d2", "org_id": None, "user_query": "q2",
+         "robot_code": "c", "created_at": "2026-01-02T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    assert admin.execute(f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 2
+    assert sorted(r[0] for r in admin.execute(
+        f"SELECT key_n FROM {name}.tests WHERE org_id IS NULL").fetchall()) == [1, 2]
+
+
+def test_the_oldest_group_gets_key_n_one(scratch):
+    """key_n has to be assigned in a fixed order or it is arbitrary --
+    HashAggregate order today, something else after the next planner
+    upgrade -- and it is user-visible (rendered TC-<key_n> in P2), so
+    fixing it after the fact means renumbering live keys. Queries are
+    seeded so alphabetical order is the OPPOSITE of chronological order:
+    if key_n ever tracked query text instead of created_at, this would
+    catch that too."""
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "r_z", "user_query": "zzz-query", "robot_code": "c",
+         "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "r_m", "user_query": "mmm-query", "robot_code": "c",
+         "created_at": "2026-01-02T10:00:00Z"},
+        {"run_id": "r_a", "user_query": "aaa-query", "robot_code": "c",
+         "created_at": "2026-01-03T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    def _key_for(query):
+        return admin.execute(
+            f"SELECT key_n FROM {name}.tests WHERE user_query = %s",
+            (query,)).fetchone()[0]
+
+    assert _key_for("zzz-query") == 1
+    assert _key_for("mmm-query") == 2
+    assert _key_for("aaa-query") == 3
 
 
 def test_the_folder_comes_from_the_newest_run_that_has_one(scratch):

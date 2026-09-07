@@ -431,6 +431,16 @@ _SCHEMA_DDL = (
         SELECT org_id, user_id, user_query, run_id, created_at, created_at
         FROM test_runs
         WHERE user_query IS NULL
+        -- Deterministic and chronological, or key_n comes out in whatever
+        -- order HashAggregate happens to produce -- and it is user-visible
+        -- (rendered TC-<key_n> in P2), so fixing it after the fact means
+        -- renumbering live keys. This ORDER BY applies to the UNION ALL as
+        -- a whole, not to either branch alone. org_id/user_id/user_query
+        -- already total-order the first branch by themselves (they are its
+        -- GROUP BY key); only_run (NULL there, the run_id in the second
+        -- branch) is what breaks a tie between two NULL-query runs that
+        -- share an org/user and a first_at.
+        ORDER BY first_at, org_id, user_id, user_query, only_run
       LOOP
         SELECT coalesce(max(key_n), 0) + 1 INTO v_key
         FROM tests WHERE org_id IS NOT DISTINCT FROM g.org_id;
