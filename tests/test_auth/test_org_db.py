@@ -718,6 +718,7 @@ _GUARDED_LEARNING_TABLES = (
     "learning_anchors",
     "kw_query_patterns",
     "test_runs",
+    "tests",
     "workflow_metrics",
     "llm_traces",
     "run_groups",
