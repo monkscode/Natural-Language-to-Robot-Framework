@@ -1029,7 +1029,8 @@ class _GenerationError(Exception):
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
                 robot_code: str | None = None, rerun_of: str | None = None,
-                error_message: str | None = None, group_id: str | None = None) -> None:
+                error_message: str | None = None, group_id: str | None = None,
+                is_platform_admin: bool = False) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
@@ -1041,6 +1042,7 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
             error_message=error_message, group_id=group_id,
+            is_platform_admin=is_platform_admin,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")

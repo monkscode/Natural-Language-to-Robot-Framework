@@ -214,11 +214,19 @@ def test_an_org_admin_cannot_reach_another_orgs_learning_record_via_an_admin_rer
     assert fake_stream.call_args.kwargs["rerun_of"] == original
 
     copy = _seed_rerun(claims_p, original, group_id=None)
-    # ...and it lands in a P folder, as the scenario describes.
+    # Owner decision D6 (test-result split P1): a result takes the org of the
+    # TEST it re-ran, not of whoever fired it. The copy is therefore org A's
+    # row even though a platform admin seated in org P produced it — which is
+    # the whole point, since org_id is what attributes the learning signal.
+    assert get_run_registry().get_run(copy)["org_id"] == claims_a["org_id"]
+    # So the scenario's next step is now refused outright: assign_runs demands
+    # the run be in the caller's org, and this run is in org A. The bypass
+    # this test guards is closed one step earlier than it used to be; the
+    # feedback gate below still has to hold on its own.
     gid_p = get_run_registry().create_group(org_p, uid_p, "P folder")["group_id"]
     assert client.put("/api/groups/assignments",
                       json={"run_ids": [copy], "group_id": gid_p},
-                      headers=_auth(tok_p)).status_code == 200
+                      headers=_auth(tok_p)).status_code == 404
 
     resp, fake, _ = _feedback(client, tok_q, copy)
 

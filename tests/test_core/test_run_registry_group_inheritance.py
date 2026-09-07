@@ -185,3 +185,46 @@ def test_retry_reuses_the_org_id_already_derived(reg, admin_conn, stored_group_i
     assert stored_group_id(rid) is None
     assert reg.get_run(rid)["org_id"] == _ORG_A
 
+
+
+def test_folder_deleted_mid_write_still_attaches_the_run_to_a_test(
+        reg, admin_conn, stored_group_id):
+    """Same race, but the run carries code — so _attach_test has already
+    INSERTed a tests row inside this transaction when the FK blows up. The
+    handler's rollback() discards that row too, so the retry must re-attach:
+    replaying the old test_id would reference a row that no longer exists,
+    violate fk_test_runs_test, and be swallowed by the outer except — losing
+    the very history row this retry exists to save."""
+    gid = reg.create_group(_ORG_A, "u1", "Doomed")["group_id"]
+    rid = _rid()
+
+    real_guard = RunRegistry._fileable_group_id
+
+    def _delete_after_reading(self, group_id, org_id):
+        inherited = real_guard(self, group_id, org_id)
+        admin_conn.execute(
+            f"DELETE FROM {_SCHEMA}.run_groups WHERE group_id = %s", (group_id,)
+        )
+        return inherited
+
+    with patch.object(RunRegistry, "_fileable_group_id", _delete_after_reading):
+        reg.record_start(rid, _USER, "the run that must survive", "running",
+                         robot_code="*** Tasks ***", group_id=gid)
+
+    assert stored_group_id(rid) is None
+    row = admin_conn.execute(
+        f"SELECT test_id, test_version_id FROM {_SCHEMA}.test_runs"
+        f" WHERE run_id = %s", (rid,)).fetchone()
+    assert row is not None, "the retry lost the history row"
+    test_id, version_id = row
+    assert test_id is not None, "the run survived but lost its test"
+    # The id written must be the one that actually survived the rollback.
+    assert admin_conn.execute(
+        f"SELECT count(*) FROM {_SCHEMA}.tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] == 1
+    assert admin_conn.execute(
+        f"SELECT count(*) FROM {_SCHEMA}.test_versions WHERE version_id = %s",
+        (version_id,)).fetchone()[0] == 1
+    # One run, one test — the rolled-back attempt must not leave a stray.
+    assert admin_conn.execute(
+        f"SELECT count(*) FROM {_SCHEMA}.tests").fetchone()[0] == 1

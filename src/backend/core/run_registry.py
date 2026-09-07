@@ -715,6 +715,104 @@ class RunRegistry:
                 group_id, e)
             return None
 
+    def _attach_test(
+        self,
+        conn,
+        run_id: str,
+        user_id: Optional[str],
+        user_email: Optional[str],
+        user_query: Optional[str],
+        robot_code: Optional[str],
+        rerun_of: Optional[str],
+        org_id: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve (test_id, test_version_id, org_id) for a run being written.
+
+        Runs on the CALLER'S connection, inside record_start's transaction, so
+        a run row and its test land together or not at all — unlike
+        _lookup_org_id and _fileable_group_id, which decide decorations and so
+        deliberately use their own.
+
+        Three owner decisions live here:
+
+        D8 — a failed run attaches to its test if one exists and never creates
+        one. A brand-new generation that fails produced nothing useful, so
+        test_id stays NULL; that is a PERMANENTLY legal state, which is why the
+        migration may not be guarded on it.
+
+        D6 — a result takes the org of its TEST, not of the caller. Only a
+        platform admin can re-run another org's test, and today that writes the
+        admin's org onto the row, which sends another org's learning signal
+        into the admin's store (get_run_owner().org_id is what attributes it).
+        Returning the test's org makes tests.org_id = test_runs.org_id an
+        invariant rather than a coincidence.
+
+        Idempotent on run_id: record_start is an upsert called at generation
+        start, at generation success and again at execute, so this must return
+        the SAME test for all three or one run would spawn three tests."""
+        existing = conn.execute(
+            "SELECT r.test_id, r.test_version_id, t.org_id"
+            " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
+            " WHERE r.run_id = %s", (run_id,)).fetchone()
+        if existing and existing["test_id"]:
+            return (existing["test_id"], existing["test_version_id"],
+                    existing["org_id"])
+
+        if rerun_of:
+            src = conn.execute(
+                "SELECT t.test_id, t.org_id, t.current_version"
+                " FROM test_runs r JOIN tests t ON t.test_id = r.test_id"
+                " WHERE r.run_id = %s", (rerun_of,)).fetchone()
+            if src:
+                ver = conn.execute(
+                    "SELECT version_id FROM test_versions"
+                    " WHERE test_id = %s AND n = %s",
+                    (src["test_id"], src["current_version"])).fetchone()
+                return (src["test_id"],
+                        ver["version_id"] if ver else None,
+                        src["org_id"])
+
+        if not robot_code:
+            # D8 scenario (a): no code, no test.
+            return (None, None, org_id)
+
+        test_id = str(uuid.uuid4())
+        version_id = str(uuid.uuid4())
+        # IS NOT DISTINCT FROM, not '=': the org-less bucket (bench and
+        # AUTH_ENFORCED=false) must get sequential keys too, and '=' is
+        # unknown for NULL so every such test would try key_n = 1.
+        insert_test = (
+            "INSERT INTO tests (test_id, org_id, key_n, user_id, user_email,"
+            " user_query, current_version) SELECT %s, %s,"
+            " coalesce(max(key_n), 0) + 1, %s, %s, %s, 1 FROM tests"
+            " WHERE org_id IS NOT DISTINCT FROM %s")
+        params = (test_id, org_id, user_id, user_email, user_query, org_id)
+        # max(key_n) is read and max+1 written in ONE statement, which still
+        # does not make the allocation atomic ACROSS transactions: two
+        # record_start calls in the same org compute the same key and the
+        # loser hits idx_tests_org_key. One bounded retry recomputes it. A
+        # SAVEPOINT (conn.transaction()) rather than conn.rollback(), because
+        # this runs inside the caller's transaction and a rollback would
+        # discard whatever else it holds. Two collisions in a row and we give
+        # up: the outer swallow leaves the run unattached, which D8 already
+        # makes a legal state, and spinning here would block the pipeline.
+        for attempt in (1, 2):
+            try:
+                with conn.transaction():
+                    conn.execute(insert_test, params)
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "[RUN_REGISTRY] test key collision for run %s in org %s; "
+                    "recomputing", run_id, org_id)
+        conn.execute(
+            "INSERT INTO test_versions (version_id, test_id, n, user_query,"
+            " robot_code, created_by) VALUES (%s, %s, 1, %s, %s, %s)",
+            (version_id, test_id, user_query, robot_code, user_id))
+        return (test_id, version_id, org_id)
+
     def record_start(
         self,
         run_id: str,
@@ -725,6 +823,7 @@ class RunRegistry:
         rerun_of: Optional[str] = None,
         error_message: Optional[str] = None,
         group_id: Optional[str] = None,
+        is_platform_admin: bool = False,
     ) -> None:
         """Upsert a run row. Ownership/query/lineage are write-once (COALESCE
         keeps the first non-NULL value); status and updated_at always advance.
@@ -746,7 +845,13 @@ class RunRegistry:
         group_id files the new run into a folder. Only the History "Run
         again" path sets it, inheriting the folder of the run it cloned; it
         is write-once like ownership, so a later record_start cannot drag a
-        run the user moved mid-flight back to the source folder."""
+        run the user moved mid-flight back to the source folder.
+
+        test_id/test_version_id come from _attach_test, which runs on THIS
+        connection before the INSERT because it can revise org_id (D6: a
+        result takes the org of its test). is_platform_admin records whether
+        the caller held platform-admin authority at the moment of the write
+        (D7) and is write-once by omission from the ON CONFLICT body."""
         try:
             user_id = (user or {}).get("user_id")
             org_id = (user or {}).get("org_id")
@@ -756,8 +861,10 @@ class RunRegistry:
                 group_id = self._fileable_group_id(group_id, org_id)
             sql = """
                 INSERT INTO test_runs
-                    (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (run_id, user_id, user_email, user_query, robot_code,
+                     rerun_of, status, org_id, error_message, group_id,
+                     test_id, test_version_id, ran_as_platform_admin)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (run_id) DO UPDATE SET
                     status     = EXCLUDED.status,
                     updated_at = now(),
@@ -765,27 +872,58 @@ class RunRegistry:
                     user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
                     user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
                     robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
+                    -- write-once, like ownership: _attach_test is idempotent
+                    -- and returns the row's existing test, so this only ever
+                    -- fills a NULL left by a failed or code-less first write.
+                    test_id         = COALESCE(test_runs.test_id, EXCLUDED.test_id),
+                    test_version_id = COALESCE(test_runs.test_version_id,
+                                               EXCLUDED.test_version_id),
                     rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
                     org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
                     error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message),
                     group_id   = COALESCE(test_runs.group_id, EXCLUDED.group_id)
+                    -- ran_as_platform_admin is absent on purpose: write-once
+                    -- by omission, so the value kept is the one from the write
+                    -- that CREATED the row, which is the honest reading of
+                    -- "who started this run" (D7).
                 """
 
-            def _params(gid: Optional[str]) -> tuple:
-                return (
-                    run_id,
-                    user_id,
-                    (user or {}).get("email"),
-                    user_query,
-                    robot_code,
-                    rerun_of,
-                    status,
-                    org_id,
-                    error_message,
-                    gid,
-                )
-
             with self._pool.connection() as conn:
+                test_id = test_version_id = None
+                try:
+                    test_id, test_version_id, org_id = self._attach_test(
+                        conn, run_id, user_id, (user or {}).get("email"),
+                        user_query, robot_code, rerun_of, org_id)
+                except Exception as e:
+                    # Bookkeeping must never cost the history row. Roll the
+                    # aborted sub-work back or the pool's COMMIT on exit takes
+                    # the INSERT down with it (same reason the folder retry
+                    # below rolls back).
+                    conn.rollback()
+                    logger.error(
+                        "[RUN_REGISTRY] test attach failed for %s: %s", run_id, e)
+
+                # Defined HERE, after the attach, so the closure reads the
+                # org_id the TEST decided (D6) rather than the caller's, and
+                # so the folder retry below picks up whatever the re-attach
+                # reassigns. Closing over a stale org_id is the failure mode.
+                def _params(gid: Optional[str]) -> tuple:
+                    return (
+                        run_id,
+                        user_id,
+                        (user or {}).get("email"),
+                        user_query,
+                        robot_code,
+                        rerun_of,
+                        status,
+                        org_id,
+                        error_message,
+                        gid,
+                        test_id,
+                        test_version_id,
+                        is_platform_admin,
+                    )
+
                 try:
                     conn.execute(sql, _params(group_id))
                 except psycopg.errors.ForeignKeyViolation:
@@ -802,6 +940,23 @@ class RunRegistry:
                     logger.warning(
                         "[RUN_REGISTRY] folder %s vanished mid-write; "
                         "recording run %s ungrouped", group_id, run_id)
+                    # That rollback also discarded the tests/test_versions
+                    # rows _attach_test just INSERTED. Replaying the old
+                    # test_id would point the retry at a row that no longer
+                    # exists, violate fk_test_runs_test, and be swallowed by
+                    # the outer except — losing the history row this retry
+                    # exists to save. So attach again and rebind the three
+                    # names _params reads at call time.
+                    try:
+                        test_id, test_version_id, org_id = self._attach_test(
+                            conn, run_id, user_id, (user or {}).get("email"),
+                            user_query, robot_code, rerun_of, org_id)
+                    except Exception as e:
+                        conn.rollback()
+                        test_id = test_version_id = None
+                        logger.error(
+                            "[RUN_REGISTRY] test re-attach failed for %s: %s",
+                            run_id, e)
                     conn.execute(sql, _params(None))
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] record_start failed for {run_id}: {e}")
