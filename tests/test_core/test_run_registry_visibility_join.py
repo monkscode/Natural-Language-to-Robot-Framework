@@ -229,9 +229,16 @@ def test_filing_one_result_publishes_its_siblings(reg):
 
 
 def test_filing_is_refused_without_authority_and_moves_no_test(reg):
-    """The new UPDATE is driven off the SAME authority filter as the parent
-    one and lives inside the same transaction, so a refused batch moves no
-    test either — not merely no run."""
+    """A refused batch moves no TEST either, not merely no run.
+
+    What this pins is the TRANSACTION, not the authority filter. Deleting
+    `AND r.{allowed}` from the new UPDATE leaves this test green: the parent
+    UPDATE's rowcount check still rolls the whole transaction back, and the
+    new statement is joined to rows already restricted to the batch. The
+    filter is defence in depth — it keeps the statement correct on its own if
+    that check is ever relaxed — and is not what this test proves. What it
+    does catch is the new UPDATE being moved outside the transaction, or the
+    rollback being dropped."""
     r, admin = reg
     r.record_start("run-x", {"user_id": "carol", "org_id": "org-a",
                              "email": "c@x.com"},
@@ -278,3 +285,26 @@ def test_count_ungrouped_tests_counts_tests_not_results(reg):
     _file_test_into_folder(admin, "run-1", "g-1")
     assert r.count_ungrouped_tests("alice", "org-a",
                                    folder_org_id="org-a") == 1
+
+
+def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
+    """delete_group's audit list has to resolve membership the way every read
+    now does. A run whose OWN group_id is NULL is still a member when its test
+    is filed — that is exactly what filing one result of a test produces, and
+    what the migration leaves on a test's other runs. ON DELETE SET NULL
+    correctly returns such a run to Ungrouped, so an audit that cannot see it
+    understates the blast radius of a destructive org-admin action."""
+    r, admin = reg
+    r.record_start("run-1", OWNER, "q", "generated", robot_code="c")
+    r.record_start("run-2", OWNER, "q", "running", robot_code="c",
+                   rerun_of="run-1")
+    _folder(admin, "g-1")
+    assert r.assign_runs("org-a", "alice", False, ["run-1"], "g-1") is True
+    assert admin.execute(
+        "SELECT group_id FROM test_runs WHERE run_id = 'run-2'"
+    ).fetchone()[0] is None, "run-2 must be a member through its TEST only"
+
+    audit: list[str] = []
+    assert r.delete_group("org-a", "alice", True, "g-1",
+                          audit_run_ids=audit) is True
+    assert sorted(audit) == ["run-1", "run-2"]

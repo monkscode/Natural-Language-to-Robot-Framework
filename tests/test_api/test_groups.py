@@ -416,11 +416,14 @@ class TestReadPathVisibility:
     @pytest.fixture(scope="class")
     def db(self):
         """A direct connection on the same schema as this class's `reg`, for
-        assertions about columns list_runs does not return.
+        seeding state the registry has no public method to write — a test's
+        folder, which only assign_runs sets and which the fan-out test needs
+        to set on three tests at once.
 
-        dict_row explicitly: psycopg.connect defaults to tuple_row, and the
-        assertions below index by NAME (the pool the registry itself uses is
-        built with dict_row, so naming keeps the two readable the same way)."""
+        dict_row explicitly: psycopg.connect defaults to tuple_row, while the
+        pool the registry itself uses is built with dict_row, so any row a
+        future test reads through here indexes the same way as one read
+        through `reg`."""
         import psycopg
         from psycopg.rows import dict_row
         from src.backend.core.config import settings
@@ -603,7 +606,7 @@ class TestReadPathVisibility:
             assert sorted(r["run_id"] for r in rows) == sorted(expected), label
             assert n == total == len(expected), label
 
-    def test_folder_run_count_agrees_with_the_folder_filter(self, reg, db):
+    def test_folder_run_count_agrees_with_the_folder_filter(self, reg):
         """A folder's contents are the ORG's, so the chip and the filtered
         table read the same number for every member of it — not the caller's
         share of the folder. A member seeing 1 beside a folder holding 2 was
@@ -615,34 +618,10 @@ class TestReadPathVisibility:
         assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1, m1], gid) is True
 
         listed = reg.list_groups(self.ORG)
-        group_row = [g for g in listed if g["group_id"] == gid][0]
         for scope_user in (self.MEMBER, None):   # plain member, then org_admin
-            rows, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
-                                        folder_org_id=self.ORG, group=gid)
+            _, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
+                                     folder_org_id=self.ORG, group=gid)
             assert [g["run_count"] for g in listed] == [total] == [2], scope_user
-
-            # The test chip must equal the tests behind the rows the filter
-            # returned, by the same argument the run count is pinned by.
-            #
-            # Derived by SQL from the visible run ids rather than read off the
-            # payload: list_runs SELECTs run_id, user_id, user_email, org_id,
-            # user_query, rerun_of, status, created_at, updated_at, group_id and
-            # group_name — and deliberately NOT test_id. Adding a column to that
-            # payload would be a change P1 is not allowed to make.
-            #
-            # The two coincide HERE because _seed passes no robot_code, so
-            # neither run has a test and both sides read 0. They are not equal
-            # in general: a run published by its OWN group_id while its test is
-            # unfiled — the migrated shape, and the transitional fallback's
-            # whole reason for existing — counts in run_count and in
-            # visible_test_ids but NOT in test_count. A test with zero runs
-            # separates them the other way once P2 makes that reachable.
-            # REVISIT this assertion then; it is scoped to this fixture.
-            visible_test_ids = {row["test_id"] for row in db.execute(
-                "SELECT DISTINCT test_id FROM test_runs"
-                " WHERE run_id = ANY(%s) AND test_id IS NOT NULL",
-                ([r["run_id"] for r in rows],)).fetchall()}
-            assert group_row["test_count"] == len(visible_test_ids)
 
     def test_folder_counts_do_not_fan_out_across_tests_and_results(self, reg, db):
         """Two one-to-many joins off run_groups multiply. A folder with 3 tests
@@ -651,6 +630,12 @@ class TestReadPathVisibility:
         The shape matters: a folder with ONE test, or one result per test,
         cannot distinguish the correct query from the broken one, because
         1 x N == N.
+
+        The chip is then checked against its own filtered table, which is the
+        stated reason the read hop, the write move and this count had to ship
+        as ONE commit: list_groups hand-writes a third copy of the folder
+        resolution, and a chip that resolves a folder differently from the
+        table it labels is the exact defect the merge exists to prevent.
         """
         db.execute(
             "INSERT INTO run_groups (group_id, name, org_id, created_by)"
@@ -669,6 +654,17 @@ class TestReadPathVisibility:
                if g["group_id"] == "fan-1"][0]
         assert row["test_count"] == 3
         assert row["run_count"] == 6
+
+        # ...and the chip equals the table it labels, for both caller shapes
+        # the folder is meant to serve: the org_admin scope that narrows by no
+        # user, and a PEER, who reaches all six only because the folder
+        # publishes their author's tests to the org.
+        for scope_user in (None, "peer"):
+            listed, total = reg.list_runs(user_id=scope_user, org_id="org-fan",
+                                          folder_org_id="org-fan",
+                                          group="fan-1")
+            assert total == row["run_count"] == 6, scope_user
+            assert len(listed) == 6, scope_user
 
     # 14 ------------------------------------------------------------------
     def test_filtering_by_a_foreign_orgs_folder_returns_nothing(self, reg):

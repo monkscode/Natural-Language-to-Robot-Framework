@@ -1058,11 +1058,32 @@ class RunRegistry:
 
         test_count arrived with the 2026-09-07 split and is additive —
         run_count keeps its name AND its meaning, a count of RESULTS. The
-        subquery behind it is deliberately NOT scoped by run_org_id:
-        _fileable_group_id enforces at the write that a test's folder is in
-        the test's own org, and the folder join enforces it at every read, so
-        an org term here is redundant — and adding one would silently zero the
-        count for the token-less dev caller, whose run_org_id is None."""
+        subquery behind it is deliberately NOT scoped by run_org_id, and
+        adding one would silently zero the count for the token-less dev
+        caller, whose run_org_id is None.
+
+        What keeps that safe is assign_runs, the ONLY writer of
+        tests.group_id: _visible_group makes the folder the caller's org's,
+        and `r.org_id = %s` in the same statement makes the run's org the
+        caller's too, so a test reached through that run carries the folder's
+        org. (NOT _fileable_group_id, which reads as if it governed this and
+        does not: its one call site is record_start, and it gates a new RUN's
+        own group_id, never tests.group_id.) The folder join then enforces
+        the same thing at every read.
+
+        The exception, and it is real: a test whose runs span two orgs — a
+        known, ledgered gap — can be filed through its org-a run into an
+        org-a folder while tests.org_id says org-b. This subquery then counts
+        a test no org-scoped read can reach. Fixing it belongs with that gap,
+        not here.
+
+        This is the THIRD place publication is expressed in SQL, and the
+        second that cannot call _group_join: the join binds a caller's org
+        and this one binds run_org_id in the JOIN, so it hand-writes the same
+        COALESCE. get_run_owner is the other. Change what "published" means
+        in any of the three and change all three — a chip resolving a folder
+        differently from the table it labels is the whole defect this count
+        exists to make visible."""
         if run_org_id is None:
             run_org_id = folder_org_id
         elif folder_org_id is None:
@@ -1295,12 +1316,30 @@ class RunRegistry:
         audit_run_ids, if given, is appended with the run ids the
         membership SELECT below sees, read BEFORE the DELETE:
         fk_test_runs_group's ON DELETE SET NULL erases each member's
-        group_id as part of that same statement. That SELECT is a
-        snapshot under READ COMMITTED, not a lock: a run assigned to this
-        folder concurrently — after the snapshot but before the DELETE
-        proceeds — is ungrouped by that same DELETE without ever
-        appearing in this list (assign_runs' own ForeignKeyViolation
-        handling is the other side of the same race). The list is
+        group_id as part of that same statement, and tests.group_id's own
+        ON DELETE SET NULL erases the test's.
+
+        That SELECT reads membership through the TEST as well as off the
+        run's own column, since 2026-09-07. A run whose own group_id is
+        NULL is still a member when its TEST is filed here — filing one
+        result of a test leaves its siblings in exactly that shape, and so
+        does the migration — and such a run IS returned to Ungrouped by
+        this DELETE, so an audit blind to it understates the blast radius
+        of a destructive org-admin action.
+
+        It is a UNION of the two columns rather than the reads' COALESCE,
+        and that direction is deliberate: it over-reports in ONE shape —
+        a run whose own group_id is this folder while its test is filed
+        elsewhere, which DISPLAYS in the test's folder and so only has a
+        dead column cleared here — and never under-reports. An audit of a
+        destructive action is the one place to prefer the wider answer.
+
+        That SELECT is a snapshot under READ COMMITTED, not a lock: a run
+        assigned to this folder concurrently — after the snapshot but
+        before the DELETE proceeds — is ungrouped by that same DELETE
+        without ever appearing in this list (assign_runs' own
+        ForeignKeyViolation handling is the other side of the same race),
+        and so is a run whose TEST is filed here concurrently. The list is
         therefore what this transaction's snapshot could see, not a
         guarantee of the folder's full membership at delete time.
         Appended only once the DELETE actually removes a row, so it stays
@@ -1314,8 +1353,10 @@ class RunRegistry:
             run_ids = None
             if audit_run_ids is not None:
                 rows = conn.execute(
-                    "SELECT run_id FROM test_runs WHERE group_id = %s",
-                    (group_id,),
+                    "SELECT run_id FROM test_runs WHERE group_id = %s"
+                    " OR test_id IN (SELECT test_id FROM tests"
+                    "                WHERE group_id = %s)",
+                    (group_id, group_id),
                 ).fetchall()
                 run_ids = [r["run_id"] for r in rows]
             cur = conn.execute(
@@ -1488,11 +1529,24 @@ class RunRegistry:
         undo.
 
         Since 2026-09-07 filing a run also files its TEST, because publication
-        is the test's. One consequence is deliberate and is the target model:
-        filing ONE result of a test publishes that test's other results too.
-        It moves no number on any current screen — every run the existing
-        suite files has no test at all, and the migrated data carries a test's
-        folder forward from the newest run that had one."""
+        is the test's. Two consequences are deliberate and are the target
+        model, and neither may be described as "no visible change":
+
+        Filing ONE result of a test publishes that test's other results too.
+
+        And the sharper half: because a test has ONE folder, filing run-2 into
+        folder Y sets the TEST's folder to Y, so a sibling run-1 whose own
+        test_runs.group_id is folder X stops displaying in X and displays in
+        Y — a run silently moved OUT of a folder someone deliberately put it
+        in, not merely a sibling added. Under the target model that IS the
+        right answer; it is written down because P1 otherwise claims to move
+        no number.
+
+        Neither is reachable on data the existing suite produces (every run it
+        files has no test at all) nor on the owner's current database
+        (measured: 0 folders, 46 runs, none filed). They ARE reachable on
+        migrated data, because the migration gives a test the folder of its
+        newest filed run while that test's other runs keep their own."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
