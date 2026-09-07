@@ -308,3 +308,74 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
     assert r.delete_group("org-a", "alice", True, "g-1",
                           audit_run_ids=audit) is True
     assert sorted(audit) == ["run-1", "run-2"]
+
+
+def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
+    """F7: a test's runs can span two orgs (a documented, ordinary-flow-
+    reachable gap -- see _attach_test's D6 fallback and
+    run_registry.py:755-758). An org-a admin filing their OWN org-a run
+    publishes the whole shared test, and a test-branch with no org term at
+    all then names a run the caller has no authority over at all -- one no
+    read path in the system ever shows as a member of this folder
+    (get_run_owner anchors g.org_id = t.org_id; list_runs filters
+    t.org_id = %s), for a run whose display never changed."""
+    r, admin = reg
+    r.record_start("run-a", OWNER, "q", "generated", robot_code="c")
+    shared_test = _test_id(admin, "run-a")
+    # The write paths in this file cannot produce this shape within one
+    # test's lifetime (a rerun of an org-less test only takes the CALLER's
+    # org per D6's fallback, and never writes it back onto `tests`) --
+    # seeded directly to exercise the audit query against the documented
+    # gap, not to re-derive how a live system reaches it.
+    admin.execute(
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " status, org_id, test_id)"
+        " VALUES ('run-b', 'zoe', 'z@x.com', 'q', 'generated', 'org-b', %s)",
+        (shared_test,))
+    assert admin.execute(
+        "SELECT org_id FROM test_runs WHERE run_id = 'run-b'"
+    ).fetchone()[0] == "org-b", "premise: run-b is a different, concrete org"
+
+    _folder(admin, "g-1")
+    assert r.assign_runs("org-a", "alice", False, ["run-a"], "g-1") is True
+    assert r.get_run_owner("run-b").group_id is None, (
+        "premise: no read path shows run-b as a member of g-1")
+
+    audit: list[str] = []
+    assert r.delete_group("org-a", "alice", True, "g-1",
+                          audit_run_ids=audit) is True
+    assert audit == ["run-a"]
+
+
+def test_deleting_a_folder_audits_an_org_less_run_filed_through_a_shared_test(reg):
+    """F7's third property: a run with org_id IS NULL can never be filed
+    directly -- assign_runs and record_start's group_id path both require a
+    concrete org match -- but it can share a test with a run that IS filed,
+    and the token-less dev caller's join binds no g.org_id term at all, so
+    such a run genuinely displays in this folder for that caller (list_runs
+    with no caller org applies no t.org_id filter either). Excluding it from
+    the audit would under-report a blast radius that is real for that caller
+    shape, so it stays admitted -- deliberately, not by the accident a bare
+    `org_id = %s` or `IS NOT DISTINCT FROM %s` would have produced."""
+    r, admin = reg
+    r.record_start("run-a", OWNER, "q", "generated", robot_code="c")
+    shared_test = _test_id(admin, "run-a")
+    admin.execute(
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " status, org_id, test_id)"
+        " VALUES ('run-none', 'zoe', 'z@x.com', 'q', 'generated', NULL, %s)",
+        (shared_test,))
+    assert admin.execute(
+        "SELECT org_id FROM test_runs WHERE run_id = 'run-none'"
+    ).fetchone()[0] is None, "premise: run-none really has no org"
+
+    _folder(admin, "g-1")
+    assert r.assign_runs("org-a", "alice", False, ["run-a"], "g-1") is True
+    rows, _ = r.list_runs(group="g-1")
+    assert "run-none" in {row["run_id"] for row in rows}, (
+        "premise: the token-less caller really is shown run-none in g-1")
+
+    audit: list[str] = []
+    assert r.delete_group("org-a", "alice", True, "g-1",
+                          audit_run_ids=audit) is True
+    assert sorted(audit) == ["run-a", "run-none"]

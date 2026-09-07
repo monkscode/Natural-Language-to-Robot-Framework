@@ -1062,14 +1062,20 @@ class RunRegistry:
         adding one would silently zero the count for the token-less dev
         caller, whose run_org_id is None.
 
-        What keeps that safe is assign_runs, the ONLY writer of
-        tests.group_id: _visible_group makes the folder the caller's org's,
-        and `r.org_id = %s` in the same statement makes the run's org the
-        caller's too, so a test reached through that run carries the folder's
-        org. (NOT _fileable_group_id, which reads as if it governed this and
-        does not: its one call site is record_start, and it gates a new RUN's
-        own group_id, never tests.group_id.) The folder join then enforces
-        the same thing at every read.
+        What keeps that safe is assign_runs, the only place this column
+        mutates OUTSIDE the one-time migration bootstrap (which sets it
+        once, at INSERT, from the newest filed run among the runs it
+        merges into that test — see assign_runs' own docstring for why
+        that makes migrated data reachable here; its grouping key is
+        (org_id, user_id, user_query), so it is single-org by construction
+        and contributes no counterexample to this invariant): _visible_group
+        makes the folder the caller's org's, and `r.org_id = %s` in the same
+        statement makes the run's org the caller's too, so a test reached
+        through that run carries the folder's org. (NOT _fileable_group_id,
+        which reads as if it governed this and does not: its one call site
+        is record_start, and it gates a new RUN's own group_id, never
+        tests.group_id.) The folder join then enforces the same thing at
+        every read.
 
         The exception, and it is real: a test whose runs span two orgs — a
         known, ledgered gap — can be filed through its org-a run into an
@@ -1328,11 +1334,34 @@ class RunRegistry:
         of a destructive org-admin action.
 
         It is a UNION of the two columns rather than the reads' COALESCE,
-        and that direction is deliberate: it over-reports in ONE shape —
-        a run whose own group_id is this folder while its test is filed
-        elsewhere, which DISPLAYS in the test's folder and so only has a
-        dead column cleared here — and never under-reports. An audit of a
-        destructive action is the one place to prefer the wider answer.
+        and that direction is still deliberate: it over-reports in the
+        same ONE shape as before — a run whose own group_id is this
+        folder while its test is filed elsewhere, which DISPLAYS in the
+        test's folder and so only has a dead column cleared here.
+
+        The test branch is additionally scoped by
+        `(org_id = %s OR org_id IS NULL)`, bound to the caller's own org
+        (already proven equal to this folder's, by _visible_group above).
+        Unscoped, that branch let a run in a genuinely FOREIGN org ride
+        into the audit through a test it merely shares with a run the
+        caller legitimately filed — a test's runs can span two orgs (a
+        documented, ordinary-flow-reachable gap: see _attach_test's D6
+        fallback and run_registry.py:755-758) — even though no read path
+        ever displays that foreign run as a member of this folder
+        (get_run_owner anchors `g.org_id = t.org_id`; list_runs filters
+        `t.org_id = %s`).
+
+        A run with org_id IS NULL stays admitted, by choice: it can never
+        be filed directly — assign_runs and record_start's group_id path
+        both require a concrete org match — but it can share a test with
+        one that is, and the token-less dev caller's join binds no
+        g.org_id term at all, so such a run genuinely displays in this
+        folder for that caller. A bare `org_id = %s`, or
+        `IS NOT DISTINCT FROM %s`, would exclude it silently, under-
+        reporting the same blast radius this whole UNION exists to stop
+        under-reporting. Never under-reporting is still the rule an audit
+        of a destructive action follows — the one place to prefer the
+        wider answer.
 
         That SELECT is a snapshot under READ COMMITTED, not a lock: a run
         assigned to this folder concurrently — after the snapshot but
@@ -1353,10 +1382,12 @@ class RunRegistry:
             run_ids = None
             if audit_run_ids is not None:
                 rows = conn.execute(
-                    "SELECT run_id FROM test_runs WHERE group_id = %s"
-                    " OR test_id IN (SELECT test_id FROM tests"
-                    "                WHERE group_id = %s)",
-                    (group_id, group_id),
+                    "SELECT run_id FROM test_runs"
+                    " WHERE (org_id = %s OR org_id IS NULL)"
+                    "   AND (group_id = %s"
+                    "        OR test_id IN (SELECT test_id FROM tests"
+                    "                       WHERE group_id = %s))",
+                    (org_id, group_id, group_id),
                 ).fetchall()
                 run_ids = [r["run_id"] for r in rows]
             cur = conn.execute(
