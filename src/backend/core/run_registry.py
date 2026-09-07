@@ -39,6 +39,11 @@ from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 
 logger = logging.getLogger(__name__)
 
+# Above this many unmigrated runs the collapse refuses to run. The rule merges
+# rows that share a query, which is right for the 46 rows the owner produced by
+# hand and unproven for a database nobody has inspected. Abort beats merge.
+_MIGRATION_SCALE_LIMIT = 5000
+
 _SCHEMA_DDL = (
     """
     CREATE TABLE IF NOT EXISTS test_runs (
@@ -382,6 +387,112 @@ _SCHEMA_DDL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_test_runs_test_time"
     " ON test_runs (test_id, created_at DESC)",
+    # --- one-shot collapse of test_runs onto tests + test_versions ---
+    # Guarded on `tests` being EMPTY, which is true exactly once in a
+    # database's life. It must NOT be guarded on `test_id IS NULL`: that is a
+    # permanently legal state (a generation that fails before any code exists,
+    # owner decision D8), so such a guard would re-arm and re-collapse live
+    # rows on the next RunRegistry() construction — silently performing the
+    # go-forward deduplication this design explicitly declined.
+    f"""
+    DO $$
+    DECLARE
+      n_unmigrated bigint;
+      g            record;
+      r            record;
+      v_test_id    text;
+      v_version_id text;
+      v_n          integer;
+      v_key        integer;
+    BEGIN
+      IF EXISTS (SELECT 1 FROM tests) THEN RETURN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM test_runs WHERE test_id IS NULL) THEN
+        RETURN;
+      END IF;
+
+      SELECT count(*) INTO n_unmigrated FROM test_runs WHERE test_id IS NULL;
+      IF n_unmigrated > {_MIGRATION_SCALE_LIMIT} THEN
+        RAISE WARNING
+          'test split: % unmigrated runs exceeds the safety limit of %; '
+          'collapse ABORTED, no rows changed. Inspect the data and run the '
+          'migration deliberately.', n_unmigrated, {_MIGRATION_SCALE_LIMIT};
+        RETURN;
+      END IF;
+
+      FOR g IN
+        SELECT org_id, user_id, user_query, NULL::text AS only_run,
+               min(created_at) AS first_at, max(created_at) AS last_at
+        FROM test_runs
+        WHERE user_query IS NOT NULL
+        GROUP BY org_id, user_id, user_query
+        UNION ALL
+        -- NULL user_query never groups: NULL = NULL is unknown, so each such
+        -- run is its own test. Keyed by run_id rather than by the query.
+        SELECT org_id, user_id, user_query, run_id, created_at, created_at
+        FROM test_runs
+        WHERE user_query IS NULL
+      LOOP
+        SELECT coalesce(max(key_n), 0) + 1 INTO v_key
+        FROM tests WHERE org_id IS NOT DISTINCT FROM g.org_id;
+
+        v_test_id := gen_random_uuid()::text;
+        INSERT INTO tests (test_id, org_id, key_n, user_id, user_email,
+                           user_query, group_id, current_version,
+                           created_at, updated_at)
+        SELECT v_test_id, g.org_id, v_key, g.user_id,
+               (SELECT t.user_email FROM test_runs t
+                 WHERE t.org_id IS NOT DISTINCT FROM g.org_id
+                   AND t.user_id IS NOT DISTINCT FROM g.user_id
+                   AND t.user_query IS NOT DISTINCT FROM g.user_query
+                   AND (g.only_run IS NULL OR t.run_id = g.only_run)
+                 ORDER BY t.created_at DESC LIMIT 1),
+               g.user_query,
+               (SELECT t.group_id FROM test_runs t
+                 WHERE t.org_id IS NOT DISTINCT FROM g.org_id
+                   AND t.user_id IS NOT DISTINCT FROM g.user_id
+                   AND t.user_query IS NOT DISTINCT FROM g.user_query
+                   AND (g.only_run IS NULL OR t.run_id = g.only_run)
+                   AND t.group_id IS NOT NULL
+                 ORDER BY t.created_at DESC LIMIT 1),
+               1, g.first_at, g.last_at;
+
+        v_n := 0;
+        FOR r IN
+          SELECT t.run_id, t.robot_code, t.user_query, t.user_id, t.created_at
+          FROM test_runs t
+          WHERE t.test_id IS NULL
+            AND t.org_id IS NOT DISTINCT FROM g.org_id
+            AND t.user_id IS NOT DISTINCT FROM g.user_id
+            AND t.user_query IS NOT DISTINCT FROM g.user_query
+            AND (g.only_run IS NULL OR t.run_id = g.only_run)
+          ORDER BY t.created_at ASC, t.run_id ASC
+        LOOP
+          IF r.robot_code IS NULL THEN
+            -- D8: no code, no version. It still attaches to the test.
+            UPDATE test_runs SET test_id = v_test_id
+             WHERE run_id = r.run_id;
+          ELSE
+            v_n := v_n + 1;
+            v_version_id := gen_random_uuid()::text;
+            INSERT INTO test_versions (version_id, test_id, n, user_query,
+                                       robot_code, created_by, created_at,
+                                       reason)
+            VALUES (v_version_id, v_test_id, v_n, r.user_query, r.robot_code,
+                    r.user_id, r.created_at, 'imported');
+            UPDATE test_runs
+               SET test_id = v_test_id, test_version_id = v_version_id
+             WHERE run_id = r.run_id;
+          END IF;
+        END LOOP;
+
+        UPDATE tests SET current_version = greatest(v_n, 1)
+         WHERE test_id = v_test_id;
+      END LOOP;
+
+      RAISE NOTICE 'test split: collapsed % runs into % tests',
+        n_unmigrated, (SELECT count(*) FROM tests);
+    END $$;
+    """,
 )
 
 
