@@ -149,6 +149,15 @@ def test_routine_notices_are_quiet_so_an_upgrade_notice_is_not_buried(scratch, c
                            "email": "u1@e.com"}, "q", "passed")
     reg.close()
 
+    # The code is added AFTER the row exists, which is what makes this
+    # PRE-SPLIT history and gives the collapse something to do. Neither
+    # ordinary path reaches that shape: record_start GIVEN robot_code mints
+    # the test itself and disarms the collapse before it can run, and
+    # record_start without it leaves a row the collapse must skip -- no
+    # code, nothing to version, no test (D8).
+    admin.execute("UPDATE test_runs SET robot_code = 'code' WHERE run_id = %s",
+                  (rid,))
+
     # This row's test_id is NULL and `tests` is still empty, so THIS
     # construction is the collapse's first chance to fire — let it run to
     # completion here, outside the assertion window below, so half one
