@@ -388,12 +388,23 @@ _SCHEMA_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_test_runs_test_time"
     " ON test_runs (test_id, created_at DESC)",
     # --- one-shot collapse of test_runs onto tests + test_versions ---
-    # Guarded on `tests` being EMPTY, which is true exactly once in a
-    # database's life. It must NOT be guarded on `test_id IS NULL`: that is a
-    # permanently legal state (a generation that fails before any code exists,
-    # owner decision D8), so such a guard would re-arm and re-collapse live
-    # rows on the next RunRegistry() construction — silently performing the
-    # go-forward deduplication this design explicitly declined.
+    # Guarded on `tests` being EMPTY, which is true until the FIRST test
+    # exists — not "once in a database's life". On a fresh install it stays
+    # true across every process start until a generation SUCCEEDS, because
+    # record_start opens each run's row with robot_code NULL at generation
+    # START (workflow_service.py:1067, :1086) and _SCHEMA_DDL re-runs on every
+    # RunRegistry() construction. The guard therefore RE-ARMS whenever `tests`
+    # returns to empty, which P2's delete path makes reachable on a live
+    # database. That is why both branches below also require code: a run with
+    # nothing to version must never mint a test (D8), or _attach_test's
+    # short-circuit on an existing test_id then denies the real code its
+    # version for good.
+    #
+    # It must NOT be guarded on `test_id IS NULL`: that is a permanently legal
+    # state (a generation that fails before any code exists, owner decision
+    # D8), so such a guard would re-arm and re-collapse live rows on the next
+    # RunRegistry() construction — silently performing the go-forward
+    # deduplication this design explicitly declined.
     f"""
     DO $$
     DECLARE
@@ -425,12 +436,20 @@ _SCHEMA_DDL = (
         FROM test_runs
         WHERE user_query IS NOT NULL
         GROUP BY org_id, user_id, user_query
+        -- A group with no code anywhere in it has nothing to version, so it
+        -- must not become a test at all. count() skips NULLs, so this is the
+        -- same predicate the inner loop's `IF r.robot_code IS NULL` applies
+        -- per run, lifted to the group. A MIXED group still survives, and its
+        -- code-less runs still attach — that is D8's "attaches if one
+        -- exists". Measured on the owner's database before this line landed:
+        -- 0 groups lose their test, so 21/45/46 do not move.
+        HAVING count(robot_code) > 0
         UNION ALL
         -- NULL user_query never groups: NULL = NULL is unknown, so each such
         -- run is its own test. Keyed by run_id rather than by the query.
         SELECT org_id, user_id, user_query, run_id, created_at, created_at
         FROM test_runs
-        WHERE user_query IS NULL
+        WHERE user_query IS NULL AND robot_code IS NOT NULL
         -- Deterministic and chronological, or key_n comes out in whatever
         -- order HashAggregate happens to produce -- and it is user-visible
         -- (rendered TC-<key_n> in P2), so fixing it after the fact means

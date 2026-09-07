@@ -13,6 +13,8 @@ from src.backend.core.run_registry import _MIGRATION_SCALE_LIMIT
 
 pytestmark = pytest.mark.integration
 
+OWNER = {"user_id": "u1", "org_id": "org-a", "email": "u1@x.com"}
+
 
 @pytest.fixture
 def scratch():
@@ -309,3 +311,136 @@ def test_the_scale_guard_aborts_rather_than_merging_an_uninspected_database(scra
     assert admin.execute(
         f"SELECT count(*) FROM {name}.test_runs WHERE test_id IS NULL"
     ).fetchone()[0] == _MIGRATION_SCALE_LIMIT + 1
+
+
+def test_a_fresh_install_does_not_collapse_a_run_that_has_no_code_yet(scratch):
+    """The guard is armed until the FIRST test exists, not "once in a
+    database's life" — and on a fresh install that window stays open across
+    every process start until a generation SUCCEEDS.
+
+    record_start opens each run's row at generation START with robot_code
+    NULL (workflow_service.py:1067, :1086) and _SCHEMA_DDL re-runs on EVERY
+    RunRegistry() construction, so a second process booting inside that
+    window used to collapse a code-less run into a test — exactly what
+    _attach_test is written never to do under D8.
+
+    The stray row is not the damage. _attach_test short-circuits on an
+    existing test_id, so when the generation then succeeds the code never
+    becomes a version: the test carries current_version 1 against zero
+    test_versions and the run's test_version_id stays NULL forever, with
+    robot_code sitting on the run where every re-run resolves version_id
+    None.
+    """
+    name, dsn, admin = scratch
+    from src.backend.core.run_registry import RunRegistry
+
+    reg = RunRegistry(dsn=dsn)          # fresh install: creates the schema
+    try:
+        # Generation STARTS. No code exists yet, so D8 leaves test_id NULL.
+        reg.record_start("w1", OWNER, "search shoes", "running")
+        assert admin.execute(
+            f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'w1'"
+        ).fetchone()[0] is None, "premise: the run starts with no test"
+
+        # A second process boots inside that window and re-runs _SCHEMA_DDL.
+        RunRegistry(dsn=dsn).close()
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 0, (
+            "the collapse minted a phantom test from a run that has no code")
+
+        # Generation SUCCEEDS: same run id, now carrying the code.
+        reg.record_start("w1", OWNER, "search shoes", "generated",
+                         robot_code="code-1")
+    finally:
+        reg.close()
+
+    assert admin.execute(
+        f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 1
+    version_id = admin.execute(
+        f"SELECT test_version_id FROM {name}.test_runs WHERE run_id = 'w1'"
+    ).fetchone()[0]
+    assert version_id is not None, (
+        "the generated code never became a version — the run points at no "
+        "version at all")
+    assert admin.execute(
+        f"SELECT robot_code FROM {name}.test_versions WHERE version_id = %s",
+        (version_id,)).fetchone()[0] == "code-1"
+    cv, n_versions = admin.execute(
+        f"SELECT t.current_version, (SELECT count(*) FROM {name}.test_versions"
+        f" v WHERE v.test_id = t.test_id) FROM {name}.tests t").fetchone()
+    assert (cv, n_versions) == (1, 1), (
+        "current_version must name a version that exists")
+
+
+def test_a_group_whose_runs_all_lack_code_is_skipped_not_minted(scratch):
+    """The same rule on pre-split data: a group with nothing to version
+    produces no test, and its runs keep test_id NULL — a permanently legal
+    state under D8. Measured read-only against the owner's database before
+    the change: 0 such groups, so the migration's 21/45/46 do not move.
+    """
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "dead1", "user_query": "never generated", "robot_code": None,
+         "status": "error", "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "dead2", "user_query": "never generated", "robot_code": None,
+         "status": "error", "created_at": "2026-01-02T10:00:00Z"},
+        {"run_id": "live1", "user_query": "real one", "robot_code": "c",
+         "created_at": "2026-01-03T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    assert [r[0] for r in admin.execute(
+        f"SELECT user_query FROM {name}.tests").fetchall()] == ["real one"]
+    assert sorted(r[0] for r in admin.execute(
+        f"SELECT run_id FROM {name}.test_runs WHERE test_id IS NULL").fetchall()
+    ) == ["dead1", "dead2"]
+
+
+def test_a_code_less_run_still_attaches_when_a_sibling_has_code(scratch):
+    """The other half of D8, and the shape the owner's database actually
+    holds (books.toscrape: 3 runs, 2 with code). Skipping a group must key
+    on the GROUP having no code, never on the individual run — the run with
+    no code still attaches to the test its siblings built.
+    """
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "ok1", "user_query": "q", "robot_code": "c1",
+         "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "bad", "user_query": "q", "robot_code": None,
+         "status": "error", "created_at": "2026-01-02T10:00:00Z"},
+        {"run_id": "ok2", "user_query": "q", "robot_code": "c2",
+         "created_at": "2026-01-03T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    assert admin.execute(
+        f"SELECT count(*) FROM {name}.test_runs WHERE test_id IS NULL"
+    ).fetchone()[0] == 0
+    assert admin.execute(
+        f"SELECT count(DISTINCT test_id) FROM {name}.test_runs").fetchone()[0] == 1
+    assert admin.execute(
+        f"SELECT test_version_id FROM {name}.test_runs WHERE run_id = 'bad'"
+    ).fetchone()[0] is None
+
+
+def test_a_null_query_run_with_no_code_mints_no_test(scratch):
+    """The NULL-query branch keys one test per run, so a code-less pasted
+    run has no sibling that could ever supply a version. It must be skipped
+    on that branch too, or it mints a test that can never hold one.
+    """
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "p1", "user_query": None, "robot_code": "c1",
+         "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "p2", "user_query": None, "robot_code": None,
+         "status": "error", "created_at": "2026-01-02T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    assert admin.execute(f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 1
+    assert admin.execute(
+        f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'p2'"
+    ).fetchone()[0] is None
