@@ -335,10 +335,22 @@ def detach_run(conn, workflow_id: str) -> None:
         _log(f"detached {cur.rowcount} row(s) from {table}")
 
     if test_id is not None:
-        # Cascades to test_versions. Deleting the test AFTER its run row means
-        # the cascade has nothing left to take with it, so this cannot reach
-        # another run's data even if a future change lets two runs share a test.
-        cur = conn.execute("DELETE FROM tests WHERE test_id = %s", (test_id,))
+        # Cascades to test_versions -- and, through fk_test_runs_test, to
+        # every test_runs row still pointing at this test. That FK is
+        # ON DELETE CASCADE on the REFERENCING side, so deletion ORDER
+        # protects nothing: our own run row being gone already does not stop
+        # the cascade reaching someone else's. The NOT EXISTS is what makes
+        # this safe, by refusing to delete a test another run still uses.
+        #
+        # No live path shares a test between two runs today (the bench never
+        # sets rerun_of, and _attach_test mints a fresh test per run with no
+        # go-forward dedup), so this deletes exactly as before. P2 is where
+        # sharing becomes ordinary, and a bench sweep must not be able to
+        # take a user's history with it then.
+        cur = conn.execute(
+            "DELETE FROM tests t WHERE t.test_id = %s"
+            " AND NOT EXISTS (SELECT 1 FROM test_runs r"
+            "                  WHERE r.test_id = t.test_id)", (test_id,))
         _log(f"detached {cur.rowcount} row(s) from tests")
     run_dir = STAGING_ROOT / workflow_id
     if run_dir.exists():
