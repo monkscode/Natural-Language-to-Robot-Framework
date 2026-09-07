@@ -134,22 +134,41 @@ def test_routine_notices_are_quiet_so_an_upgrade_notice_is_not_buried(scratch, c
     dashboards and left the two notices the handler exists to surface as 2
     lines in 15. Routine construction must be silent; the FK repair, which
     MUTATES data and is permitted inside _SCHEMA_DDL only because it says so
-    (owner decision 6), must not be.
+    (owner decision 6), must not be. Neither is the one-shot test_runs ->
+    tests/test_versions collapse (2026-09-07) — it mutates data too, so its
+    own first run is allowed to speak; this test lets that run happen and
+    then checks the schema it leaves behind, not the collapse itself.
     """
     from src.backend.core.run_registry import RunRegistry
     schema, dsn, admin = scratch
     rid = str(uuid.uuid4())
+    admin.execute(f"SET search_path TO {schema}")
 
     reg = RunRegistry(dsn=dsn)          # provisions the schema
     reg.record_start(rid, {"user_id": "u1", "org_id": "org-a",
                            "email": "u1@e.com"}, "q", "passed")
     reg.close()
 
-    # Half one: nothing to upgrade, so nothing to say.
+    # This row's test_id is NULL and `tests` is still empty, so THIS
+    # construction is the collapse's first chance to fire — let it run to
+    # completion here, outside the assertion window below, so half one
+    # measures the schema it leaves behind rather than racing it.
+    RunRegistry(dsn=dsn).close()
+    tests_after_collapse = admin.execute("SELECT count(*) FROM tests").fetchone()[0]
+    assert tests_after_collapse == 1
+
+    # Half one: a fully-upgraded schema has nothing left to upgrade, so
+    # nothing to say — and the collapse, having already run once above,
+    # does not run again or add another row. caplog accumulates for the
+    # whole test regardless of at_level()'s own window, so the collapse's
+    # own notice just above has to be cleared here or it reads as noise
+    # from THIS construction instead of the previous one.
+    caplog.clear()
     with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
         reg2 = RunRegistry(dsn=dsn)
     reg2.close()
     assert _registry_warnings(caplog) == []
+    assert admin.execute("SELECT count(*) FROM tests").fetchone()[0] == tests_after_collapse
 
     # Half two: give it something to say, and it still says it.
     admin.execute(f"SET search_path TO {schema}")
