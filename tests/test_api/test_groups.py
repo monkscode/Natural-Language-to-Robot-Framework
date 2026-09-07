@@ -75,7 +75,10 @@ class TestGroupRegistryCrud:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_test.test_runs, run_groups_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_test.test_runs,"
+            " run_groups_test.test_versions, run_groups_test.tests,"
+            " run_groups_test.run_groups")
         admin.close()
 
     def test_registry_construction_is_idempotent(self, reg):
@@ -218,7 +221,10 @@ class TestGroupAuthorityMatrix:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_authz_test.test_runs, run_groups_authz_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_authz_test.test_runs,"
+            " run_groups_authz_test.test_versions,"
+            " run_groups_authz_test.tests, run_groups_authz_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -414,7 +420,10 @@ class TestReadPathVisibility:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_read_test.test_runs, run_groups_read_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_read_test.test_runs,"
+            " run_groups_read_test.test_versions,"
+            " run_groups_read_test.tests, run_groups_read_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -681,7 +690,11 @@ class TestGroupAssignmentAndFilter:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_assign_test.test_runs, run_groups_assign_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_assign_test.test_runs,"
+            " run_groups_assign_test.test_versions,"
+            " run_groups_assign_test.tests,"
+            " run_groups_assign_test.run_groups")
         admin.close()
 
     @staticmethod

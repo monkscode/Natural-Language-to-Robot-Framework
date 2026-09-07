@@ -296,6 +296,92 @@ _SCHEMA_DDL = (
       END IF;
     END $$;
     """,
+    # --- tests: the durable identity behind a run (2026-09-07 split) ---
+    # org_id is NULLABLE on purpose: the bench and every AUTH_ENFORCED=false
+    # developer run is token-less and writes NULL, and record_start swallows
+    # its own exceptions, so a NOT NULL here would fail test creation SILENTLY.
+    """
+    CREATE TABLE IF NOT EXISTS tests (
+        test_id         TEXT PRIMARY KEY,
+        org_id          TEXT,
+        key_n           INTEGER NOT NULL,
+        user_id         TEXT,
+        user_email      TEXT,
+        name            TEXT,
+        user_query      TEXT,
+        group_id        TEXT REFERENCES run_groups(group_id) ON DELETE SET NULL,
+        current_version INTEGER NOT NULL DEFAULT 1,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # NULLS NOT DISTINCT (PG 15+; this database is 16.15): without it
+    # (NULL, 1) may be inserted twice and key_n stops being a key for every
+    # org-less run.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_org_key"
+    " ON tests (org_id, key_n) NULLS NOT DISTINCT",
+    "CREATE INDEX IF NOT EXISTS idx_tests_org_updated"
+    " ON tests (org_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tests_group ON tests (group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tests_user ON tests (user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS test_versions (
+        version_id  TEXT PRIMARY KEY,
+        test_id     TEXT NOT NULL REFERENCES tests(test_id) ON DELETE CASCADE,
+        n           INTEGER NOT NULL,
+        user_query  TEXT,
+        robot_code  TEXT,
+        created_by  TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        reason      TEXT,
+        UNIQUE (test_id, n)
+    )
+    """,
+    # Results point at their test and at the version they actually ran.
+    # Both stay NULLABLE: test_id IS NULL is a permanently legal state for a
+    # generation that failed before any code existed (owner decision D8).
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_id TEXT",
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_version_id TEXT",
+    # Whether the caller held platform-admin authority at the moment of the
+    # write (owner decision D7). Captured here and never joined live: the role
+    # is evaluated per request, so a live join would let a demotion rewrite
+    # history and a promotion retroactively re-badge past runs.
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS"
+    " ran_as_platform_admin BOOLEAN NOT NULL DEFAULT FALSE",
+    # ADD CONSTRAINT is not idempotent and this tuple runs on every
+    # construction, so both need the guard. conrelid is load-bearing for the
+    # same reason it is on fk_test_runs_group above: the suite runs on
+    # isolated schemas whose search_path ends in public, and a conname-only
+    # guard would find public's constraint and skip the ALTER, leaving every
+    # test schema without it.
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND contype = 'f' AND conname = 'fk_test_runs_test') THEN
+        BEGIN
+          ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_test
+            FOREIGN KEY (test_id) REFERENCES tests(test_id) ON DELETE CASCADE;
+        EXCEPTION WHEN duplicate_object THEN
+          RAISE NOTICE 'test_runs: fk_test_runs_test already existed -- lost the race to another concurrent RunRegistry() construction, nothing to do';
+        END;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND contype = 'f' AND conname = 'fk_test_runs_version') THEN
+        BEGIN
+          ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_version
+            FOREIGN KEY (test_version_id) REFERENCES test_versions(version_id)
+            ON DELETE SET NULL;
+        EXCEPTION WHEN duplicate_object THEN
+          RAISE NOTICE 'test_runs: fk_test_runs_version already existed -- lost the race to another concurrent RunRegistry() construction, nothing to do';
+        END;
+      END IF;
+    END $$;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_test_runs_test_time"
+    " ON test_runs (test_id, created_at DESC)",
 )
 
 

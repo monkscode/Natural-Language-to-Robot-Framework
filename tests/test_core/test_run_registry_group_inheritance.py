@@ -63,7 +63,9 @@ def reg(admin_conn):
 def _clean(reg, admin_conn):
     # ONE statement, not two: test_runs' foreign key makes run_groups
     # untruncatable on its own.
-    admin_conn.execute(f"TRUNCATE {_SCHEMA}.test_runs, {_SCHEMA}.run_groups")
+    admin_conn.execute(
+        f"TRUNCATE {_SCHEMA}.test_runs, {_SCHEMA}.test_versions,"
+        f" {_SCHEMA}.tests, {_SCHEMA}.run_groups")
 
 
 @pytest.fixture

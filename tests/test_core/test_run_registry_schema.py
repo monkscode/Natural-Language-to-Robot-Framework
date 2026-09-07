@@ -271,9 +271,13 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch, caplog)
     admin.execute(f"SET search_path TO {schema}")
     admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
 
-    fk_guard_ddl = _SCHEMA_DDL[-1]
-    assert "fk_test_runs_group" in fk_guard_ddl, (
-        "_SCHEMA_DDL's last statement changed — this test targets the wrong one")
+    # Selected by CONTENT, not by position: statements are appended to the
+    # tuple as the schema grows, and _SCHEMA_DDL[-1] silently became the
+    # tests/test_versions block on 2026-09-07.
+    fk_guards = [d for d in _SCHEMA_DDL if "fk_test_runs_group" in d]
+    assert len(fk_guards) == 1, (
+        "expected exactly one _SCHEMA_DDL statement naming fk_test_runs_group")
+    fk_guard_ddl = fk_guards[0]
 
     t1 = psycopg.connect(dsn, autocommit=False)
     t1.execute("BEGIN")
