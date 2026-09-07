@@ -749,14 +749,26 @@ class RunRegistry:
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
-        the SAME test for all three or one run would spawn three tests."""
+        the SAME test for all three or one run would spawn three tests.
+
+        Spec section 10 case 35 — the test wins, but only when it HAS an org.
+        A test whose org_id is NULL falls back to the caller's, on BOTH
+        branches that read a test's org. Two mechanisms reach that state, so
+        it is not the dead defensive branch it looks like: backfill_org_ids
+        used to carry an org onto test_runs and not onto tests, and
+        _lookup_org_id swallows its own failure, so the upsert that MINTS a
+        test can write org_id NULL onto it. Without the fallback the run
+        inherits that NULL permanently, where before the split it self-healed
+        on the next write. Returning the caller's org there does not weaken
+        D6: the test still wins whenever it has an org to win with."""
         existing = conn.execute(
             "SELECT r.test_id, r.test_version_id, t.org_id"
             " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
             " WHERE r.run_id = %s", (run_id,)).fetchone()
         if existing and existing["test_id"]:
             return (existing["test_id"], existing["test_version_id"],
-                    existing["org_id"])
+                    existing["org_id"] if existing["org_id"] is not None
+                    else org_id)
 
         if rerun_of:
             src = conn.execute(
@@ -770,7 +782,7 @@ class RunRegistry:
                     (src["test_id"], src["current_version"])).fetchone()
                 return (src["test_id"],
                         ver["version_id"] if ver else None,
-                        src["org_id"])
+                        src["org_id"] if src["org_id"] is not None else org_id)
 
         if not robot_code:
             # D8 scenario (a): no code, no test.
@@ -1716,7 +1728,31 @@ class RunRegistry:
         many-to-many org membership lands, this must target the user's
         actual active org explicitly (e.g. a dedicated lookup ordered like
         get_orgs_for_user, not a bare join) instead of trusting org_members
-        to return exactly one row, to stay deterministic."""
+        to return exactly one row, to stay deterministic.
+
+        The SECOND update carries the same org onto `tests`, and it is not
+        optional. This method runs from backfill_data_org_ids, which reaches
+        it through get_run_registry() — whose construction has already
+        executed the collapse. So on a database whose data_org_id_backfill
+        marker is not yet set, the collapse mints tests.org_id = NULL for
+        every org-less row and this method then sets test_runs.org_id, which
+        would leave tests.org_id NULL against a run that HAS an org: the D6
+        invariant (tests.org_id = test_runs.org_id) broken by our own
+        migration. A plain member's later "Run again" would take the rerun
+        branch, inherit that NULL, and the new run would drop out of
+        org-scoped History with its traces attributed to no org.
+
+        It reassigns key_n as well, because org_id is half of the
+        (org_id, key_n) unique index: a test carrying key_n 1 out of the
+        NULL bucket into an org that already has a key_n 1 would raise
+        UniqueViolation and abort the whole backfill. The window function
+        numbers the movers from the destination bucket's existing maximum.
+        Reading `tests` inside an UPDATE of `tests` is safe here — subqueries
+        see the pre-statement snapshot, so both maxima are the pre-move ones.
+
+        The return value still means RUNS updated, unchanged; the tests count
+        is logged rather than added to it, so existing callers and the
+        migration marker keep reading the same number."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(
@@ -1726,9 +1762,37 @@ class RunRegistry:
                     "  AND m.user_id::text = t.user_id"
                 )
                 n = cur.rowcount
+                # After the runs, never before: the org is read back off the
+                # rows the statement above has just repaired.
+                cur_t = conn.execute(
+                    "UPDATE tests x SET org_id = s.new_org, key_n = s.new_key,"
+                    "                   updated_at = now()"
+                    " FROM ("
+                    "   SELECT c.test_id, c.new_org,"
+                    "          coalesce((SELECT max(e.key_n) FROM tests e"
+                    "                     WHERE e.org_id IS NOT DISTINCT FROM"
+                    "                           c.new_org), 0)"
+                    "          + row_number() OVER (PARTITION BY c.new_org"
+                    "                               ORDER BY c.created_at,"
+                    "                                        c.test_id)"
+                    "            AS new_key"
+                    "     FROM (SELECT t.test_id, t.created_at,"
+                    "                  (SELECT r.org_id FROM test_runs r"
+                    "                    WHERE r.test_id = t.test_id"
+                    "                      AND r.org_id IS NOT NULL"
+                    "                    ORDER BY r.created_at, r.run_id"
+                    "                    LIMIT 1) AS new_org"
+                    "             FROM tests t WHERE t.org_id IS NULL) c"
+                    "    WHERE c.new_org IS NOT NULL"
+                    " ) s WHERE x.test_id = s.test_id"
+                )
+                n_tests = cur_t.rowcount
                 conn.commit()
             if n:
                 logger.info("[RUN_REGISTRY] backfilled org_id on %d run(s)", n)
+            if n_tests:
+                logger.info(
+                    "[RUN_REGISTRY] backfilled org_id on %d test(s)", n_tests)
             return n
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] backfill_org_ids failed: {e}")

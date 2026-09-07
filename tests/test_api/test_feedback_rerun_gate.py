@@ -173,16 +173,29 @@ def test_an_org_admin_cannot_reach_another_orgs_learning_record_via_an_admin_rer
     """Cross-org. A platform admin seated in org P re-runs org A's published
     run and files the copy into a P folder. P's own org_admin — no platform
     role — then feeds back on that copy. The gate on the copy passes (their
-    org, and they are its admin); the gate on the ORIGINAL must not."""
+    org, and they are its admin); the gate on the ORIGINAL must not.
+
+    The copy only lands in org P because org A's run carries no test row.
+    Test-result-split D6 otherwise gives a re-run the org of the TEST it
+    re-ran, which closes this bypass one step earlier by seating the copy in
+    org A — where org P's admin cannot reach it at all, and cannot even file
+    it into a P folder. What survives D6 is the run whose attachment failed:
+    record_start swallows a test-write error by design (bookkeeping may never
+    cost the history row), leaving a run with code and no test, and a re-run
+    of THAT has no org to inherit. So the residual route is narrower than it
+    was, and this is the gate still standing in it."""
     from src.backend.auth.jwt_utils import create_access_token, decode_token
     from src.backend.auth.org_repository import OrgRepository
-    from src.backend.core.run_registry import get_run_registry
+    from src.backend.core.run_registry import RunRegistry, get_run_registry
 
-    # Org A: a published run nobody in org P owns.
+    # Org A: a published run nobody in org P owns, and — see the docstring —
+    # one whose test attachment failed, which is what keeps D6 out of the way.
     tok_a = _register(client, f"oa-{uuid.uuid4().hex[:8]}@e.com")
     claims_a = decode_token(tok_a)
     original = _seed_run_for(client, tok_a, "org A published test")
-    _store_code(claims_a, original)
+    with patch.object(RunRegistry, "_attach_test",
+                      side_effect=RuntimeError("attach failed")):
+        _store_code(claims_a, original)
     gid_a = client.post("/api/groups", json={"name": "A folder"},
                         headers=_auth(tok_a)).json()["group_id"]
     assert client.put("/api/groups/assignments",
@@ -214,26 +227,32 @@ def test_an_org_admin_cannot_reach_another_orgs_learning_record_via_an_admin_rer
     assert fake_stream.call_args.kwargs["rerun_of"] == original
 
     copy = _seed_rerun(claims_p, original, group_id=None)
-    # Owner decision D6 (test-result split P1): a result takes the org of the
-    # TEST it re-ran, not of whoever fired it. The copy is therefore org A's
-    # row even though a platform admin seated in org P produced it — which is
-    # the whole point, since org_id is what attributes the learning signal.
-    assert get_run_registry().get_run(copy)["org_id"] == claims_a["org_id"]
-    # So the scenario's next step is now refused outright: assign_runs demands
-    # the run be in the caller's org, and this run is in org A. The bypass
-    # this test guards is closed one step earlier than it used to be; the
-    # feedback gate below still has to hold on its own.
+    # The precondition the whole scenario rests on. D6 hands a re-run the org
+    # of the test it re-ran; with no such test the copy keeps the re-runner's
+    # org, which is what puts it inside org P and within org P's admin's
+    # reach. If this ever flips to org A the caller's own gate refuses first
+    # and the assertions below would stop testing _gated_feedback_target.
+    assert get_run_registry().get_run(copy)["org_id"] == org_p
+    # ...and it lands in a P folder, as the scenario describes.
     gid_p = get_run_registry().create_group(org_p, uid_p, "P folder")["group_id"]
     assert client.put("/api/groups/assignments",
                       json={"run_ids": [copy], "group_id": gid_p},
-                      headers=_auth(tok_p)).status_code == 404
+                      headers=_auth(tok_p)).status_code == 200
 
-    resp, fake, _ = _feedback(client, tok_q, copy)
+    resp, fake, lookups = _feedback(client, tok_q, copy)
 
     assert resp.status_code == 403, resp.text
     assert not fake.process_user_feedback.called, (
         f"org P's admin rewrote org A's learning record (target "
         f"{fake.process_user_feedback.call_args})"
+    )
+    # WHICH gate refused. The caller's own gate clears — the copy is in their
+    # org and they are its org_admin — so the 403 has to come from the second
+    # lookup, the one _gated_feedback_target makes against the ORIGINAL.
+    # Without this the test passes with _gated_feedback_target deleted.
+    assert any(rid == original for rid, _, _ in lookups), (
+        f"the original was never looked up, so the refusal came from the "
+        f"caller's gate rather than the re-run gate: {lookups}"
     )
     assert claims_a["org_id"] != org_p  # the two orgs really are different
 
