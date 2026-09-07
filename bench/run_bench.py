@@ -19,8 +19,9 @@ Environment:
 Detachment (owner requirement — bench data must never appear in History /
 metrics / pricing dashboards): after each run the runner captures evidence
 locally FIRST into bench/runs/<workflow_id>/ (metrics row, llm_traces rows,
-test_runs row, artifact dir copy), THEN deletes that run's rows from
-workflow_metrics, llm_traces and test_runs and removes the artifact run dir.
+test_runs row, tests + test_versions rows, artifact dir copy), THEN deletes
+that run's rows from workflow_metrics, llm_traces, test_runs, tests and
+test_versions and removes the artifact run dir.
 Capture failure → nothing is deleted, a loud warning is printed. audit_log
 rows are deliberately kept (append-only audit trail). Assumes the local
 artifact store (dev stack) — S3 mode is out of scope for the bench.
@@ -295,6 +296,12 @@ def capture_evidence(conn, workflow_id: str) -> bool:
                 "SELECT * FROM llm_traces WHERE workflow_id = %s",
             "test_runs.json":
                 "SELECT * FROM test_runs WHERE run_id = %s",
+            "tests.json":
+                "SELECT t.* FROM tests t JOIN test_runs r"
+                " ON r.test_id = t.test_id WHERE r.run_id = %s",
+            "test_versions.json":
+                "SELECT v.* FROM test_versions v JOIN test_runs r"
+                " ON r.test_id = v.test_id WHERE r.run_id = %s",
         }
         for filename, sql in captures.items():
             rows = _fetch_rows(conn, sql, workflow_id)
@@ -312,12 +319,27 @@ def capture_evidence(conn, workflow_id: str) -> bool:
 
 def detach_run(conn, workflow_id: str) -> None:
     """Delete the run's rows + artifacts. audit_log rows are kept on purpose."""
+    # The run's test must be read BEFORE anything is deleted: test_runs.test_id
+    # is ON DELETE CASCADE from tests, so removing the run row first loses the
+    # only pointer to the test and would strand it on the Tests page.
+    row = conn.execute(
+        "SELECT test_id FROM test_runs WHERE run_id = %s",
+        (workflow_id,)).fetchone()
+    test_id = row["test_id"] if row else None
+
     for table, col in (("workflow_metrics", "workflow_id"),
                        ("llm_traces", "workflow_id"),
                        ("test_runs", "run_id")):
         cur = conn.execute(
             f"DELETE FROM {table} WHERE {col} = %s", (workflow_id,))
         _log(f"detached {cur.rowcount} row(s) from {table}")
+
+    if test_id is not None:
+        # Cascades to test_versions. Deleting the test AFTER its run row means
+        # the cascade has nothing left to take with it, so this cannot reach
+        # another run's data even if a future change lets two runs share a test.
+        cur = conn.execute("DELETE FROM tests WHERE test_id = %s", (test_id,))
+        _log(f"detached {cur.rowcount} row(s) from tests")
     run_dir = STAGING_ROOT / workflow_id
     if run_dir.exists():
         try:
