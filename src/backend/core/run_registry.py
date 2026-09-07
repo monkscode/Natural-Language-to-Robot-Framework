@@ -1752,7 +1752,14 @@ class RunRegistry:
 
         The return value still means RUNS updated, unchanged; the tests count
         is logged rather than added to it, so existing callers and the
-        migration marker keep reading the same number."""
+        migration marker keep reading the same number. That holds even when
+        the tests UPDATE fails: it runs inside a SAVEPOINT, so its failure
+        rolls back only itself, the runs repair still commits, and this still
+        returns the runs count rather than 0. Deliberate — run_migration_once
+        writes the data_org_id_backfill marker unconditionally once migrate()
+        returns, so a 0 here would report "nothing to do" for a boot that in
+        fact repaired rows, and the number callers log would stop describing
+        what happened."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(
@@ -1764,29 +1771,56 @@ class RunRegistry:
                 n = cur.rowcount
                 # After the runs, never before: the org is read back off the
                 # rows the statement above has just repaired.
-                cur_t = conn.execute(
-                    "UPDATE tests x SET org_id = s.new_org, key_n = s.new_key,"
-                    "                   updated_at = now()"
-                    " FROM ("
-                    "   SELECT c.test_id, c.new_org,"
-                    "          coalesce((SELECT max(e.key_n) FROM tests e"
-                    "                     WHERE e.org_id IS NOT DISTINCT FROM"
-                    "                           c.new_org), 0)"
-                    "          + row_number() OVER (PARTITION BY c.new_org"
-                    "                               ORDER BY c.created_at,"
-                    "                                        c.test_id)"
-                    "            AS new_key"
-                    "     FROM (SELECT t.test_id, t.created_at,"
-                    "                  (SELECT r.org_id FROM test_runs r"
-                    "                    WHERE r.test_id = t.test_id"
-                    "                      AND r.org_id IS NOT NULL"
-                    "                    ORDER BY r.created_at, r.run_id"
-                    "                    LIMIT 1) AS new_org"
-                    "             FROM tests t WHERE t.org_id IS NULL) c"
-                    "    WHERE c.new_org IS NOT NULL"
-                    " ) s WHERE x.test_id = s.test_id"
-                )
-                n_tests = cur_t.rowcount
+                #
+                # SAVEPOINT, for the same reason _attach_test uses one: the
+                # runs UPDATE above is not committed yet, and this statement
+                # has a live failure mode (a concurrent record_start inserting
+                # into the destination org can still collide on
+                # idx_tests_org_key). Without the savepoint that failure would
+                # roll the transaction back, discard the RUNS repair too, and
+                # return 0 — while run_migration_once writes the
+                # data_org_id_backfill marker unconditionally after migrate()
+                # returns (migration_state.py:89-95), so the backfill would
+                # never run again. The tests repair is allowed to fail; taking
+                # the runs repair with it, permanently, is not.
+                n_tests = 0
+                try:
+                    with conn.transaction():
+                        cur_t = conn.execute(
+                            "UPDATE tests x SET org_id = s.new_org,"
+                            "                   key_n = s.new_key,"
+                            "                   updated_at = now()"
+                            " FROM ("
+                            "   SELECT c.test_id, c.new_org,"
+                            "          coalesce((SELECT max(e.key_n)"
+                            "                      FROM tests e"
+                            "                     WHERE e.org_id IS NOT"
+                            "                           DISTINCT FROM"
+                            "                           c.new_org), 0)"
+                            "          + row_number() OVER ("
+                            "                PARTITION BY c.new_org"
+                            "                ORDER BY c.created_at, c.test_id)"
+                            "            AS new_key"
+                            "     FROM (SELECT t.test_id, t.created_at,"
+                            "                  (SELECT r.org_id"
+                            "                     FROM test_runs r"
+                            "                    WHERE r.test_id = t.test_id"
+                            "                      AND r.org_id IS NOT NULL"
+                            "                    ORDER BY r.created_at,"
+                            "                             r.run_id"
+                            "                    LIMIT 1) AS new_org"
+                            "             FROM tests t"
+                            "            WHERE t.org_id IS NULL) c"
+                            "    WHERE c.new_org IS NOT NULL"
+                            " ) s WHERE x.test_id = s.test_id"
+                        )
+                    n_tests = cur_t.rowcount
+                except psycopg.Error as e:
+                    # Narrow on purpose, and never re-raised: the runs repair
+                    # above is still good and must reach the commit below.
+                    logger.error(
+                        "[RUN_REGISTRY] test org backfill failed (runs repair "
+                        "kept): %s", e)
                 conn.commit()
             if n:
                 logger.info("[RUN_REGISTRY] backfilled org_id on %d run(s)", n)

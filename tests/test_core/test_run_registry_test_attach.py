@@ -411,3 +411,73 @@ def test_the_backfill_renumbers_a_test_moving_into_an_occupied_org(reg):
     assert keys == [1, 2, 3, 4], f"keys collided or were not reassigned: {keys}"
     assert admin.execute(
         "SELECT count(*) FROM tests WHERE org_id IS NULL").fetchone()[0] == 0
+
+
+def test_a_failed_tests_backfill_does_not_discard_the_runs_backfill(reg):
+    """The two UPDATEs share one transaction before the commit, so without a
+    SAVEPOINT a failure in the second would roll the FIRST one back as well —
+    and that loss is permanent: backfill_org_ids swallows and returns 0,
+    migrate() returns normally, and run_migration_once then writes the
+    data_org_id_backfill marker unconditionally (migration_state.py:89-95), so
+    the backfill never runs again. The tests repair may fail; it may not take
+    the runs repair with it."""
+    from contextlib import contextmanager
+
+    r, admin = reg
+    user_uuid = str(uuid.uuid4())
+    org = str(uuid.uuid4())
+
+    r.record_start("run-1", {"user_id": user_uuid, "email": "u@x.com"},
+                   "q", "generated", robot_code="code-1")
+    test_id, _, org_id, _ = _row(admin, "run-1")
+    assert org_id is None
+
+    admin.execute(
+        "CREATE TABLE org_members (org_id UUID, user_id UUID,"
+        " created_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    admin.execute("INSERT INTO org_members (org_id, user_id) VALUES (%s, %s)",
+                  (org, user_uuid))
+
+    class _FailsTheTestsUpdate:
+        def __init__(self, real):
+            self._real = real
+            self.fired = False
+
+        def execute(self, sql, params=None):
+            if sql.lstrip().startswith("UPDATE tests"):
+                self.fired = True
+                # A REAL server-side UniqueViolation, on the very index the
+                # live failure mode names. Raising from Python instead would
+                # leave the transaction healthy, and the assertions below
+                # would then pass with no savepoint in the code at all.
+                return self._real.execute(
+                    "INSERT INTO tests (test_id, org_id, key_n,"
+                    " current_version) SELECT %s, org_id, key_n, 1"
+                    " FROM tests LIMIT 1", (str(uuid.uuid4()),))
+            return self._real.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_connection = r._pool.connection
+    seen = {}
+
+    @contextmanager
+    def _wrapped(*args, **kwargs):
+        with real_connection(*args, **kwargs) as conn:
+            yield seen.setdefault("conn", _FailsTheTestsUpdate(conn))
+
+    with patch.object(r._pool, "connection", _wrapped):
+        updated = r.backfill_org_ids()
+
+    assert seen["conn"].fired, "the tests UPDATE never ran"
+    # The runs count, not 0 — the marker is written either way, so a 0 here
+    # would report "nothing to do" for a boot that in fact repaired a row.
+    assert updated == 1
+    # Read back on a SEPARATE connection: this proves the runs repair was
+    # COMMITTED, not merely pending in the rolled-back transaction.
+    assert _row(admin, "run-1")[2] == org
+    # ...and only the tests repair was lost, which the next boot can redo.
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None
