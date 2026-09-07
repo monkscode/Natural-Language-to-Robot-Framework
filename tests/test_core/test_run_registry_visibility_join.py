@@ -379,3 +379,48 @@ def test_deleting_a_folder_audits_an_org_less_run_filed_through_a_shared_test(re
     assert r.delete_group("org-a", "alice", True, "g-1",
                           audit_run_ids=audit) is True
     assert sorted(audit) == ["run-a", "run-none"]
+
+
+def test_deleting_a_folder_does_not_audit_a_foreign_run_filed_directly(reg):
+    """F9b: the org guard covers the DIRECT-COLUMN arm too, not only the
+    test branch. record_start's rerun path can produce this exact shape --
+    a foreign-org run whose OWN test_runs.group_id names this folder --
+    without ever going through assign_runs: _fileable_group_id (:690-728)
+    validates an inherited group_id against the caller's PRE-D6 org at
+    :884-885, _attach_test's D6 rule (:755-760, rerun branch :785-797) then
+    reassigns the row's FINAL org_id to the shared test's own org, and the
+    INSERT (:934-952) writes the pre-D6-checked group_id beside the
+    post-D6 org_id with nothing re-validating the pair. Seeded directly by
+    SQL here -- driving it through record_start needs a second org's own
+    test/run graph built first -- but the shape itself is real, reachable
+    on the rerun path just named, not hypothetical."""
+    r, admin = reg
+    r.record_start("run-a", OWNER, "q", "generated", robot_code="c")
+    _folder(admin, "g-1")
+    assert r.assign_runs("org-a", "alice", False, ["run-a"], "g-1") is True
+
+    # The direct-column shape: run-x's OWN group_id names g-1 while its
+    # own org_id is a different, concrete org, with no test at all linking
+    # it to run-a -- so only a `group_id = %s` arm could ever see it.
+    admin.execute(
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " status, org_id, group_id)"
+        " VALUES ('run-x', 'zoe', 'z@x.com', 'q', 'generated', 'org-b',"
+        " 'g-1')")
+    assert admin.execute(
+        "SELECT org_id, group_id, test_id FROM test_runs"
+        " WHERE run_id = 'run-x'"
+    ).fetchone() == ("org-b", "g-1", None), (
+        "premise: run-x is a different, concrete org, filed on its own "
+        "column directly, with no shared test involved at all")
+
+    audit: list[str] = []
+    assert r.delete_group("org-a", "alice", True, "g-1",
+                          audit_run_ids=audit) is True
+    assert audit == ["run-a"]
+    # The accepted cost the docstring now states plainly: the FK cascade
+    # still clears run-x's column, silently, even though the audit never
+    # named it.
+    assert admin.execute(
+        "SELECT group_id FROM test_runs WHERE run_id = 'run-x'"
+    ).fetchone()[0] is None

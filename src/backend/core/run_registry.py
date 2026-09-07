@@ -1339,29 +1339,77 @@ class RunRegistry:
         folder while its test is filed elsewhere, which DISPLAYS in the
         test's folder and so only has a dead column cleared here.
 
-        The test branch is additionally scoped by
-        `(org_id = %s OR org_id IS NULL)`, bound to the caller's own org
-        (already proven equal to this folder's, by _visible_group above).
-        Unscoped, that branch let a run in a genuinely FOREIGN org ride
-        into the audit through a test it merely shares with a run the
-        caller legitimately filed — a test's runs can span two orgs (a
-        documented, ordinary-flow-reachable gap: see _attach_test's D6
-        fallback and run_registry.py:755-758) — even though no read path
-        ever displays that foreign run as a member of this folder
-        (get_run_owner anchors `g.org_id = t.org_id`; list_runs filters
-        `t.org_id = %s`).
+        The org term — `(org_id = %s OR org_id IS NULL)` — is ANDed
+        across the WHOLE predicate, not scoped onto the test branch
+        alone: both `group_id = %s` and `test_id IN (...)` sit inside
+        it. Scoping only the test branch would leave the direct-column
+        arm open to the identical leak, and that arm is reachable:
+        record_start's rerun path can write a row whose own group_id
+        names THIS folder while its org_id names a different org —
+        `_fileable_group_id` (:690-728) validates an inherited
+        group_id against the caller's PRE-D6 org at :884-885,
+        `_attach_test`'s D6 rule (:755-760, rerun branch :785-797)
+        then reassigns the row's FINAL org_id to the shared test's own
+        org, and the INSERT (:934-952) writes the pre-D6-checked
+        group_id beside the post-D6 org_id with nothing re-validating
+        the pair.
 
-        A run with org_id IS NULL stays admitted, by choice: it can never
-        be filed directly — assign_runs and record_start's group_id path
-        both require a concrete org match — but it can share a test with
-        one that is, and the token-less dev caller's join binds no
-        g.org_id term at all, so such a run genuinely displays in this
-        folder for that caller. A bare `org_id = %s`, or
-        `IS NOT DISTINCT FROM %s`, would exclude it silently, under-
-        reporting the same blast radius this whole UNION exists to stop
-        under-reporting. Never under-reporting is still the rule an audit
-        of a destructive action follows — the one place to prefer the
-        wider answer.
+        Unscoped altogether, the test branch let a run in a genuinely
+        FOREIGN org ride into the audit through a test it merely
+        shares with a run the caller legitimately filed — a test's
+        runs can span two orgs (a documented, ordinary-flow-reachable
+        gap: see _attach_test's D6 fallback and
+        run_registry.py:755-758). That gap is not new here:
+        list_groups' own docstring names this same shape for its
+        test_count subquery and declines to fix it there ("Fixing it
+        belongs with that gap, not here"). list_groups resolves it
+        the OTHER way, though — its subquery counts that test into
+        the folder's number with no org guard at all, which is safe
+        there because a COUNT names no one. An audit of a destructive
+        action is not that: its only job is to NAME the run_ids about
+        to be affected, durably, and naming another org's run_id in
+        THIS org's audit record is the cross-tenant disclosure the
+        org boundary exists to prevent everywhere else in this file.
+        So here the choice runs opposite to list_groups': hide the
+        foreign row rather than leak it, and accept under-reporting
+        as its cost — a foreign-org run whose own group_id pointed at
+        this folder still has that column cleared by ON DELETE SET
+        NULL, silently, and is never named in this audit.
+
+        That is also a correction: it is NOT true that no read path
+        ever displays a run in this shape, which this docstring used
+        to claim. get_run_owner anchors `g.org_id = t.org_id`
+        regardless of caller, so it never resolves the foreign folder
+        for that run, and list_runs excludes it via `t.org_id = %s`
+        for every caller whose row filter binds a concrete org. But a
+        validated PLATFORM ADMIN calls list_runs with `user_id=None,
+        org_id=None, folder_org_id=<their own org>`
+        (api/history_scope.py:90-92, deliberately, so their History
+        spans every org while their folders stay their own) — org_id
+        is exactly the row filter that excludes the foreign run for
+        everyone else, and it is the one argument that caller does
+        not bind. Under that call the foreign run's folder resolves,
+        through its shared test, to the admin's own folder, and
+        nothing in the WHERE clause excludes the row:
+        `GET /api/history?group=<this folder>` genuinely lists it as
+        a member. The org scope on this audit does not rest on
+        "nothing shows it" — it rests on the naming argument above,
+        which holds regardless of who else can see the row.
+
+        A run with org_id IS NULL stays admitted, by choice: it can
+        never be filed directly — assign_runs and record_start's
+        group_id path both require a concrete org match — but it can
+        share a test with one that is, and the token-less dev
+        caller's join binds no g.org_id term at all, so such a run
+        genuinely displays in this folder for that caller. A bare
+        `org_id = %s`, or `IS NOT DISTINCT FROM %s`, would exclude it
+        silently, under-reporting a blast radius that is real for
+        that caller shape — and, unlike the foreign-org case above,
+        excluding it crosses no OTHER tenant's boundary, since
+        org-less names no tenant at all. Never under-reporting is the
+        rule everywhere except that one case — a run belonging to a
+        different, identifiable org — where naming it would leak a
+        foreign tenant's run_id and hiding wins instead.
 
         That SELECT is a snapshot under READ COMMITTED, not a lock: a run
         assigned to this folder concurrently — after the snapshot but
