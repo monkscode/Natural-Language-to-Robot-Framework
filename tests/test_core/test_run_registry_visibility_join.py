@@ -207,9 +207,10 @@ def test_filing_one_result_publishes_its_siblings(reg):
     """The target model, and a deliberate consequence of P1: filing ONE result
     of a test publishes that test's other results too.
 
-    It moves no number on any current screen — every run the existing suite
-    files has no test at all, and the migration carried each test's folder
-    forward from the newest run that had one."""
+    It moves no number on any CURRENT screen: the owner's database holds 0
+    folders and 46 unfiled runs, and the migration carried each test's
+    folder forward from the newest run that had one. It does move one here —
+    this test files a run that HAS a test, which is the point."""
     r, admin = reg
     r.record_start("run-1", OWNER, "q", "generated", robot_code="c")
     r.record_start("run-2", OWNER, "q", "running", robot_code="c",
@@ -313,12 +314,19 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
 def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     """F7: a test's runs can span two orgs (a documented, ordinary-flow-
     reachable gap -- see _attach_test's D6 fallback and
-    run_registry.py:755-758). An org-a admin filing their OWN org-a run
+    run_registry.py:782-785). An org-a admin filing their OWN org-a run
     publishes the whole shared test, and a test-branch with no org term at
-    all then names a run the caller has no authority over at all -- one no
-    read path in the system ever shows as a member of this folder
-    (get_run_owner anchors g.org_id = t.org_id; list_runs filters
-    t.org_id = %s), for a run whose display never changed."""
+    all then names a run the caller has no authority over at all.
+
+    Not one no read path shows: that claim is false and was retracted from
+    delete_group's docstring. get_run_owner anchors g.org_id = t.org_id and
+    list_runs filters t.org_id = %s, so every caller whose row filter binds
+    a concrete org is excluded -- but a validated PLATFORM ADMIN calls
+    list_runs with org_id None (api/history_scope.py:90-92), which is
+    exactly that filter, so GET /api/history?group=<this folder> does list
+    the foreign run. The org term on the audit rests on the naming argument
+    in delete_group's docstring instead: an audit of a destructive action
+    must not name another org's run_id, whoever else can see the row."""
     r, admin = reg
     r.record_start("run-a", OWNER, "q", "generated", robot_code="c")
     shared_test = _test_id(admin, "run-a")
@@ -339,7 +347,8 @@ def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     _folder(admin, "g-1")
     assert r.assign_runs("org-a", "alice", False, ["run-a"], "g-1") is True
     assert r.get_run_owner("run-b").group_id is None, (
-        "premise: no read path shows run-b as a member of g-1")
+        "premise: get_run_owner does not resolve g-1 for run-b -- it anchors "
+        "g.org_id = t.org_id. A platform admin's list_runs still would")
 
     audit: list[str] = []
     assert r.delete_group("org-a", "alice", True, "g-1",
@@ -385,11 +394,11 @@ def test_deleting_a_folder_does_not_audit_a_foreign_run_filed_directly(reg):
     """F9b: the org guard covers the DIRECT-COLUMN arm too, not only the
     test branch. record_start's rerun path can produce this exact shape --
     a foreign-org run whose OWN test_runs.group_id names this folder --
-    without ever going through assign_runs: _fileable_group_id (:690-728)
+    without ever going through assign_runs: _fileable_group_id (:709-755)
     validates an inherited group_id against the caller's PRE-D6 org at
-    :884-885, _attach_test's D6 rule (:755-760, rerun branch :785-797) then
+    :911-912, _attach_test's D6 rule (:782-787, rerun branch :812-824) then
     reassigns the row's FINAL org_id to the shared test's own org, and the
-    INSERT (:934-952) writes the pre-D6-checked group_id beside the
+    INSERT (:961-979) writes the pre-D6-checked group_id beside the
     post-D6 org_id with nothing re-validating the pair. Seeded directly by
     SQL here -- driving it through record_start needs a second org's own
     test/run graph built first -- but the shape itself is real, reachable

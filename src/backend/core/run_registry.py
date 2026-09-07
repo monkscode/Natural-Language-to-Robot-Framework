@@ -713,19 +713,27 @@ class RunRegistry:
         None — the same predicate assign_runs enforces (the folder is in the
         run's org), applied at the write instead of at the read.
 
-        It has to be keyed on the NEW ROW'S ORG rather than on whoever read
-        the source. A re-run inherits the folder of the run it was cloned
-        from, and the token-less dev caller reads that source row through the
-        UNFILTERED group join (see _group_join), so the id arriving here can
-        name ANY org's folder. Filing the new run there would put it in a
-        folder its own org cannot see — and, now that a folder is what
-        publishes a run, would show it to an org that never had access.
+        It has to be keyed on an ORG rather than on whoever read the source.
+        A re-run inherits the folder of the run it was cloned from, and the
+        token-less dev caller reads that source row through the UNFILTERED
+        group join (see _group_join), so the id arriving here can name ANY
+        org's folder. Filing the new run there would put it in a folder its
+        own org cannot see — and, now that a folder is what publishes a run,
+        would show it to an org that never had access.
 
-        Only record_start can make this decision, because only it knows the
-        org actually written on the new row — _lookup_org_id can supply it
-        when the token did not. An org-less row (AUTH_ENFORCED off) matches
-        no folder at all: run_groups.org_id is NOT NULL, so there is nothing
-        for it to equal.
+        The org it is keyed on is the CALLER'S PRE-D6 ORG — the token's, or
+        the one _lookup_org_id derives when the token carried none — and NOT
+        the org finally written on the row. record_start calls this at :912,
+        before _attach_test at :945, and _attach_test can hand back the
+        TEST'S org instead (D6). So a group_id validated against org A can be
+        written beside an org_id of org B, with nothing re-validating the
+        pair. delete_group's docstring describes that gap at length and is
+        the authority on it; whether this check should move after the attach
+        is a P2 decision, deliberately not made here.
+
+        record_start is its only caller. An org-less row (AUTH_ENFORCED off)
+        matches no folder at all: run_groups.org_id is NOT NULL, so there is
+        nothing for it to equal.
 
         Runs on its OWN pool connection and swallows its own errors, exactly
         like _lookup_org_id: this decides a folder tag, and nothing about a
@@ -1082,12 +1090,16 @@ class RunRegistry:
         caller, whose run_org_id is None.
 
         What keeps that safe is assign_runs, the only place this column
-        mutates OUTSIDE the one-time migration bootstrap (which sets it
-        once, at INSERT, from the newest filed run among the runs it
-        merges into that test — see assign_runs' own docstring for why
-        that makes migrated data reachable here; its grouping key is
-        (org_id, user_id, user_query), so it is single-org by construction
-        and contributes no counterexample to this invariant): _visible_group
+        mutates to a CONCRETE folder outside the one-time migration
+        bootstrap (which sets it once, at INSERT, from the newest filed run
+        among the runs it merges into that test — see assign_runs' own
+        docstring for why that makes migrated data reachable here; its
+        grouping key is (org_id, user_id, user_query), so it is single-org
+        by construction and contributes no counterexample to this
+        invariant). tests.group_id also mutates on its own ON DELETE SET
+        NULL when the folder goes (:1357 documents it), and that direction
+        contributes no counterexample either — it only ever clears the
+        column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
         statement makes the run's org the caller's too, so a test reached
         through that run carries the folder's org. (NOT _fileable_group_id,
@@ -1365,11 +1377,11 @@ class RunRegistry:
         arm open to the identical leak, and that arm is reachable:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
-        `_fileable_group_id` (:690-728) validates an inherited
-        group_id against the caller's PRE-D6 org at :884-885,
-        `_attach_test`'s D6 rule (:755-760, rerun branch :785-797)
+        `_fileable_group_id` (:709-755) validates an inherited
+        group_id against the caller's PRE-D6 org at :911-912,
+        `_attach_test`'s D6 rule (:782-787, rerun branch :812-824)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:934-952) writes the pre-D6-checked
+        org, and the INSERT (:961-979) writes the pre-D6-checked
         group_id beside the post-D6 org_id with nothing re-validating
         the pair.
 
@@ -1378,7 +1390,7 @@ class RunRegistry:
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
         gap: see _attach_test's D6 fallback and
-        run_registry.py:755-758). That gap is not new here:
+        run_registry.py:782-785). That gap is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it
@@ -1640,11 +1652,20 @@ class RunRegistry:
         right answer; it is written down because P1 otherwise claims to move
         no number.
 
-        Neither is reachable on data the existing suite produces (every run it
-        files has no test at all) nor on the owner's current database
-        (measured: 0 folders, 46 runs, none filed). They ARE reachable on
-        migrated data, because the migration gives a test the folder of its
-        newest filed run while that test's other runs keep their own."""
+        Neither is reachable on the owner's current database (measured:
+        0 folders, 46 runs, none filed). The FIRST is reachable in the
+        suite, and is asserted there: the runs in
+        tests/test_core/test_run_registry_visibility_join.py carry
+        robot_code and therefore tests, and
+        test_filing_one_result_publishes_its_siblings files one of two runs
+        that share a test and pins the folder at run_count 2. The second is
+        not produced anywhere in the suite — the only case filing two
+        siblings into two different folders,
+        test_groups.py::test_a_rerun_filed_somewhere_else_stays_there, seeds
+        without robot_code, so neither run has a test to move. Both ARE
+        reachable on migrated data, because the migration gives a test the
+        folder of its newest filed run while that test's other runs keep
+        their own."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
@@ -2097,9 +2118,13 @@ class RunRegistry:
                             " ) s WHERE x.test_id = s.test_id"
                         )
                     n_tests = cur_t.rowcount
-                except psycopg.Error as e:
-                    # Narrow on purpose, and never re-raised: the runs repair
-                    # above is still good and must reach the commit below.
+                except Exception as e:
+                    # Broad, and never re-raised: the runs repair above is
+                    # still good and must reach the commit below. psycopg.Error
+                    # alone was not enough — anything else escaping here lands
+                    # in the outer handler, which returns 0 with the runs
+                    # repair discarded, which is exactly the outcome the
+                    # savepoint was added to prevent.
                     logger.error(
                         "[RUN_REGISTRY] test org backfill failed (runs repair "
                         "kept): %s", e)

@@ -1432,12 +1432,17 @@ async def stream_execute_only(
             route feedback to the run that owns the learning record.
         group_id: The folder of the run this one was cloned from — a re-run
             stays where its source was filed until the user moves it. Set only
-            by the rerun path. record_start re-checks it against the ORG of the
-            row it is about to write and drops it if the folder is not that
-            org's, so a folder a platform admin could see but the new run's
-            org could not never reaches the row. Org only — there is no owner
-            term in that check, and there should not be: D5 lets any org member
-            re-run a published test, and their re-run stays in the folder.
+            by the rerun path. record_start re-checks it against the CALLER'S
+            org — the token's, or the one _lookup_org_id derives — and drops
+            it if the folder is not that org's, so a folder a platform admin
+            could see but the caller's org could not never reaches the row.
+            That is not always the org the row ends up carrying: the check
+            runs before _attach_test, which can replace it with the TEST'S
+            org (D6). See _fileable_group_id and delete_group in
+            core/run_registry.py for the gap that leaves. Org only — there is
+            no owner term in that check, and there should not be: D5 lets any
+            org member re-run a published test, and their re-run stays in the
+            folder.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
