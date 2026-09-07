@@ -413,6 +413,25 @@ class TestReadPathVisibility:
         admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         admin.close()
 
+    @pytest.fixture(scope="class")
+    def db(self):
+        """A direct connection on the same schema as this class's `reg`, for
+        assertions about columns list_runs does not return.
+
+        dict_row explicitly: psycopg.connect defaults to tuple_row, and the
+        assertions below index by NAME (the pool the registry itself uses is
+        built with dict_row, so naming keeps the two readable the same way)."""
+        import psycopg
+        from psycopg.rows import dict_row
+        from src.backend.core.config import settings
+
+        sep = "&" if "?" in settings.DATABASE_URL else "?"
+        dsn = settings.DATABASE_URL + (
+            f"{sep}options=-c%20search_path%3Drun_groups_read_test,public")
+        conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+        yield conn
+        conn.close()
+
     @pytest.fixture(autouse=True)
     def _clean(self, reg):
         import psycopg
@@ -584,7 +603,7 @@ class TestReadPathVisibility:
             assert sorted(r["run_id"] for r in rows) == sorted(expected), label
             assert n == total == len(expected), label
 
-    def test_folder_run_count_agrees_with_the_folder_filter(self, reg):
+    def test_folder_run_count_agrees_with_the_folder_filter(self, reg, db):
         """A folder's contents are the ORG's, so the chip and the filtered
         table read the same number for every member of it — not the caller's
         share of the folder. A member seeing 1 beside a folder holding 2 was
@@ -596,10 +615,60 @@ class TestReadPathVisibility:
         assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1, m1], gid) is True
 
         listed = reg.list_groups(self.ORG)
+        group_row = [g for g in listed if g["group_id"] == gid][0]
         for scope_user in (self.MEMBER, None):   # plain member, then org_admin
-            _, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
-                                     folder_org_id=self.ORG, group=gid)
+            rows, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
+                                        folder_org_id=self.ORG, group=gid)
             assert [g["run_count"] for g in listed] == [total] == [2], scope_user
+
+            # The test chip must equal the tests behind the rows the filter
+            # returned, by the same argument the run count is pinned by.
+            #
+            # Derived by SQL from the visible run ids rather than read off the
+            # payload: list_runs SELECTs run_id, user_id, user_email, org_id,
+            # user_query, rerun_of, status, created_at, updated_at, group_id and
+            # group_name — and deliberately NOT test_id. Adding a column to that
+            # payload would be a change P1 is not allowed to make.
+            #
+            # The two coincide HERE because _seed passes no robot_code, so
+            # neither run has a test and both sides read 0. They are not equal
+            # in general: a run published by its OWN group_id while its test is
+            # unfiled — the migrated shape, and the transitional fallback's
+            # whole reason for existing — counts in run_count and in
+            # visible_test_ids but NOT in test_count. A test with zero runs
+            # separates them the other way once P2 makes that reachable.
+            # REVISIT this assertion then; it is scoped to this fixture.
+            visible_test_ids = {row["test_id"] for row in db.execute(
+                "SELECT DISTINCT test_id FROM test_runs"
+                " WHERE run_id = ANY(%s) AND test_id IS NOT NULL",
+                ([r["run_id"] for r in rows],)).fetchall()}
+            assert group_row["test_count"] == len(visible_test_ids)
+
+    def test_folder_counts_do_not_fan_out_across_tests_and_results(self, reg, db):
+        """Two one-to-many joins off run_groups multiply. A folder with 3 tests
+        and 2 results each must read 3 and 6 — not 6 and 6, and not 18 and 18.
+
+        The shape matters: a folder with ONE test, or one result per test,
+        cannot distinguish the correct query from the broken one, because
+        1 x N == N.
+        """
+        db.execute(
+            "INSERT INTO run_groups (group_id, name, org_id, created_by)"
+            " VALUES ('fan-1', 'FanOut', 'org-fan', 'alice')")
+        user = {"user_id": "alice", "org_id": "org-fan", "email": "a@x.com"}
+        for t in range(3):
+            reg.record_start(f"fan-{t}-a", user, f"fan query {t}", "generated",
+                             robot_code="c")
+            reg.record_start(f"fan-{t}-b", user, f"fan query {t}", "running",
+                             robot_code="c", rerun_of=f"fan-{t}-a")
+        db.execute(
+            "UPDATE tests SET group_id = 'fan-1' WHERE org_id = 'org-fan'")
+
+        row = [g for g in reg.list_groups(folder_org_id="org-fan",
+                                          run_org_id="org-fan")
+               if g["group_id"] == "fan-1"][0]
+        assert row["test_count"] == 3
+        assert row["run_count"] == 6
 
     # 14 ------------------------------------------------------------------
     def test_filtering_by_a_foreign_orgs_folder_returns_nothing(self, reg):
@@ -1485,10 +1554,17 @@ def test_platform_admin_folder_chip_equals_its_filtered_table(client):
     })
 
     chips = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
-    chip = [g for g in chips if g["group_id"] == gid][0]["run_count"]
+    folder = [g for g in chips if g["group_id"] == gid][0]
+    chip = folder["run_count"]
     page = client.get(f"/api/history?group={gid}", headers=_auth(admin_tok)).json()
     assert {r["run_id"] for r in page["runs"]} == {attributed}
-    assert chip == page["total"] == 1
+    assert chip == page["total"] == 1   # run_count unchanged by P1
+
+    # P1 adds test_count beside run_count; run_count keeps its meaning.
+    # The full chip-equals-table invariant for TESTS cannot be asserted at the
+    # HTTP layer until /api/tests exists — that assertion belongs to P2.
+    assert "test_count" in folder
+    assert isinstance(folder["test_count"], int)
 
 
 # ---------------------------------------------------------------------------

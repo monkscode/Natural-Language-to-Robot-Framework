@@ -545,6 +545,18 @@ _VISIBLE_RUN_SQL = (
 # now shows an author column and an unowned row renders blank and unopenable.
 _OWNED_RUN_SQL = "t.user_id IS NOT NULL"
 
+# The same sentence as _VISIBLE_RUN_SQL — you see it if you own it, or the org
+# published it into a folder — over `tests` instead of `test_runs`.
+#
+# It cannot reuse _VISIBLE_RUN_SQL: that constant binds t.user_id, which is the
+# RESULT'S owner, and a read whose rows are TESTS has no result in scope. The
+# fail-closed `IS NOT NULL` term carries over for the same reason it exists
+# there — an unattributed row is readable only by a platform admin.
+_VISIBLE_TEST_SQL = (
+    "(te.user_id = %s"
+    " OR (g.group_id IS NOT NULL AND te.user_id IS NOT NULL))"
+)
+
 
 class RunOwnership(NamedTuple):
     """What the authorization gates need to know about one run.
@@ -1042,7 +1054,15 @@ class RunRegistry:
         fails closed. groups_endpoints already refuses to call with it, but a
         guard at one call site and a fail-closed default are not the same
         protection: without this, that pair emitted no WHERE at all and
-        listed every org's folders."""
+        listed every org's folders.
+
+        test_count arrived with the 2026-09-07 split and is additive —
+        run_count keeps its name AND its meaning, a count of RESULTS. The
+        subquery behind it is deliberately NOT scoped by run_org_id:
+        _fileable_group_id enforces at the write that a test's folder is in
+        the test's own org, and the folder join enforces it at every read, so
+        an org term here is redundant — and adding one would silently zero the
+        count for the token-less dev caller, whose run_org_id is None."""
         if run_org_id is None:
             run_org_id = folder_org_id
         elif folder_org_id is None:
@@ -1059,9 +1079,16 @@ class RunRegistry:
             rows = conn.execute(
                 "SELECT g.group_id, g.name, g.created_by, "
                 "       g.created_at, g.updated_at, "
-                "       COUNT(t.run_id) AS run_count "
+                "       COUNT(t.run_id) AS run_count, "
+                # Scalar subquery, NOT a second LEFT JOIN off run_groups: two
+                # one-to-many joins multiply, and a folder of 3 tests and 30
+                # results would report 90 for BOTH counts.
+                "       (SELECT count(*) FROM tests te2 "
+                "          WHERE te2.group_id = g.group_id) AS test_count "
                 "FROM run_groups g "
-                f"LEFT JOIN test_runs t ON t.group_id = g.group_id{join} "
+                "LEFT JOIN (test_runs t "
+                "           LEFT JOIN tests te ON te.test_id = t.test_id) "
+                f"       ON COALESCE(te.group_id, t.group_id) = g.group_id{join} "
                 f"{where}"
                 "GROUP BY g.group_id ORDER BY lower(g.name)",
                 join_params + where_params,
@@ -1355,6 +1382,57 @@ class RunRegistry:
             ).fetchone()
         return row["n"]
 
+    @staticmethod
+    def _group_join_for_tests(
+        org_id: Optional[str], *, identified: bool = False
+    ) -> Tuple[str, list]:
+        """_group_join's three forms, anchored on `te` for reads whose rows are
+        tests. No COALESCE here: there is no result in scope to fall back to,
+        because these rows ARE the tests. Kept separate rather than
+        parameterised on the alias: the two have different WHERE vocabularies,
+        and one function answering both would need a branch at every use."""
+        if org_id is None:
+            if identified:
+                return "LEFT JOIN run_groups g ON FALSE", []
+            return "LEFT JOIN run_groups g ON g.group_id = te.group_id", []
+        return (
+            "LEFT JOIN run_groups g ON g.group_id = te.group_id"
+            " AND g.org_id = %s",
+            [org_id],
+        )
+
+    def count_ungrouped_tests(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> int:
+        """The Ungrouped chip's count for the TESTS page (P2 reads it).
+
+        The same sentence as count_ungrouped, over `tests`: it uses
+        _VISIBLE_TEST_SQL because these rows are tests, and binds te.user_id
+        rather than t.user_id for the same reason. Written in P1 and read by
+        nothing until P2, so it cannot move a number on any current screen."""
+        join, params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["g.group_id IS NULL"]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params = params + [user_id]
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params = params + [org_id]
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM tests te {join} "
+                f"WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+        return row["n"]
+
     def assign_runs(
         self,
         org_id: Optional[str],
@@ -1407,7 +1485,14 @@ class RunRegistry:
         beside it is therefore REDUNDANT (verified: the whole suite passes
         without it) and is kept only to state that intent in the SQL rather
         than leaving it to a NULL-semantics subtlety a later edit could
-        undo."""
+        undo.
+
+        Since 2026-09-07 filing a run also files its TEST, because publication
+        is the test's. One consequence is deliberate and is the target model:
+        filing ONE result of a test publishes that test's other results too.
+        It moves no number on any current screen — every run the existing
+        suite files has no test at all, and the migrated data carries a test's
+        folder forward from the newest run that had one."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
@@ -1447,6 +1532,21 @@ class RunRegistry:
                 cur = conn.execute(
                     f"UPDATE test_runs SET group_id = %s "
                     f"WHERE run_id = ANY(%s) AND org_id = %s AND {allowed}",
+                    params,
+                )
+                # Publication belongs to the TEST now, so filing a run files
+                # its test. Driven off the SAME authority filter as the parent
+                # UPDATE, so it can never move a test through a run the caller
+                # could not have filed directly.
+                #
+                # test_runs.group_id keeps being written above, unchanged:
+                # spec 4.4 requires the old column to stay populated through P1
+                # so that dropping the new tables restores prior behaviour.
+                conn.execute(
+                    f"UPDATE tests te SET group_id = %s, updated_at = now() "
+                    f"FROM test_runs r "
+                    f"WHERE r.test_id = te.test_id "
+                    f"  AND r.run_id = ANY(%s) AND r.org_id = %s AND r.{allowed}",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -1501,13 +1601,33 @@ class RunRegistry:
         ONE other query expresses publication in SQL and cannot call this:
         get_run_owner, which has no caller to bind and anchors to the run's
         own org instead. Change what "published" means here and change it
-        there too."""
+        there too.
+
+        Since 2026-09-07 this join makes ONE HOP first: folder membership
+        belongs to the TEST, so it reaches run_groups through tests, falling
+        back to the run's own column while runs without a test still exist.
+        The returned params are unchanged, so binding order is unchanged — but
+        anything added to the hop must re-check every caller, because these
+        placeholders bind before any WHERE params."""
+        # One hop: a row's folder is its TEST'S folder now. _VISIBLE_RUN_SQL is
+        # unchanged, character for character — every property its docstring
+        # argues for is preserved, because the org term still lives in this
+        # join and only the row whose group_id it reads has moved.
+        #
+        # COALESCE, not a bare te.group_id: `test_id IS NULL` is a permanently
+        # legal state (owner decision D8), and a run with no test would
+        # otherwise be filable but never publishable — a silent no-op in the
+        # UI. The fallback is TRANSITIONAL: P2/P3 remove it once every run has
+        # a test.
+        hop = "LEFT JOIN tests te ON te.test_id = t.test_id "
+        folder = "COALESCE(te.group_id, t.group_id)"
         if org_id is None:
             if identified:
-                return "LEFT JOIN run_groups g ON FALSE", []
-            return "LEFT JOIN run_groups g ON g.group_id = t.group_id", []
+                return hop + "LEFT JOIN run_groups g ON FALSE", []
+            return (hop + f"LEFT JOIN run_groups g ON g.group_id = {folder}",
+                    [])
         return (
-            "LEFT JOIN run_groups g ON g.group_id = t.group_id"
+            hop + f"LEFT JOIN run_groups g ON g.group_id = {folder}"
             " AND g.org_id = %s",
             [org_id],
         )
@@ -1636,12 +1756,22 @@ class RunRegistry:
         This is the ONE publication join that is not _group_join, and nothing
         couples them but this sentence: _group_join binds a CALLER's org and
         this binds the row's, so it cannot literally reuse it. Change either
-        notion of "published" and change both."""
+        notion of "published" and change both.
+
+        The folder is read through the run's TEST since 2026-09-07, matching
+        _group_join's hop and its transitional fallback to the run's own
+        column. This must change in the SAME COMMIT as that join: this answer
+        anchors /reports while the join anchors History, and a window where
+        they disagree offers a row one of them then refuses. The ORG anchoring
+        is deliberately untouched — it stays the run's own org, which owner
+        decision D6 makes equal to its test's anyway."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "SELECT t.user_id, t.org_id, g.group_id FROM test_runs t "
-                    "LEFT JOIN run_groups g ON g.group_id = t.group_id "
+                    "LEFT JOIN tests te ON te.test_id = t.test_id "
+                    "LEFT JOIN run_groups g"
+                    " ON g.group_id = COALESCE(te.group_id, t.group_id) "
                     "                      AND g.org_id = t.org_id "
                     "WHERE t.run_id = %s",
                     (run_id,),
