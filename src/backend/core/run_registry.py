@@ -518,8 +518,17 @@ _SCHEMA_DDL = (
          WHERE test_id = v_test_id;
       END LOOP;
 
-      RAISE NOTICE 'test split: collapsed % runs into % tests',
-        n_unmigrated, (SELECT count(*) FROM tests);
+      -- n_unmigrated counted every CANDIDATE. Runs whose group had no code
+      -- anywhere are deliberately left alone, so report what actually moved
+      -- rather than what was considered. Everything with a test_id now was
+      -- attached by this block: `tests` was empty on entry and
+      -- fk_test_runs_test makes a test_id without a test impossible.
+      RAISE NOTICE 'test split: collapsed % of % runs into % tests; % left '
+        'unattached (no code to version)',
+        (SELECT count(*) FROM test_runs WHERE test_id IS NOT NULL),
+        n_unmigrated,
+        (SELECT count(*) FROM tests),
+        (SELECT count(*) FROM test_runs WHERE test_id IS NULL);
     END $$;
     """,
 )
@@ -723,8 +732,8 @@ class RunRegistry:
 
         The org it is keyed on is the CALLER'S PRE-D6 ORG — the token's, or
         the one _lookup_org_id derives when the token carried none — and NOT
-        the org finally written on the row. record_start calls this at :912,
-        before _attach_test at :945, and _attach_test can hand back the
+        the org finally written on the row. record_start calls this at :921,
+        before _attach_test at :954, and _attach_test can hand back the
         TEST'S org instead (D6). So a group_id validated against org A can be
         written beside an org_id of org B, with nothing re-validating the
         pair. delete_group's docstring describes that gap at length and is
@@ -1097,7 +1106,7 @@ class RunRegistry:
         grouping key is (org_id, user_id, user_query), so it is single-org
         by construction and contributes no counterexample to this
         invariant). tests.group_id also mutates on its own ON DELETE SET
-        NULL when the folder goes (:1357 documents it), and that direction
+        NULL when the folder goes (:1366 documents it), and that direction
         contributes no counterexample either — it only ever clears the
         column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
@@ -1377,11 +1386,11 @@ class RunRegistry:
         arm open to the identical leak, and that arm is reachable:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
-        `_fileable_group_id` (:709-755) validates an inherited
-        group_id against the caller's PRE-D6 org at :911-912,
-        `_attach_test`'s D6 rule (:782-787, rerun branch :812-824)
+        `_fileable_group_id` (:718-764) validates an inherited
+        group_id against the caller's PRE-D6 org at :920-921,
+        `_attach_test`'s D6 rule (:791-796, rerun branch :821-833)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:961-979) writes the pre-D6-checked
+        org, and the INSERT (:970-988) writes the pre-D6-checked
         group_id beside the post-D6 org_id with nothing re-validating
         the pair.
 
@@ -1390,7 +1399,7 @@ class RunRegistry:
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
         gap: see _attach_test's D6 fallback and
-        run_registry.py:782-785). That gap is not new here:
+        run_registry.py:791-794). That gap is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it

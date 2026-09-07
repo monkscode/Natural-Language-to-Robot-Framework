@@ -314,7 +314,7 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
 def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     """F7: a test's runs can span two orgs (a documented, ordinary-flow-
     reachable gap -- see _attach_test's D6 fallback and
-    run_registry.py:782-785). An org-a admin filing their OWN org-a run
+    run_registry.py:791-794). An org-a admin filing their OWN org-a run
     publishes the whole shared test, and a test-branch with no org term at
     all then names a run the caller has no authority over at all.
 
@@ -394,11 +394,11 @@ def test_deleting_a_folder_does_not_audit_a_foreign_run_filed_directly(reg):
     """F9b: the org guard covers the DIRECT-COLUMN arm too, not only the
     test branch. record_start's rerun path can produce this exact shape --
     a foreign-org run whose OWN test_runs.group_id names this folder --
-    without ever going through assign_runs: _fileable_group_id (:709-755)
+    without ever going through assign_runs: _fileable_group_id (:718-764)
     validates an inherited group_id against the caller's PRE-D6 org at
-    :911-912, _attach_test's D6 rule (:782-787, rerun branch :812-824) then
+    :920-921, _attach_test's D6 rule (:791-796, rerun branch :821-833) then
     reassigns the row's FINAL org_id to the shared test's own org, and the
-    INSERT (:961-979) writes the pre-D6-checked group_id beside the
+    INSERT (:970-988) writes the pre-D6-checked group_id beside the
     post-D6 org_id with nothing re-validating the pair. Seeded directly by
     SQL here -- driving it through record_start needs a second org's own
     test/run graph built first -- but the shape itself is real, reachable
