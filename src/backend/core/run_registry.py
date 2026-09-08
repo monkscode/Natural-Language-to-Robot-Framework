@@ -878,16 +878,19 @@ class RunRegistry:
 
         The write-back's claim is PERMANENT and undisclosed to nobody: say
         so plainly rather than implying a safeguard that is not here. A
-        NULL-org test is reachable in production by exactly two kinds of
-        caller — the AUTH_ENFORCED=off token-less caller
-        (`caller_can_access` rule 1, `auth/ownership.py`), who has no org_id
-        to write back with, and a platform admin (rule 2), who does. No
-        ordinary identified caller ever passes that gate for a NULL-org
-        resource, not even the row's own original owner: rule 5's
-        `org_id != caller_org` fires and returns False before the ownership
-        check ever runs, because `org_id` is NULL and can equal no caller's
-        org. So in practice the first identified caller to reach this
-        write-back is very often a platform admin, acting in whatever org
+        NULL-org test is reachable in production by three kinds of caller —
+        the AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
+        `auth/ownership.py`), who has no org_id to write back with; a
+        platform admin (rule 2), who does; and the row's own original
+        owner, reclaiming it on a legacy token whose own org_id claim is
+        absent (rule 4). No ordinary identified caller whose OWN token
+        carries a concrete org ever passes that gate for a NULL-org
+        resource — not even the row's own original owner, once identified
+        with an org: rule 5's `org_id != caller_org` fires and returns
+        False before the ownership check ever runs, because `org_id` is
+        NULL and can equal no caller's org. So in practice the first
+        identified caller to reach this write-back is very often a
+        platform admin, acting in whatever org
         they represent at that moment, and nothing in this codebase ever
         un-writes tests.org_id once it is non-NULL (verified: the only two
         statements that ever set it, this one and backfill_org_ids', both
