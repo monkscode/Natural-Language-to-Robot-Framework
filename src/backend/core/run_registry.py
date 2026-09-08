@@ -404,7 +404,10 @@ _SCHEMA_DDL = (
     # state (a generation that fails before any code exists, owner decision
     # D8), so such a guard would re-arm and re-collapse live rows on the next
     # RunRegistry() construction — silently performing the go-forward
-    # deduplication this design explicitly declined.
+    # deduplication this design explicitly declined. That rules out an ENTRY
+    # guard on the column; the `test_id IS NULL` in the grouping query below
+    # is row SELECTION and re-arms nothing, because entry is still gated on
+    # `tests` being empty.
     f"""
     DO $$
     DECLARE
@@ -416,6 +419,18 @@ _SCHEMA_DDL = (
       v_n          integer;
       v_key        integer;
     BEGIN
+      -- The guard below is a check-then-act, not a lock: two RunRegistry()
+      -- constructions against the same database both pass it, both walk the
+      -- same groups, and the loser's INSERT collides on idx_tests_org_key --
+      -- measured at 4 of 10 two-thread rounds. The DO block is atomic so the
+      -- DATA survives, but the losing construction raises out of __init__:
+      -- a bare 500 on whichever request got there first, or a failed boot.
+      -- Serialise them. _SCHEMA_DDL runs on an autocommit connection, so this
+      -- statement is its own transaction and the lock is held for exactly the
+      -- length of this block, then released -- the same primitive, and the
+      -- same hashtext() keying, as auth/migration_state.run_migration_once.
+      -- The loser blocks here, then re-reads a non-empty `tests` and returns.
+      PERFORM pg_advisory_xact_lock(hashtext('nlrf_test_split_collapse')::bigint);
       IF EXISTS (SELECT 1 FROM tests) THEN RETURN; END IF;
       IF NOT EXISTS (SELECT 1 FROM test_runs WHERE test_id IS NULL) THEN
         RETURN;
@@ -434,7 +449,17 @@ _SCHEMA_DDL = (
         SELECT org_id, user_id, user_query, NULL::text AS only_run,
                min(created_at) AS first_at, max(created_at) AS last_at
         FROM test_runs
-        WHERE user_query IS NOT NULL
+        -- `test_id IS NULL` here selects ROWS; it does not gate ENTRY (see
+        -- the comment above this block -- entry stays on `tests` being
+        -- empty). A no-op in the normal case: entry requires `tests` empty,
+        -- and fk_test_runs_test makes a non-NULL test_id impossible when no
+        -- test exists, so every row already qualifies. It earns its place
+        -- only if a construction ever reaches here with rows already
+        -- attached, where selecting them would build a group whose inner
+        -- loop then finds nothing left to attach -- minting a test with
+        -- current_version 1 and zero test_versions. Structurally impossible
+        -- instead of accidentally rare.
+        WHERE user_query IS NOT NULL AND test_id IS NULL
         GROUP BY org_id, user_id, user_query
         -- A group with no code anywhere in it has nothing to version, so it
         -- must not become a test at all. count() skips NULLs, so this is the
@@ -450,6 +475,7 @@ _SCHEMA_DDL = (
         SELECT org_id, user_id, user_query, run_id, created_at, created_at
         FROM test_runs
         WHERE user_query IS NULL AND robot_code IS NOT NULL
+          AND test_id IS NULL
         -- Deterministic and chronological, or key_n comes out in whatever
         -- order HashAggregate happens to produce -- and it is user-visible
         -- (rendered TC-<key_n> in P2), so fixing it after the fact means

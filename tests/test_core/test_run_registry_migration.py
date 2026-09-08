@@ -3,6 +3,7 @@
 Every assertion here mirrors a measured fact about the live database
 (46 runs -> 21 tests, 45 versions) or a rule from spec section 4.
 """
+import threading
 import uuid
 
 import psycopg
@@ -444,3 +445,130 @@ def test_a_null_query_run_with_no_code_mints_no_test(scratch):
     assert admin.execute(
         f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'p2'"
     ).fetchone()[0] is None
+
+
+# Enough rounds that the pre-fix race is caught with near-certainty rather
+# than 4 times in 10. The owner measured the unguarded collapse raising
+# UniqueViolation on idx_tests_org_key in 4 of 10 two-thread rounds; at that
+# rate 8 rounds miss it once in ~60 runs. After the advisory lock the outcome
+# is deterministic, so the only cost of the extra rounds is wall time.
+_RACE_ROUNDS = 8
+
+
+def _reset_collapse(admin, name):
+    """Return the schema to its pre-collapse state so the next round re-arms.
+
+    test_runs.test_id is cleared FIRST: fk_test_runs_test is ON DELETE
+    CASCADE, so deleting `tests` while runs still point at it would take the
+    seeded runs with it and every later round would collapse nothing."""
+    admin.execute(
+        f"UPDATE {name}.test_runs SET test_id = NULL, test_version_id = NULL")
+    admin.execute(f"DELETE FROM {name}.test_versions")
+    admin.execute(f"DELETE FROM {name}.tests")
+
+
+def test_two_concurrent_constructions_collapse_once_without_raising(scratch):
+    """THE race the entry guard cannot win on its own.
+
+    `IF EXISTS (SELECT 1 FROM tests) THEN RETURN` is a check-then-act, not a
+    lock: two RunRegistry() constructions against the same database both pass
+    it, both walk the same groups, and the loser's INSERT collides on
+    idx_tests_org_key. The DO block is atomic so the DATA survives, but the
+    losing construction raises out of __init__ — in production a bare 500 on
+    whichever request got there first, and on a fresh deploy a failed boot.
+
+    Two threads released by a barrier, over a schema already provisioned so
+    the DDL statements ahead of the collapse are no-ops and both threads
+    arrive at the DO block together."""
+    name, dsn, admin = scratch
+    _migrate(dsn)   # provision: test_runs is empty, so the collapse no-ops
+    assert admin.execute(f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 0
+
+    # ~20 groups x 2 runs is the shape that reproduced it: enough groups that
+    # the loop stays inside the DO block long enough for the second thread to
+    # pass the guard.
+    _seed(admin, name, [
+        {"run_id": f"r{g:02d}-{i}", "user_query": f"query {g}",
+         "robot_code": f"code-{g}-{i}",
+         "created_at": f"2026-01-{g + 1:02d}T1{i}:00:00Z"}
+        for g in range(20) for i in range(2)
+    ])
+
+    for round_n in range(_RACE_ROUNDS):
+        barrier = threading.Barrier(2)
+        failures: list[BaseException] = []
+
+        def _construct():
+            try:
+                barrier.wait()
+                _migrate(dsn)
+            except BaseException as exc:      # noqa: BLE001 - reported below
+                failures.append(exc)
+
+        threads = [threading.Thread(target=_construct) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+        assert not any(t.is_alive() for t in threads), (
+            f"round {round_n}: a construction never finished — the advisory "
+            f"lock is held by something that did not release it")
+        assert failures == [], (
+            f"round {round_n}: a concurrent RunRegistry() construction "
+            f"raised {failures[0]!r}")
+
+        # Exactly what ONE construction produces, no more and no less.
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 20, (
+            f"round {round_n}: the collapse ran twice or half-ran")
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.test_versions").fetchone()[0] == 40
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.test_runs WHERE test_id IS NULL"
+        ).fetchone()[0] == 0
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.tests t WHERE NOT EXISTS ("
+            f"SELECT 1 FROM {name}.test_versions v WHERE v.test_id = t.test_id)"
+        ).fetchone()[0] == 0, (
+            f"round {round_n}: a phantom test with current_version 1 and no "
+            f"version at all")
+        assert admin.execute(
+            f"SELECT count(*) FROM {name}.tests t WHERE NOT EXISTS ("
+            f"SELECT 1 FROM {name}.test_runs r WHERE r.test_id = t.test_id)"
+        ).fetchone()[0] == 0, (
+            f"round {round_n}: a test nothing points at")
+
+        _reset_collapse(admin, name)
+
+
+def test_the_collapse_never_leaves_a_test_without_a_version(scratch):
+    """current_version is set to greatest(v_n, 1), so a test whose inner loop
+    attached nothing still claims version 1 while `test_versions` holds none —
+    an unrenderable row that no later code path can repair. The outer grouping
+    query is what has to make that impossible, by selecting only runs that are
+    still unattached."""
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "a1", "user_query": "q1", "robot_code": "c1",
+         "created_at": "2026-01-01T10:00:00Z"},
+        {"run_id": "a2", "user_query": "q1", "robot_code": "c2",
+         "created_at": "2026-01-02T10:00:00Z"},
+        {"run_id": "a3", "user_query": "q1", "robot_code": None,
+         "status": "error", "created_at": "2026-01-03T10:00:00Z"},
+        {"run_id": "b1", "user_query": None, "robot_code": "c3",
+         "created_at": "2026-01-04T10:00:00Z"},
+        {"run_id": "c1", "org_id": None, "user_query": "q2",
+         "robot_code": "c4", "created_at": "2026-01-05T10:00:00Z"},
+    ])
+    _migrate(dsn)
+
+    assert admin.execute(
+        f"SELECT count(*) FROM {name}.tests t WHERE NOT EXISTS ("
+        f"SELECT 1 FROM {name}.test_versions v WHERE v.test_id = t.test_id)"
+    ).fetchone()[0] == 0
+    # current_version must name a version that exists, for every test.
+    assert admin.execute(
+        f"SELECT count(*) FROM {name}.tests t WHERE NOT EXISTS ("
+        f"SELECT 1 FROM {name}.test_versions v WHERE v.test_id = t.test_id"
+        f" AND v.n = t.current_version)").fetchone()[0] == 0
