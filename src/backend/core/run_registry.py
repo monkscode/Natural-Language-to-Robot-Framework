@@ -876,6 +876,36 @@ class RunRegistry:
         gap, which this method does not touch: it only ever moves a test
         OUT of the NULL bucket, never between two non-NULL orgs.
 
+        The write-back's claim is PERMANENT and undisclosed to nobody: say
+        so plainly rather than implying a safeguard that is not here. A
+        NULL-org test is reachable in production by exactly two kinds of
+        caller — the AUTH_ENFORCED=off token-less caller
+        (`caller_can_access` rule 1, `auth/ownership.py`), who has no org_id
+        to write back with, and a platform admin (rule 2), who does. No
+        ordinary identified caller ever passes that gate for a NULL-org
+        resource, not even the row's own original owner: rule 5's
+        `org_id != caller_org` fires and returns False before the ownership
+        check ever runs, because `org_id` is NULL and can equal no caller's
+        org. So in practice the first identified caller to reach this
+        write-back is very often a platform admin, acting in whatever org
+        they represent at that moment, and nothing in this codebase ever
+        un-writes tests.org_id once it is non-NULL (verified: the only two
+        statements that ever set it, this one and backfill_org_ids', both
+        require the CURRENT value to be NULL first). From that write
+        onward, D6 gives every later result of this test the admin's org,
+        and so does get_run_owner().org_id — which is what attributes LLM
+        traces (trace_store.py) and learning records (workflow_service.py).
+        The test's learning signal and cost now belong to the admin's org
+        rather than whichever org its history actually came from, and the
+        first admin to touch it wins that permanently. No guard exists
+        against this here: gating it on the caller actually being a
+        platform admin needs this method to receive that fact, and it does
+        not — record_start's own is_platform_admin (D7) flag is used to
+        stamp `ran_as_platform_admin` and stops there; it is never passed
+        into this method. A guard checked against a bit this method cannot
+        see would be an inert, misleading comment, so none is written here;
+        the decision and the plumbing it needs are left to a later task.
+
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
         the SAME test for all three or one run would spawn three tests.
@@ -898,11 +928,41 @@ class RunRegistry:
             # is half of idx_tests_org_key (UNIQUE (org_id, key_n) NULLS NOT
             # DISTINCT) — the simple, single-test form of the window-function
             # shape backfill_org_ids uses to move many tests at once, reading
-            # the destination bucket's current max(key_n). SAVEPOINT, exactly
-            # like the key-collision retry below, so a concurrent claim on
-            # the same key cannot take the run write down with it; on
-            # collision this does not retry — the run still gets org_id, the
-            # test stays NULL, and the next write repeats the repair.
+            # the destination bucket's current max(key_n). updated_at is
+            # bumped too, matching backfill_org_ids' own tests UPDATE: the
+            # row's org identity just changed and idx_tests_org_updated sorts
+            # the Tests page on this column, so a repaired test should read
+            # as recently touched rather than keep the timestamp from
+            # whenever it was minted. WHERE ... AND org_id IS NULL guards
+            # against a concurrent write landing between the SELECT above and
+            # this UPDATE: if some other transaction already gave this test
+            # an org by the time this runs, zero rows match and this is a
+            # silent no-op — the caller below still gets ITS OWN org_id back
+            # for the run regardless, same as the collision path, because a
+            # run write may not depend on the test repair succeeding.
+            #
+            # SAVEPOINT, exactly like the key-collision retry below, so a
+            # failure here cannot take the run write down with it. Caught
+            # broadly and never re-raised — same reasoning backfill_org_ids
+            # uses for its own tests UPDATE: a key collision is not the only
+            # way this can fail, and these two branches used to be
+            # read-only, so the write-back hands them deadlock, lock
+            # timeout, serialization failure and dropped-connection failure
+            # modes they did not have before. Anything narrower than
+            # Exception lets those escape _attach_test into record_start's
+            # outer except, which rolls back and leaves THIS call's
+            # test_id/test_version_id at None. On the rerun_of branch that is
+            # unrecoverable: the new run_id has no test_id already stored for
+            # record_start's COALESCE to protect, so the run would be
+            # inserted permanently detached from its test — stream_execute_
+            # only calls record_start once per re-run and nothing else ever
+            # writes test_id afterward. The short-circuit branch happens to
+            # be protected by that same COALESCE once a test_id is already
+            # stored on the row, but this catch does not special-case that:
+            # one guard, broad, for both branches. Not retried either way —
+            # the run still gets org_id from the return value below; only
+            # the test-side repair is skipped, and the next caller to reach
+            # this test tries again.
             try:
                 with conn.transaction():
                     conn.execute(
@@ -912,11 +972,11 @@ class RunRegistry:
                         " updated_at = now()"
                         " WHERE test_id = %s AND org_id IS NULL",
                         (org_id, org_id, existing_test_id))
-            except psycopg.errors.UniqueViolation:
+            except Exception as e:
                 logger.warning(
-                    "[RUN_REGISTRY] org write-back key collision for test "
-                    "%s -> org %s; leaving test org-less",
-                    existing_test_id, org_id)
+                    "[RUN_REGISTRY] org write-back failed for test "
+                    "%s -> org %s; leaving test org-less: %s",
+                    existing_test_id, org_id, e)
 
         existing = conn.execute(
             "SELECT r.test_id, r.test_version_id, t.org_id"
@@ -1238,7 +1298,7 @@ class RunRegistry:
         grouping key is (org_id, user_id, user_query), so it is single-org
         by construction and contributes no counterexample to this
         invariant). tests.group_id also mutates on its own ON DELETE SET
-        NULL when the folder goes (:1457-1458 documents it), and that direction
+        NULL when the folder goes (:1558-1559 documents it), and that direction
         contributes no counterexample either — it only ever clears the
         column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
@@ -1521,10 +1581,10 @@ class RunRegistry:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
         `_fileable_group_id` (:785-831) validates an inherited
-        group_id against the caller's PRE-D6 org at :1052-1053,
-        `_attach_test`'s D6 rule (:858-877, rerun branch :933-965)
+        group_id against the caller's PRE-D6 org at :1112-1113,
+        `_attach_test`'s D6 rule (:858-877, rerun branch :993-1025)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:1054-1081) writes the pre-D6-checked
+        org, and the INSERT (:1114-1141) writes the pre-D6-checked
         group_id beside the post-D6 org_id with nothing re-validating
         the pair.
 
@@ -1533,7 +1593,7 @@ class RunRegistry:
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
         gap: see _attach_test's NULL-org fallback paragraph,
-        run_registry.py:883-892). That gap is not new here:
+        run_registry.py:913-922). That gap is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it

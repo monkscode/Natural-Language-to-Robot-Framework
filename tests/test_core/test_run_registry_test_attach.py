@@ -665,7 +665,17 @@ class _CollidesOnceOnOrgWriteBack:
     UniqueViolation, exactly as Postgres does when two write-backs (or a
     write-back and a fresh test INSERT) target the same destination org's
     next key_n at once. Task 1 item 4 says the write-back does not retry
-    on this — unlike the key-collision retry on test creation above."""
+    on this — unlike the key-collision retry on test creation above.
+
+    This is a REPRESENTATIVE failure, not the only one the write-back's
+    `except Exception` now catches (review round 1, Important 1): the
+    write-back turned two previously read-only branches into branches that
+    write, which is also deadlock/lock-timeout/serialization-failure/
+    dropped-connection territory. See
+    test_a_real_postgres_collision_still_leaves_the_run_recorded below for
+    a GENUINE Postgres-raised UniqueViolation, which this Python injection
+    cannot substitute for when what is under test is whether the SAVEPOINT
+    actually leaves the connection usable afterward."""
 
     def __init__(self, real):
         self._real = real
@@ -712,7 +722,84 @@ def test_a_write_back_collision_leaves_the_run_recorded_and_the_test_org_less(
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
         (test_id,)).fetchone()[0] is None, "the collision must not retry"
-    assert any("collision" in m for m in caplog.messages)
+    assert any("org write-back failed" in m for m in caplog.messages)
+
+
+def test_a_real_postgres_collision_still_leaves_the_run_recorded(reg):
+    """Review round 1, Important 3 ('cannot verify'): the Python injection
+    above proves the except branch runs; it proves nothing about psycopg's
+    transaction state, which is the entire reason the write-back uses a
+    SAVEPOINT (`with conn.transaction():`) in the first place. This drives
+    a GENUINE aborted subtransaction instead.
+
+    A second, independent connection to the same schema opens its own
+    transaction and INSERTs the exact (org_id, key_n) row the write-back is
+    about to compute for an empty 'org-a' bucket — (`'org-a'`, 1) — but does
+    NOT commit yet. record_start's write-back then computes the SAME key_n
+    (it cannot see the racer's uncommitted row) and tries to write it too;
+    Postgres blocks that statement on the racer's held row lock rather than
+    raising immediately. Only once the racer commits does the blocked
+    statement resume and get a REAL UniqueViolation from the server.
+
+    If the SAVEPOINT were missing or misplaced, the aborted subtransaction
+    would poison the rest of THIS connection's transaction, and the run
+    UPSERT that record_start issues immediately afterward — on that same
+    connection — would fail with psycopg's 'current transaction is
+    aborted' instead of succeeding. That the run row exists afterward is
+    the assertion that actually exercises the SAVEPOINT, not merely the
+    except clause around it."""
+    import threading
+    import time
+
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    racer = psycopg.connect(r.dsn, autocommit=False)
+    racer_inserted = threading.Event()
+    release_racer = threading.Event()
+
+    def _hold_the_key():
+        try:
+            racer.execute(
+                "INSERT INTO tests (test_id, org_id, key_n, current_version)"
+                " VALUES (%s, 'org-a', 1, 1)", (str(uuid.uuid4()),))
+            racer_inserted.set()
+            release_racer.wait(timeout=5)
+            racer.commit()
+        finally:
+            racer.close()
+
+    racer_thread = threading.Thread(target=_hold_the_key)
+    racer_thread.start()
+    assert racer_inserted.wait(timeout=5), "racer never inserted its row"
+
+    def _release_shortly_after():
+        # Give record_start's UPDATE time to reach Postgres and block on
+        # the racer's row lock before the racer resolves it.
+        time.sleep(0.3)
+        release_racer.set()
+
+    releaser = threading.Thread(target=_release_shortly_after)
+    releaser.start()
+
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+
+    racer_thread.join(timeout=5)
+    releaser.join(timeout=5)
+
+    # The run must still be written, on the SAME connection the aborted
+    # write-back ran on -- this is what a missing/misplaced SAVEPOINT would
+    # break (either no row at all, or the pool raising on the next use).
+    assert admin.execute(
+        "SELECT count(*) FROM test_runs WHERE run_id = 'run-1'"
+    ).fetchone()[0] == 1
+    assert _row(admin, "run-1")[2] == "org-a", (
+        "the run must still get the caller's org")
+    # The racer's row won the (org_id, key_n) slot; the test stays NULL.
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None
 
 
 def test_the_write_back_is_redone_after_the_folder_vanished_retry(reg):
