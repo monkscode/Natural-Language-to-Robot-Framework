@@ -342,11 +342,13 @@ def detach_run(conn, workflow_id: str) -> None:
         # the cascade reaching someone else's. The NOT EXISTS is what makes
         # this safe, by refusing to delete a test another run still uses.
         #
-        # No live path shares a test between two runs today (the bench never
-        # sets rerun_of, and _attach_test mints a fresh test per run with no
-        # go-forward dedup), so this deletes exactly as before. P2 is where
-        # sharing becomes ordinary, and a bench sweep must not be able to
-        # take a user's history with it then.
+        # Two runs DO share a test today wherever one is a re-run of the
+        # other: _attach_test's rerun branch looks the source up and returns
+        # its test_id. What keeps the bench clear of that is only that the
+        # bench never sets rerun_of, so no bench run is ever the sharer and
+        # this deletes exactly as before. That is a property of the bench,
+        # not of the schema, and it is NOT what makes the delete safe --
+        # the NOT EXISTS is. P2 makes sharing ordinary beyond re-runs.
         cur = conn.execute(
             "DELETE FROM tests t WHERE t.test_id = %s"
             " AND NOT EXISTS (SELECT 1 FROM test_runs r"

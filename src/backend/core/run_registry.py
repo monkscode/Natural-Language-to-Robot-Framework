@@ -1662,19 +1662,28 @@ class RunRegistry:
         no number.
 
         Neither is reachable on the owner's current database (measured:
-        0 folders, 46 runs, none filed). The FIRST is reachable in the
-        suite, and is asserted there: the runs in
-        tests/test_core/test_run_registry_visibility_join.py carry
-        robot_code and therefore tests, and
-        test_filing_one_result_publishes_its_siblings files one of two runs
-        that share a test and pins the folder at run_count 2. The second is
-        not produced anywhere in the suite — the only case filing two
-        siblings into two different folders,
-        test_groups.py::test_a_rerun_filed_somewhere_else_stays_there, seeds
-        without robot_code, so neither run has a test to move. Both ARE
-        reachable on migrated data, because the migration gives a test the
-        folder of its newest filed run while that test's other runs keep
-        their own."""
+        0 folders, 46 runs, none filed). Both ARE reachable on migrated
+        data, because the migration gives a test the folder of its newest
+        filed run while that test's other runs keep their own.
+
+        The suite produces both today. The first is also ASSERTED, by
+        test_run_registry_visibility_join.py::
+        test_filing_one_result_publishes_its_siblings, which files one of
+        two runs sharing a test and pins the folder at run_count 2.
+
+        The second is produced but NOT asserted, by
+        test_rerun_group_inheritance.py::
+        test_chain_rerun_follows_the_immediate_source_not_the_original: it
+        files a run into F, then files that run's re-run — which SHARES its
+        test, see the rerun branch of _attach_test — into G, so from that
+        point the first run answers for G. The test never looks at F again;
+        it is about lineage. Anyone wanting to pin the displacement has the
+        shape already built there.
+
+        What gives those two runs a test to move is that its _seed_run
+        passes robot_code. Do not generalise that: most folder tests seed
+        deliberately WITHOUT robot_code, so their runs have no test at all
+        and exercise the COALESCE fallback instead."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False

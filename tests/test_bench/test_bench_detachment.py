@@ -75,10 +75,11 @@ def test_detaching_a_run_cannot_destroy_a_run_that_shares_its_test(schema):
     Deletion order protects nothing: the bench run's own row is already gone,
     and the cascade still reaches the run that stayed behind.
 
-    Nothing produces this shape today — the bench never sets rerun_of and
-    _attach_test mints a fresh test per run — but P2 is where two runs share
-    one, and a bench sweep must not be able to delete a user's history when
-    it does.
+    Two runs already share a test today wherever one is a re-run of the
+    other: _attach_test's rerun branch returns the source's test_id. The
+    bench never sets rerun_of, so its own runs are never the sharer — but
+    that is a property of the bench, not of the schema, and a bench sweep
+    must not be able to delete a user's history the day it changes.
     """
     name, conn, admin = schema
     _share_one_test(conn, ["bench-1", "keep-me"])
