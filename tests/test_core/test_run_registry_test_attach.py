@@ -248,6 +248,75 @@ def test_an_ordinary_run_is_not_flagged(reg):
     assert _row(admin, "run-1")[3] is False
 
 
+def test_the_admin_flag_is_write_once_across_a_re_upsert(reg):
+    """Task 2 corner case: a user promoted to admin between the opening
+    'running' row and the terminal write. ran_as_platform_admin is write-once
+    by OMISSION from the ON CONFLICT body (record_start's own docstring), so
+    the row must keep the value from the write that CREATED it, not the
+    caller's later authority."""
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "running")
+    assert _row(admin, "run-1")[3] is False
+
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="c",
+                   is_platform_admin=True)
+    assert _row(admin, "run-1")[3] is False, (
+        "ran_as_platform_admin must stay False — set on the write that "
+        "created the row, not a later one")
+
+
+def test_a_platform_admin_does_not_write_back_the_org_on_the_existing_branch(reg):
+    """Owner ruling, 2026-09-08 (Task 2 item 6). The write-back guard is
+    about authority, not identity: when the caller holds platform-admin
+    authority, _attach_test must skip _write_back_org — the run's OWN org
+    still lands on the row exactly as before, only the TEST is left alone.
+
+    Reached through the 'existing' branch: the row's own test_id is already
+    attached (a second upsert of the same run_id), and the joined test's org
+    is NULL."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert _row(admin, "run-1")[2] is None
+
+    admin_user = {"user_id": "root", "org_id": "org-ADMIN", "email": "r@x.com"}
+    r.record_start("run-1", admin_user, "q", "running", robot_code="code-1",
+                   is_platform_admin=True)
+
+    # Accepted cost: the test stays org-less forever.
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+    # ...but the RUN still takes the admin's own org. Nothing regresses.
+    assert _row(admin, "run-1")[2] == "org-ADMIN"
+
+
+def test_a_platform_admin_does_not_write_back_the_org_on_the_rerun_branch(reg):
+    """Same guard, the rerun_of branch: a platform admin re-running another
+    caller's org-less test must not claim it either."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    source_test = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone()[0] is None
+
+    admin_user = {"user_id": "root", "org_id": "org-ADMIN", "email": "r@x.com"}
+    r.record_start("run-2", admin_user, "q", "running",
+                   robot_code="code-1", rerun_of="run-1",
+                   is_platform_admin=True)
+
+    test_id, _, org_id, flag = _row(admin, "run-2")
+    assert test_id == source_test
+    assert org_id == "org-ADMIN"     # the RUN still takes the admin's org
+    assert flag is True
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone() == (None, 1), (
+        "a platform admin's write-back must be skipped — the test stays "
+        "org-less")
+
+
 def test_a_token_less_run_still_gets_a_test(reg):
     """The bench and AUTH_ENFORCED=false. org_id is NULL, which is exactly why
     tests.org_id is nullable."""

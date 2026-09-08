@@ -417,6 +417,261 @@ class TestStreamExecuteOnly:
         assert len(events) > 0
 
 
+class TestPlatformAdminFlagWiring:
+    """D7's ran_as_platform_admin is wired here (Task 2): workflow_service
+    calls is_validated_admin(user) ONCE per request and threads the result to
+    every _record_run call that request makes. Once, not once per call,
+    because is_validated_admin re-reads the users table on every invocation
+    (auth/history_scope.py's own module docstring says so).
+
+    stream_generate_only and stream_generate_and_run share the exact opening
+    row and generation-failure plumbing (_make_start_recorder,
+    _record_generation_failure), so both of those call sites are pinned here,
+    driven through stream_generate_only alone. stream_generate_and_run's OWN
+    call site (its terminal 'running' write) and stream_execute_only's are
+    covered by the two classes below instead.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+    _MEMBER = {"user_id": "u-1", "email": "u1@x.com", "role": "user"}
+
+    def _run(self, events, user=None, admin_side_effect=None):
+        """Drive stream_generate_only, collecting every _record_run call's
+        kwargs plus how many times is_validated_admin was invoked."""
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            if admin_side_effect is not None:
+                raise admin_side_effect
+            return u is not None and u.get("role") == "admin"
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service.is_validated_admin",
+                   side_effect=_count_admin_calls), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, admin_calls["n"], sse
+
+    def test_a_validated_admins_opening_row_is_flagged(self):
+        """The opening-row call site, inside _make_start_recorder."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert calls[0]["status"] == "running"
+        assert calls[0]["is_platform_admin"] is True
+
+    def test_an_ordinary_users_opening_row_is_not_flagged(self):
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=self._MEMBER,
+        )
+        assert calls[0]["is_platform_admin"] is False
+
+    def test_the_token_less_dev_caller_is_never_flagged_admin(self):
+        """user=None is the AUTH_ENFORCED=false dev caller. is_validated_admin
+        short-circuits on `not user` and must return False, not raise."""
+        calls, _, sse = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=None,
+        )
+        assert all(c["is_platform_admin"] is False for c in calls)
+        assert any("complete" in str(e) for e in sse)
+
+    def test_the_terminal_generated_row_carries_the_same_flag_as_the_opening_row(self):
+        """stream_generate_only's own terminal 'generated' call site."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert calls[0]["is_platform_admin"] is True
+        assert calls[1]["is_platform_admin"] is True
+
+    def test_is_validated_admin_is_called_once_per_request_not_once_per_write(self):
+        """The docstring's own reason: two writes in one request (opening +
+        terminal) must share ONE users-table lookup, not pay for it twice."""
+        _, admin_calls, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert admin_calls == 1
+
+    def test_the_generation_failure_row_carries_the_flag(self):
+        """The _record_generation_failure call site — synchronous, reached
+        from the _GenerationError except block."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "error", "message": "LLM offline", "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert [c["status"] for c in calls] == ["running", "error"]
+        assert calls[1]["is_platform_admin"] is True
+
+    def test_a_failure_computing_the_flag_falls_back_to_false_and_never_breaks_the_stream(self):
+        """Same discipline _record_run itself already lives by: bookkeeping
+        may never take the pipeline down. A raise inside is_validated_admin
+        must degrade to False, not propagate."""
+        calls, _, sse = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+            admin_side_effect=RuntimeError("users table unreachable"),
+        )
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert calls[0]["is_platform_admin"] is False
+        assert calls[1]["is_platform_admin"] is False
+        assert any("complete" in str(e) for e in sse)
+
+
+class TestStreamExecuteOnlyPlatformAdminFlag:
+    """stream_execute_only's own direct _record_run call site.
+
+    _stream_docker_execution is faked so this isolates stream_execute_only's
+    OWN bookkeeping call from Docker/artifact machinery, the same reasoning
+    TestRerunServiceWritesTheFolder (test_rerun_group_inheritance.py) and
+    TestExecuteRunIdFork (test_history_and_reports_access.py) already use.
+    """
+
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+    _MEMBER = {"user_id": "u-1", "email": "u1@x.com", "role": "user"}
+
+    def _execute(self, user, history_query=None, rerun_of=None, admin_side_effect=None):
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status,
+                          "user_query": user_query, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            if admin_side_effect is not None:
+                raise admin_side_effect
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: ok\n\n"
+
+        from src.backend.services import workflow_service as ws
+        with patch.object(ws, "_stream_docker_execution", fake_docker), \
+             patch.object(ws, "_record_run", side_effect=_capture), \
+             patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls):
+            async def consume():
+                async for _ in ws.stream_execute_only(
+                        "*** Test Cases ***\nT\n    Log    hi", user=user,
+                        history_query=history_query, rerun_of=rerun_of):
+                    pass
+            asyncio.run(consume())
+        return calls, admin_calls["n"]
+
+    def test_a_validated_admins_execute_row_is_flagged(self):
+        calls, admin_calls = self._execute(self._ADMIN)
+        assert calls[0]["is_platform_admin"] is True
+        assert admin_calls == 1
+
+    def test_an_ordinary_users_execute_row_is_not_flagged(self):
+        calls, _ = self._execute(self._MEMBER)
+        assert calls[0]["is_platform_admin"] is False
+
+    def test_the_rerun_path_carries_the_flag_alongside_history_query(self):
+        """Corner case: history_query stands in for user_query on this call
+        site. The admin flag rides beside it, computed independently."""
+        calls, _ = self._execute(
+            self._ADMIN, history_query="the original query", rerun_of="root-run-id")
+        assert calls[0]["user_query"] == "the original query"
+        assert calls[0]["rerun_of"] == "root-run-id"
+        assert calls[0]["is_platform_admin"] is True
+
+    def test_a_failure_computing_the_flag_falls_back_to_false(self):
+        calls, _ = self._execute(self._ADMIN, admin_side_effect=RuntimeError("boom"))
+        assert calls[0]["is_platform_admin"] is False
+
+
+class TestGenerateAndRunFlagWiring:
+    """stream_generate_and_run's OWN call site — the terminal 'running'
+    write issued before Docker execution starts. Its opening row and
+    generation-failure path reuse the exact same _make_start_recorder /
+    _record_generation_failure code already pinned by
+    TestPlatformAdminFlagWiring via stream_generate_only — this class only
+    needs to prove the direct call site plus the once-per-request property
+    hold for THIS entry point too.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+
+    def _run(self, user):
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: ok\n\n"
+
+        from src.backend.services import workflow_service as ws
+        with patch.object(ws, "run_agentic_workflow", return_value=iter([
+                {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+                {"status": "complete", "robot_code": "*** Test Cases ***",
+                 "workflow_id": self._WF_ID},
+             ])), \
+             patch.object(ws, "_record_run", side_effect=_capture), \
+             patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls), \
+             patch.object(ws, "_stream_docker_execution", fake_docker):
+
+            async def run_gen():
+                out = []
+                async for e in ws.stream_generate_and_run(
+                        "login to github", "gemini", "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, admin_calls["n"], sse
+
+    def test_the_terminal_running_row_is_flagged_for_a_validated_admin(self):
+        calls, admin_calls, _ = self._run(self._ADMIN)
+        # Opening row (_make_start_recorder, shared with stream_generate_only)
+        # + this function's own terminal row — both status='running'.
+        assert len(calls) == 2
+        assert all(c["is_platform_admin"] is True for c in calls)
+        assert admin_calls == 1
+
+
 class TestVertexCredentialValidation:
     """Tests for vertex provider credential validation in run_agentic_workflow."""
 

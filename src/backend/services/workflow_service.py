@@ -11,6 +11,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
@@ -1038,9 +1039,9 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
     swallowing alone.
 
     is_platform_admin becomes test_runs.ran_as_platform_admin (owner decision
-    D7), write-once on the row that CREATED it. It is NOT WIRED: every call
-    site below leaves it at False, so every production row reads False until
-    P2 threads the caller's role down to here.
+    D7), write-once on the row that CREATED it. Every call site in this
+    module passes the caller's is_validated_admin result here — computed once
+    per request, not once per call, by _compute_is_platform_admin below.
     """
     try:
         get_run_registry().record_start(
@@ -1051,6 +1052,29 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
+
+
+async def _compute_is_platform_admin(user: dict | None) -> bool:
+    """The caller's platform-admin authority, computed ONCE per request.
+
+    is_validated_admin re-reads the users table on every call
+    (auth/history_scope.py's own module docstring says so), so every entry
+    point below calls this exactly once and threads the result to every
+    _record_run call the request makes, rather than re-deriving it per write.
+
+    Never raises: a failure here must not break the run pipeline, the same
+    rule _record_run itself lives by, so it degrades to False (non-admin)
+    exactly as an unresolved caller would — is_validated_admin already fails
+    closed internally, but the thread hop is guarded here too, the same
+    reasoning _make_start_recorder's own try/except uses around its
+    to_thread call.
+    """
+    try:
+        return await asyncio.to_thread(is_validated_admin, user)
+    except Exception as e:
+        logging.error(
+            "[RUN_REGISTRY] platform-admin check failed; treating as non-admin: %s", e)
+        return False
 
 
 _ERROR_MESSAGE_MAX_CHARS = 2000
@@ -1068,7 +1092,8 @@ def _store_failure(result_store: dict, event: dict) -> None:
         result_store["workflow_id"] = event["workflow_id"]
 
 
-def _make_start_recorder(user: dict | None, user_query: str | None):
+def _make_start_recorder(user: dict | None, user_query: str | None,
+                         is_platform_admin: bool = False):
     """Return an async callback that opens a test_runs row at status 'running'.
 
     Without an opening row, a run that dies before either terminal path — the
@@ -1080,6 +1105,10 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
     'running' is not a new status: the execute path already writes it. The
     terminal upsert overwrites it, and record_start COALESCEs ownership and
     query, so the later write fills in anything missing here.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
     """
     async def _record(workflow_id: str) -> None:
         try:
@@ -1088,7 +1117,8 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
             logging.warning("[RUN_REGISTRY] non-UUID workflow_id at start; run not opened")
             return
         try:
-            await asyncio.to_thread(_record_run, run_id, user, user_query, "running")
+            await asyncio.to_thread(_record_run, run_id, user, user_query, "running",
+                                    is_platform_admin=is_platform_admin)
         except Exception as e:
             # _record_run swallows registry errors itself; this guards the hop
             # into the thread as well. Opening a row is bookkeeping — it must
@@ -1099,7 +1129,8 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
 
 
 def _record_generation_failure(result_store: dict, user: dict | None,
-                               user_query: str | None) -> None:
+                               user_query: str | None,
+                               is_platform_admin: bool = False) -> None:
     """Write a test_runs row for a run that never produced code.
 
     Without this a generation failure leaves no trace anywhere: the metrics
@@ -1108,6 +1139,10 @@ def _record_generation_failure(result_store: dict, user: dict | None,
 
     Status 'error' already exists in test_runs and in the SPA's RunStatus and
     filter list, so this adds no vocabulary and needs no UI change.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
     """
     wf_id = result_store.get("workflow_id")
     if not wf_id:
@@ -1119,7 +1154,8 @@ def _record_generation_failure(result_store: dict, user: dict | None,
         logging.warning("[RUN_REGISTRY] non-UUID workflow_id on failure; run not recorded")
         return
     _record_run(run_id, user, user_query, status="error",
-                error_message=result_store.get("error_message"))
+                error_message=result_store.get("error_message"),
+                is_platform_admin=is_platform_admin)
 
 
 def _set_run_status(run_id: str, status: str) -> None:
@@ -1383,6 +1419,8 @@ async def stream_generate_only(
     # while the LLM thread is still running.
     releaser = _SlotReleaser()
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
@@ -1391,10 +1429,11 @@ async def stream_generate_only(
         try:
             async for sse in _drain_generation_queue(
                     workflow_thread, q, result_store,
-                    on_workflow_id=_make_start_recorder(user, user_query)):
+                    on_workflow_id=_make_start_recorder(user, user_query, is_platform_admin)):
                 yield sse
         except _GenerationError:
-            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query, is_platform_admin)
             return
 
         # History row: a generate-only run is terminal at 'generated' until the
@@ -1404,7 +1443,8 @@ async def stream_generate_only(
             try:
                 await asyncio.to_thread(
                     _record_run, str(uuid.UUID(wf_id)), user, user_query, status="generated",
-                    robot_code=result_store.get("robot_code"))
+                    robot_code=result_store.get("robot_code"),
+                    is_platform_admin=is_platform_admin)
             except ValueError:
                 logging.warning("[RUN_REGISTRY] non-UUID workflow_id from generation; run not recorded")
 
@@ -1468,6 +1508,9 @@ async def stream_execute_only(
     # (happens when workflow_id is present but fails UUID validation).
     run_id = None
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
+
         # Validate or generate the run ID.
         # workflow_id comes from an untrusted request body; if present it must be a
         # canonical UUID4 string so it is safe to use as a directory name.
@@ -1498,7 +1541,8 @@ async def stream_execute_only(
         # owner/query attribution is write-once.
         await asyncio.to_thread(
             _record_run, run_id, user, history_query or user_query, status="running",
-            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id)
+            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
@@ -1530,6 +1574,8 @@ async def stream_generate_and_run(
     # (happens when UUID validation fails or generation errors before reaching execution).
     run_id = None
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
@@ -1539,10 +1585,11 @@ async def stream_generate_and_run(
         try:
             async for sse in _drain_generation_queue(
                     workflow_thread, q, result_store,
-                    on_workflow_id=_make_start_recorder(user, user_query)):
+                    on_workflow_id=_make_start_recorder(user, user_query, is_platform_admin)):
                 yield sse
         except _GenerationError:
-            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query, is_platform_admin)
             return
 
         robot_code = result_store["robot_code"]
@@ -1562,7 +1609,8 @@ async def stream_generate_and_run(
 
         # History row: generation is done and Docker execution starts now.
         await asyncio.to_thread(
-            _record_run, run_id, user, user_query, status="running", robot_code=robot_code)
+            _record_run, run_id, user, user_query, status="running", robot_code=robot_code,
+            is_platform_admin=is_platform_admin)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse

@@ -380,12 +380,12 @@ _SCHEMA_DDL = (
     # write (owner decision D7). Captured here and never joined live: the role
     # is evaluated per request, so a live join would let a demotion rewrite
     # history and a promotion retroactively re-badge past runs.
-    # NOT WIRED YET: record_start takes the flag, but its only production
-    # caller is workflow_service._record_run, whose own is_platform_admin
-    # defaults False and which no call site passes it to. Every production row is
-    # therefore FALSE until P2 threads the caller's role through; the column
-    # and its write-once rule land now so that threading it is a one-line
-    # change rather than a schema change.
+    # WIRED (P2): every workflow_service._record_run call site passes the
+    # caller's is_validated_admin result, computed once per request by
+    # _compute_is_platform_admin. A row written before P2 landed still reads
+    # FALSE — record_start's own write-once-by-omission rule (its docstring
+    # and its SQL below) means this only ever affects rows created from here
+    # on, never rewrites a past one.
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS"
     " ran_as_platform_admin BOOLEAN NOT NULL DEFAULT FALSE",
     # ADD CONSTRAINT is not idempotent and this tuple runs on every
@@ -840,6 +840,7 @@ class RunRegistry:
         robot_code: Optional[str],
         rerun_of: Optional[str],
         org_id: Optional[str],
+        is_platform_admin: bool = False,
     ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Resolve (test_id, test_version_id, org_id) for a run being written.
 
@@ -894,20 +895,25 @@ class RunRegistry:
         they represent at that moment, and nothing in this codebase ever
         un-writes tests.org_id once it is non-NULL (verified: the only two
         statements that ever set it, this one and backfill_org_ids', both
-        require the CURRENT value to be NULL first). From that write
-        onward, D6 gives every later result of this test the admin's org,
-        and so does get_run_owner().org_id — which is what attributes LLM
-        traces (trace_store.py) and learning records (workflow_service.py).
-        The test's learning signal and cost now belong to the admin's org
-        rather than whichever org its history actually came from, and the
-        first admin to touch it wins that permanently. No guard exists
-        against this here: gating it on the caller actually being a
-        platform admin needs this method to receive that fact, and it does
-        not — record_start's own is_platform_admin (D7) flag is used to
-        stamp `ran_as_platform_admin` and stops there; it is never passed
-        into this method. A guard checked against a bit this method cannot
-        see would be an inert, misleading comment, so none is written here;
-        the decision and the plumbing it needs are left to a later task.
+        require the CURRENT value to be NULL first). Left unguarded, that
+        write would let D6 give every later result of this test the
+        writer's org, and so would get_run_owner().org_id — which is what
+        attributes LLM traces (trace_store.py) and learning records
+        (workflow_service.py) — permanently, to whichever org happened to
+        touch the test first rather than whichever org its history
+        actually came from. For a platform admin that org is arbitrary
+        relative to a test they do not otherwise belong to, so as of P2
+        (owner ruling, 2026-09-08) this method also takes
+        is_platform_admin — record_start passes its own D7 flag straight
+        through — and the existing-test branch and the rerun_of branch
+        below both skip `_write_back_org` when it is True. The RUN row
+        still takes the caller's org exactly as before (`resolved_org =
+        org_id` runs either way); only the TEST is left alone. Accepted
+        cost, stated plainly: a test reachable ONLY by a platform admin
+        now stays org-less forever — the status quo from before Task 1,
+        and no worse than it. An ordinary member reaching this same path
+        still repairs the test, because their org
+        is the only one that could legitimately own it.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -988,7 +994,11 @@ class RunRegistry:
         if existing and existing["test_id"]:
             resolved_org = existing["org_id"]
             if resolved_org is None and org_id is not None:
-                _write_back_org(existing["test_id"])
+                # Guard: authority, not identity (owner ruling, 2026-09-08 —
+                # see the docstring above). The RUN still takes the caller's
+                # org either way, on the next line.
+                if not is_platform_admin:
+                    _write_back_org(existing["test_id"])
                 resolved_org = org_id
             return (existing["test_id"], existing["test_version_id"],
                     resolved_org)
@@ -1023,7 +1033,9 @@ class RunRegistry:
                     version_id = ver["version_id"] if ver else None
                 resolved_org = src["org_id"]
                 if resolved_org is None and org_id is not None:
-                    _write_back_org(src["test_id"])
+                    # Same guard as the branch above.
+                    if not is_platform_admin:
+                        _write_back_org(src["test_id"])
                     resolved_org = org_id
                 return (src["test_id"], version_id, resolved_org)
 
@@ -1148,7 +1160,8 @@ class RunRegistry:
                 try:
                     test_id, test_version_id, org_id = self._attach_test(
                         conn, run_id, user_id, (user or {}).get("email"),
-                        user_query, robot_code, rerun_of, org_id)
+                        user_query, robot_code, rerun_of, org_id,
+                        is_platform_admin)
                 except Exception as e:
                     # Bookkeeping must never cost the history row. Roll the
                     # aborted sub-work back or the pool's COMMIT on exit takes
@@ -1205,7 +1218,8 @@ class RunRegistry:
                     try:
                         test_id, test_version_id, org_id = self._attach_test(
                             conn, run_id, user_id, (user or {}).get("email"),
-                            user_query, robot_code, rerun_of, org_id)
+                            user_query, robot_code, rerun_of, org_id,
+                            is_platform_admin)
                     except Exception as e:
                         conn.rollback()
                         test_id = test_version_id = None
