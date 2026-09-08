@@ -1301,7 +1301,8 @@ class RunRegistry:
         grouping key is (org_id, user_id, user_query), so it is single-org
         by construction and contributes no counterexample to this
         invariant). tests.group_id also mutates on its own ON DELETE SET
-        NULL when the folder goes (:1558-1559 documents it), and that direction
+        NULL when the folder goes (delete_group's own docstring documents
+        it), and that direction
         contributes no counterexample either — it only ever clears the
         column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
@@ -1583,20 +1584,20 @@ class RunRegistry:
         arm open to the identical leak, and that arm is reachable:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
-        `_fileable_group_id` (:785-831) validates an inherited
-        group_id against the caller's PRE-D6 org at :1112-1113,
-        `_attach_test`'s D6 rule (:858-877, rerun branch :993-1025)
+        `_fileable_group_id` validates an inherited group_id against the
+        caller's PRE-D6 org, called from record_start before its call to
+        `_attach_test`; `_attach_test`'s D6 paragraph (rerun_of branch)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:1114-1141) writes the pre-D6-checked
-        group_id beside the post-D6 org_id with nothing re-validating
-        the pair.
+        org, and record_start's own INSERT/UPSERT writes the
+        pre-D6-checked group_id beside the post-D6 org_id with nothing
+        re-validating the pair.
 
         Unscoped altogether, the test branch let a run in a genuinely
         FOREIGN org ride into the audit through a test it merely
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
-        gap: see _attach_test's NULL-org fallback paragraph,
-        run_registry.py:913-922). That gap is not new here:
+        gap: see _attach_test's NULL-org fallback paragraph). That gap
+        is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it

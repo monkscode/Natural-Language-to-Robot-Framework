@@ -317,8 +317,8 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
 
 def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     """F7: a test's runs can span two orgs (a documented, ordinary-flow-
-    reachable gap -- see _attach_test's NULL-org fallback paragraph,
-    run_registry.py:913-922). An org-a admin filing their OWN org-a run
+    reachable gap -- see _attach_test's NULL-org fallback paragraph in
+    run_registry.py). An org-a admin filing their OWN org-a run
     publishes the whole shared test, and a test-branch with no org term at
     all then names a run the caller has no authority over at all.
 
