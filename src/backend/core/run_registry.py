@@ -799,8 +799,8 @@ class RunRegistry:
 
         The org it is keyed on is the CALLER'S PRE-D6 ORG — the token's, or
         the one _lookup_org_id derives when the token carried none — and NOT
-        the org finally written on the row. record_start calls this at :1011,
-        before _attach_test at :1044, and _attach_test can hand back the
+        the org finally written on the row. record_start calls this before
+        its call to _attach_test, and _attach_test can hand back the
         TEST'S org instead (D6). So a group_id validated against org A can be
         written beside an org_id of org B, with nothing re-validating the
         pair. delete_group's docstring describes that gap at length and is
