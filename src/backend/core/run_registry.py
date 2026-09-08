@@ -427,10 +427,11 @@ _SCHEMA_DDL = (
     # exists — not "once in a database's life". On a fresh install it stays
     # true across every process start until a generation SUCCEEDS, because
     # record_start opens each run's row with robot_code NULL at generation
-    # START (workflow_service.py:1066, :1086) and _SCHEMA_DDL re-runs on every
-    # RunRegistry() construction. The guard therefore RE-ARMS whenever `tests`
-    # returns to empty, which P2's delete path makes reachable on a live
-    # database. That is why both branches below also require code: a run with
+    # START (workflow_service._make_start_recorder's opening write) and
+    # _SCHEMA_DDL re-runs on every RunRegistry() construction. The guard
+    # therefore RE-ARMS whenever `tests` returns to empty, which P2's delete
+    # path makes reachable on a live database. That is why both branches
+    # below also require code: a run with
     # nothing to version must never mint a test (D8), or _attach_test's
     # short-circuit on an existing test_id then denies the real code its
     # version for good.
@@ -879,8 +880,9 @@ class RunRegistry:
 
         The write-back's claim is PERMANENT and undisclosed to nobody: say
         so plainly rather than implying a safeguard that is not here. A
-        NULL-org test is reachable in production by three kinds of caller —
-        the AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
+        NULL-org test's rerun_of branch is reachable in production, through
+        `caller_can_access`, by three kinds of caller — the
+        AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
         `auth/ownership.py`), who has no org_id to write back with; a
         platform admin (rule 2), who does; and the row's own original
         owner, reclaiming it on a legacy token whose own org_id claim is
@@ -911,9 +913,13 @@ class RunRegistry:
         org_id` runs either way); only the TEST is left alone. Accepted
         cost, stated plainly: a test reachable ONLY by a platform admin
         now stays org-less forever — the status quo from before Task 1,
-        and no worse than it. An ordinary member reaching this same path
-        still repairs the test, because their org
-        is the only one that could legitimately own it.
+        and no worse than it. An ordinary member reaching the rerun_of
+        branch through `caller_can_access` still repairs the test, because
+        rule 5 admits only their own org. The existing-test branch sits
+        behind no such gate: `stream_execute_only`'s `workflow_id` reuse
+        forks to a fresh run id only on an owner mismatch and treats an
+        unowned run as reusable, so a member holding such an id can reach
+        that branch's write-back with no access predicate run at all.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return

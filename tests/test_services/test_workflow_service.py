@@ -562,7 +562,8 @@ class TestStreamExecuteOnlyPlatformAdminFlag:
     _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
     _MEMBER = {"user_id": "u-1", "email": "u1@x.com", "role": "user"}
 
-    def _execute(self, user, history_query=None, rerun_of=None, admin_side_effect=None):
+    def _execute(self, user, history_query=None, rerun_of=None, admin_side_effect=None,
+                is_platform_admin=None):
         calls = []
         admin_calls = {"n": 0}
 
@@ -587,7 +588,8 @@ class TestStreamExecuteOnlyPlatformAdminFlag:
             async def consume():
                 async for _ in ws.stream_execute_only(
                         "*** Test Cases ***\nT\n    Log    hi", user=user,
-                        history_query=history_query, rerun_of=rerun_of):
+                        history_query=history_query, rerun_of=rerun_of,
+                        is_platform_admin=is_platform_admin):
                     pass
             asyncio.run(consume())
         return calls, admin_calls["n"]
@@ -613,6 +615,17 @@ class TestStreamExecuteOnlyPlatformAdminFlag:
     def test_a_failure_computing_the_flag_falls_back_to_false(self):
         calls, _ = self._execute(self._ADMIN, admin_side_effect=RuntimeError("boom"))
         assert calls[0]["is_platform_admin"] is False
+
+    def test_a_pre_computed_flag_is_used_as_is_not_recomputed(self):
+        """Finding 1 (round 1 review): the rerun route now has its own
+        history_scope() answer in hand before calling in here, and must not
+        pay for a second is_validated_admin lookup. _MEMBER's own role would
+        compute False if asked, so seeing True proves the passed-in value won
+        rather than being overridden or ignored, and admin_calls == 0 proves
+        is_validated_admin was never invoked at all."""
+        calls, admin_calls = self._execute(self._MEMBER, is_platform_admin=True)
+        assert calls[0]["is_platform_admin"] is True
+        assert admin_calls == 0
 
 
 class TestGenerateAndRunFlagWiring:

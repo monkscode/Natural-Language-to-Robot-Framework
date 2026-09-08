@@ -906,6 +906,50 @@ def test_the_write_back_is_redone_after_the_folder_vanished_retry(reg):
     assert _row(admin, "run-1")[2] == "org-a"
 
 
+def test_a_platform_admin_does_not_write_back_after_the_folder_vanished_retry(reg):
+    """Task 2 item 6 review, finding 5. record_start's folder-vanished retry
+    calls _attach_test a SECOND time (see the test above): the write-back
+    guard must hold on THAT retried call too, not only on the first one that
+    gets rolled back. Without the flag threaded to both call sites, a platform
+    admin who only happens to hit this retry path — the folder-vanished race
+    is timing-dependent, not something the caller controls — would silently
+    claim the test despite the guard passing everywhere else.
+
+    org_id is "org-a" on both the folder and the caller (not "org-ADMIN" as
+    in the sibling guard tests) because _fileable_group_id only resolves a
+    group for a caller in the SAME org as the folder; a mismatched org would
+    make record_start drop group_id before the FK violation this test relies
+    on ever has a chance to fire."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None
+
+    gid = r.create_group("org-a", "alice", "Doomed")["group_id"]
+    real_guard = type(r)._fileable_group_id
+
+    def _delete_after_reading(self, group_id, org_id):
+        inherited = real_guard(self, group_id, org_id)
+        admin.execute("DELETE FROM run_groups WHERE group_id = %s",
+                      (group_id,))
+        return inherited
+
+    admin_user = {"user_id": "root", "org_id": "org-a", "email": "r@x.com"}
+    with patch.object(type(r), "_fileable_group_id", _delete_after_reading):
+        r.record_start("run-1", admin_user, "q", "running",
+                       robot_code="code-1", group_id=gid,
+                       is_platform_admin=True)
+
+    # Accepted cost survives the retry too: the test stays org-less.
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+    # ...but the RUN still takes the admin's own org. Nothing regresses.
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
 def test_d6_holds_after_a_representative_mix_of_mint_repair_and_rerun(reg):
     """Spec section 13 item 6's live check
     (SELECT count(*) FROM test_runs r JOIN tests te USING (test_id)

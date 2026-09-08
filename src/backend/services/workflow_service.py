@@ -1057,10 +1057,12 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
 async def _compute_is_platform_admin(user: dict | None) -> bool:
     """The caller's platform-admin authority, computed ONCE per request.
 
-    is_validated_admin re-reads the users table on every call
-    (auth/history_scope.py's own module docstring says so), so every entry
-    point below calls this exactly once and threads the result to every
-    _record_run call the request makes, rather than re-deriving it per write.
+    is_validated_admin only re-reads the users table when the token's own
+    role claim is already "admin" — every other caller returns False before
+    that read runs. It still costs a DB round trip for exactly the callers
+    who could be flagged, so every entry point below calls this once and
+    threads the result to every _record_run call the request makes, rather
+    than re-deriving it per write.
 
     Never raises: a failure here must not break the run pipeline, the same
     rule _record_run itself lives by, so it degrades to False (non-admin)
@@ -1456,7 +1458,7 @@ async def stream_generate_only(
 async def stream_execute_only(
     robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
     history_query: str | None = None, rerun_of: str | None = None,
-    group_id: str | None = None
+    group_id: str | None = None, is_platform_admin: bool | None = None
 ) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
@@ -1488,6 +1490,11 @@ async def stream_execute_only(
             no owner term in that check, and there should not be: D5 lets any
             org member re-run a published test, and their re-run stays in the
             folder.
+        is_platform_admin: Pre-computed platform-admin flag. The rerun route
+            (_rerun_from_history in api/endpoints.py) already has this from
+            its own history_scope() call and passes it here instead of
+            paying for a second one. None on every other caller, which
+            computes it below via _compute_is_platform_admin instead.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -1509,7 +1516,11 @@ async def stream_execute_only(
     run_id = None
     try:
         # Computed ONCE for this request — see _compute_is_platform_admin.
-        is_platform_admin = await _compute_is_platform_admin(user)
+        # The rerun route already has it from history_scope and passes it
+        # in above; every other caller leaves this None and pays for the
+        # computation here instead.
+        if is_platform_admin is None:
+            is_platform_admin = await _compute_is_platform_admin(user)
 
         # Validate or generate the run ID.
         # workflow_id comes from an untrusted request body; if present it must be a

@@ -325,9 +325,10 @@ def test_a_fresh_install_does_not_collapse_a_run_that_has_no_code_yet(scratch):
     every process start until a generation SUCCEEDS.
 
     record_start opens each run's row at generation START with robot_code
-    NULL (workflow_service.py:1066, :1086) and _SCHEMA_DDL re-runs on EVERY
-    RunRegistry() construction, so a second process booting inside that
-    window used to collapse a code-less run into a test — exactly what
+    NULL (workflow_service._make_start_recorder's opening write) and
+    _SCHEMA_DDL re-runs on EVERY RunRegistry() construction, so a second
+    process booting inside that window used to collapse a code-less run into
+    a test — exactly what
     _attach_test is written never to do under D8.
 
     The stray row is not the damage. _attach_test short-circuits on an

@@ -854,11 +854,12 @@ def _rerun_client(registry, user, validated_admin=False):
 
     async def fake_stream(robot_code, user_query=None, workflow_id=None,
                           user=None, history_query=None, rerun_of=None,
-                          group_id=None):
+                          group_id=None, is_platform_admin=None):
         captured.update(
             robot_code=robot_code, user_query=user_query,
             workflow_id=workflow_id, user=user, history_query=history_query,
             rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin,
         )
         yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
 
@@ -897,6 +898,10 @@ class TestRerunEndpoint:
         assert captured["user"] == _USER1
         # Lineage anchor: the new row links back to the source run.
         assert captured["rerun_of"] == _RID_OWNED
+        # Finding 1: the rerun route's own history_scope() call already
+        # re-validated this caller as non-admin; stream_execute_only must
+        # receive that answer rather than recompute it.
+        assert captured["is_platform_admin"] is False
 
     def test_chain_rerun_flattens_to_the_original(self, detail_seeded):
         # _RID_CHAIN is itself a re-run of _RID_OWNED. Re-running it must
@@ -933,6 +938,9 @@ class TestRerunEndpoint:
             _close_feedback(client)
         assert resp.status_code == 200
         assert captured["robot_code"] == "*** Code 2 ***"
+        # Finding 1: history_scope()'s re-validated admin flag must reach
+        # stream_execute_only, not be recomputed a second time downstream.
+        assert captured["is_platform_admin"] is True
 
     def test_run_without_stored_code_is_409(self, detail_seeded, tmp_path):
         from src.backend.core.artifact_store import LocalArtifactStore

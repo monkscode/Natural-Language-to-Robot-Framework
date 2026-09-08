@@ -135,7 +135,8 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
         stream_execute_only(robot_code, user=user,
                             history_query=source.get("user_query"),
                             rerun_of=learning_anchor,
-                            group_id=source.get("group_id")),
+                            group_id=source.get("group_id"),
+                            is_platform_admin=scope.is_admin),
         media_type=SSE_MEDIA_TYPE,
     )
 

@@ -130,7 +130,7 @@ def _rerun_client(registry, user, validated_admin=False):
 
     async def fake_stream(robot_code, user_query=None, workflow_id=None,
                           user=None, history_query=None, rerun_of=None,
-                          group_id=None):
+                          group_id=None, is_platform_admin=None):
         captured.update(robot_code=robot_code, user=user, rerun_of=rerun_of,
                         group_id=group_id)
         yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
