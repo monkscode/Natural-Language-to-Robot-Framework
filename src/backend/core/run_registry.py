@@ -3,9 +3,12 @@ Per-run history registry — who ran what, with what outcome.
 
 One `test_runs` row per workflow/run id, written from the SSE streaming
 generators in workflow_service:
-- record_start() when a run id becomes known (generation complete or Docker
-  execution starting) — an upsert that NEVER steals ownership: the first
-  writer's user/query attribution wins, later calls only advance the status.
+- record_start() at every point a run's row must exist: generation START
+  (workflow_service._make_start_recorder opens the row at 'running' with
+  robot_code NULL — the moment the collapse's re-arm reasoning below depends
+  on), a generation failure, generation complete, and Docker execution
+  starting. An upsert that NEVER steals ownership: the first writer's
+  user/query attribution wins, later calls only advance the status.
 - set_status() when the Docker result (passed/failed) or an error is known.
 
 Read by:
@@ -16,8 +19,14 @@ Read by:
 - /api/groups (api/groups_endpoints.py) — lists folders with run counts,
   creates/renames/deletes them, and files runs into them.
 
-Registry writes must never break the pipeline: every method swallows its own
-exceptions (mirrors the WorkflowMetricsCollector / learning-store discipline).
+Registry writes must never break the pipeline: record_start and set_status
+swallow their own exceptions, and so do the reads the authorization gates and
+the History table go through — get_owner, get_run_owner,
+get_run_owners_for_caller, list_runs, get_run (mirrors the
+WorkflowMetricsCollector / learning-store discipline). It is NOT every
+method: the run-groups CRUD below propagates deliberately — DuplicateGroupName
+and every 409/404 depend on the exception escaping — and the folder counts and
+list_groups beside it propagate too.
 get_owner() fails CLOSED — on any error it returns None, which the reports
 guard treats as "not yours".
 
@@ -77,15 +86,23 @@ _SCHEMA_DDL = (
     # here: this tuple runs on EVERY RunRegistry() construction (see
     # __init__), so one would delete every folder on each process start and
     # each test fixture, and would fail outright once the foreign key below
-    # references the table. There are exactly TWO exceptions, both below, and
-    # neither can destroy anything a user made: the pre-release per-user
-    # TABLE (0 rows, never shipped) is dropped by the guarded block below,
-    # because CREATE TABLE IF NOT EXISTS would otherwise silently keep the
-    # old column set; and the superseded visibility INDEXES are dropped by
-    # name inside the one-shot migration block, which carry no rows at all.
+    # references the table. Everything below that removes or rewrites an
+    # EXISTING run_groups object or row is one of FOUR things, each inside a
+    # one-shot block that returns early once its shape is gone, and none of
+    # which can lose a folder: the pre-release per-user TABLE (0 rows, never
+    # shipped) is dropped by the guarded block below, because CREATE TABLE IF
+    # NOT EXISTS would otherwise silently keep the old column set; the
+    # superseded visibility INDEXES are dropped by name inside the one-shot
+    # migration block and carry no rows at all; that same block then removes
+    # the `visibility` COLUMN itself; and it RENAMES the folders whose names
+    # collide once visibility is gone — the one statement here that rewrites
+    # a name a user typed, which is why it explains its tie-break at
+    # length. (Statements against OTHER tables are out of this rule's scope:
+    # the fk block below nulls dangling group_ids, and the collapse writes
+    # tests/test_versions/test_runs.)
     #
-    # ...and this is the ONE exception the comment above allows, because it
-    # cannot delete anything anyone made. A database that ran PR #94's
+    # ...and this is the first of the four the comment above allows, because
+    # it cannot delete anything anyone made. A database that ran PR #94's
     # pre-release branch still has the per-user run_groups
     # (group_id, name, user_id). CREATE TABLE IF NOT EXISTS is a no-op there,
     # so the partial indexes below fail with UndefinedColumn and
@@ -275,10 +292,15 @@ _SCHEMA_DDL = (
         -- constructing RunRegistry() against the same fresh schema can both
         -- pass it before either's ALTER commits, so the loser still reaches
         -- ADD CONSTRAINT and raises duplicate_object. The sibling CREATE
-        -- TABLE/INDEX IF NOT EXISTS statements in this tuple don't need this
-        -- — the server treats those as a no-op itself — but ADD CONSTRAINT
-        -- has no such built-in idempotence, so the race has to be caught
-        -- here by hand.
+        -- TABLE/INDEX IF NOT EXISTS statements are idempotent on a
+        -- SEQUENTIAL re-run, which is what makes this tuple safe to execute
+        -- on every construction -- but IF NOT EXISTS is not race-proof
+        -- either: measured on a fresh schema, two simultaneous constructions
+        -- failed 12 of 12 rounds on pg_class_relname_nsp_index /
+        -- pg_type_typname_nsp_index. Nothing here closes that race, and
+        -- closing it is out of scope. What is caught by hand below is only
+        -- ADD CONSTRAINT's own duplicate_object, which has no built-in
+        -- idempotence at all.
         BEGIN
           ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
             FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
@@ -342,7 +364,14 @@ _SCHEMA_DDL = (
         UNIQUE (test_id, n)
     )
     """,
-    # Results point at their test and at the version they actually ran.
+    # Results point at their test, and at the version they ran — with one
+    # known exception: EDIT-then-execute. record_start replaces robot_code
+    # newest-non-NULL-wins while _attach_test short-circuits on the run's
+    # existing test_id, so a run whose generated code was edited before
+    # execution holds the edited code against the GENERATED version's id.
+    # Minting a version on edit is P2's Update dialog, and P1 pins the current
+    # behaviour deliberately (test_run_registry_test_attach.py::
+    # test_an_edited_code_execution_does_not_mint_a_second_version).
     # Both stay NULLABLE: test_id IS NULL is a permanently legal state for a
     # generation that failed before any code existed (owner decision D8).
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_id TEXT",
@@ -351,6 +380,12 @@ _SCHEMA_DDL = (
     # write (owner decision D7). Captured here and never joined live: the role
     # is evaluated per request, so a live join would let a demotion rewrite
     # history and a promotion retroactively re-badge past runs.
+    # NOT WIRED YET: record_start takes the flag, but its only production
+    # caller is workflow_service._record_run, whose own is_platform_admin
+    # defaults False and which no call site passes it to. Every production row is
+    # therefore FALSE until P2 threads the caller's role through; the column
+    # and its write-once rule land now so that threading it is a one-line
+    # change rather than a schema change.
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS"
     " ran_as_platform_admin BOOLEAN NOT NULL DEFAULT FALSE",
     # ADD CONSTRAINT is not idempotent and this tuple runs on every
@@ -392,7 +427,7 @@ _SCHEMA_DDL = (
     # exists — not "once in a database's life". On a fresh install it stays
     # true across every process start until a generation SUCCEEDS, because
     # record_start opens each run's row with robot_code NULL at generation
-    # START (workflow_service.py:1067, :1086) and _SCHEMA_DDL re-runs on every
+    # START (workflow_service.py:1066, :1086) and _SCHEMA_DDL re-runs on every
     # RunRegistry() construction. The guard therefore RE-ARMS whenever `tests`
     # returns to empty, which P2's delete path makes reachable on a live
     # database. That is why both branches below also require code: a run with
@@ -470,8 +505,14 @@ _SCHEMA_DDL = (
         -- 0 groups lose their test, so 21/45/46 do not move.
         HAVING count(robot_code) > 0
         UNION ALL
-        -- NULL user_query never groups: NULL = NULL is unknown, so each such
-        -- run is its own test. Keyed by run_id rather than by the query.
+        -- A NULL user_query gets its OWN test per run. NOT because GROUP BY
+        -- separates NULLs -- it does not, Postgres groups them together
+        -- (SELECT q, count(*) FROM (VALUES (NULL),(NULL),('a')) v(q)
+        -- GROUP BY q returns (a,1) and (NULL,2)). They stay apart
+        -- STRUCTURALLY: branch 1 excludes them with user_query IS NOT NULL,
+        -- and this branch keys on run_id instead of the query. Acting on the
+        -- NULL = NULL reason and grouping them by query would merge every
+        -- pasted run in an org into one test.
         SELECT org_id, user_id, user_query, run_id, created_at, created_at
         FROM test_runs
         WHERE user_query IS NULL AND robot_code IS NOT NULL
@@ -758,8 +799,8 @@ class RunRegistry:
 
         The org it is keyed on is the CALLER'S PRE-D6 ORG — the token's, or
         the one _lookup_org_id derives when the token carried none — and NOT
-        the org finally written on the row. record_start calls this at :921,
-        before _attach_test at :954, and _attach_test can hand back the
+        the org finally written on the row. record_start calls this at :1011,
+        before _attach_test at :1044, and _attach_test can hand back the
         TEST'S org instead (D6). So a group_id validated against org A can be
         written beside an org_id of org B, with nothing re-validating the
         pair. delete_group's docstring describes that gap at length and is
@@ -818,8 +859,14 @@ class RunRegistry:
         platform admin can re-run another org's test, and today that writes the
         admin's org onto the row, which sends another org's learning signal
         into the admin's store (get_run_owner().org_id is what attributes it).
-        Returning the test's org makes tests.org_id = test_runs.org_id an
-        invariant rather than a coincidence.
+        It does NOT make tests.org_id = test_runs.org_id an invariant. The
+        NULL-org fallback described below repairs the RUN and never the TEST,
+        and nothing self-heals it: a token-less run, later re-run by an
+        identified caller, ends with run.org_id = org-a against
+        test.org_id NULL. backfill_org_ids' second UPDATE would repair that,
+        but it is gated behind the one-shot data_org_id_backfill marker, so it
+        never fires again on a database that has already completed it. A known
+        gap — delete_group's docstring is the authority on what it costs.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -1149,7 +1196,7 @@ class RunRegistry:
         grouping key is (org_id, user_id, user_query), so it is single-org
         by construction and contributes no counterexample to this
         invariant). tests.group_id also mutates on its own ON DELETE SET
-        NULL when the folder goes (:1366 documents it), and that direction
+        NULL when the folder goes (:1457-1458 documents it), and that direction
         contributes no counterexample either — it only ever clears the
         column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
@@ -1166,13 +1213,15 @@ class RunRegistry:
         a test no org-scoped read can reach. Fixing it belongs with that gap,
         not here.
 
-        This is the THIRD place publication is expressed in SQL, and the
-        second that cannot call _group_join: the join binds a caller's org
-        and this one binds run_org_id in the JOIN, so it hand-writes the same
-        COALESCE. get_run_owner is the other. Change what "published" means
-        in any of the three and change all three — a chip resolving a folder
-        differently from the table it labels is the whole defect this count
-        exists to make visible."""
+        This run_count join is one of the THREE places a RUN's folder is
+        expressed in SQL, and the second that cannot call _group_join: that
+        join binds a CALLER's org and this one binds run_org_id in the JOIN,
+        so it hand-writes the same COALESCE. get_run_owner is the third.
+        Change what "published" means in any of them and change all three — a
+        chip resolving a folder differently from the table it labels is the
+        whole defect this count exists to make visible. The test_count
+        subquery above is NOT in that trio: its rows are tests, so it reads
+        tests.group_id with no COALESCE, exactly like _group_join_for_tests."""
         if run_org_id is None:
             run_org_id = folder_org_id
         elif folder_org_id is None:
@@ -1429,11 +1478,11 @@ class RunRegistry:
         arm open to the identical leak, and that arm is reachable:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
-        `_fileable_group_id` (:718-764) validates an inherited
-        group_id against the caller's PRE-D6 org at :920-921,
-        `_attach_test`'s D6 rule (:791-796, rerun branch :821-833)
+        `_fileable_group_id` (:785-831) validates an inherited
+        group_id against the caller's PRE-D6 org at :1010-1011,
+        `_attach_test`'s D6 rule (:858-869, rerun branch :894-923)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:970-988) writes the pre-D6-checked
+        org, and the INSERT (:1012-1039) writes the pre-D6-checked
         group_id beside the post-D6 org_id with nothing re-validating
         the pair.
 
@@ -1441,8 +1490,8 @@ class RunRegistry:
         FOREIGN org ride into the audit through a test it merely
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
-        gap: see _attach_test's D6 fallback and
-        run_registry.py:791-794). That gap is not new here:
+        gap: see _attach_test's NULL-org fallback paragraph,
+        run_registry.py:875-884). That gap is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it
@@ -1704,6 +1753,17 @@ class RunRegistry:
         right answer; it is written down because P1 otherwise claims to move
         no number.
 
+        Both are AUTHORIZATION changes, not merely display ones. A run's
+        resolved folder is what feeds is_grouped into caller_can_access rule 3
+        at three gates — auth/jwt_utils.py for /reports,
+        api/history_endpoints.py for the detail row, api/endpoints.py for
+        re-run — so filing one result admits every member of the org to the
+        siblings' reports, which carry the credentials someone typed into the
+        script. Measured live: filing run a1 moved a peer from 403 to 404 on
+        siblings a2 and a3 — the gate began admitting him to /reports for runs
+        the filer never filed. A foreign-org caller stayed 403, so the org
+        boundary itself holds.
+
         Neither is reachable on the owner's current database (measured:
         0 folders, 46 runs, none filed). Both ARE reachable on migrated
         data, because the migration gives a test the folder of its newest
@@ -1802,11 +1862,13 @@ class RunRegistry:
     def _group_join(
         org_id: Optional[str], *, identified: bool = False
     ) -> Tuple[str, list]:
-        """(SQL, params) for the ONE folder join every read derives its
-        folder answers from: a row's folder tag is g.name, its folder id is
-        g.group_id, and "in no folder I can see" is g.group_id IS NULL.
-        _VISIBLE_RUN_SQL reads "published to me" off this same alias, so this
-        is also the only place the published half of visibility is expressed.
+        """(SQL, params) for the folder join every CALLER-SCOPED read over
+        test_runs derives its folder answers from: a row's folder tag is
+        g.name, its folder id is g.group_id, and "in no folder I can see" is
+        g.group_id IS NULL. _VISIBLE_RUN_SQL reads "published to me" off this
+        same alias, so this is where the published half of visibility is
+        expressed for those reads (see the accounting below for the sites that
+        express it themselves).
 
         Three forms. With an org it is that org's folders, which is the
         ordinary caller. Without one the answer depends on whether there is a
@@ -1832,10 +1894,20 @@ class RunRegistry:
         these placeholders sit earlier in the SQL text and psycopg binds %s
         strictly by position.
 
-        ONE other query expresses publication in SQL and cannot call this:
-        get_run_owner, which has no caller to bind and anchors to the run's
-        own org instead. Change what "published" means here and change it
-        there too.
+        Several reads here resolve folder membership in SQL, and they do not
+        all have to agree. THREE of them answer "which folder is this RUN in"
+        and must stay identical in that answer — this join,
+        get_run_owner (no caller to bind, so it anchors to the run's own org)
+        and list_groups' run_count join (which binds run_org_id in the JOIN).
+        Neither of those two can call this one, for exactly those reasons.
+        Change what "published" means for a run and change all three.
+
+        The rest differ ON PURPOSE and must not be dragged into that trio.
+        _group_join_for_tests and list_groups' test_count subquery read
+        tests.group_id with NO COALESCE, because their rows ARE the tests and
+        there is no run column to fall back to. delete_group's audit SELECT
+        reads BOTH columns as a UNION rather than a COALESCE, so it
+        over-reports one shape deliberately; its docstring says why.
 
         Since 2026-09-07 this join makes ONE HOP first: folder membership
         belongs to the TEST, so it reaches run_groups through tests, falling
@@ -1851,8 +1923,19 @@ class RunRegistry:
         # COALESCE, not a bare te.group_id: `test_id IS NULL` is a permanently
         # legal state (owner decision D8), and a run with no test would
         # otherwise be filable but never publishable — a silent no-op in the
-        # UI. The fallback is TRANSITIONAL: P2/P3 remove it once every run has
-        # a test.
+        # UI. assign_runs files by run_id and demands no test, so a code-less
+        # run really is filable. The fallback is therefore PERMANENT, not
+        # transitional: "once every run has a test" is unreachable while D8
+        # stands, so it can only go if the model changes.
+        #
+        # Which makes its cost permanent too, and worth stating. The COALESCE
+        # is an expression over a JOINED relation, so idx_test_runs_group
+        # cannot serve it. Measured on a 200k-run schema:
+        # /api/history?group=X goes from a 0.03 ms index scan to a 25.8 ms
+        # parallel seq scan of every run plus a full scan of `tests`, and
+        # /api/groups from 0.037 ms to 17.7 ms. The P2 option, noted and not
+        # taken here: mirror the test's folder down onto its runs, so reads
+        # can key on t.group_id alone and use the index again.
         hop = "LEFT JOIN tests te ON te.test_id = t.test_id "
         folder = "COALESCE(te.group_id, t.group_id)"
         if org_id is None:
@@ -1987,18 +2070,25 @@ class RunRegistry:
         caller's); anchoring to t.org_id here makes the pair mean exactly
         what list_runs' _group_join means for the same caller.
 
-        This is the ONE publication join that is not _group_join, and nothing
-        couples them but this sentence: _group_join binds a CALLER's org and
-        this binds the row's, so it cannot literally reuse it. Change either
-        notion of "published" and change both.
+        This is one of TWO run-publication joins that are not _group_join —
+        list_groups' run_count join is the other — and nothing couples the
+        three but this sentence: _group_join binds a CALLER's org, list_groups
+        binds run_org_id in its JOIN, and this binds the row's own, so neither
+        can literally reuse it. Change any of those notions of "published"
+        over runs and change all three.
 
         The folder is read through the run's TEST since 2026-09-07, matching
-        _group_join's hop and its transitional fallback to the run's own
+        _group_join's hop and its permanent COALESCE fallback to the run's own
         column. This must change in the SAME COMMIT as that join: this answer
         anchors /reports while the join anchors History, and a window where
         they disagree offers a row one of them then refuses. The ORG anchoring
-        is deliberately untouched — it stays the run's own org, which owner
-        decision D6 makes equal to its test's anyway."""
+        is deliberately untouched — it stays the RUN's own org. D6 aims at
+        tests.org_id = test_runs.org_id but does not achieve it: _attach_test's
+        NULL-org fallback repairs the run and never the test, so the two can
+        differ, and for a test whose runs span two orgs this method resolves
+        the shared folder for one of them and not the other. The run's org is
+        still the right anchor here, for the reason given above: it is what
+        makes this answer mean what _group_join means for the same caller."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(

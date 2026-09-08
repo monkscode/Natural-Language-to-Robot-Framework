@@ -153,13 +153,17 @@ def test_a_visible_test_predicate_exists_for_reads_over_tests(reg):
 
 
 def test_a_run_with_no_test_is_still_published_by_its_own_folder(reg):
-    """The transitional fallback. A run recorded with no robot_code never
-    creates a test (owner decision D8) and test_id IS NULL is a permanently
-    legal state — so the join must still fall back to the run's own column, or
-    such a row could be filed and never published: a silent no-op in the UI.
+    """The COALESCE fallback. A run recorded with no robot_code never creates
+    a test (owner decision D8) and test_id IS NULL is a permanently legal
+    state — so the join must still fall back to the run's own column, or such
+    a row could be filed and never published: a silent no-op in the UI.
 
-    This is what keeps the ~40 existing folder tests green, every one of which
-    seeds runs without robot_code. P2 removes both the fallback and this test.
+    It is what keeps the existing folder tests green: MOST of them seed runs
+    without robot_code, though not all — test_rerun_group_inheritance.py's
+    _seed_run passes it, which is what gives those runs a test at all. The
+    fallback is not transitional either: assign_runs files by run_id and needs
+    no test, so while D8 stands "every run has a test" is unreachable and
+    neither the fallback nor this test goes away (see _group_join).
     """
     r, admin = reg
     r.record_start("run-1", OWNER, "q", "generated")
@@ -313,8 +317,8 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
 
 def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     """F7: a test's runs can span two orgs (a documented, ordinary-flow-
-    reachable gap -- see _attach_test's D6 fallback and
-    run_registry.py:791-794). An org-a admin filing their OWN org-a run
+    reachable gap -- see _attach_test's NULL-org fallback paragraph,
+    run_registry.py:875-884). An org-a admin filing their OWN org-a run
     publishes the whole shared test, and a test-branch with no org term at
     all then names a run the caller has no authority over at all.
 

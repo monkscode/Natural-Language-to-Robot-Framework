@@ -1036,6 +1036,11 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
     get_run_registry() itself can raise on first use when Postgres is down, so
     the guard sits here rather than relying on the registry's internal
     swallowing alone.
+
+    is_platform_admin becomes test_runs.ran_as_platform_admin (owner decision
+    D7), write-once on the row that CREATED it. It is NOT WIRED: every call
+    site below leaves it at False, so every production row reads False until
+    P2 threads the caller's role down to here.
     """
     try:
         get_run_registry().record_start(

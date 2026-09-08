@@ -134,7 +134,12 @@ def test_a_code_less_run_attaches_but_produces_no_version(scratch):
 
 
 def test_null_queries_never_group_with_each_other(scratch):
-    """NULL never equals NULL, so two pasted runs stay two tests.
+    """Two pasted runs stay two tests — structurally, not because of NULL.
+
+    Postgres GROUP BY puts NULLs in ONE group, so "NULL never equals NULL"
+    would give the wrong answer here. They stay apart because the collapse's
+    first UNION branch excludes them (user_query IS NOT NULL) and its second
+    keys on run_id.
 
     A row-count assertion alone is blind to a swallow: if the only_run
     guard were ever deleted from the NULL branch, p1 and p2 would BOTH
@@ -320,7 +325,7 @@ def test_a_fresh_install_does_not_collapse_a_run_that_has_no_code_yet(scratch):
     every process start until a generation SUCCEEDS.
 
     record_start opens each run's row at generation START with robot_code
-    NULL (workflow_service.py:1067, :1086) and _SCHEMA_DDL re-runs on EVERY
+    NULL (workflow_service.py:1066, :1086) and _SCHEMA_DDL re-runs on EVERY
     RunRegistry() construction, so a second process booting inside that
     window used to collapse a code-less run into a test — exactly what
     _attach_test is written never to do under D8.

@@ -151,6 +151,12 @@ def list_groups(user: dict | None = Depends(require_user)):
     run_count is the folder's WHOLE contents, not the caller's slice of it —
     a folder belongs to the org, so its count does too. Scoping it per user
     was what put a member's chip at 1 beside a folder holding 2.
+
+    Each folder also carries test_count since the 2026-09-07 split: how many
+    TESTS are filed there, beside run_count's tally of RESULTS. Purely
+    additive — run_count keeps its name and its meaning — and passed straight
+    through from the registry, whose list_groups docstring is the authority on
+    why that subquery is deliberately not narrowed by the run scope.
     """
     scope = history_scope(user)
     reg = get_run_registry()
