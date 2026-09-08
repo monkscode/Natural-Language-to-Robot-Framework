@@ -846,16 +846,33 @@ class RunRegistry:
 
         if rerun_of:
             src = conn.execute(
-                "SELECT t.test_id, t.org_id, t.current_version"
+                "SELECT r.test_version_id, t.test_id, t.org_id,"
+                " t.current_version"
                 " FROM test_runs r JOIN tests t ON t.test_id = r.test_id"
                 " WHERE r.run_id = %s", (rerun_of,)).fetchone()
             if src:
-                ver = conn.execute(
-                    "SELECT version_id FROM test_versions"
-                    " WHERE test_id = %s AND n = %s",
-                    (src["test_id"], src["current_version"])).fetchone()
-                return (src["test_id"],
-                        ver["version_id"] if ver else None,
+                # The version the SOURCE RUN actually used, not the test's
+                # newest. A re-run re-executes that run's stored code verbatim
+                # (the rerun endpoint hands stream_execute_only
+                # resolve_robot_code(source)), so current_version labels the
+                # new run with code it never ran whenever the source is not
+                # the newest — measured live: a re-run of a version-1 run
+                # pointed at version 2. Reading the source's own column is
+                # right for a CHAIN too, because rerun_of is root-flattened by
+                # the caller and every link re-executes the original's code.
+                version_id = src["test_version_id"]
+                if version_id is None:
+                    # A code-less run the collapse attached (D8) has no
+                    # version. Re-running one is legal — resolve_robot_code
+                    # recovers the code from the artifact store — so fall back
+                    # to the test's current version rather than propagating
+                    # the NULL onto a run that did execute something.
+                    ver = conn.execute(
+                        "SELECT version_id FROM test_versions"
+                        " WHERE test_id = %s AND n = %s",
+                        (src["test_id"], src["current_version"])).fetchone()
+                    version_id = ver["version_id"] if ver else None
+                return (src["test_id"], version_id,
                         src["org_id"] if src["org_id"] is not None else org_id)
 
         if not robot_code:

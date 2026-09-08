@@ -122,6 +122,96 @@ def test_a_rerun_joins_its_source_test_and_adds_no_version(reg):
         (test_id,)).fetchone()[0]
 
 
+def _a_two_version_test(r, admin):
+    """Seed a test with two versions the only way P1 can produce one: by
+    letting a RunRegistry construction collapse pre-split rows.
+
+    _attach_test mints exactly one version per test and never a second, so no
+    sequence of record_start calls reaches two versions. Hand-inserting the
+    second test_versions row would work, but it would assert against a shape
+    built by the test rather than by the code; the collapse builds the shape
+    the live defect was found in — 7 of the owner's 21 migrated tests carry
+    two or more versions, one of them ten.
+
+    Three runs on one query: two with code (versions 1 and 2, chronological)
+    and one without, which D8 attaches carrying test_version_id NULL. Returns
+    (test_id, version 1, version 2)."""
+    admin.execute(
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " robot_code, status, org_id, created_at) VALUES"
+        " ('src-v1', 'alice', 'a@x.com', 'q', 'code-1', 'passed', 'org-a',"
+        " '2026-01-01T10:00:00Z'),"
+        " ('src-v2', 'alice', 'a@x.com', 'q', 'code-2', 'passed', 'org-a',"
+        " '2026-01-02T10:00:00Z'),"
+        " ('src-none', 'alice', 'a@x.com', 'q', NULL, 'error', 'org-a',"
+        " '2026-01-03T10:00:00Z')")
+    from src.backend.core.run_registry import RunRegistry
+    # r.dsn pins search_path to the fixture's throwaway schema, so this
+    # collapses the rows seeded above and nothing else.
+    RunRegistry(dsn=r.dsn).close()
+
+    test_id, v1, _, _ = _row(admin, "src-v1")
+    v2 = _row(admin, "src-v2")[1]
+    assert admin.execute(
+        "SELECT current_version FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] == 2
+    assert v1 is not None and v2 is not None and v1 != v2
+    assert _row(admin, "src-none")[1] is None
+    return test_id, v1, v2
+
+
+def test_a_rerun_names_the_version_whose_code_it_actually_runs(reg):
+    """A re-run re-executes the SOURCE RUN's stored code verbatim — the rerun
+    endpoint passes `resolve_robot_code(source)` — so the version it names
+    must be the one that code came from. Resolving the test's current_version
+    instead stamps the new run with a version it never ran: reproduced through
+    POST /execute-test on a live stack, where re-running a version-1 run
+    produced a row pointing at version 2."""
+    r, admin = reg
+    test_id, v1, _v2 = _a_two_version_test(r, admin)
+
+    r.record_start("rerun-1", USER_A, "q", "running",
+                   robot_code="code-1", rerun_of="src-v1")
+
+    run_test, version_id, _, _ = _row(admin, "rerun-1")
+    assert run_test == test_id
+    assert version_id == v1, "the re-run names a version it did not run"
+    ran, named = admin.execute(
+        "SELECT r.robot_code, v.robot_code FROM test_runs r"
+        " JOIN test_versions v ON v.version_id = r.test_version_id"
+        " WHERE r.run_id = 'rerun-1'").fetchone()
+    assert named == ran
+
+
+def test_a_rerun_of_the_newest_version_still_names_the_newest(reg):
+    """The half the current-version lookup got right, kept: when the source
+    run IS the newest, both readings agree and the answer must not move."""
+    r, admin = reg
+    _test_id, _v1, v2 = _a_two_version_test(r, admin)
+
+    r.record_start("rerun-2", USER_A, "q", "running",
+                   robot_code="code-2", rerun_of="src-v2")
+
+    assert _row(admin, "rerun-2")[1] == v2
+
+
+def test_a_rerun_of_a_code_less_run_falls_back_to_the_current_version(reg):
+    """D8's code-less run attaches to its test with test_version_id NULL, and
+    it is still re-runnable — resolve_robot_code falls back to the stored
+    test.robot artifact. Reading the source's NULL straight through would
+    leave the new run unversioned, so the current-version lookup has to stay
+    as the fallback."""
+    r, admin = reg
+    test_id, _v1, v2 = _a_two_version_test(r, admin)
+
+    r.record_start("rerun-3", USER_A, "q", "running",
+                   robot_code="recovered-code", rerun_of="src-none")
+
+    run_test, version_id, _, _ = _row(admin, "rerun-3")
+    assert run_test == test_id
+    assert version_id == v2, "a NULL source version must not become a NULL run"
+
+
 def test_a_cross_org_rerun_takes_the_org_of_the_test_not_the_caller(reg):
     """Owner decision D6. A platform admin re-running another org's test writes
     a result in the TEST's org, so tests.org_id = test_runs.org_id is an
