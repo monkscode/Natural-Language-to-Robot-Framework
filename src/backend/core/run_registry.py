@@ -859,14 +859,22 @@ class RunRegistry:
         platform admin can re-run another org's test, and today that writes the
         admin's org onto the row, which sends another org's learning signal
         into the admin's store (get_run_owner().org_id is what attributes it).
-        It does NOT make tests.org_id = test_runs.org_id an invariant. The
-        NULL-org fallback described below repairs the RUN and never the TEST,
-        and nothing self-heals it: a token-less run, later re-run by an
-        identified caller, ends with run.org_id = org-a against
-        test.org_id NULL. backfill_org_ids' second UPDATE would repair that,
-        but it is gated behind the one-shot data_org_id_backfill marker, so it
-        never fires again on a database that has already completed it. A known
-        gap — delete_group's docstring is the authority on what it costs.
+        When the test's own org_id is NULL and the caller's is not, the
+        NULL-org fallback described below now writes the caller's org onto
+        `tests` itself — renumbering key_n into the destination bucket —
+        before returning it, on both branches that read an existing test's
+        org, so the repair lands on the TEST and not only on the RUN: a
+        token-less run, later re-run by an identified caller, no longer
+        leaves test.org_id NULL forever. A write-back that loses a key_n
+        race to a concurrent one is logged and left NULL rather than
+        retried — the run itself still gets the correct org, and the next
+        caller to reach this test repeats the repair. This still does not
+        make tests.org_id = test_runs.org_id an unconditional invariant: a
+        test whose runs span two DIFFERENT, CONCRETE orgs can still exist
+        and diverge from a run written afterward — delete_group's and
+        list_groups' docstrings are the authority on that separate, known
+        gap, which this method does not touch: it only ever moves a test
+        OUT of the NULL bucket, never between two non-NULL orgs.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -882,14 +890,45 @@ class RunRegistry:
         inherits that NULL permanently, where before the split it self-healed
         on the next write. Returning the caller's org there does not weaken
         D6: the test still wins whenever it has an org to win with."""
+        def _write_back_org(existing_test_id: str) -> None:
+            # The test's own org is NULL and the caller's is not: repair the
+            # TEST here, not only the run being written, so this fallback
+            # does not have to fire again the next time this test is
+            # reached. key_n is renumbered in the same statement because it
+            # is half of idx_tests_org_key (UNIQUE (org_id, key_n) NULLS NOT
+            # DISTINCT) — the simple, single-test form of the window-function
+            # shape backfill_org_ids uses to move many tests at once, reading
+            # the destination bucket's current max(key_n). SAVEPOINT, exactly
+            # like the key-collision retry below, so a concurrent claim on
+            # the same key cannot take the run write down with it; on
+            # collision this does not retry — the run still gets org_id, the
+            # test stays NULL, and the next write repeats the repair.
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "UPDATE tests SET org_id = %s, key_n = coalesce("
+                        "(SELECT max(key_n) FROM tests"
+                        " WHERE org_id IS NOT DISTINCT FROM %s), 0) + 1,"
+                        " updated_at = now()"
+                        " WHERE test_id = %s AND org_id IS NULL",
+                        (org_id, org_id, existing_test_id))
+            except psycopg.errors.UniqueViolation:
+                logger.warning(
+                    "[RUN_REGISTRY] org write-back key collision for test "
+                    "%s -> org %s; leaving test org-less",
+                    existing_test_id, org_id)
+
         existing = conn.execute(
             "SELECT r.test_id, r.test_version_id, t.org_id"
             " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
             " WHERE r.run_id = %s", (run_id,)).fetchone()
         if existing and existing["test_id"]:
+            resolved_org = existing["org_id"]
+            if resolved_org is None and org_id is not None:
+                _write_back_org(existing["test_id"])
+                resolved_org = org_id
             return (existing["test_id"], existing["test_version_id"],
-                    existing["org_id"] if existing["org_id"] is not None
-                    else org_id)
+                    resolved_org)
 
         if rerun_of:
             src = conn.execute(
@@ -919,8 +958,11 @@ class RunRegistry:
                         " WHERE test_id = %s AND n = %s",
                         (src["test_id"], src["current_version"])).fetchone()
                     version_id = ver["version_id"] if ver else None
-                return (src["test_id"], version_id,
-                        src["org_id"] if src["org_id"] is not None else org_id)
+                resolved_org = src["org_id"]
+                if resolved_org is None and org_id is not None:
+                    _write_back_org(src["test_id"])
+                    resolved_org = org_id
+                return (src["test_id"], version_id, resolved_org)
 
         if not robot_code:
             # D8 scenario (a): no code, no test.
@@ -1479,10 +1521,10 @@ class RunRegistry:
         record_start's rerun path can write a row whose own group_id
         names THIS folder while its org_id names a different org —
         `_fileable_group_id` (:785-831) validates an inherited
-        group_id against the caller's PRE-D6 org at :1010-1011,
-        `_attach_test`'s D6 rule (:858-869, rerun branch :894-923)
+        group_id against the caller's PRE-D6 org at :1052-1053,
+        `_attach_test`'s D6 rule (:858-877, rerun branch :933-965)
         then reassigns the row's FINAL org_id to the shared test's own
-        org, and the INSERT (:1012-1039) writes the pre-D6-checked
+        org, and the INSERT (:1054-1081) writes the pre-D6-checked
         group_id beside the post-D6 org_id with nothing re-validating
         the pair.
 
@@ -1491,7 +1533,7 @@ class RunRegistry:
         shares with a run the caller legitimately filed — a test's
         runs can span two orgs (a documented, ordinary-flow-reachable
         gap: see _attach_test's NULL-org fallback paragraph,
-        run_registry.py:875-884). That gap is not new here:
+        run_registry.py:883-892). That gap is not new here:
         list_groups' own docstring names this same shape for its
         test_count subquery and declines to fix it there ("Fixing it
         belongs with that gap, not here"). list_groups resolves it
@@ -2083,12 +2125,13 @@ class RunRegistry:
         anchors /reports while the join anchors History, and a window where
         they disagree offers a row one of them then refuses. The ORG anchoring
         is deliberately untouched — it stays the RUN's own org. D6 aims at
-        tests.org_id = test_runs.org_id but does not achieve it: _attach_test's
-        NULL-org fallback repairs the run and never the test, so the two can
-        differ, and for a test whose runs span two orgs this method resolves
-        the shared folder for one of them and not the other. The run's org is
-        still the right anchor here, for the reason given above: it is what
-        makes this answer mean what _group_join means for the same caller."""
+        tests.org_id = test_runs.org_id, and _attach_test's NULL-org fallback
+        now repairs the test as well as the run in the common case, but the
+        two can still differ for a test whose runs span two orgs, and for
+        such a test this method resolves the shared folder for one of them
+        and not the other. The run's org is still the right anchor here, for
+        the reason given above: it is what makes this answer mean what
+        _group_join means for the same caller."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(

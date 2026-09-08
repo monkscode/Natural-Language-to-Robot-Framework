@@ -371,9 +371,9 @@ def test_a_second_key_collision_gives_up_without_losing_the_run(reg):
 def test_the_caller_org_fills_in_when_the_reruns_source_test_has_none(reg):
     """Spec section 10 case 35, rerun branch. A test can carry org_id NULL —
     the collapse mints one for every org-less row, and _lookup_org_id
-    swallowing a failure writes one on the upsert that creates the test. D6
-    would then hand that NULL to every later run of it, and the run would drop
-    out of org-scoped History permanently."""
+    swallowing a failure writes one on the upsert that creates the test.
+    This now repairs the TEST as well as the run: the source test's own
+    org_id must not still be NULL once an identified caller reruns it."""
     r, admin = reg
     r.record_start("run-1", None, "q", "generated", robot_code="code-1")
     source_test = _row(admin, "run-1")[0]
@@ -387,39 +387,61 @@ def test_the_caller_org_fills_in_when_the_reruns_source_test_has_none(reg):
     test_id, _, org_id, _ = _row(admin, "run-2")
     assert test_id == source_test          # D6 still binds the run to the test
     assert org_id == "org-a"               # ...but a NULL org cannot win
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone() == ("org-a", 1), (
+        "the source test itself must be repaired, not only the new run")
 
 
 def test_the_caller_org_fills_in_when_the_rows_own_test_has_none(reg):
     """Same rule, the idempotent branch — the second and third upsert of one
     run read the test's org back rather than the caller's, so the NULL has to
     be caught on that path too or the run is org-less from its second write
-    onward."""
+    onward. This now repairs the TEST itself on the second call, and the
+    third call — where the test is no longer NULL — must be a no-op rather
+    than a second write-back (no error, key_n untouched)."""
     r, admin = reg
     r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
     assert _row(admin, "run-1")[2] is None
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
 
     # Same run, now with an identified caller (a login that failed to resolve
     # an org on the first write is exactly how this arises).
     r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
 
-    # org_id is write-once on the row, so the repair the fallback enables is
-    # visible in what _attach_test hands the upsert, not in the stored value.
-    with r._pool.connection() as conn:
-        _, _, resolved = r._attach_test(
-            conn, "run-1", "alice", "a@x.com", "q", "code-1", None, "org-a")
-    assert resolved == "org-a"
+    assert _row(admin, "run-1")[2] == "org-a"
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1)
+
+    # Third upsert of the same run (execute-start): the test's org is no
+    # longer NULL, so this must be a no-op, not a second write-back attempt.
+    r.record_start("run-1", USER_A, "q", "passed", robot_code="code-1")
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1)
 
 
 def test_the_test_org_still_wins_when_it_has_one(reg):
-    """The fallback must not become 'the caller wins' — that would undo D6."""
+    """The fallback must not become 'the caller wins' — that would undo D6.
+    No write-back may be attempted at all here: the test already has an
+    org, so it must be untouched (org_id AND key_n) after a cross-org
+    platform-admin rerun tries to claim it."""
     r, admin = reg
     r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
 
     with r._pool.connection() as conn:
         _, _, resolved = r._attach_test(
             conn, "run-2", "root", "r@x.com", "q", "code-1", "run-1",
             "org-ADMIN")
     assert resolved == "org-a"
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1), "org-ADMIN must not win"
 
 
 def test_the_backfill_carries_the_org_onto_the_test_not_only_the_run(reg):
@@ -571,3 +593,181 @@ def test_a_failed_tests_backfill_does_not_discard_the_runs_backfill(reg):
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
         (test_id,)).fetchone()[0] is None
+
+
+def test_no_write_back_when_neither_caller_nor_the_test_has_an_org(reg):
+    """Task 1 corner case: a token-less caller reaches a test that is
+    already org-less (the bench, or AUTH_ENFORCED=false). The write-back
+    guard is `org_id is not None`, and here the caller's org_id is also
+    None, so nothing is written and nothing raises."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    r.record_start("run-1", None, "q", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+    assert _row(admin, "run-1")[2] is None
+
+
+def test_no_write_back_when_the_caller_has_none_but_the_test_already_does(reg):
+    """Task 1 corner case: an identified caller mints the test; a later
+    token-less caller of the SAME run (e.g. a retry that lost its token)
+    must not blank the test's org or touch key_n — the test's own org
+    already wins, unchanged. Same rule as
+    test_the_test_org_still_wins_when_it_has_one, but reached through the
+    short-circuit branch instead of rerun_of."""
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    r.record_start("run-1", None, "q", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1)
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
+def test_the_write_back_renumbers_key_n_into_an_occupied_org_bucket(reg):
+    """Task 1, item 2: org_id is half of idx_tests_org_key (UNIQUE
+    (org_id, key_n) NULLS NOT DISTINCT), so moving a test out of the NULL
+    bucket into an org that already holds key_n 1 and 2 must land on 3, not
+    collide, and not raise."""
+    r, admin = reg
+    r.record_start("run-a", USER_A, "q1", "generated", robot_code="c")
+    r.record_start("run-b", USER_A, "q2", "generated", robot_code="c")
+    assert sorted(k for (k,) in admin.execute(
+        "SELECT key_n FROM tests WHERE org_id = 'org-a'"
+    ).fetchall()) == [1, 2]
+
+    r.record_start("run-1", None, "q3", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+
+    r.record_start("run-1", USER_A, "q3", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 3)
+    assert sorted(k for (k,) in admin.execute(
+        "SELECT key_n FROM tests WHERE org_id = 'org-a'"
+    ).fetchall()) == [1, 2, 3], "the move must not collide with the occupied bucket"
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
+class _CollidesOnceOnOrgWriteBack:
+    """A connection wrapper whose FIRST org write-back UPDATE raises
+    UniqueViolation, exactly as Postgres does when two write-backs (or a
+    write-back and a fresh test INSERT) target the same destination org's
+    next key_n at once. Task 1 item 4 says the write-back does not retry
+    on this — unlike the key-collision retry on test creation above."""
+
+    def __init__(self, real):
+        self._real = real
+        self.collisions = 0
+
+    def execute(self, sql, params=None):
+        if "UPDATE tests SET org_id" in sql and self.collisions == 0:
+            self.collisions += 1
+            raise psycopg.errors.UniqueViolation(
+                'duplicate key value violates unique constraint'
+                ' "idx_tests_org_key"')
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_write_back_collision_leaves_the_run_recorded_and_the_test_org_less(
+        reg, caplog):
+    """Task 1 item 4: a concurrent claim on the destination org's next
+    key_n must not take the run write down with it, and must not spin
+    retrying either — the run still gets the caller's org, the test stays
+    NULL, and the next write to reach it repeats the repair."""
+    import logging
+
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    real_attach = type(r)._attach_test
+    seen = {}
+
+    def _through_a_colliding_connection(self, conn, *args, **kwargs):
+        wrapper = seen.setdefault("conn", _CollidesOnceOnOrgWriteBack(conn))
+        return real_attach(self, wrapper, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING, logger="src.backend.core.run_registry"), \
+            patch.object(type(r), "_attach_test", _through_a_colliding_connection):
+        r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+
+    assert seen["conn"].collisions == 1
+    assert _row(admin, "run-1")[2] == "org-a", (
+        "the run must still get the caller's org")
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None, "the collision must not retry"
+    assert any("collision" in m for m in caplog.messages)
+
+
+def test_the_write_back_is_redone_after_the_folder_vanished_retry(reg):
+    """Task 1's seventh corner case. record_start's folder-vanished retry
+    calls _attach_test a SECOND time after a bare conn.rollback() — a full
+    rollback, not a savepoint, so it discards everything the first attempt
+    did on this connection, including a write-back UPDATE (the same reason
+    it discards a freshly minted test/version row; record_start's own
+    comment on the retry explains why). The second attempt must redo the
+    repair rather than leave the test org-less because the first one was
+    rolled back with everything else."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None
+
+    gid = r.create_group("org-a", "alice", "Doomed")["group_id"]
+    real_guard = type(r)._fileable_group_id
+
+    def _delete_after_reading(self, group_id, org_id):
+        inherited = real_guard(self, group_id, org_id)
+        admin.execute("DELETE FROM run_groups WHERE group_id = %s",
+                      (group_id,))
+        return inherited
+
+    with patch.object(type(r), "_fileable_group_id", _delete_after_reading):
+        r.record_start("run-1", USER_A, "q", "running",
+                       robot_code="code-1", group_id=gid)
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1)
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
+def test_d6_holds_after_a_representative_mix_of_mint_repair_and_rerun(reg):
+    """Spec section 13 item 6's live check
+    (SELECT count(*) FROM test_runs r JOIN tests te USING (test_id)
+     WHERE r.org_id IS DISTINCT FROM te.org_id, IS DISTINCT FROM because
+    both sides can be NULL), run against a converged mix: an org-less
+    mint, an org-bearing mint, a write-back repair, and a rerun taken AFTER
+    the repair. The one case that is NOT reproduced here is the deliberate
+    write-back collision above, which is a known, accepted, self-healing
+    EXCEPTION to this invariant (item 4) -- not a scenario this check
+    claims to cover."""
+    r, admin = reg
+    r.record_start("run-1", None, "q1", "generated", robot_code="code-1")
+    r.record_start("run-2", USER_A, "q2", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A, "q1", "running", robot_code="code-1")
+    r.record_start("run-3", USER_A, "q1", "running",
+                   robot_code="code-1", rerun_of="run-1")
+
+    violations = admin.execute(
+        "SELECT count(*) FROM test_runs r JOIN tests te USING (test_id) "
+        "WHERE r.org_id IS DISTINCT FROM te.org_id").fetchone()[0]
+    assert violations == 0

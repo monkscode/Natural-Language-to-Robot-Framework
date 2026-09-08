@@ -318,7 +318,7 @@ def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
 def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     """F7: a test's runs can span two orgs (a documented, ordinary-flow-
     reachable gap -- see _attach_test's NULL-org fallback paragraph,
-    run_registry.py:875-884). An org-a admin filing their OWN org-a run
+    run_registry.py:883-892). An org-a admin filing their OWN org-a run
     publishes the whole shared test, and a test-branch with no org term at
     all then names a run the caller has no authority over at all.
 
@@ -335,10 +335,12 @@ def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     r.record_start("run-a", OWNER, "q", "generated", robot_code="c")
     shared_test = _test_id(admin, "run-a")
     # The write paths in this file cannot produce this shape within one
-    # test's lifetime (a rerun of an org-less test only takes the CALLER's
-    # org per D6's fallback, and never writes it back onto `tests`) --
-    # seeded directly to exercise the audit query against the documented
-    # gap, not to re-derive how a live system reaches it.
+    # test's lifetime: D6 makes a rerun of a test with a concrete org take
+    # THAT org, never the caller's, and a rerun of an org-less test now
+    # writes the caller's org back onto `tests` itself (since 2026-09-08)
+    # instead of leaving it to happen again on a later rerun -- seeded
+    # directly to exercise the audit query against the documented gap, not
+    # to re-derive how a live system reaches it.
     admin.execute(
         "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
         " status, org_id, test_id)"
