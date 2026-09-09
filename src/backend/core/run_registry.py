@@ -1842,11 +1842,13 @@ class RunRegistry:
         the caller validates the public all|passing|failing vocabulary before
         this is reached, the same trust boundary list_runs has with `status`.
 
-        sort is accepted but not yet read: no value for it is specified
-        anywhere the brief for this method could find one, so the only order
-        implemented is the one below. It is threaded through the signature
-        now so a later task can give it real values without another endpoint
-        signature change.
+        sort is accepted but not yet read: the endpoint layer now validates
+        it down to a single Literal value ("last_run", spec case 27's only
+        defined order), but this method does not branch on it -- the order
+        below is unconditional regardless of what's passed. It is threaded
+        through the signature now so a later task can widen the endpoint's
+        Literal and give this method real values to switch on without
+        another signature change.
 
         Two DIFFERENT scopes live in one row, and getting them crossed is
         the defect this split exists to remove:
@@ -1897,10 +1899,9 @@ class RunRegistry:
         fallback, because that fallback is a RUN concept and this is asking
         about a VERSION that may never have been executed at all.
 
-        Performance: one query for the rows, one for the total, each built
-        from ONE grouped/lateral pass over test_runs -- no per-test lookups
-        from Python. The whole-test aggregate (result_count, pass_count,
-        last_*) is one LATERAL keyed on test_id, which idx_test_runs_test_time
+        Performance: one query for the rows and one for the total; no
+        per-test lookups from Python. The whole-test aggregate (result_count,
+        pass_count, last_*) is one LATERAL keyed on test_id, which idx_test_runs_test_time
         serves directly. The version-scoped reads (health, running, spark)
         additionally filter on test_version_id; they repeat the test_id
         predicate alongside it -- redundant given every row's test_id agrees

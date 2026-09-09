@@ -267,6 +267,15 @@ def test_unknown_health_value_answers_422(client):
     assert r.status_code == 422
 
 
+def test_unknown_sort_value_answers_422(client):
+    """sort is a validated Literal now, the same shape health already has
+    two tests above -- an unrecognised value must be genuinely rejected,
+    not silently ignored the way an undeclared query param would be."""
+    tok = _register(client, f"is-{uuid.uuid4().hex[:8]}@e.com")
+    r = client.get("/api/tests?sort=name", headers=_auth(tok))
+    assert r.status_code == 422
+
+
 def test_health_passing_filters_the_list(client):
     from src.backend.auth.jwt_utils import decode_token
     email = f"hp-{uuid.uuid4().hex[:8]}@e.com"
@@ -284,6 +293,22 @@ def test_health_passing_filters_the_list(client):
 
 
 def test_limit_is_capped_like_history(client):
+    """?limit=99999&offset=-5 must reach RunRegistry.list_tests already
+    clamped to [1, 200] / floored at 0 -- the same convention list_history
+    applies (history_endpoints.py:127-128). Patches get_run_registry so the
+    assertion is on the exact kwargs the endpoint computed and passed down,
+    not on how many rows happen to exist in the isolated test schema (which
+    would need 200+ seeded rows to tell a capped page apart from an
+    uncapped one)."""
+    from unittest.mock import MagicMock, patch
     tok = _register(client, f"lc-{uuid.uuid4().hex[:8]}@e.com")
-    r = client.get("/api/tests?limit=99999&offset=-5", headers=_auth(tok))
+
+    stub = MagicMock()
+    stub.list_tests.return_value = ([], 0)
+    with patch("src.backend.api.tests_endpoints.get_run_registry", return_value=stub):
+        r = client.get("/api/tests?limit=99999&offset=-5", headers=_auth(tok))
+
     assert r.status_code == 200
+    _, kwargs = stub.list_tests.call_args
+    assert kwargs["limit"] == 200
+    assert kwargs["offset"] == 0

@@ -18,17 +18,26 @@ can_move mirrors list_history's shape exactly (own test, or an org_admin's
 test in their own org) rather than the stricter check assign_runs enforces
 for moving a RUN (which also requires the row's own org to equal the
 caller's CURRENT org, even on the owner branch). That stricter check is
-reachable only when a caller can both SEE a foreign/NULL-org row they own
-and act as an identified caller -- structurally only a platform admin,
-since the row-level org_id filter excludes such a row for every ordinary
-caller and org_admin. The same gap already exists, unfixed, for RUNS (see
-list_history); mirroring here keeps tests and runs consistent with each
-other rather than making tests stricter than runs for the identical caller
-shape. Whatever move endpoint a later task builds for tests would need the
-same authority check assign_runs already enforces for runs, so it would
-inherit this narrow disagreement too -- an offered move a caller-scoped
-authority check refuses in exactly the case assign_runs already refuses
-for the run equivalent, not a new gap this endpoint introduces.
+reachable two ways, not one: a validated platform admin (history_scope
+gives them org_id=None, so list_tests appends no te.org_id row filter at
+all) AND an identified caller whose own token simply carries no org
+(history_scope gives that shape the identical org_id=None, so the row
+filter is equally absent for them -- see history_scope's own docstring).
+Ordinary callers and org_admins are the ones excluded, by the concrete
+te.org_id = <their current org> filter list_tests binds from a real
+folder_org_id/org_id -- that part of the reasoning holds. For the org-less
+caller specifically the disagreement is not narrow: assign_runs' very
+first statement is `if org_id is None: return False`, an unconditional
+refusal, so mirrored can_move reads True on every row that caller owns
+while assign_runs would refuse every one of those same moves. The same
+gap already exists, unfixed, for RUNS (see list_history); mirroring here
+keeps tests and runs consistent with each other rather than making tests
+stricter than runs for the identical caller shape. Whatever move endpoint
+a later task builds for tests would need the same authority check
+assign_runs already enforces for runs, so it would inherit this
+disagreement too -- an offered move a caller-scoped authority check
+refuses in exactly the case assign_runs already refuses for the run
+equivalent, not a new gap this endpoint introduces.
 
 Referenced by: main.py (router registration).
 Depends on: core/run_registry.py (RunRegistry.list_tests), api/history_scope.py
@@ -58,7 +67,7 @@ def list_tests(
     q: str | None = None,
     group: str | None = None,
     health: Literal["all", "passing", "failing"] = "all",
-    sort: str | None = None,
+    sort: Literal["last_run"] = "last_run",
     user: dict | None = Depends(require_user),
 ):
     """The Tests page's data source: the caller's tests narrowed exactly as
@@ -75,9 +84,13 @@ def list_tests(
     literal "ungrouped". health is validated by FastAPI's own enum against
     the public all|passing|failing vocabulary (no "flaky" -- owner ruling O2)
     before this body ever runs; RunRegistry.list_tests treats anything other
-    than "passing"/"failing" as no filter. sort is accepted for forward
-    compatibility -- see list_tests' own docstring for why it does nothing
-    yet.
+    than "passing"/"failing" as no filter. sort is likewise a validated
+    Literal now, the same shape as health -- FastAPI answers 422 on any
+    value other than "last_run" (spec case 27's only defined order) before
+    this body runs, closing the "offered control the server silently
+    ignores" gap a free-form sort would leave next to a validated health.
+    The registry itself still does not branch on sort's value -- see
+    list_tests' own docstring for why.
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)

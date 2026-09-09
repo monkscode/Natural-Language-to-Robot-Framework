@@ -358,13 +358,17 @@ def test_count_ungrouped_tests_for_an_identified_caller_with_no_org(reg):
 def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
     """Spec section 5a's regression net: _VISIBLE_RUN_SQL and _VISIBLE_TEST_SQL
     must agree, or a result a caller can see could belong to a test absent
-    from their Tests page. _VISIBLE_TEST_SQL has exactly ONE production entry
-    point today, count_ungrouped_tests — there is no list_tests yet for the
-    other half of _VISIBLE_RUN_SQL's two callers (list_runs) to pair against
-    — so this checks agreement between the one pair of entry points that both
-    exist: count_ungrouped and count_ungrouped_tests, the pair this task
-    wires side by side onto /api/groups. It covers the caller shape section
-    5a names explicitly: a platform admin's cross-org re-run.
+    from their Tests page. _VISIBLE_TEST_SQL now has TWO production entry
+    points -- count_ungrouped_tests and list_tests (served at /api/tests) --
+    the same count _VISIBLE_RUN_SQL's callers (count_ungrouped and list_runs)
+    already had. This test pins agreement between the pair it can exercise
+    with a plain count comparison: count_ungrouped and count_ungrouped_tests,
+    the pair this task wires side by side onto /api/groups. The list_runs/
+    list_tests pair carries the identical divergence (same _VISIBLE_*_SQL
+    predicates) and is NOT pinned here -- a second regression test over full
+    row lists, not just counts, would be needed to cover it. It covers the
+    caller shape section 5a names explicitly: a platform admin's cross-org
+    re-run.
 
     Built on the same shape as
     test_a_platform_admin_does_not_write_back_the_org_on_the_rerun_branch
