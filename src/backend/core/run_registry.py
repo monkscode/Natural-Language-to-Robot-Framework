@@ -868,9 +868,11 @@ class RunRegistry:
         NULL-org fallback described below now writes the caller's org onto
         `tests` itself — renumbering key_n into the destination bucket —
         before returning it, on both branches that read an existing test's
-        org, so the repair lands on the TEST and not only on the RUN: a
-        token-less run, later re-run by an identified caller, no longer
-        leaves test.org_id NULL forever. A write-back that loses a key_n
+        org, so the repair lands on the TEST and not only on the RUN: an
+        org-less run, later reached with an org resolved, no longer leaves
+        test.org_id NULL forever. Both branches gate that write, and the
+        gates differ — the paragraphs below are the authority on which
+        caller each one admits. A write-back that loses a key_n
         race to a concurrent one is logged and left NULL rather than
         retried — the run itself still gets the correct org, and the next
         caller to reach this test repeats the repair. This still does not
@@ -882,8 +884,9 @@ class RunRegistry:
         OUT of the NULL bucket, never between two non-NULL orgs.
 
         The write-back's claim is PERMANENT and undisclosed to nobody: say
-        so plainly rather than implying a safeguard that is not here. A
-        NULL-org test's rerun_of branch is reachable in production, through
+        so plainly, and name every gate in front of it rather than implying
+        one that is not here. A NULL-org test's rerun_of branch is
+        reachable in production, through
         `caller_can_access`, by three kinds of caller — the
         AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
         `auth/ownership.py`), who has no org_id to write back with; a
@@ -918,11 +921,37 @@ class RunRegistry:
         now stays org-less forever — the status quo from before Task 1,
         and no worse than it. An ordinary member reaching the rerun_of
         branch through `caller_can_access` still repairs the test, because
-        rule 5 admits only their own org. The existing-test branch sits
-        behind no such gate: `stream_execute_only`'s `workflow_id` reuse
-        forks to a fresh run id only on an owner mismatch and treats an
-        unowned run as reusable, so a member holding such an id can reach
-        that branch's write-back with no access predicate run at all.
+        rule 5 admits only their own org.
+
+        The existing-test branch has no `caller_can_access` in front of it
+        at all: POST /execute-test takes a CLIENT-supplied workflow_id and
+        runs no access predicate on it, and `stream_execute_only`'s reuse
+        check forks to a fresh run id only on an owner MISMATCH — so a
+        NULL-owner row reads as unowned and is reused, and any identified
+        caller holding such an id reaches this branch. As of 2026-09-09
+        (owner ruling O5) that branch therefore carries a gate of its own:
+        it repairs the test only when the run row's `user_id` equals THIS
+        caller's, and only when that user_id is not NULL — two NULLs must
+        not compare equal, or the token-less caller passes. It is an
+        ADDITIONAL gate, not a replacement: is_platform_admin must be False
+        as well. Accepted cost, stated plainly: a run NOBODY owns — an
+        unattributed legacy row, or one written with AUTH_ENFORCED off —
+        can no longer repair its test through this branch, for any caller,
+        not even the person who actually made it (a NULL owner is
+        indistinguishable from a stranger's). Its rerun_of branch is no
+        escape either: `caller_can_access` refuses a NULL-owner, NULL-org
+        resource to every caller except a platform admin, who is stopped
+        by the guard above, and the AUTH_ENFORCED=off token-less caller
+        (rule 1), who has no org to write back with — rule 3 requires
+        owner_id is not None, rule 4 requires owner_id == caller.user_id,
+        and rule 5 compares a NULL org_id against the caller's own. The
+        gate is per RUN, not per test, so a DIFFERENT run that shares the
+        test and does have an owner can still repair it; and
+        backfill_org_ids, the only other statement that writes this
+        column, is untouched. Failing that, such a test stays org-less
+        forever — again the state it was in before Task 1, and no worse
+        than it. The RUN row still takes the caller's org either way,
+        exactly as under the admin guard.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -997,16 +1026,31 @@ class RunRegistry:
                     existing_test_id, org_id, e)
 
         existing = conn.execute(
-            "SELECT r.test_id, r.test_version_id, t.org_id"
+            "SELECT r.test_id, r.test_version_id, r.user_id AS run_user_id,"
+            " t.org_id"
             " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
             " WHERE r.run_id = %s", (run_id,)).fetchone()
         if existing and existing["test_id"]:
             resolved_org = existing["org_id"]
             if resolved_org is None and org_id is not None:
-                # Guard: authority, not identity (owner ruling, 2026-09-08 —
-                # see the docstring above). The RUN still takes the caller's
-                # org either way, on the next line.
-                if not is_platform_admin:
+                # Two guards, both about authority rather than identity (owner
+                # rulings 2026-09-08 and 2026-09-09 — see the docstring
+                # above). is_platform_admin withholds the repair from a
+                # caller whose org is arbitrary relative to the test; the
+                # ownership terms withhold it from a caller who merely
+                # SUPPLIED this run's id.
+                # run_user_id rides on the SELECT that already runs here — the
+                # same row, no extra round trip — and is the same column
+                # stream_execute_only's reuse check reads, so this refuses
+                # exactly the case that check lets through.
+                #
+                # `user_id is not None` is load-bearing, not decoration: a
+                # NULL owner arrives as None, so without it a caller with no
+                # user_id claim would compare equal to a token-less row and
+                # pass. The RUN still takes the caller's org either way, on
+                # the last line of this block.
+                if (not is_platform_admin and user_id is not None
+                        and existing["run_user_id"] == user_id):
                     _write_back_org(existing["test_id"])
                 resolved_org = org_id
             return (existing["test_id"], existing["test_version_id"],

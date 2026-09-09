@@ -15,6 +15,13 @@ from src.backend.core.config import settings
 pytestmark = pytest.mark.integration
 
 USER_A = {"user_id": "alice", "org_id": "org-a", "email": "a@x.com"}
+# The same person on a token that resolved no org — a login-time failure, or
+# a membership lookup that returned nothing. record_start short-circuits
+# _lookup_org_id on a non-UUID user_id, so this stays org-less without a
+# round trip. It is how a run comes to be OWNED and yet org-less, which is
+# the state the write-back's ownership gate has to let through.
+USER_A_NO_ORG = {"user_id": "alice", "email": "a@x.com"}
+USER_B = {"user_id": "bob", "org_id": "org-b", "email": "b@x.com"}
 
 
 @pytest.fixture
@@ -273,9 +280,15 @@ def test_a_platform_admin_does_not_write_back_the_org_on_the_existing_branch(reg
 
     Reached through the 'existing' branch: the row's own test_id is already
     attached (a second upsert of the same run_id), and the joined test's org
-    is NULL."""
+    is NULL.
+
+    The admin OWNS this run (its first write carries the same user_id on an
+    org-less token). That is deliberate: O5's ownership gate would otherwise
+    refuse the write-back on its own and this would stop testing the
+    platform-admin guard at all."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", {"user_id": "root", "email": "r@x.com"}, "q",
+                   "generated", robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
     assert _row(admin, "run-1")[2] is None
 
@@ -468,17 +481,22 @@ def test_the_caller_org_fills_in_when_the_rows_own_test_has_none(reg):
     be caught on that path too or the run is org-less from its second write
     onward. This now repairs the TEST itself on the second call, and the
     third call — where the test is no longer NULL — must be a no-op rather
-    than a second write-back (no error, key_n untouched)."""
+    than a second write-back (no error, key_n untouched).
+
+    The first write is org-less but IDENTIFIED — the login-failure shape the
+    paragraph above names — because O5 gates the repair on owning the run:
+    a token-less first write would leave the row unowned and no later caller
+    could repair it."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
     assert _row(admin, "run-1")[2] is None
     assert admin.execute(
         "SELECT org_id, key_n FROM tests WHERE test_id = %s",
         (test_id,)).fetchone() == (None, 1)
 
-    # Same run, now with an identified caller (a login that failed to resolve
-    # an org on the first write is exactly how this arises).
+    # Same run, same user, now with an org resolved.
     r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
 
     assert _row(admin, "run-1")[2] == "org-a"
@@ -700,6 +718,100 @@ def test_no_write_back_when_the_caller_has_none_but_the_test_already_does(reg):
     assert _row(admin, "run-1")[2] == "org-a"
 
 
+def test_an_identified_caller_does_not_claim_an_unowned_runs_test(reg):
+    """Owner ruling O5, 2026-09-09. POST /execute-test takes a CLIENT-supplied
+    workflow_id and runs no access predicate on it, and stream_execute_only's
+    reuse check forks to a fresh id only on an owner MISMATCH — a NULL-owner
+    row reads as unowned and is reused. So an ordinary identified caller who
+    merely holds a token-less run's id reaches this write-back.
+
+    The repair is gated on owning the run whose id was supplied: the test
+    stays org-less, and the RUN still takes the caller's org exactly as
+    before, the same shape as the platform-admin guard."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1), (
+        "a caller who does not own the run must not claim its test")
+    assert _row(admin, "run-1")[2] == "org-a", (
+        "the RUN still takes the caller's org — only the TEST is left alone")
+
+
+def test_the_runs_own_owner_still_repairs_its_org_less_test(reg):
+    """The dominant flow, which must not break: generate then execute under
+    one unified id, same user. The row already carries that user_id
+    (write-once), so the ownership gate passes and the repair fires."""
+    r, admin = reg
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert _row(admin, "run-1")[2] is None
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == ("org-a", 1)
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
+def test_no_write_back_when_neither_the_row_nor_the_caller_has_a_user_id(reg):
+    """The `user_id is not None` term, which is load-bearing rather than
+    decoration: SQL NULL arrives in Python as None, so without it a caller
+    with no user_id claim would compare EQUAL to a token-less row's NULL
+    owner and pass the gate — exactly the land-grab the gate exists to
+    close, reached by a caller who is even less identified."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    # An org claim with no user_id claim. record_start reads both from the
+    # same dict and only consults _lookup_org_id when user_id is truthy, so
+    # this org survives to the write-back's own `org_id is not None` guard.
+    r.record_start("run-1", {"org_id": "org-a"}, "q", "running",
+                   robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1), (
+        "two NULL user_ids must not compare equal")
+    assert _row(admin, "run-1")[2] == "org-a"
+
+
+def test_a_caller_who_is_not_the_rows_owner_does_not_repair_the_test(reg):
+    """Defence in depth. stream_execute_only forks to a fresh run id on an
+    owner mismatch, so this pairing should not reach _attach_test from
+    /execute-test today; the gate must still refuse it, because that fork is
+    a different module's check and this one is the one that writes."""
+    r, admin = reg
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+
+    r.record_start("run-1", USER_B, "q", "running", robot_code="code-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, 1)
+    # Ownership is write-once, so the row still belongs to alice...
+    assert admin.execute(
+        "SELECT user_id FROM test_runs WHERE run_id = 'run-1'"
+    ).fetchone()[0] == "alice"
+    # ...while its org_id, which was NULL, takes bob's.
+    assert _row(admin, "run-1")[2] == "org-b"
+
+
 def test_the_write_back_renumbers_key_n_into_an_occupied_org_bucket(reg):
     """Task 1, item 2: org_id is half of idx_tests_org_key (UNIQUE
     (org_id, key_n) NULLS NOT DISTINCT), so moving a test out of the NULL
@@ -712,7 +824,8 @@ def test_the_write_back_renumbers_key_n_into_an_occupied_org_bucket(reg):
         "SELECT key_n FROM tests WHERE org_id = 'org-a'"
     ).fetchall()) == [1, 2]
 
-    r.record_start("run-1", None, "q3", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q3", "generated",
+                   robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
     assert admin.execute(
         "SELECT org_id, key_n FROM tests WHERE test_id = %s",
@@ -767,11 +880,16 @@ def test_a_write_back_collision_leaves_the_run_recorded_and_the_test_org_less(
     """Task 1 item 4: a concurrent claim on the destination org's next
     key_n must not take the run write down with it, and must not spin
     retrying either — the run still gets the caller's org, the test stays
-    NULL, and the next write to reach it repeats the repair."""
+    NULL, and the next write to reach it repeats the repair.
+
+    The first write is org-less but identified so that O5's ownership gate
+    admits the second one; otherwise no write-back is attempted and the
+    injected collision never fires."""
     import logging
 
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
 
     real_attach = type(r)._attach_test
@@ -816,12 +934,18 @@ def test_a_real_postgres_collision_still_leaves_the_run_recorded(reg):
     connection — would fail with psycopg's 'current transaction is
     aborted' instead of succeeding. That the run row exists afterward is
     the assertion that actually exercises the SAVEPOINT, not merely the
-    except clause around it."""
+    except clause around it.
+
+    The first write is org-less but identified so that O5's ownership gate
+    admits the second one; otherwise no UPDATE is issued, nothing blocks on
+    the racer's lock, and this would pass without exercising the SAVEPOINT
+    at all."""
     import threading
     import time
 
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
 
     racer = psycopg.connect(r.dsn, autocommit=False)
@@ -879,9 +1003,13 @@ def test_the_write_back_is_redone_after_the_folder_vanished_retry(reg):
     it discards a freshly minted test/version row; record_start's own
     comment on the retry explains why). The second attempt must redo the
     repair rather than leave the test org-less because the first one was
-    rolled back with everything else."""
+    rolled back with everything else.
+
+    Org-less but identified on the first write, so O5's ownership gate admits
+    the repair the retry has to redo."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
@@ -919,9 +1047,14 @@ def test_a_platform_admin_does_not_write_back_after_the_folder_vanished_retry(re
     in the sibling guard tests) because _fileable_group_id only resolves a
     group for a caller in the SAME org as the folder; a mismatched org would
     make record_start drop group_id before the FK violation this test relies
-    on ever has a chance to fire."""
+    on ever has a chance to fire.
+
+    The admin OWNS this run, for the same reason as the sibling test above:
+    O5's ownership gate would otherwise be what refuses the write-back, and
+    the admin flag would be untested on the retried call."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", {"user_id": "root", "email": "r@x.com"}, "q",
+                   "generated", robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
@@ -959,9 +1092,14 @@ def test_d6_holds_after_a_representative_mix_of_mint_repair_and_rerun(reg):
     the repair. The one case that is NOT reproduced here is the deliberate
     write-back collision above, which is a known, accepted, self-healing
     EXCEPTION to this invariant (item 4) -- not a scenario this check
-    claims to cover."""
+    claims to cover.
+
+    run-1's org-less mint is identified, so its second upsert is the
+    write-back repair leg; a token-less mint would be refused by O5's
+    ownership gate and the repair would come only from the rerun below."""
     r, admin = reg
-    r.record_start("run-1", None, "q1", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q1", "generated",
+                   robot_code="code-1")
     r.record_start("run-2", USER_A, "q2", "generated", robot_code="code-1")
     r.record_start("run-1", USER_A, "q1", "running", robot_code="code-1")
     r.record_start("run-3", USER_A, "q1", "running",
