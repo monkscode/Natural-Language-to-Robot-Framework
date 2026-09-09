@@ -18,6 +18,8 @@ Read by:
   /reports/{run_id}/ files.
 - /api/groups (api/groups_endpoints.py) — lists folders with run counts,
   creates/renames/deletes them, and files runs into them.
+- /api/tests (api/tests_endpoints.py) — lists the caller's visible TESTS
+  (list_tests), not runs; see that module's own docstring.
 
 Registry writes must never break the pipeline: record_start and set_status
 swallow their own exceptions, and so do the reads the authorization gates and
@@ -31,7 +33,8 @@ get_owner() fails CLOSED — on any error it returns None, which the reports
 guard treats as "not yours".
 
 Referenced by: services/workflow_service.py, api/history_endpoints.py,
-api/groups_endpoints.py, auth/jwt_utils.py (lazy import).
+api/groups_endpoints.py, api/tests_endpoints.py, auth/jwt_utils.py
+(lazy import).
 Depends on: core/config.py (DATABASE_URL).
 """
 
@@ -1810,6 +1813,286 @@ class RunRegistry:
                 params,
             ).fetchone()
         return row["n"]
+
+    def list_tests(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        q: Optional[str] = None,
+        group: Optional[str] = None,
+        health: Optional[str] = None,
+        sort: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """The Tests page's row list + total (P2 reads it; nothing else does
+        yet). Same caller-scoping shape as list_runs, over `tests` instead of
+        `test_runs`: _group_join_for_tests and _VISIBLE_TEST_SQL, not
+        _group_join/_VISIBLE_RUN_SQL, because these rows are tests (section
+        5a). user_id/org_id/folder_org_id/include_unowned mean exactly what
+        they mean in list_runs and count_ungrouped_tests.
+
+        q matches ONLY tests.user_query (spec section 10 case 26 -- Activity
+        keeps matching a result's own copy; this is not list_runs' three-field
+        OR over query/email/run id). group is a run_groups id or the literal
+        "ungrouped", exactly as list_runs reads it. health is "passing",
+        "failing", or anything else (None/"all"/omitted) for no filter --
+        the caller validates the public all|passing|failing vocabulary before
+        this is reached, the same trust boundary list_runs has with `status`.
+
+        sort is accepted but not yet read: no value for it is specified
+        anywhere the brief for this method could find one, so the only order
+        implemented is the one below. It is threaded through the signature
+        now so a later task can give it real values without another endpoint
+        signature change.
+
+        Two DIFFERENT scopes live in one row, and getting them crossed is
+        the defect this split exists to remove:
+
+        - version_count, result_count, pass_count, last_status, last_run_at,
+          last_run_id are WHOLE-TEST -- every version, every result ever
+          recorded against this test_id. "This has run 312 times" is a fact
+          about the test (section 6.1), and last_* is deliberately the
+          newest row of ANY version (ruling R2): a re-run of an OLDER
+          version fired after a newer one exists is still the test's most
+          recent activity, even while health (below) reports the newer
+          version's own last outcome.
+        - health, running and spark are scoped to the CURRENT version alone
+          (ruling R1 / section 6.1): resolved through test_versions.n =
+          tests.current_version, never through current_version's ordinal
+          position in a whole-test list of results. A test broken through
+          nine earlier versions and fixed at the tenth reads "passing", not
+          a mostly-red history -- the drawer's own per-version timeline
+          (not built here) is where that history stays reachable.
+
+        health is the STATUS of the current version's last COMPLETED result
+        -- 'passed' -> "passing", 'failed' or 'error' -> "failing" -- and
+        "not_run" when the current version has no completed result at all
+        (no rows, or every row is still 'running'/'generated'). 'generated'
+        (code exists, never executed) is deliberately NOT a completed result
+        for this purpose: it produces the same "not_run" outcome spec case 11
+        names for a version with literally zero results (case 11's own
+        scenario is POST /api/tests/{id}/versions, not built by this task,
+        which mints a version without writing any test_runs row at all --
+        a different mechanism reaching the same health value). 'running' is
+        excluded per case 18 so a stuck in-flight result can never read a
+        passing test as failing; case 25 (two results running at once) is
+        why `running` is an EXISTS over the whole current version rather
+        than a property of whichever row happens to be newest.
+
+        spark is the current version's last 10 completed results, oldest
+        first, mapped to the literal strings "pass"/"fail". 'error' folds
+        into "fail" here and in health alike: the response has no third
+        bucket for either field (owner ruling O2 is explicit that spark gets
+        no "flaky" value, and health's own vocabulary is only passing /
+        failing / not_run), and 'error' is not 'passed' -- so among
+        completed outcomes it reads as a failure signal rather than
+        silently vanishing from both fields.
+
+        can_run is False when the current version's OWN robot_code is falsy
+        (NULL or empty) -- the same falsy check the "predates code
+        persistence" 409 uses, not resolve_robot_code's artifact-store
+        fallback, because that fallback is a RUN concept and this is asking
+        about a VERSION that may never have been executed at all.
+
+        Performance: one query for the rows, one for the total, each built
+        from ONE grouped/lateral pass over test_runs -- no per-test lookups
+        from Python. The whole-test aggregate (result_count, pass_count,
+        last_*) is one LATERAL keyed on test_id, which idx_test_runs_test_time
+        serves directly. The version-scoped reads (health, running, spark)
+        additionally filter on test_version_id; they repeat the test_id
+        predicate alongside it -- redundant given every row's test_id agrees
+        with its own test_version_id's test_id by construction of
+        _attach_test, but that redundancy is what lets these still use
+        idx_test_runs_test_time's leading column rather than an unindexed
+        test_version_id scan. Whether a dedicated (test_id, test_version_id,
+        created_at) index is worth adding is a measurement this method does
+        not make (spec section 6.1 leaves it unmeasured); nothing here adds
+        one on a guess.
+
+        Do not fan out: every join below is provably at-most-one-row per
+        test, each for a different reason -- cv is a UNIQUE (test_id, n)
+        lookup; whole and spk are aggregates with no GROUP BY, which always
+        collapse to one row; hlt and spk's own inner subquery take LIMIT 1
+        and LIMIT 10 respectively. Two independent one-to-many joins off
+        `tests` -- the trap list_groups' own docstring names for
+        run_count/test_count -- would multiply version_count and
+        result_count together; nothing here joins test_versions or
+        test_runs directly against `te` more than once without one of
+        those three collapsing it back to one row first.
+
+        Swallows storage errors and returns ([], 0), matching list_runs:
+        this is a page read, not a mutation, and must never break like one."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses: list = []
+        params: list = []
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params.append(org_id)
+        if group == "ungrouped":
+            clauses.append("g.group_id IS NULL")
+        elif group is not None:
+            clauses.append("g.group_id = %s")
+            params.append(group)
+        if q:
+            # Same escaping list_runs uses: a literal % or _ in the search
+            # box must match itself, not act as a LIKE wildcard.
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            clauses.append("te.user_query ILIKE %s")
+            params.append(like)
+        if health == "passing":
+            clauses.append("hlt.status = 'passed'")
+        elif health == "failing":
+            clauses.append("hlt.status IN ('failed', 'error')")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        # Join params FIRST: _group_join_for_tests' placeholder sits earlier
+        # in the SQL text than the WHERE clause's, and psycopg binds %s
+        # strictly by position (_group_join's docstring states the general
+        # rule this follows). The lateral joins below bind NOTHING of their
+        # own -- cv/hlt/whole/spk correlate on te.test_id/cv.version_id or
+        # match literal strings, so they add no parameter to reorder.
+        params = join_params + params
+
+        # Resolves the CURRENT version's own row once; hlt, spk and the
+        # inline `running` EXISTS all read cv.version_id/cv.robot_code
+        # rather than re-deriving it. test_versions is UNIQUE (test_id, n),
+        # so this is at most one row -- no fan-out risk.
+        version_lookup = (
+            "LEFT JOIN LATERAL ("
+            "  SELECT v.version_id, v.robot_code FROM test_versions v"
+            "  WHERE v.test_id = te.test_id AND v.n = te.current_version"
+            ") cv ON TRUE "
+        )
+        # The current version's last COMPLETED result (section 6.1/R1). LIMIT
+        # 1 makes this at most one row; reused by both the total COUNT (when
+        # health is filtered) and the row SELECT (to render "health").
+        health_lookup = (
+            "LEFT JOIN LATERAL ("
+            "  SELECT r.status FROM test_runs r"
+            "  WHERE r.test_id = te.test_id AND r.test_version_id = cv.version_id"
+            "    AND r.status IN ('passed', 'failed', 'error')"
+            "  ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"
+            ") hlt ON TRUE "
+        )
+        try:
+            with self._pool.connection() as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM tests te {join} "
+                    f"{version_lookup}{health_lookup}{where}",
+                    params,
+                ).fetchone()["n"]
+                rows = conn.execute(
+                    "SELECT te.test_id, te.name, te.user_query, te.user_id, "
+                    "       te.user_email, te.org_id, "
+                    "       g.group_id, g.name AS group_name, "
+                    "       te.current_version, "
+                    "       (SELECT COUNT(*) FROM test_versions v2 "
+                    "          WHERE v2.test_id = te.test_id) AS version_count, "
+                    "       whole.result_count, whole.pass_count, "
+                    "       whole.last_status, whole.last_run_at, "
+                    "       whole.last_run_id, "
+                    "       hlt.status AS health_status, "
+                    "       EXISTS (SELECT 1 FROM test_runs r3 "
+                    "               WHERE r3.test_id = te.test_id "
+                    "                 AND r3.test_version_id = cv.version_id "
+                    "                 AND r3.status = 'running') AS running, "
+                    "       spk.statuses AS spark_statuses, "
+                    "       cv.robot_code AS current_robot_code "
+                    f"FROM tests te {join} "
+                    f"{version_lookup}"
+                    f"{health_lookup}"
+                    # Whole-test aggregate: one pass over every result this
+                    # test has ever had, whatever version it names. Each
+                    # ARRAY_AGG(... ORDER BY ...)[1] picks that column off
+                    # the newest row (index 1 after a DESC sort) without a
+                    # second scan -- this is result_count/pass_count/last_*,
+                    # never version-scoped.
+                    "LEFT JOIN LATERAL ("
+                    "  SELECT COUNT(*) AS result_count, "
+                    "         COUNT(*) FILTER (WHERE r.status = 'passed')"
+                    "           AS pass_count, "
+                    "         (ARRAY_AGG(r.run_id"
+                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
+                    "         )[1] AS last_run_id, "
+                    "         (ARRAY_AGG(r.status"
+                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
+                    "         )[1] AS last_status, "
+                    "         (ARRAY_AGG(r.created_at"
+                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
+                    "         )[1] AS last_run_at "
+                    "  FROM test_runs r WHERE r.test_id = te.test_id"
+                    ") whole ON TRUE "
+                    # The current version's last 10 completed results,
+                    # oldest first: an inner bounded top-10 (indexed,
+                    # LIMIT-ed) re-ordered by the outer aggregate so the
+                    # array reads chronologically for the sparkline.
+                    "LEFT JOIN LATERAL ("
+                    "  SELECT ARRAY_AGG(status ORDER BY created_at ASC,"
+                    "                   run_id ASC) AS statuses"
+                    "  FROM ("
+                    "    SELECT r.status, r.created_at, r.run_id"
+                    "    FROM test_runs r"
+                    "    WHERE r.test_id = te.test_id"
+                    "      AND r.test_version_id = cv.version_id"
+                    "      AND r.status IN ('passed', 'failed', 'error')"
+                    "    ORDER BY r.created_at DESC, r.run_id DESC LIMIT 10"
+                    "  ) recent"
+                    ") spk ON TRUE "
+                    f"{where} "
+                    # Case 27: last result time descending, test_id as
+                    # tiebreaker. NULLS LAST is defensive -- every test is
+                    # created together with the run that minted it, so
+                    # last_run_at should never actually be NULL.
+                    "ORDER BY whole.last_run_at DESC NULLS LAST, te.test_id "
+                    "LIMIT %s OFFSET %s",
+                    params + [limit, offset],
+                ).fetchall()
+            out = []
+            for r in rows:
+                r = dict(r)
+                spark_statuses = r["spark_statuses"] or []
+                health_status = r["health_status"]
+                if health_status is None:
+                    health_value = "not_run"
+                elif health_status == "passed":
+                    health_value = "passing"
+                else:
+                    health_value = "failing"
+                out.append({
+                    "test_id": r["test_id"],
+                    "name": r["name"],
+                    "user_query": r["user_query"],
+                    "user_id": r["user_id"],
+                    "org_id": r["org_id"],
+                    "user_email": r["user_email"],
+                    "group_id": r["group_id"],
+                    "group_name": r["group_name"],
+                    "current_version": r["current_version"],
+                    "version_count": r["version_count"],
+                    "result_count": r["result_count"],
+                    "pass_count": r["pass_count"],
+                    "last_status": r["last_status"],
+                    "last_run_at": (r["last_run_at"].isoformat()
+                                    if r["last_run_at"] else None),
+                    "last_run_id": r["last_run_id"],
+                    "health": health_value,
+                    "running": r["running"],
+                    "spark": ["pass" if s == "passed" else "fail"
+                             for s in spark_statuses],
+                    "can_run": bool(r["current_robot_code"]),
+                })
+            return out, total
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] list_tests failed: {e}")
+            return [], 0
 
     def assign_runs(
         self,

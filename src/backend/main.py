@@ -143,6 +143,11 @@ app.include_router(history_router, prefix="/api")
 from src.backend.api.groups_endpoints import router as groups_router
 app.include_router(groups_router, prefix="/api")
 
+# Tests — the Tests page's list of versioned tests (distinct from their
+# individual runs, which /api/history keeps listing).
+from src.backend.api.tests_endpoints import router as tests_router
+app.include_router(tests_router, prefix="/api")
+
 # Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
