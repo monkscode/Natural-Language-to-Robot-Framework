@@ -339,7 +339,7 @@ def test_count_ungrouped_tests_for_an_identified_caller_with_no_org(reg):
 
 
 @pytest.mark.xfail(
-    strict=True, reason=(
+    raises=AssertionError, strict=True, reason=(
         "Confirmed divergence, not yet resolved: Task 2's platform-admin "
         "write-back guard (owner ruling, 2026-09-08) leaves a cross-org-"
         "rerun's TEST permanently org-less and unowned while the RUN takes "
@@ -348,8 +348,13 @@ def test_count_ungrouped_tests_for_an_identified_caller_with_no_org(reg):
         "net section 5a asks for; do not widen _VISIBLE_TEST_SQL/"
         "_VISIBLE_RUN_SQL or change the guard to force this green — the "
         "owner is deciding the guard's consequences separately. strict=True "
-        "so an accidental fix (or a further break) is reported loudly rather "
-        "than silently XPASSing."))
+        "reports an unexpected pass (the day this is fixed) as a failure "
+        "instead of silently going green. raises=AssertionError additionally "
+        "means an exception of any OTHER type -- e.g. a schema-drift crash "
+        "inside count_ungrouped_tests -- also fails loudly rather than being "
+        "absorbed as this expected divergence; it does not distinguish "
+        "which assert below raised, only that the raise was an "
+        "AssertionError."))
 def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
     """Spec section 5a's regression net: _VISIBLE_RUN_SQL and _VISIBLE_TEST_SQL
     must agree, or a result a caller can see could belong to a test absent
@@ -369,6 +374,17 @@ def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
     Task 2's write-back guard (owner ruling, 2026-09-08) skips repairing the
     TEST when the caller acts under platform-admin authority, so the test
     stays org-less and unowned forever while the run does not.
+
+    Section 5a's invariant is an IMPLICATION — a visible result's test must
+    itself be visible, and the reverse — not a count identity, and the final
+    `visible_tests == visible_runs` below is a correct proxy for it only
+    because this fixture's scoped caller ("root", an identified member of
+    org-ADMIN) has exactly one candidate result and one candidate test in
+    view. It is not a general law: at the caller shape /api/groups actually
+    passes a validated platform admin (user_id=None, org_id=None,
+    include_unowned=True), the same two functions return 2 and 1 on this
+    same data — two results of the one test, which is the ordinary
+    multiplicity ungrouped_test_count exists to represent, not a violation.
     """
     r, admin = reg
     r.record_start("run-1", None, "q", "generated", robot_code="code-1")
