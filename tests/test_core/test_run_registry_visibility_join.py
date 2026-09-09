@@ -292,6 +292,118 @@ def test_count_ungrouped_tests_counts_tests_not_results(reg):
                                    folder_org_id="org-a") == 1
 
 
+def test_count_ungrouped_tests_excludes_unowned_when_not_included(reg):
+    """The include_unowned=False branch: te.user_id IS NOT NULL. Mirrors
+    count_ungrouped's _OWNED_RUN_SQL rule on the tests side — only a platform
+    admin (or the token-less caller) may read an unattributed test, so only
+    they may count it."""
+    r, admin = reg
+    r.record_start("run-1", OWNER, "q1", "generated", robot_code="c")
+    # No user_id, a concrete org: the shape AUTH_ENFORCED=false or a legacy
+    # row leaves behind — attributed to an org with no owning user.
+    r.record_start("run-2", {"org_id": "org-a"}, "q2", "generated",
+                   robot_code="c")
+    assert admin.execute(
+        "SELECT user_id, org_id FROM tests WHERE user_query = 'q2'"
+    ).fetchone() == (None, "org-a"), "premise: an unattributed test in org-a"
+
+    assert r.count_ungrouped_tests(org_id="org-a", folder_org_id="org-a",
+                                   include_unowned=True) == 2
+    assert r.count_ungrouped_tests(org_id="org-a", folder_org_id="org-a",
+                                   include_unowned=False) == 1
+
+
+def test_count_ungrouped_tests_for_an_identified_caller_with_no_org(reg):
+    """_group_join_for_tests(None, identified=True) resolves ON FALSE: an
+    identified caller who owns no org can resolve NO folder at all — not
+    even one that happens to file their own test — the same rule
+    ownership.py rule 4 states for runs. Filing nomad's test must therefore
+    NOT drop it out of nomad's own Ungrouped count: an unfiltered join
+    (g.group_id = te.group_id, no org term — the token-less caller's form)
+    would instead resolve the real folder and remove it from this count,
+    which is the failure this test is built to catch."""
+    r, admin = reg
+    r.record_start("run-1", {"user_id": "nomad"}, "q1", "generated",
+                   robot_code="c")
+    r.record_start("run-2", OWNER, "q2", "generated", robot_code="c")
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE user_id = 'nomad'"
+    ).fetchone()[0] is None, "premise: nomad's test really has no org"
+
+    assert r.count_ungrouped_tests(user_id="nomad") == 1
+
+    _file_test_into_folder(admin, "run-1", "g-1", org="org-a")
+    assert r.count_ungrouped_tests(user_id="nomad") == 1, (
+        "nomad owns no org, so no folder is theirs to resolve — their own "
+        "test must still read as Ungrouped even though it is now filed")
+
+
+@pytest.mark.xfail(
+    strict=True, reason=(
+        "Confirmed divergence, not yet resolved: Task 2's platform-admin "
+        "write-back guard (owner ruling, 2026-09-08) leaves a cross-org-"
+        "rerun's TEST permanently org-less and unowned while the RUN takes "
+        "the admin's own org, so count_ungrouped and count_ungrouped_tests "
+        "disagree for that caller. Left failing on purpose as the regression "
+        "net section 5a asks for; do not widen _VISIBLE_TEST_SQL/"
+        "_VISIBLE_RUN_SQL or change the guard to force this green — the "
+        "owner is deciding the guard's consequences separately. strict=True "
+        "so an accidental fix (or a further break) is reported loudly rather "
+        "than silently XPASSing."))
+def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
+    """Spec section 5a's regression net: _VISIBLE_RUN_SQL and _VISIBLE_TEST_SQL
+    must agree, or a result a caller can see could belong to a test absent
+    from their Tests page. _VISIBLE_TEST_SQL has exactly ONE production entry
+    point today, count_ungrouped_tests — there is no list_tests yet for the
+    other half of _VISIBLE_RUN_SQL's two callers (list_runs) to pair against
+    — so this checks agreement between the one pair of entry points that both
+    exist: count_ungrouped and count_ungrouped_tests, the pair this task
+    wires side by side onto /api/groups. It covers the caller shape section
+    5a names explicitly: a platform admin's cross-org re-run.
+
+    Built on the same shape as
+    test_a_platform_admin_does_not_write_back_the_org_on_the_rerun_branch
+    (tests/test_core/test_run_registry_test_attach.py): a token-less run
+    mints an org-less, unowned test; a platform admin then reruns it
+    cross-org. D6 makes the RUN take the admin's own org either way, but
+    Task 2's write-back guard (owner ruling, 2026-09-08) skips repairing the
+    TEST when the caller acts under platform-admin authority, so the test
+    stays org-less and unowned forever while the run does not.
+    """
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _test_id(admin, "run-1")
+    assert admin.execute(
+        "SELECT user_id, org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, None), (
+        "premise: the test is org-less and unowned")
+
+    admin_user = {"user_id": "root", "org_id": "org-ADMIN", "email": "r@x.com"}
+    r.record_start("run-2", admin_user, "q", "running", robot_code="code-1",
+                   rerun_of="run-1", is_platform_admin=True)
+    assert admin.execute(
+        "SELECT org_id FROM test_runs WHERE run_id = 'run-2'"
+    ).fetchone()[0] == "org-ADMIN", (
+        "premise: the RUN took the admin's own org (D6)")
+    assert admin.execute(
+        "SELECT org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0] is None, (
+        "premise: the write-back guard left the TEST org-less")
+
+    visible_runs = r.count_ungrouped("root", "org-ADMIN",
+                                     folder_org_id="org-ADMIN")
+    visible_tests = r.count_ungrouped_tests("root", "org-ADMIN",
+                                            folder_org_id="org-ADMIN")
+    assert visible_runs == 1, (
+        "premise: root's own re-run is in root's Ungrouped run count")
+    assert visible_tests == visible_runs, (
+        f"root can see a result (count_ungrouped={visible_runs}) belonging "
+        f"to a test root cannot see (count_ungrouped_tests={visible_tests}) "
+        "-- the cross-org-rerun divergence section 5a says D6 removes is, "
+        "for this platform-admin caller shape, preserved by Task 2's "
+        "write-back guard instead")
+
+
 def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
     """delete_group's audit list has to resolve membership the way every read
     now does. A run whose OWN group_id is NULL is still a member when its test

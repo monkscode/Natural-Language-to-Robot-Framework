@@ -157,6 +157,12 @@ def list_groups(user: dict | None = Depends(require_user)):
     additive — run_count keeps its name and its meaning — and passed straight
     through from the registry, whose list_groups docstring is the authority on
     why that subquery is deliberately not narrowed by the run scope.
+
+    ungrouped_test_count is that same split applied to the Ungrouped chip:
+    count_ungrouped_tests, called with the identical scope args as
+    count_ungrouped below, so the two chips describe the same caller's view
+    of results and tests respectively. Purely additive — ungrouped_count
+    keeps its name and its meaning, a count of RESULTS.
     """
     scope = history_scope(user)
     reg = get_run_registry()
@@ -167,6 +173,10 @@ def list_groups(user: dict | None = Depends(require_user)):
     return {
         "groups": groups,
         "ungrouped_count": reg.count_ungrouped(
+            scope.user_id, scope.org_id,
+            folder_org_id=scope.folder_org_id,
+            include_unowned=scope.is_admin or scope.caller_user_id is None),
+        "ungrouped_test_count": reg.count_ungrouped_tests(
             scope.user_id, scope.org_id,
             folder_org_id=scope.folder_org_id,
             include_unowned=scope.is_admin or scope.caller_user_id is None),

@@ -1293,6 +1293,32 @@ def test_assignments_endpoint(client):
     assert body["groups"][0]["run_count"] == 0 and body["ungrouped_count"] == 1
 
 
+def test_groups_endpoint_reports_ungrouped_test_count(client):
+    """ungrouped_test_count is the Tests-page counterpart of ungrouped_count
+    (spec section 6.5: purely additive, from count_ungrouped_tests, with
+    ungrouped_count unchanged in name and meaning — a count of RESULTS).
+
+    _seed_run_for never passes robot_code, so it mints no test row (owner
+    decision D8) — every other test in this module that uses it exercises
+    run_count only. This test records through the registry directly so the
+    seeded run has a real test to count."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+
+    tok = _register(client, f"utc-{uuid.uuid4().hex[:8]}@e.com")
+    claims = decode_token(tok)
+    rid = str(uuid.uuid4())
+    get_run_registry().record_start(
+        rid,
+        {"user_id": claims["user_id"], "email": claims["email"],
+         "org_id": claims["org_id"]},
+        "q", "generated", robot_code="*** Tasks ***")
+
+    body = client.get("/api/groups", headers=_auth(tok)).json()
+    assert body["ungrouped_count"] == 1
+    assert body["ungrouped_test_count"] == 1
+
+
 def test_assignments_reject_foreign_run_atomically(client):
     tok_a = _register(client, f"fa-{uuid.uuid4().hex[:8]}@e.com")
     tok_b = _register(client, f"fb-{uuid.uuid4().hex[:8]}@e.com")
@@ -1371,7 +1397,7 @@ def test_orgless_caller_sees_no_folders(client):
     client.post("/api/groups", json={"name": "Someone elses"}, headers=_auth(other))
 
     body = client.get("/api/groups", headers=_auth(_orgless_token(client))).json()
-    assert body == {"groups": [], "ungrouped_count": 0}
+    assert body == {"groups": [], "ungrouped_count": 0, "ungrouped_test_count": 0}
 
 
 def test_orgless_caller_cannot_mutate_folders(client):
