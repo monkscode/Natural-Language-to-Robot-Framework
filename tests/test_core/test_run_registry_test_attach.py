@@ -753,7 +753,7 @@ def test_an_identified_caller_does_not_claim_an_unowned_runs_test(reg):
     assert admin.execute(
         "SELECT org_id, key_n FROM tests WHERE test_id = %s",
         (test_id,)).fetchone() == (None, 1), (
-        "a caller who does not own the run must not claim its test")
+        "a caller who did not author the test must not claim it")
     assert _row(admin, "run-1")[2] == "org-a", (
         "the RUN still takes the caller's org — only the TEST is left alone")
 
@@ -856,18 +856,33 @@ def test_the_two_step_land_grab_through_run_again_is_closed(reg):
     assert _row(admin, "run-2")[2] == "org-a"
 
 
-def test_a_peer_re_running_someone_elses_org_less_test_does_not_repair_it(reg):
-    """Fix round 2, F1 case 3 — the change's one real behavioural loss, pinned
-    rather than glossed. Before it, an ordinary member re-running a colleague's
-    org-less test repaired it: `caller_can_access` rule 5 admits them whenever
-    the RUN carries their org while the TEST's is still NULL, which is exactly
-    the D6 divergence. Now only the author repairs.
+def test_a_non_author_re_running_an_org_less_test_does_not_repair_it(reg):
+    """Fix round 2, F1 case 3 — the change's one real behavioural loss
+    (owner ruling O7, 2026-09-09), pinned rather than glossed. Before it, a
+    caller who was not the author but could reach a colleague's org-less test
+    repaired it. Now only the author does.
+
+    WHO loses it, precisely, because "a peer" understates it: a plain peer
+    with an unfiled source run never reached the rerun branch at all — rule 5
+    ends `owner_id == caller_uid` and refuses them. The callers who did reach
+    it are the run's own OWNER, an `org_admin` of the run's org (rule 5's
+    org_admin branch), and ANY member of that org once the source run is
+    filed in a folder (rule 3, which the rerun endpoint enables with
+    `is_grouped=source.get("group_id") is not None`).
+
+    THIS TEST PINS THE REGISTRY-LEVEL GATE, NOT THE END-TO-END PATH. Its
+    caller is in another org, whom `caller_can_access` would refuse upstream,
+    so the pairing is not one of the populations above. That is deliberate
+    and sufficient here: _attach_test consults neither org, folder nor role —
+    only `tests.user_id` against the caller's — so every one of those callers
+    reaches this same comparison and gets this same answer. The endpoint-level
+    predicate is covered by tests/test_api/, not by this file.
 
     What is NOT lost: the author can still repair it, and an org-less test is
-    already invisible to an org-carrying caller on the Tests page — the peer
-    could not see it before their re-run either (_VISIBLE_TEST_SQL binds
-    te.user_id, and a folder cannot publish a test whose author is NULL). So
-    this removes a repair, not a view."""
+    invisible to an org-carrying caller on the Tests page anyway —
+    count_ungrouped_tests and list_tests both append `te.org_id = %s`, which
+    excludes it whatever its author and whatever folder it is in. So this
+    removes a repair, not a view."""
     r, admin = reg
     r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
                    robot_code="code-1")
@@ -910,7 +925,7 @@ def test_no_rerun_write_back_when_neither_the_test_nor_the_caller_has_an_author(
     assert _row(admin, "run-2")[2] == "org-a"
 
 
-def test_the_runs_own_owner_still_repairs_its_org_less_test(reg):
+def test_the_tests_own_author_still_repairs_its_org_less_test(reg):
     """The dominant flow, which must not break: generate then execute under
     one unified id, same user. The row already carries that user_id
     (write-once), and the same caller minted the test, so the authorship gate
@@ -932,12 +947,14 @@ def test_the_runs_own_owner_still_repairs_its_org_less_test(reg):
     assert _row(admin, "run-1")[2] == "org-a"
 
 
-def test_no_write_back_when_neither_the_row_nor_the_caller_has_a_user_id(reg):
-    """The `user_id is not None` term, which is load-bearing rather than
-    decoration: SQL NULL arrives in Python as None, so without it a caller
-    with no user_id claim would compare EQUAL to a token-less row's NULL
-    owner and pass the gate — exactly the land-grab the gate exists to
-    close, reached by a caller who is even less identified."""
+def test_no_write_back_when_neither_the_test_nor_the_caller_has_an_author(reg):
+    """The `user_id is not None` term on the existing-test branch, which is
+    load-bearing rather than decoration: SQL NULL arrives in Python as None,
+    so without it a caller with no user_id claim would compare EQUAL to a
+    token-less test's NULL author and pass the gate — exactly the land-grab
+    the gate exists to close, reached by a caller who is even less
+    identified. The rerun_of branch's twin is
+    test_no_rerun_write_back_when_neither_the_test_nor_the_caller_has_an_author."""
     r, admin = reg
     r.record_start("run-1", None, "q", "generated", robot_code="code-1")
     test_id = _row(admin, "run-1")[0]
@@ -951,15 +968,16 @@ def test_no_write_back_when_neither_the_row_nor_the_caller_has_a_user_id(reg):
     assert admin.execute(
         "SELECT org_id, key_n FROM tests WHERE test_id = %s",
         (test_id,)).fetchone() == (None, 1), (
-        "two NULL user_ids must not compare equal")
+        "two NULL authors must not compare equal")
     assert _row(admin, "run-1")[2] == "org-a"
 
 
-def test_a_caller_who_is_not_the_rows_owner_does_not_repair_the_test(reg):
-    """Defence in depth. stream_execute_only forks to a fresh run id on an
-    owner mismatch, so this pairing should not reach _attach_test from
-    /execute-test today; the gate must still refuse it, because that fork is
-    a different module's check and this one is the one that writes."""
+def test_a_caller_who_did_not_author_the_test_does_not_repair_it(reg):
+    """Defence in depth, existing-test branch. stream_execute_only forks to a
+    fresh run id on an owner mismatch, so this pairing should not reach
+    _attach_test from /execute-test today; the gate must still refuse it,
+    because that fork is a different module's check and this one is the one
+    that writes."""
     r, admin = reg
     r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
                    robot_code="code-1")

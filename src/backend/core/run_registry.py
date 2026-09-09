@@ -903,10 +903,18 @@ class RunRegistry:
         org. But a test whose org_id is NULL may have runs whose org_id is
         NOT — D6 aims at equality without making it an invariant, and the
         O5-refused call described further below leaves exactly that state
-        behind — and for such a run an ordinary member of its org passes
-        rule 5 and REACHES this write-back. What they may then do to the
-        test is decided here, not there, which is the whole reason the two
-        gates below exist. Nothing in this codebase ever
+        behind — and for such a run three kinds of non-admin caller REACH
+        this write-back: the run's own OWNER (rule 5's last line is
+        `owner_id == caller_uid`, which is exactly what the adopter
+        becomes); an `org_admin` of the run's org (rule 5's org_admin
+        branch, which needs only `owner_id is not None`); and ANY member of
+        that org once the source run is FILED IN A FOLDER, through rule 3 —
+        the rerun endpoint enables it by passing
+        `is_grouped=source.get("group_id") is not None`. A plain peer with
+        an unfiled source run is NOT among them: rule 5 refuses them. What
+        the callers who do reach it may then do to the test is decided
+        here, not there, which is the whole reason the two gates below
+        exist. Nothing in this codebase ever
         un-writes tests.org_id once it is non-NULL (verified: the only two
         statements that ever set it, this one and backfill_org_ids', both
         require the CURRENT value to be NULL first). Left unguarded, that
@@ -925,7 +933,7 @@ class RunRegistry:
         org_id` runs either way); only the TEST is left alone. Accepted
         cost, stated plainly: a test reachable ONLY by a platform admin
         now stays org-less forever — the status quo from before Task 1,
-        and no worse than it. An ordinary member reaching the rerun_of
+        and no worse than it. A non-admin caller reaching the rerun_of
         branch still repairs the test when they AUTHORED it — since fix
         round 2 that branch carries the same three terms as the one below,
         of which is_platform_admin is the first.
@@ -980,13 +988,25 @@ class RunRegistry:
         to be here. Keep the two branches identical: an asymmetry between
         them is the shape this defect took both times.
 
-        The disclosed cost of that symmetry: an ordinary member re-running
-        a colleague's org-less test used to repair it (rule 5 admits them
-        whenever the RUN carries their org while the TEST's is still NULL)
-        and now cannot. Only the author can. That removes a repair, not a
-        view — _VISIBLE_TEST_SQL binds `te.user_id`, so an author-less test
-        was already invisible to them on the Tests page, and a folder
-        cannot publish it either. The author's own repair still works.
+        The disclosed cost of that symmetry (owner ruling O7, 2026-09-09 —
+        accepted knowingly): re-running a colleague's org-less test used to
+        repair it, and now does not. Only the author can. Name the
+        populations that actually bear that, because a "peer" understates
+        it — a plain peer with an unfiled source run never reached the
+        branch at all (rule 5 refuses them). The ones who did, and who lose
+        the repair, are an `org_admin` of the run's org, and ANY member of
+        that org once the source run is filed in a folder (rule 3). The
+        source run's own OWNER reaches it too, but when they are not the
+        test's author that is the claim this whole change closes, not a
+        cost of it. That
+        removes a repair, not a view: count_ungrouped_tests and list_tests
+        both append `te.org_id = %s` for a caller who has an org, so an
+        ORG-LESS test is invisible to every org-carrying caller whatever
+        its author and whatever folder it is in — _VISIBLE_TEST_SQL is not
+        what does that here, since its second term
+        (`g.group_id IS NOT NULL AND te.user_id IS NOT NULL`) would admit
+        exactly this authored, foldered test. The author's own repair still
+        works.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -1085,9 +1105,11 @@ class RunRegistry:
                 # by the mint below or by the collapse's INSERT, and none of
                 # the four UPDATE tests statements in this file touches it
                 # (current_version; org_id/key_n here; group_id; and
-                # backfill_org_ids' org_id/key_n). It also matches
-                # _VISIBLE_TEST_SQL's `te.user_id`: repair only a test you
-                # can already see. It rides on the SELECT that already runs
+                # backfill_org_ids' org_id/key_n). It is also the column
+                # _VISIBLE_TEST_SQL binds, so the gate and the Tests list
+                # agree on what "yours" means for a test — though that list
+                # excludes an ORG-LESS one from an org-carrying caller by a
+                # separate `te.org_id = %s` clause, not by this column. It rides on the SELECT that already runs
                 # here — the same row, no extra round trip.
                 #
                 # `user_id is not None` is load-bearing, not decoration: a
@@ -1139,8 +1161,11 @@ class RunRegistry:
                     # author — so it says nothing about the test this writes,
                     # and a run whose org is concrete while its test's is NULL
                     # (the D6 divergence, and precisely what the branch above
-                    # leaves behind when it refuses) admits any member of that
-                    # org through rule 5. Without this term the gate above was
+                    # leaves behind when it refuses) admits that run's own
+                    # owner — what the adopter becomes — plus the org's
+                    # org_admin (rule 5) and, once the run is filed in a
+                    # folder, any member of the org (rule 3). Without this
+                    # term the gate above was
                     # a one-click detour: adopt the run with one POST, then
                     # "Run again". `user_id is not None` is needed here for
                     # the identical reason, and an asymmetry between the two
