@@ -885,22 +885,27 @@ class RunRegistry:
 
         The write-back's claim is PERMANENT and undisclosed to nobody: say
         so plainly, and name every gate in front of it rather than implying
-        one that is not here. A NULL-org test's rerun_of branch is
-        reachable in production, through
-        `caller_can_access`, by three kinds of caller — the
+        one that is not here. `caller_can_access` guards the rerun_of
+        branch, but it is evaluated on the SOURCE RUN — api/endpoints.py
+        passes it `source["user_id"]` and `source["org_id"]` — and never on
+        the test, so it constrains who REACHES that branch and says nothing
+        about the org of the test the branch then writes. Where the source
+        run's own org_id is ALSO NULL, three kinds of caller reach it: the
         AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
         `auth/ownership.py`), who has no org_id to write back with; a
-        platform admin (rule 2), who does; and the row's own original
+        platform admin (rule 2), who does; and the run's own original
         owner, reclaiming it on a legacy token whose own org_id claim is
-        absent (rule 4). No ordinary identified caller whose OWN token
-        carries a concrete org ever passes that gate for a NULL-org
-        resource — not even the row's own original owner, once identified
-        with an org: rule 5's `org_id != caller_org` fires and returns
-        False before the ownership check ever runs, because `org_id` is
-        NULL and can equal no caller's org. So in practice the first
-        identified caller to reach this write-back is very often a
-        platform admin, acting in whatever org
-        they represent at that moment, and nothing in this codebase ever
+        absent (rule 4). For THAT shape no ordinary identified caller whose
+        OWN token carries a concrete org passes — not even the run's own
+        original owner, once identified with an org: rule 5's
+        `org_id != caller_org` fires and returns False before the ownership
+        check ever runs, because `org_id` is NULL and can equal no caller's
+        org. But a test whose org_id is NULL may have runs whose org_id is
+        NOT — D6 aims at equality without making it an invariant, and the
+        O5-refused call described further below leaves exactly that state
+        behind — and for such a run an ordinary member of its org passes
+        rule 5 and repairs the test. So the callers who reach this
+        write-back are not only platform admins; and nothing in this codebase ever
         un-writes tests.org_id once it is non-NULL (verified: the only two
         statements that ever set it, this one and backfill_org_ids', both
         require the CURRENT value to be NULL first). Left unguarded, that
@@ -920,8 +925,8 @@ class RunRegistry:
         cost, stated plainly: a test reachable ONLY by a platform admin
         now stays org-less forever — the status quo from before Task 1,
         and no worse than it. An ordinary member reaching the rerun_of
-        branch through `caller_can_access` still repairs the test, because
-        rule 5 admits only their own org.
+        branch still repairs the test — is_platform_admin is the only term
+        that branch carries.
 
         The existing-test branch has no `caller_can_access` in front of it
         at all: POST /execute-test takes a CLIENT-supplied workflow_id and
@@ -930,28 +935,44 @@ class RunRegistry:
         NULL-owner row reads as unowned and is reused, and any identified
         caller holding such an id reaches this branch. As of 2026-09-09
         (owner ruling O5) that branch therefore carries a gate of its own:
-        it repairs the test only when the run row's `user_id` equals THIS
+        it repairs the test only when the TEST's `user_id` equals THIS
         caller's, and only when that user_id is not NULL — two NULLs must
-        not compare equal, or the token-less caller passes. It is an
+        not compare equal, or a token-less caller passes. It is an
         ADDITIONAL gate, not a replacement: is_platform_admin must be False
-        as well. Accepted cost, stated plainly: a run NOBODY owns — an
-        unattributed legacy row, or one written with AUTH_ENFORCED off —
-        can no longer repair its test through this branch, for any caller,
-        not even the person who actually made it (a NULL owner is
-        indistinguishable from a stranger's). Its rerun_of branch is no
-        escape either: `caller_can_access` refuses a NULL-owner, NULL-org
-        resource to every caller except a platform admin, who is stopped
-        by the guard above, and the AUTH_ENFORCED=off token-less caller
-        (rule 1), who has no org to write back with — rule 3 requires
-        owner_id is not None, rule 4 requires owner_id == caller.user_id,
-        and rule 5 compares a NULL org_id against the caller's own. The
-        gate is per RUN, not per test, so a DIFFERENT run that shares the
-        test and does have an owner can still repair it; and
-        backfill_org_ids, the only other statement that writes this
-        column, is untouched. Failing that, such a test stays org-less
-        forever — again the state it was in before Task 1, and no worse
-        than it. The RUN row still takes the caller's org either way,
+        as well, and the RUN row still takes the caller's org either way,
         exactly as under the admin guard.
+
+        The test's AUTHOR, deliberately, and not the run's owner. Gating on
+        the run would gate on a value this very call is about to write:
+        record_start runs its UPSERT after this returns, and that UPSERT
+        does `user_id = COALESCE(test_runs.user_id, EXCLUDED.user_id)`, so
+        a refused call adopts the run and the same caller's SECOND POST of
+        the same workflow_id would find the run owned by themselves and
+        pass — a one-request delay, not a gate (measured, fix round 1,
+        2026-09-09). tests.user_id has no such transition: it is written
+        once, by the mint below or by the collapse's INSERT, and none of
+        the four UPDATE tests statements in this file touches it
+        (current_version; org_id/key_n in the write-back; group_id; and
+        backfill_org_ids' org_id/key_n).
+
+        Accepted cost, stated plainly: a test NOBODY authored — minted by a
+        token-less run (AUTH_ENFORCED off, the bench, local dev), or
+        collapsed from runs that were themselves token-less — can no longer
+        be repaired through this branch by any caller, not even the person
+        who actually made it, because a NULL author is indistinguishable
+        from a stranger's. Through THIS branch it then stays org-less, which
+        is the state it was in before Task 1 and no worse than it.
+
+        That is a statement about this branch and not about the method. The
+        rerun_of branch below still repairs an author-less test for any
+        caller `caller_can_access` admits to one of its RUNS, and after the
+        adoption described above such a run is owned by, in the org of, and
+        visible in History to the caller who reused its id — so a second
+        action ("Run again") reaches the same claim this branch refuses.
+        That branch is gated on is_platform_admin only; giving it the same
+        authorship term is not in this change's scope and is recorded for
+        the owner rather than assumed away. Do not read the paragraph above
+        as a closure of the write-back as a whole.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -1026,7 +1047,7 @@ class RunRegistry:
                     existing_test_id, org_id, e)
 
         existing = conn.execute(
-            "SELECT r.test_id, r.test_version_id, r.user_id AS run_user_id,"
+            "SELECT r.test_id, r.test_version_id, t.user_id AS test_user_id,"
             " t.org_id"
             " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
             " WHERE r.run_id = %s", (run_id,)).fetchone()
@@ -1037,20 +1058,31 @@ class RunRegistry:
                 # rulings 2026-09-08 and 2026-09-09 — see the docstring
                 # above). is_platform_admin withholds the repair from a
                 # caller whose org is arbitrary relative to the test; the
-                # ownership terms withhold it from a caller who merely
+                # authorship terms withhold it from a caller who merely
                 # SUPPLIED this run's id.
-                # run_user_id rides on the SELECT that already runs here — the
-                # same row, no extra round trip — and is the same column
-                # stream_execute_only's reuse check reads, so this refuses
-                # exactly the case that check lets through.
+                #
+                # The TEST's author, not the RUN's owner. Keying on the run
+                # would gate on a value THIS call is about to write: the
+                # UPSERT below runs after this and does
+                # `user_id = COALESCE(test_runs.user_id, EXCLUDED.user_id)`,
+                # so a refused call adopts the run and the caller's SECOND
+                # POST of the same client-supplied workflow_id would pass.
+                # tests.user_id has no such transition — it is written once,
+                # by the mint below or by the collapse's INSERT, and none of
+                # the four UPDATE tests statements in this file touches it
+                # (current_version; org_id/key_n here; group_id; and
+                # backfill_org_ids' org_id/key_n). It also matches
+                # _VISIBLE_TEST_SQL's `te.user_id`: repair only a test you
+                # can already see. It rides on the SELECT that already runs
+                # here — the same row, no extra round trip.
                 #
                 # `user_id is not None` is load-bearing, not decoration: a
-                # NULL owner arrives as None, so without it a caller with no
-                # user_id claim would compare equal to a token-less row and
+                # NULL author arrives as None, so without it a caller with no
+                # user_id claim would compare equal to a token-less test and
                 # pass. The RUN still takes the caller's org either way, on
                 # the last line of this block.
                 if (not is_platform_admin and user_id is not None
-                        and existing["run_user_id"] == user_id):
+                        and existing["test_user_id"] == user_id):
                     _write_back_org(existing["test_id"])
                 resolved_org = org_id
             return (existing["test_id"], existing["test_version_id"],
