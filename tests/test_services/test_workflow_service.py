@@ -422,7 +422,8 @@ class TestPlatformAdminFlagWiring:
     calls is_validated_admin(user) ONCE per request and threads the result to
     every _record_run call that request makes. Once, not once per call,
     because is_validated_admin re-reads the users table on every invocation
-    (auth/history_scope.py's own module docstring says so).
+    where the token already claims admin — every other caller returns False
+    before that read runs.
 
     stream_generate_only and stream_generate_and_run share the exact opening
     row and generation-failure plumbing (_make_start_recorder,
