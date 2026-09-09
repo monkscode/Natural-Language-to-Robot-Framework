@@ -306,10 +306,16 @@ def test_a_platform_admin_does_not_write_back_the_org_on_the_existing_branch(reg
 
 
 def test_a_platform_admin_does_not_write_back_the_org_on_the_rerun_branch(reg):
-    """Same guard, the rerun_of branch: a platform admin re-running another
-    caller's org-less test must not claim it either."""
+    """Same guard, the rerun_of branch: a platform admin re-running an
+    org-less test must not claim it either.
+
+    The admin AUTHORED the source test (its mint carries the same user_id on
+    an org-less token), for the same reason as the existing-branch sibling:
+    fix round 2's authorship term would otherwise be what refuses the
+    write-back here, and the admin flag would go untested on this branch."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", {"user_id": "root", "email": "r@x.com"}, "q",
+                   "generated", robot_code="code-1")
     source_test = _row(admin, "run-1")[0]
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
@@ -456,9 +462,15 @@ def test_the_caller_org_fills_in_when_the_reruns_source_test_has_none(reg):
     the collapse mints one for every org-less row, and _lookup_org_id
     swallowing a failure writes one on the upsert that creates the test.
     This now repairs the TEST as well as the run: the source test's own
-    org_id must not still be NULL once an identified caller reruns it."""
+    org_id must not still be NULL once its AUTHOR reruns it.
+
+    The first write is org-less but identified so that it authors the test —
+    fix round 2 put the same authorship term on this branch as on the one
+    above, so a token-less mint would leave the test author-less and no
+    rerun could repair it."""
     r, admin = reg
-    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
     source_test = _row(admin, "run-1")[0]
     assert admin.execute(
         "SELECT org_id FROM tests WHERE test_id = %s",
@@ -794,6 +806,108 @@ def test_the_refused_call_adopts_the_run_but_still_never_claims_the_test(reg):
         (test_id,)).fetchone()[0] is None, (
         "tests.user_id is never updated, which is what makes it a stable gate")
     assert _row(admin, "run-1")[2] == "org-a"
+
+
+def test_the_two_step_land_grab_through_run_again_is_closed(reg):
+    """Fix round 2, F1. Closing the existing-test branch alone left the claim
+    reachable in two ordinary UI actions, because `caller_can_access` guards
+    the rerun_of branch on the SOURCE RUN's owner and org and never on the
+    test's author.
+
+    Step 1: an identified caller POSTs /execute-test with a token-less run's
+    id. The write-back is refused — but record_start's UPSERT, which runs
+    after _attach_test, adopts the run: its NULL user_id and NULL org_id take
+    the caller's. _VISIBLE_RUN_SQL is `t.user_id = %s OR ...`, so the run is
+    now in that caller's History.
+    Step 2: "Run again" on it. caller_can_access sees their own user_id and
+    their own org on the SOURCE RUN and allows it, and the rerun_of branch
+    reaches the same author-less test.
+
+    Both branches now carry the same authorship term, so the sequence ends
+    where it started: the test is org-less and un-authored."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT user_id, org_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, None)
+
+    # Step 1 — refused, and the run is adopted anyway.
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+    assert admin.execute(
+        "SELECT user_id, org_id FROM test_runs WHERE run_id = 'run-1'"
+    ).fetchone() == ("alice", "org-a"), (
+        "the refused call adopts the run — this is what makes the source run "
+        "pass caller_can_access at step 2")
+
+    # Step 2 — "Run again" on the run they just adopted.
+    r.record_start("run-2", USER_A, "q", "running",
+                   robot_code="code-1", rerun_of="run-1")
+
+    assert admin.execute(
+        "SELECT test_id FROM test_runs WHERE run_id = 'run-2'"
+    ).fetchone()[0] == test_id, "the re-run must still join the source test"
+    assert admin.execute(
+        "SELECT user_id, org_id, key_n FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone() == (None, None, 1), (
+        "the rerun_of branch must refuse an author-less test too, or the "
+        "existing-test gate is only a one-click detour")
+    # The RUN still takes the caller's org on both branches, as ever.
+    assert _row(admin, "run-2")[2] == "org-a"
+
+
+def test_a_peer_re_running_someone_elses_org_less_test_does_not_repair_it(reg):
+    """Fix round 2, F1 case 3 — the change's one real behavioural loss, pinned
+    rather than glossed. Before it, an ordinary member re-running a colleague's
+    org-less test repaired it: `caller_can_access` rule 5 admits them whenever
+    the RUN carries their org while the TEST's is still NULL, which is exactly
+    the D6 divergence. Now only the author repairs.
+
+    What is NOT lost: the author can still repair it, and an org-less test is
+    already invisible to an org-carrying caller on the Tests page — the peer
+    could not see it before their re-run either (_VISIBLE_TEST_SQL binds
+    te.user_id, and a folder cannot publish a test whose author is NULL). So
+    this removes a repair, not a view."""
+    r, admin = reg
+    r.record_start("run-1", USER_A_NO_ORG, "q", "generated",
+                   robot_code="code-1")
+    source_test = _row(admin, "run-1")[0]
+    assert admin.execute(
+        "SELECT user_id, org_id FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone() == ("alice", None)
+
+    r.record_start("run-2", USER_B, "q", "running",
+                   robot_code="code-1", rerun_of="run-1")
+
+    assert _row(admin, "run-2")[0] == source_test
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone() == (None, 1), (
+        "a peer is not the author — the repair is theirs to lose")
+    assert _row(admin, "run-2")[2] == "org-b", (
+        "the RUN still takes the caller's org, as on every other refusal")
+
+
+def test_no_rerun_write_back_when_neither_the_test_nor_the_caller_has_an_author(
+        reg):
+    """Fix round 2, F1 case 6. The `user_id is not None` term must be on the
+    rerun_of branch too: SQL NULL arrives as None, so without it a caller with
+    no user_id claim compares EQUAL to an author-less test and claims it. An
+    asymmetry between the two branches would itself be the defect."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    source_test = _row(admin, "run-1")[0]
+
+    # An org claim with no user_id claim: record_start only consults
+    # _lookup_org_id when user_id is truthy, so this org reaches the branch.
+    r.record_start("run-2", {"org_id": "org-a"}, "q", "running",
+                   robot_code="code-1", rerun_of="run-1")
+
+    assert admin.execute(
+        "SELECT org_id, key_n FROM tests WHERE test_id = %s",
+        (source_test,)).fetchone() == (None, 1), (
+        "two NULL authors must not compare equal")
+    assert _row(admin, "run-2")[2] == "org-a"
 
 
 def test_the_runs_own_owner_still_repairs_its_org_less_test(reg):

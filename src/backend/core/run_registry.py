@@ -870,9 +870,9 @@ class RunRegistry:
         before returning it, on both branches that read an existing test's
         org, so the repair lands on the TEST and not only on the RUN: an
         org-less run, later reached with an org resolved, no longer leaves
-        test.org_id NULL forever. Both branches gate that write, and the
-        gates differ — the paragraphs below are the authority on which
-        caller each one admits. A write-back that loses a key_n
+        test.org_id NULL forever. Both branches gate that write, with the
+        SAME three terms — the paragraphs below are the authority on which
+        caller they admit. A write-back that loses a key_n
         race to a concurrent one is logged and left NULL rather than
         retried — the run itself still gets the correct org, and the next
         caller to reach this test repeats the repair. This still does not
@@ -904,8 +904,9 @@ class RunRegistry:
         NOT — D6 aims at equality without making it an invariant, and the
         O5-refused call described further below leaves exactly that state
         behind — and for such a run an ordinary member of its org passes
-        rule 5 and repairs the test. So the callers who reach this
-        write-back are not only platform admins; and nothing in this codebase ever
+        rule 5 and REACHES this write-back. What they may then do to the
+        test is decided here, not there, which is the whole reason the two
+        gates below exist. Nothing in this codebase ever
         un-writes tests.org_id once it is non-NULL (verified: the only two
         statements that ever set it, this one and backfill_org_ids', both
         require the CURRENT value to be NULL first). Left unguarded, that
@@ -925,8 +926,9 @@ class RunRegistry:
         cost, stated plainly: a test reachable ONLY by a platform admin
         now stays org-less forever — the status quo from before Task 1,
         and no worse than it. An ordinary member reaching the rerun_of
-        branch still repairs the test — is_platform_admin is the only term
-        that branch carries.
+        branch still repairs the test when they AUTHORED it — since fix
+        round 2 that branch carries the same three terms as the one below,
+        of which is_platform_admin is the first.
 
         The existing-test branch has no `caller_can_access` in front of it
         at all: POST /execute-test takes a CLIENT-supplied workflow_id and
@@ -934,7 +936,7 @@ class RunRegistry:
         check forks to a fresh run id only on an owner MISMATCH — so a
         NULL-owner row reads as unowned and is reused, and any identified
         caller holding such an id reaches this branch. As of 2026-09-09
-        (owner ruling O5) that branch therefore carries a gate of its own:
+        (owner ruling O5) the gate therefore sits at the write-back itself:
         it repairs the test only when the TEST's `user_id` equals THIS
         caller's, and only when that user_id is not NULL — two NULLs must
         not compare equal, or a token-less caller passes. It is an
@@ -958,21 +960,33 @@ class RunRegistry:
         Accepted cost, stated plainly: a test NOBODY authored — minted by a
         token-less run (AUTH_ENFORCED off, the bench, local dev), or
         collapsed from runs that were themselves token-less — can no longer
-        be repaired through this branch by any caller, not even the person
-        who actually made it, because a NULL author is indistinguishable
-        from a stranger's. Through THIS branch it then stays org-less, which
-        is the state it was in before Task 1 and no worse than it.
+        be repaired by any caller through EITHER branch of this method, not
+        even by the person who actually made it, because a NULL author is
+        indistinguishable from a stranger's. It stays org-less here, which
+        is the state it was in before Task 1 and no worse than it. One
+        statement outside this method can still move it: backfill_org_ids
+        takes the org of the test's earliest org-carrying run and asks
+        nothing about authorship — but it is a one-shot migration, gated on
+        the data_org_id_backfill marker, not an ongoing repair path.
 
-        That is a statement about this branch and not about the method. The
-        rerun_of branch below still repairs an author-less test for any
-        caller `caller_can_access` admits to one of its RUNS, and after the
-        adoption described above such a run is owned by, in the org of, and
-        visible in History to the caller who reused its id — so a second
-        action ("Run again") reaches the same claim this branch refuses.
-        That branch is gated on is_platform_admin only; giving it the same
-        authorship term is not in this change's scope and is recorded for
-        the owner rather than assumed away. Do not read the paragraph above
-        as a closure of the write-back as a whole.
+        The rerun_of branch below carries the IDENTICAL three terms, added
+        in fix round 2 (2026-09-09) after the gate above alone was measured
+        to be a one-click detour: the refused call adopts the run, whose
+        owner and org become the caller's and which _VISIBLE_RUN_SQL then
+        shows in their History, and "Run again" reached the same
+        author-less test through a branch gated only on is_platform_admin.
+        `caller_can_access` does not prevent that — it is evaluated on the
+        SOURCE RUN, as the paragraph further up explains — so the term has
+        to be here. Keep the two branches identical: an asymmetry between
+        them is the shape this defect took both times.
+
+        The disclosed cost of that symmetry: an ordinary member re-running
+        a colleague's org-less test used to repair it (rule 5 admits them
+        whenever the RUN carries their org while the TEST's is still NULL)
+        and now cannot. Only the author can. That removes a repair, not a
+        view — _VISIBLE_TEST_SQL binds `te.user_id`, so an author-less test
+        was already invisible to them on the Tests page, and a folder
+        cannot publish it either. The author's own repair still works.
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
@@ -1091,7 +1105,7 @@ class RunRegistry:
         if rerun_of:
             src = conn.execute(
                 "SELECT r.test_version_id, t.test_id, t.org_id,"
-                " t.current_version"
+                " t.user_id AS test_user_id, t.current_version"
                 " FROM test_runs r JOIN tests t ON t.test_id = r.test_id"
                 " WHERE r.run_id = %s", (rerun_of,)).fetchone()
             if src:
@@ -1118,8 +1132,21 @@ class RunRegistry:
                     version_id = ver["version_id"] if ver else None
                 resolved_org = src["org_id"]
                 if resolved_org is None and org_id is not None:
-                    # Same guard as the branch above.
-                    if not is_platform_admin:
+                    # The SAME three terms as the branch above, deliberately
+                    # identical (fix round 2, 2026-09-09). `caller_can_access`
+                    # guards this branch, but api/endpoints.py hands it the
+                    # SOURCE RUN's user_id and org_id and never the test's
+                    # author — so it says nothing about the test this writes,
+                    # and a run whose org is concrete while its test's is NULL
+                    # (the D6 divergence, and precisely what the branch above
+                    # leaves behind when it refuses) admits any member of that
+                    # org through rule 5. Without this term the gate above was
+                    # a one-click detour: adopt the run with one POST, then
+                    # "Run again". `user_id is not None` is needed here for
+                    # the identical reason, and an asymmetry between the two
+                    # branches would itself be the defect.
+                    if (not is_platform_admin and user_id is not None
+                            and src["test_user_id"] == user_id):
                         _write_back_org(src["test_id"])
                     resolved_org = org_id
                 return (src["test_id"], version_id, resolved_org)
