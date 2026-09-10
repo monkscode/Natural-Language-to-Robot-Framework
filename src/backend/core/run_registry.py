@@ -2723,7 +2723,10 @@ class RunRegistry:
         every sibling.
 
         The two UPDATEs may run in either order: the second reads te.test_id,
-        te.org_id and te.user_id, none of which the first writes."""
+        te.org_id and te.user_id, none of which the first writes. That
+        independence is what lets the atomicity gate sit BETWEEN them, so a
+        refused batch never performs the results write at all -- assign_runs
+        has to gate after both, because its cascade reads pre-move values."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a test
             # against. Measured redundant for a non-empty batch -- a named
@@ -2750,17 +2753,36 @@ class RunRegistry:
                     f"WHERE test_id = ANY(%s) AND org_id = %s AND {allowed}",
                     params,
                 )
+                # The tests UPDATE's rowcount alone, and BEFORE the results
+                # UPDATE rather than after it. The results dragged along are
+                # not in test_ids, so folding them into the count would make
+                # every move of a test that has ever run fail its own
+                # atomicity check. Gating here costs nothing and skips a
+                # write that a refusal is about to roll back anyway: on a
+                # batch of 500 where one test is unfilable, the statement
+                # below would otherwise rewrite every result of the other
+                # 499 first. Safe in this order only because the two
+                # statements are independent -- see the note at the end of
+                # this docstring; assign_runs cannot do the same, because its
+                # cascade has to read pre-move values.
+                if cur.rowcount != len(set(test_ids)):
+                    conn.rollback()
+                    return False
                 # Driven off the SAME authority filter, qualified onto `te`
                 # because two tables are in scope here: a result moves only
                 # as a consequence of its TEST moving, so it can never be
                 # reached through a run the caller could not have filed.
                 #
                 # Those two authority terms are defence in depth and no test
-                # can observe them, which is measured rather than assumed:
-                # weakening them moves runs of a test the caller may not
-                # file, and the rowcount gate below then rolls the whole
-                # transaction back before any read could see it. They are
-                # kept so each statement is independently correct.
+                # can observe them. Since the gate moved above this statement
+                # that holds for a stronger reason than "it gets rolled back
+                # anyway": reaching this line means the UPDATE above matched
+                # every distinct id in test_ids under org_id AND {allowed},
+                # so every named test is already authorized, and it took row
+                # locks on exactly those `tests` rows — no concurrent writer
+                # can change org_id or user_id under us before we commit. The
+                # terms therefore re-select a set that is provably identical.
+                # They are kept so each statement is independently correct.
                 conn.execute(
                     f"UPDATE test_runs r SET group_id = %s "
                     f"FROM tests te "
@@ -2773,12 +2795,6 @@ class RunRegistry:
                 # Lost the race: delete_group removed the folder between the
                 # visibility check and this write. Fail closed like any other
                 # unusable folder — the endpoint turns False into a 404.
-                conn.rollback()
-                return False
-            # The tests UPDATE's rowcount alone. The results it drags along
-            # are not in test_ids, so folding them in would make every move
-            # of a test that has ever run fail its own atomicity check.
-            if cur.rowcount != len(set(test_ids)):
                 conn.rollback()
                 return False
             return True
