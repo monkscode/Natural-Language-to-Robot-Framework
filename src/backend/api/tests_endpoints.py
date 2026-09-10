@@ -2,12 +2,15 @@
 query + its generated Robot code; distinct from its individual RUNS, which
 Activity/`/api/history` keeps listing).
 
-Two routes, and both narrow the caller the same way: GET /api/tests lists
-the visible tests, GET /api/tests/{test_id} returns one of them with all of
-its versions and one page of its results. The second resolves visibility
-through the SAME _VISIBLE_TEST_SQL predicate as the first, so a test the
-list will not show is not readable one URL deeper; it answers 404 rather
-than 403 so a rejection cannot confirm that an id is real.
+Three routes. The two reads narrow the caller the same way: GET /api/tests
+lists the visible tests, GET /api/tests/{test_id} returns one of them with
+all of its versions and one page of its results. The second resolves
+visibility through the SAME _VISIBLE_TEST_SQL predicate as the first, so a
+test the list will not show is not readable one URL deeper; it answers 404
+rather than 403 so a rejection cannot confirm that an id is real. The
+write, PUT /api/tests/assignments, files tests into a folder -- the move
+spec section 7.2 puts on a Tests row and section 10 case 6 defines as
+moving the TEST, its results following by join.
 
 GET /api/tests lists the caller's visible tests newest-result-first: their
 own tests plus every test their org has published into a folder (the same
@@ -21,45 +24,49 @@ result_count, pass_count, last_status/last_run_at/last_run_id are WHOLE-TEST
 CURRENT version only. See RunRegistry.list_tests' own docstring for the full
 rules behind each field.
 
-can_move mirrors list_history's shape exactly (own test, or an org_admin's
-test in their own org) rather than the stricter check assign_runs enforces
-for moving a RUN (which also requires the row's own org to equal the
-caller's CURRENT org, even on the owner branch). That stricter check is
-reachable two ways, not one: a validated platform admin (history_scope
-gives them org_id=None, so list_tests appends no te.org_id row filter at
-all) AND an identified caller whose own token simply carries no org
-(history_scope gives that shape the identical org_id=None, so the row
-filter is equally absent for them -- see history_scope's own docstring).
-Ordinary callers and org_admins are the ones excluded, by the concrete
-te.org_id = <their current org> filter list_tests binds from a real
-folder_org_id/org_id -- that part of the reasoning holds. For the org-less
-caller specifically the disagreement is not narrow: assign_runs' very
-first statement is `if org_id is None: return False`, an unconditional
-refusal, so mirrored can_move reads True on every row that caller owns
-while assign_runs would refuse every one of those same moves. The same
-gap already exists, unfixed, for RUNS (see list_history); mirroring here
-keeps tests and runs consistent with each other rather than making tests
-stricter than runs for the identical caller shape. Whatever move endpoint
-a later task builds for tests would need the same authority check
-assign_runs already enforces for runs, so it would inherit this
-disagreement too -- an offered move a caller-scoped authority check
-refuses in exactly the case assign_runs already refuses for the run
-equivalent, not a new gap this endpoint introduces.
+can_move on a list row reports the SAME three terms PUT
+/api/tests/assignments then enforces -- the caller has a concrete org, the
+TEST's org equals it, and the caller is an org_admin or the test's own
+author -- and the two live in this one module so they can be read against
+each other rather than kept in step by hand.
+
+It deliberately no longer mirrors list_history's can_move for RUNS, which
+omits the org term on its owner branch. history_scope gives BOTH a
+validated platform admin and an identified caller whose own token carries
+no org the same org_id=None, list_tests then appends no te.org_id row
+filter for either, and the mirrored flag therefore read True on every row
+such a caller owned while the server refuses every one of those moves:
+for the org-less caller PUT /api/tests/assignments answers 403 from
+_require_org_scope before the registry is reached, and RunRegistry.
+assign_tests refuses org_id=None on its own first statement in any case;
+for the platform admin the te.org_id term refuses each foreign-org test.
+list_history's own flag is left ALONE -- that gap is pre-existing and
+recorded, and widening this task to runs would break the surgical-diff
+constraint.
 
 Referenced by: main.py (router registration).
 Depends on: core/run_registry.py (RunRegistry.list_tests,
-RunRegistry.get_test_detail), api/history_scope.py (the shared caller scope,
-shared with /api/history and /api/groups), api/history_endpoints.py
-(_REPORT_STATUSES -- imported rather than restated so both detail routes
-answer "is there a log.html" identically), auth/jwt_utils.py (require_user).
+RunRegistry.get_test_detail, RunRegistry.assign_tests), api/history_scope.py
+(the shared caller scope, shared with /api/history and /api/groups),
+api/history_endpoints.py (_REPORT_STATUSES -- imported rather than restated
+so both detail routes answer "is there a log.html" identically),
+api/groups_endpoints.py (_require_identity / _require_org_scope /
+_valid_uuid -- imported for the same reason: they carry the 403-not-401
+contract for a token-less mutation, the rule that an org_role claim counts
+only alongside a concrete org_id, and the 400 shape for a malformed id),
+auth/jwt_utils.py (require_user).
 """
 
 import logging
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
+from src.backend.api.groups_endpoints import (
+    _require_identity, _require_org_scope, _valid_uuid,
+)
 from src.backend.api.history_endpoints import _REPORT_STATUSES
 from src.backend.api.history_scope import history_scope
 from src.backend.auth.jwt_utils import require_user
@@ -68,6 +75,20 @@ from src.backend.core.run_registry import get_run_registry
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# One assignment is one UPDATE with a test_id = ANY(%s) array, so the batch is
+# the one request whose cost a client sets. 500 is far above any real
+# selection: the Tests list clamps itself to 200 rows, the same bound
+# groups_endpoints' _RUN_IDS_MAX reasons from over test_runs. Its own 500 is
+# not imported -- these are two batch budgets over two tables, not one shared
+# rule -- and this one also keeps the audit_log.detail JSON written below
+# bounded.
+_TEST_IDS_MAX = 500
+
+
+class TestAssignmentsIn(BaseModel):
+    test_ids: list[str]
+    group_id: str | None = None
 
 
 @router.get("/tests")
@@ -127,14 +148,22 @@ def list_tests(
         include_unowned=scope.is_admin or scope.caller_user_id is None,
     )
     for t in tests:
-        # Mirrors list_history's can_move exactly -- see this module's own
-        # docstring for the one place it does not also mirror assign_runs,
-        # and why that is a deliberate "mirror, don't diverge" choice rather
-        # than an oversight.
+        # The three terms PUT /api/tests/assignments enforces, and nothing
+        # else -- see this module's own docstring for why this no longer
+        # mirrors list_history's flag for runs.
+        #
+        # The folder_org_id term is load-bearing, not defensive. Without it
+        # a caller with no org compares None to an ORG-LESS test's None and
+        # reads True on a move that route answers 403 for, which is the
+        # same "two NULLs must not compare equal" trap the authorship gate
+        # in _attach_test needs its own `user_id is not None` for. It also
+        # excludes the token-less dev caller, whose mutations are 403 by
+        # design (groups_endpoints' module docstring).
         t["can_move"] = (
-            scope.caller_user_id is None                  # dev, no token
-            or t.get("user_id") == scope.caller_user_id   # own test
-            or (scope.is_org_admin and t.get("org_id") == scope.folder_org_id)
+            scope.folder_org_id is not None
+            and t.get("org_id") == scope.folder_org_id
+            and (scope.is_org_admin
+                 or t.get("user_id") == scope.caller_user_id)
         )
         # org_id was selected only to answer can_move, same as list_history.
         t.pop("org_id", None)
@@ -239,3 +268,59 @@ def test_detail(
         for v in detail["versions"]:
             v.pop("created_by", None)
     return detail
+
+
+@router.put("/tests/assignments")
+def assign_tests(
+    request: Request,
+    body: TestAssignmentsIn,
+    user: dict | None = Depends(require_user),
+):
+    """Move tests into a folder (group_id null = remove from folder).
+
+    Filing a test into a folder PUBLISHES it to the org; passing null takes
+    it back to its author alone. Atomic: one test the caller may not file,
+    or a folder outside their org, rejects the whole request -- and the
+    rejection reads as 404, never 403, the convention
+    GET /api/tests/{test_id} above follows for the same reason.
+
+    Only the test's author, or an org_admin, may file it, and only inside
+    their own org. Being able to SEE a colleague's published test is not
+    authority over where it lives (owner decision D4). Those are the same
+    three terms can_move reports on each row of the list above, which is
+    what lets the Tests page offer the control only where it will be
+    honoured.
+
+    Rows move that the caller did not name: every RESULT of a filed test
+    follows it, a peer's included, and both folder columns are written.
+    That is the model rather than a cascade -- a result belongs to its test
+    -- and RunRegistry.assign_tests' own docstring is the authority on
+    which columns it writes and on why writing only the test's would leave
+    an unfiled test's results still published. The audit detail below
+    records the ids the CALLER gave, so those results leave or join the
+    folder without appearing in the record: the same snapshot bound
+    PUT /groups/assignments already documents for its own cascade.
+
+    403 rather than 404 for a caller with no identity or no org, because
+    those two refusals are about the CALLER and not about a folder whose
+    existence a 404 is there to protect. Not 401 either -- the SPA reads
+    every 401 as "session expired", clears the token and redirects to
+    /login, so a 401 here logs the whole app out on a click.
+    """
+    user_id = _require_identity(user)
+    org_id, is_org_admin = _require_org_scope(user)
+    if not body.test_ids:
+        raise HTTPException(400, "test_ids must not be empty")
+    if len(body.test_ids) > _TEST_IDS_MAX:
+        raise HTTPException(400, f"test_ids must not exceed {_TEST_IDS_MAX} ids")
+    test_ids = [_valid_uuid(t, "test id") for t in body.test_ids]
+    group_id = _valid_uuid(body.group_id, "group id") if body.group_id else None
+    if not get_run_registry().assign_tests(
+            org_id, user_id, is_org_admin, test_ids, group_id):
+        raise HTTPException(404, "Group or test not found")
+    # Audited only on success: the floor writes one row per request whatever
+    # the status, and detail on a refused move would read as a move that
+    # happened. test_ids is capped at _TEST_IDS_MAX, so the JSON stays
+    # bounded.
+    request.state.audit_detail = {"group_id": group_id, "test_ids": test_ids}
+    return {"assigned": len(test_ids), "group_id": group_id}

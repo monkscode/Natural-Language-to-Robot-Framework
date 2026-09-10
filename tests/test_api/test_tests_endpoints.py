@@ -549,3 +549,262 @@ def test_detail_resolves_folder_names_only_from_the_callers_own_org(client):
     assert r.status_code == 200, r.text
     assert r.json()["test"]["group_id"] is None
     assert r.json()["test"]["group_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/tests/assignments -- ruling R3's move endpoint. Registry-level
+# authority/atomicity coverage lives in
+# tests/test_core/test_run_registry_assign_tests.py; this section covers the
+# HTTP layer: body validation, the 404 convention, the audit detail, and --
+# the point of the endpoint existing here -- that can_move on the list rows
+# answers exactly what this route then does.
+# ---------------------------------------------------------------------------
+
+def _new_folder(client, tok, name=None):
+    r = client.post("/api/groups",
+                    json={"name": name or f"F-{uuid.uuid4().hex[:6]}"},
+                    headers=_auth(tok))
+    assert r.status_code == 201, r.text
+    return r.json()["group_id"]
+
+
+def _row_for(client, tok, test_id):
+    r = client.get("/api/tests", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    return next((t for t in r.json()["tests"] if t["test_id"] == test_id), None)
+
+
+def _move(client, tok, test_ids, group_id):
+    return client.put("/api/tests/assignments",
+                      json={"test_ids": test_ids, "group_id": group_id},
+                      headers=_auth(tok))
+
+
+def test_assignments_files_a_test_and_then_unfiles_it(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"asg-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    group_id = _new_folder(client, tok)
+
+    r = _move(client, tok, [test_id], group_id)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"assigned": 1, "group_id": group_id}
+    assert _row_for(client, tok, test_id)["group_id"] == group_id
+
+    r = _move(client, tok, [test_id], None)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"assigned": 1, "group_id": None}
+    assert _row_for(client, tok, test_id)["group_id"] is None
+
+
+def test_assignments_let_an_org_admin_file_a_members_test(client):
+    from src.backend.auth.jwt_utils import decode_token
+    tok_admin, tok_member, _tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    group_id = _new_folder(client, tok_admin)
+
+    assert _move(client, tok_admin, [test_id], group_id).status_code == 200
+    assert _row_for(client, tok_member, test_id)["group_id"] == group_id
+
+
+def test_assignments_answer_404_for_a_peers_test_and_move_nothing(client):
+    """Rejection reads as 404, never 403 -- the convention this module's
+    GET /api/tests/{test_id} already follows, so a refusal cannot confirm
+    that an id is real."""
+    from src.backend.auth.jwt_utils import decode_token
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    _file_into_new_folder(org_id, member["user_id"], test_id)
+    group_id = _new_folder(client, tok_peer)
+
+    r = _move(client, tok_peer, [test_id], group_id)
+    assert r.status_code == 404
+    # The peer can SEE the test (it is filed into their org's folder) and
+    # still cannot move it -- and it did not move.
+    assert _row_for(client, tok_peer, test_id) is not None
+    assert _row_for(client, tok_member, test_id)["group_id"] != group_id
+
+
+def test_assignments_answer_404_for_a_folder_in_another_org(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"afo-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    foreign_tok = _register(client, f"afo2-{uuid.uuid4().hex[:8]}@e.com")
+    foreign_group = _new_folder(client, foreign_tok)
+
+    assert _move(client, tok, [test_id], foreign_group).status_code == 404
+    assert _row_for(client, tok, test_id)["group_id"] is None
+
+
+def test_assignments_reject_a_mixed_batch_atomically(client):
+    from src.backend.auth.jwt_utils import decode_token
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    peer = decode_token(tok_peer)
+    mine, _ = _seed_test(member["user_id"], org_id, member["email"])
+    theirs, _ = _seed_test(peer["user_id"], org_id, peer["email"],
+                           query="a peer's own test")
+    group_id = _new_folder(client, tok_member)
+
+    assert _move(client, tok_member, [mine, theirs], group_id).status_code == 404
+    assert _row_for(client, tok_member, mine)["group_id"] is None
+
+
+def test_assignments_validate_the_body_like_the_groups_route(client):
+    tok = _register(client, f"av2-{uuid.uuid4().hex[:8]}@e.com")
+    group_id = _new_folder(client, tok)
+
+    assert client.put("/api/tests/assignments",
+                      json={"test_ids": [], "group_id": None},
+                      headers=_auth(tok)).status_code == 400
+    assert client.put("/api/tests/assignments",
+                      json={"test_ids": ["not-a-uuid"], "group_id": None},
+                      headers=_auth(tok)).status_code == 400
+    assert client.put("/api/tests/assignments",
+                      json={"test_ids": [str(uuid.uuid4())],
+                            "group_id": "not-a-uuid"},
+                      headers=_auth(tok)).status_code == 400
+    from src.backend.api.tests_endpoints import _TEST_IDS_MAX
+    too_many = [str(uuid.uuid4()) for _ in range(_TEST_IDS_MAX + 1)]
+    assert client.put("/api/tests/assignments",
+                      json={"test_ids": too_many, "group_id": group_id},
+                      headers=_auth(tok)).status_code == 400
+
+
+def test_assignments_audit_the_move_only_when_it_happened(client, monkeypatch):
+    """The floor writes one row per mutating request whatever the status, so
+    detail on a refused move would read as a move that happened."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core import audit_log
+    rows: list = []
+    monkeypatch.setattr(audit_log, "write_audit_log",
+                        lambda **kw: rows.append(kw))
+
+    email = f"aud-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    group_id = _new_folder(client, tok)
+
+    rows.clear()
+    assert _move(client, tok, [test_id], group_id).status_code == 200
+    written = [r for r in rows if r["path"] == "/api/tests/assignments"]
+    assert len(written) == 1 and written[0]["detail"] is not None
+    assert test_id in written[0]["detail"] and group_id in written[0]["detail"]
+
+    rows.clear()
+    assert _move(client, tok, [str(uuid.uuid4())], group_id).status_code == 404
+    refused = [r for r in rows if r["path"] == "/api/tests/assignments"]
+    assert len(refused) == 1 and refused[0]["detail"] is None
+
+
+# ---------------------------------------------------------------------------
+# can_move agrees with the endpoint -- the whole reason ruling R3's move
+# route was built beside the flag rather than in groups_endpoints.py.
+# ---------------------------------------------------------------------------
+
+def test_can_move_answers_exactly_what_the_move_endpoint_then_does(client):
+    """Owner, org_admin and peer, each asked both questions about the same
+    test. Task 4's review found the flag and the server disagreeing; this
+    pins that they no longer can."""
+    from src.backend.auth.jwt_utils import decode_token
+    tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    _file_into_new_folder(org_id, member["user_id"], test_id)
+
+    for tok in (tok_member, tok_admin, tok_peer):
+        flag = _row_for(client, tok, test_id)["can_move"]
+        # Each caller moves it into a folder they created themselves, so the
+        # folder's own org can never be the term that refuses.
+        allowed = _move(client, tok, [test_id],
+                        _new_folder(client, tok)).status_code == 200
+        assert flag is allowed, f"can_move {flag} but the move said {allowed}"
+
+
+def test_an_org_less_caller_is_offered_no_move_and_is_refused(client):
+    """Task 4's widest disagreement, closed. history_scope gives an
+    identified caller whose token carries no org the same org_id=None a
+    validated platform admin gets, so list_tests appends no te.org_id row
+    filter and the old mirrored flag read True on every row they owned --
+    while the move is refused for every one of them. Login normally
+    provisions an org before minting a token; a stale pre-tenancy token is
+    the shape that still reaches this, which spec section 10 case 38 names."""
+    from src.backend.auth.jwt_utils import create_access_token, decode_token
+    email = f"noorg-{uuid.uuid4().hex[:8]}@e.com"
+    claims = decode_token(_register(client, email))
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    orgless = create_access_token({
+        "id": claims["user_id"], "email": email, "role": "user",
+        "display_name": "", "org_id": None, "org_role": None,
+        "token_version": claims["token_version"], "status": "active",
+    })
+
+    row = _row_for(client, orgless, test_id)
+    assert row is not None, "the org-less caller still sees their own test"
+    # This test carries a CONCRETE org, so what refuses here is the org
+    # EQUALITY term (concrete != None), not the folder_org_id guard beside
+    # it -- see the next test for the shape only that guard refuses.
+    assert row["can_move"] is False
+    # 403, not 404: the org guard runs before the registry is reached, and
+    # the SPA must not read it as an expired session (that is why it is not
+    # a 401 either).
+    assert _move(client, orgless, [test_id], str(uuid.uuid4())).status_code == 403
+
+
+def test_an_org_less_test_is_not_movable_by_its_org_less_author(client):
+    """The one shape can_move's `folder_org_id is not None` term refuses on
+    its own: both sides of the org comparison are None, and two NULLs must
+    not compare equal. Reached by mutation rather than by reasoning -- with
+    that term removed every other assertion in this file still passed.
+
+    The population is real rather than hypothetical: a test minted while
+    _lookup_org_id swallowed a failure stays org-less and, since Task 4.5,
+    is repairable only by its own author; a stale pre-tenancy token is what
+    puts that author in an org-less scope (spec section 10 case 38).
+
+    record_start cannot mint this row directly -- it looks an org up from
+    the user_id whenever the token carries none -- so the column is cleared
+    afterwards, with a fresh key_n because idx_tests_org_key is UNIQUE
+    (org_id, key_n) NULLS NOT DISTINCT."""
+    from src.backend.auth.jwt_utils import create_access_token, decode_token
+    from src.backend.core.run_registry import get_run_registry
+    email = f"noorg2-{uuid.uuid4().hex[:8]}@e.com"
+    claims = decode_token(_register(client, email))
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email,
+                            query="an org-less test")
+    reg = get_run_registry()
+    with reg._pool.connection() as conn:
+        conn.execute(
+            "UPDATE tests SET org_id = NULL, key_n = ("
+            "  SELECT coalesce(max(key_n), 0) + 1 FROM tests"
+            "   WHERE org_id IS NULL) WHERE test_id = %s",
+            (test_id,))
+    orgless = create_access_token({
+        "id": claims["user_id"], "email": email, "role": "user",
+        "display_name": "", "org_id": None, "org_role": None,
+        "token_version": claims["token_version"], "status": "active",
+    })
+
+    row = _row_for(client, orgless, test_id)
+    assert row is not None, "an org-less author still sees their org-less test"
+    assert row["can_move"] is False
+    assert _move(client, orgless, [test_id], str(uuid.uuid4())).status_code == 403
+
+
+def test_a_token_less_caller_is_refused_403_not_401(client):
+    """AUTH_ENFORCED is off in this suite, so require_user yields None for a
+    request with no Authorization header. A mutation there must be 403: the
+    SPA reads every 401 as "session expired", clears the token and
+    hard-redirects to /login, so a 401 here logs the whole app out on a
+    click. The same rule groups_endpoints states for its own mutations,
+    which is why this route imports its guard rather than restating it."""
+    r = client.put("/api/tests/assignments",
+                   json={"test_ids": [str(uuid.uuid4())], "group_id": None})
+    assert r.status_code == 403

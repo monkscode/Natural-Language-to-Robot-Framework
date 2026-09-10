@@ -1488,10 +1488,10 @@ class RunRegistry:
         adding one would silently zero the count for the token-less dev
         caller, whose run_org_id is None.
 
-        What keeps that safe is assign_runs, the only place this column
-        mutates to a CONCRETE folder outside the one-time migration
-        bootstrap (which sets it once, at INSERT, from the newest filed run
-        among the runs it merges into that test — see assign_runs' own
+        What keeps that safe is assign_runs and assign_tests, the only two
+        places this column mutates to a CONCRETE folder outside the one-time
+        migration bootstrap (which sets it once, at INSERT, from the newest
+        filed run among the runs it merges into that test — see assign_runs' own
         docstring for why that makes migrated data reachable here; its
         grouping key is (org_id, user_id, user_query), so it is single-org
         by construction and contributes no counterexample to this
@@ -1502,7 +1502,11 @@ class RunRegistry:
         column, so it can add no test to any folder's count: _visible_group
         makes the folder the caller's org's, and `r.org_id = %s` in the same
         statement makes the run's org the caller's too, so a test reached
-        through that run carries the folder's org. (NOT _fileable_group_id,
+        through that run carries the folder's org. assign_tests is stricter
+        again and adds no counterexample of its own: it binds `te.org_id`
+        against the caller's org directly, so the test it files is already
+        in the folder's org rather than merely reached through a run that
+        is. (NOT _fileable_group_id,
         which reads as if it governed this and does not: its one call site
         is record_start, and it gates a new RUN's own group_id, never
         tests.group_id.) The folder join then enforces the same thing at
@@ -2585,6 +2589,142 @@ class RunRegistry:
             # fail its own atomicity check. A parent that turns out to be
             # unfilable still rolls the cascade back with everything else.
             if cur.rowcount != len(set(run_ids)):
+                conn.rollback()
+                return False
+            return True
+
+    def assign_tests(
+        self,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        test_ids: List[str],
+        group_id: Optional[str],
+    ) -> bool:
+        """Atomically file TESTS into a folder (group_id None = unfile).
+
+        assign_runs' rule, over the unit that actually owns a folder now. The
+        folder must be in the caller's org, and every test must be one the
+        caller may file: their own, or — for an org_admin — any test in their
+        org. Seeing a shared test does NOT confer this: a peer reads and
+        re-runs another member's published test, but only its author or an
+        org_admin moves it (owner decision D4).
+
+        Every test must ALSO be in the caller's org, org_admin or not.
+        Without that clause a member could file a test they still author in
+        an org they have since left into a folder of the org they are in now,
+        leaving a row whose org_id and folder disagree. The clause equally
+        excludes a test with no org at all (AUTH_ENFORCED off, the bench, or
+        _lookup_org_id having swallowed a failure at mint): run_groups.org_id
+        is NOT NULL, so there is nothing for such a test to equal.
+
+        BOTH authority terms are read off `tests` — te.org_id and te.user_id
+        — never off a result of the test. Reading them from test_runs would
+        decide an authorization fact about a TEST from a row that is not the
+        test: a member owning one RESULT of a colleague's test would file the
+        colleague's test, and the colleague's own results would move with it.
+
+        All-or-nothing: filing is a per-row authority decision, which is
+        exactly when partial writes appear, so a batch containing one test
+        the caller may not file writes NOTHING and returns False.
+
+        THE RUN COLUMN IS WRITTEN TOO, and that is not bookkeeping. Every
+        caller-scoped read whose rows are results resolves its folder as
+        COALESCE(te.group_id, t.group_id) — see _group_join and list_groups'
+        run_count join — so clearing only tests.group_id leaves each result
+        falling back to its own stale column: _VISIBLE_RUN_SQL's published
+        term stays TRUE and the org goes on reading every result of a test
+        the caller has just made private, /reports included (a resolved
+        folder is what feeds is_grouped into caller_can_access rule 3).
+        Measured on a throwaway schema before this method existed: after
+        clearing tests.group_id alone a peer still counted the run and no
+        longer counted the test. Stated at its real size — in the FILING
+        direction the run write changes no answer any read here gives, since
+        every one of them resolves a run's folder as g.group_id off that
+        COALESCE join and the test's new folder already wins there; it is
+        UNGROUPING that needs it. It also keeps spec 4.4's promise
+        that test_runs.group_id stays populated and readable until P3 drops
+        it, so P1/P2 remain reversible.
+
+        No re-run cascade, and none is missing. assign_runs needs one because
+        a re-run carries its own folder id and can drift from the test it
+        copied; here the test IS the unit being moved and every result of it
+        — the caller's, a peer's, a re-run's — is picked up by the same
+        test_id predicate. A result whose test_id is NULL (owner decision D8,
+        a permanent legal state) has no test to travel with and is reachable
+        only through assign_runs, which files by run_id and demands no test.
+
+        Filing a test PUBLISHES it, and this is decided per ROW rather than
+        by the test: _VISIBLE_TEST_SQL admits the test itself only while
+        te.user_id IS NOT NULL, and _VISIBLE_RUN_SQL admits each result only
+        while that RESULT's own t.user_id IS NOT NULL. Measured: an
+        author-less test in a folder publishes its authored results while
+        staying invisible in the Tests list itself, and an unattributed
+        result under an authored test stays invisible while its siblings are
+        published. It escalates nobody's authority — an org_admin reaching
+        the author-less case could already file those same results directly
+        through assign_runs, and a member filing their own test already
+        publishes a peer's result of it today, because assign_runs' own
+        test-side UPDATE sets tests.group_id and the COALESCE carries it to
+        every sibling.
+
+        The two UPDATEs may run in either order: the second reads te.test_id,
+        te.org_id and te.user_id, none of which the first writes."""
+        if org_id is None:
+            # No org: nothing to file into, and no org to test a test
+            # against. Measured redundant for a non-empty batch -- a named
+            # folder fails _visible_group below (run_groups.org_id is NOT
+            # NULL, so nothing equals NULL) and an ungroup fails the org
+            # term in the UPDATE -- so this is an early-out that takes no
+            # connection, not the refusal. Kept to mirror assign_runs'
+            # identical first line.
+            return False
+        with self._pool.connection() as conn:
+            if group_id is not None:
+                if self._visible_group(conn, org_id, group_id) is None:
+                    return False
+            params: list = [group_id, list(test_ids), org_id]
+            if is_org_admin:
+                allowed = "org_id = %s"
+                params.append(org_id)
+            else:
+                allowed = "user_id = %s"
+                params.append(user_id)
+            try:
+                cur = conn.execute(
+                    f"UPDATE tests SET group_id = %s, updated_at = now() "
+                    f"WHERE test_id = ANY(%s) AND org_id = %s AND {allowed}",
+                    params,
+                )
+                # Driven off the SAME authority filter, qualified onto `te`
+                # because two tables are in scope here: a result moves only
+                # as a consequence of its TEST moving, so it can never be
+                # reached through a run the caller could not have filed.
+                #
+                # Those two authority terms are defence in depth and no test
+                # can observe them, which is measured rather than assumed:
+                # weakening them moves runs of a test the caller may not
+                # file, and the rowcount gate below then rolls the whole
+                # transaction back before any read could see it. They are
+                # kept so each statement is independently correct.
+                conn.execute(
+                    f"UPDATE test_runs r SET group_id = %s "
+                    f"FROM tests te "
+                    f"WHERE te.test_id = r.test_id "
+                    f"  AND te.test_id = ANY(%s) AND te.org_id = %s "
+                    f"  AND te.{allowed}",
+                    params,
+                )
+            except psycopg.errors.ForeignKeyViolation:
+                # Lost the race: delete_group removed the folder between the
+                # visibility check and this write. Fail closed like any other
+                # unusable folder — the endpoint turns False into a 404.
+                conn.rollback()
+                return False
+            # The tests UPDATE's rowcount alone. The results it drags along
+            # are not in test_ids, so folding them in would make every move
+            # of a test that has ever run fail its own atomicity check.
+            if cur.rowcount != len(set(test_ids)):
                 conn.rollback()
                 return False
             return True
