@@ -367,6 +367,16 @@ _SCHEMA_DDL = (
         UNIQUE (test_id, n)
     )
     """,
+    # Who appended this version, by email. created_by beside it holds an
+    # internal user id and is admin-only, so without this a non-admin's
+    # version history cannot say who wrote a version -- which first MATTERS
+    # in P2 Task 7, the first code that lets someone other than the test's
+    # author append one. Legacy rows stay NULL and are answered from
+    # tests.user_email instead: every row written before Task 7 has
+    # created_by equal to the test's author by construction, because both
+    # earlier writers (the mint below and the migration collapse above) set
+    # it from the same value they write into tests.user_id.
+    "ALTER TABLE test_versions ADD COLUMN IF NOT EXISTS created_by_email TEXT",
     # Results point at their test, and at the version they ran — with one
     # known exception: EDIT-then-execute. record_start replaces robot_code
     # newest-non-NULL-wins while _attach_test short-circuits on the run's
@@ -889,6 +899,9 @@ class RunRegistry:
         rerun_of: Optional[str],
         org_id: Optional[str],
         is_platform_admin: bool = False,
+        test_id: Optional[str] = None,
+        test_version_id: Optional[str] = None,
+        version_reason: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Resolve (test_id, test_version_id, org_id) for a run being written.
 
@@ -896,6 +909,21 @@ class RunRegistry:
         a run row and its test land together or not at all — unlike
         _lookup_org_id and _fileable_group_id, which decide decorations and so
         deliberately use their own.
+
+        FOUR shapes, and the FIRST is the one the caller NAMES (P2 Task 7,
+        owner ruling R7-8). The three older branches all DERIVE the test —
+        from the run's own row, from a rerun_of source, or by minting one —
+        and a regeneration cannot use any of them: its success write would
+        fall through to the mint and create a SECOND test rather than
+        appending to the one being regenerated. So `test_id` dispatches a
+        branch of its own, placed first and kept separate rather than folded
+        into the existing-row branch below, because both of Task 4.5's
+        Criticals lived in that branch and a regeneration's own opening row
+        lands there. That branch NEVER mints, never re-homes a run, and
+        never writes an org back onto the test — naming a test in a request
+        body is not a claim on it, which is exactly what the two write-back
+        gates below exist to refuse. Its own contract is documented on the
+        branch.
 
         Three owner decisions live here:
 
@@ -1004,10 +1032,12 @@ class RunRegistry:
         the same workflow_id would find the run owned by themselves and
         pass — a one-request delay, not a gate (measured, fix round 1,
         2026-09-09). tests.user_id has no such transition: it is written
-        once, by the mint below or by the collapse's INSERT, and none of
-        the four UPDATE tests statements in this file touches it
-        (current_version; org_id/key_n in the write-back; group_id; and
-        backfill_org_ids' org_id/key_n).
+        once, by the mint below or by the collapse's INSERT, and no
+        UPDATE tests statement in this file sets it. (An earlier form of
+        this sentence counted those statements. The count went stale twice
+        -- assign_tests added one and Task 7's append below added another --
+        so it is gone: the claim that carries the argument is that none of
+        them touches user_id, whatever their number.)
 
         Accepted cost, stated plainly: a test NOBODY authored — minted by a
         token-less run (AUTH_ENFORCED off, the bench, local dev), or
@@ -1124,6 +1154,101 @@ class RunRegistry:
                     "%s -> org %s; leaving test org-less: %s",
                     existing_test_id, org_id, e)
 
+        if test_id is not None:
+            # The caller NAMED the target test: a regeneration appending
+            # version n+1, or a Tests-page Run executing the current one.
+            # Nothing in this branch creates a test and nothing claims one.
+            row = conn.execute(
+                "SELECT test_id, test_version_id FROM test_runs"
+                " WHERE run_id = %s", (run_id,)).fetchone()
+            stored_test = row["test_id"] if row else None
+            stored_version = row["test_version_id"] if row else None
+            if stored_test and (stored_version or stored_test != test_id):
+                # Two refusals off one read. A run that already names a
+                # VERSION never gets a second one — record_start is an upsert
+                # called at generation start, at generation success and again
+                # at execute, and the /versions stream calls the success write
+                # a SECOND time when its read-back finds no version, so
+                # "append at most once per run" has to be a property of this
+                # branch rather than of its callers. A run that already names
+                # a DIFFERENT test is never re-homed onto this one either:
+                # that would move a result off the test whose code it ran.
+                stored_org = conn.execute(
+                    "SELECT org_id FROM tests WHERE test_id = %s",
+                    (stored_test,)).fetchone()
+                return (stored_test, stored_version,
+                        stored_org["org_id"]
+                        if stored_org and stored_org["org_id"] is not None
+                        else org_id)
+            appending = version_reason is not None and bool(robot_code)
+            # FOR NO KEY UPDATE, and taken BEFORE max(n) + 1 is read: that
+            # ordering is what makes the counter safe against a simultaneous
+            # regeneration of the same test, and UNIQUE (test_id, n) is left
+            # as the backstop rather than as the mechanism — a
+            # UniqueViolation-and-retry loop was measured to LOSE the third
+            # of three simultaneous writers, while the lock kept all three.
+            # Not FOR UPDATE: that mode also conflicts with the FOR KEY SHARE
+            # a foreign-key check takes, so it would stall every concurrent
+            # INSERT of a run referencing this test (measured: 1.01s of a 1s
+            # hold, against 0.00s for this mode), and spec case 25 says two
+            # results of one test may run at once.
+            target = conn.execute(
+                "SELECT org_id FROM tests WHERE test_id = %s"
+                + (" FOR NO KEY UPDATE" if appending else ""),
+                (test_id,)).fetchone()
+            if target is None:
+                # A named test that does not exist. NEVER mint: minting here
+                # would answer a request nobody made, and silently, since
+                # record_start swallows. The run is recorded unattached,
+                # which D8 already makes a permanently legal state.
+                return (None, None, org_id)
+            version_id = None
+            if appending:
+                n = conn.execute(
+                    "SELECT coalesce(max(n), 0) + 1 AS n FROM test_versions"
+                    " WHERE test_id = %s", (test_id,)).fetchone()["n"]
+                version_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO test_versions (version_id, test_id, n,"
+                    " user_query, robot_code, created_by, created_by_email,"
+                    " reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (version_id, test_id, n, user_query, robot_code,
+                     user_id, user_email, version_reason))
+                # The pointer and the description move WITH the version.
+                # Without current_version the new code is written and never
+                # executed — every later run resolves its code through that
+                # column — and without user_query the Tests row and the
+                # Update dialog keep prefilling the description this
+                # regeneration replaced.
+                conn.execute(
+                    "UPDATE tests SET current_version = %s, user_query = %s,"
+                    " updated_at = now() WHERE test_id = %s",
+                    (n, user_query, test_id))
+            elif test_version_id is not None:
+                # Executing a named version. The PAIR is checked rather than
+                # trusted: a result claiming a version of some other test
+                # would attribute its outcome to code it never ran, which is
+                # case 15's rule seen from the write side.
+                ok = conn.execute(
+                    "SELECT 1 FROM test_versions WHERE version_id = %s"
+                    " AND test_id = %s",
+                    (test_version_id, test_id)).fetchone()
+                version_id = test_version_id if ok else None
+            # Neither: the opening row of a regeneration, or its failure row.
+            # Both attach to the test with NO version, so "this test failed
+            # to regenerate" is visible on the test (D8 (b), case 10).
+            #
+            # The org is the TEST'S (D6), falling back to the caller's only
+            # when the test has none (case 35) — and only for the RUN. There
+            # is deliberately no _write_back_org call anywhere in this
+            # branch: reaching it takes nothing but a test_id in a request
+            # body, so a write-back here would hand the first caller to name
+            # an org-less test a permanent claim on it, which is precisely
+            # what the two gates below refuse on the older branches.
+            return (test_id, version_id,
+                    target["org_id"] if target["org_id"] is not None
+                    else org_id)
+
         existing = conn.execute(
             "SELECT r.test_id, r.test_version_id, t.user_id AS test_user_id,"
             " t.org_id"
@@ -1146,10 +1271,10 @@ class RunRegistry:
                 # so a refused call adopts the run and the caller's SECOND
                 # POST of the same client-supplied workflow_id would pass.
                 # tests.user_id has no such transition — it is written once,
-                # by the mint below or by the collapse's INSERT, and none of
-                # the four UPDATE tests statements in this file touches it
-                # (current_version; org_id/key_n here; group_id; and
-                # backfill_org_ids' org_id/key_n). It is also the column
+                # by the mint below or by the collapse's INSERT, and no
+                # UPDATE tests statement in this file sets it (see the
+                # docstring for why that claim is no longer stated as a
+                # count). It is also the column
                 # _VISIBLE_TEST_SQL binds, so the gate and the Tests list
                 # agree on what "yours" means for a test — though that list
                 # excludes an ORG-LESS one from an org-carrying caller by a
@@ -1255,10 +1380,15 @@ class RunRegistry:
                 logger.warning(
                     "[RUN_REGISTRY] test key collision for run %s in org %s; "
                     "recomputing", run_id, org_id)
+        # created_by_email is the same value written into tests.user_email
+        # just above: on a minted test the version's author and the test's
+        # author are one person, and writing it here rather than reading it
+        # back through a join keeps the name that was true at write time.
         conn.execute(
             "INSERT INTO test_versions (version_id, test_id, n, user_query,"
-            " robot_code, created_by) VALUES (%s, %s, 1, %s, %s, %s)",
-            (version_id, test_id, user_query, robot_code, user_id))
+            " robot_code, created_by, created_by_email)"
+            " VALUES (%s, %s, 1, %s, %s, %s, %s)",
+            (version_id, test_id, user_query, robot_code, user_id, user_email))
         return (test_id, version_id, org_id)
 
     def record_start(
@@ -1272,6 +1402,9 @@ class RunRegistry:
         error_message: Optional[str] = None,
         group_id: Optional[str] = None,
         is_platform_admin: bool = False,
+        test_id: Optional[str] = None,
+        test_version_id: Optional[str] = None,
+        version_reason: Optional[str] = None,
     ) -> None:
         """Upsert a run row. Ownership/query/lineage are write-once (COALESCE
         keeps the first non-NULL value); status and updated_at always advance.
@@ -1295,12 +1428,30 @@ class RunRegistry:
         is write-once like ownership, so a later record_start cannot drag a
         run the user moved mid-flight back to the source folder.
 
-        test_id/test_version_id come from _attach_test, which runs on THIS
-        connection before the INSERT because it can revise org_id (D6: a
-        result takes the org of its test). is_platform_admin records whether
-        the caller held platform-admin authority at the moment of the write
-        (D7) and is write-once by omission from the ON CONFLICT body."""
+        The test_id/test_version_id WRITTEN on the row come from
+        _attach_test, which runs on THIS connection before the INSERT because
+        it can revise org_id (D6: a result takes the org of its test).
+        is_platform_admin records whether the caller held platform-admin
+        authority at the moment of the write (D7) and is write-once by
+        omission from the ON CONFLICT body.
+
+        The three parameters of the same names are the caller NAMING a target
+        rather than letting _attach_test derive one (P2 Task 7), and only the
+        /versions and Tests-page-Run paths pass them. test_id selects the
+        test; version_reason alongside robot_code appends version n+1 to it
+        and is the label spec section 7.4 records ('regenerated' when the
+        description came back unchanged, 'edited' when it did not);
+        test_version_id says which existing version a run is executing.
+        _attach_test's first branch is the authority on what each combination
+        does — in particular that a named test is never created and never
+        claimed here."""
         try:
+            # The caller's NAMED target, kept under its own names: the two
+            # locals below are rebound from _attach_test's return (and reset
+            # to None when it fails), so reading the parameters back on the
+            # folder retry would pass whatever the first attach resolved
+            # instead of what the caller asked for.
+            named_test_id, named_version_id = test_id, test_version_id
             user_id = (user or {}).get("user_id")
             org_id = (user or {}).get("org_id")
             if org_id is None and user_id:
@@ -1342,7 +1493,8 @@ class RunRegistry:
                     test_id, test_version_id, org_id = self._attach_test(
                         conn, run_id, user_id, (user or {}).get("email"),
                         user_query, robot_code, rerun_of, org_id,
-                        is_platform_admin)
+                        is_platform_admin, named_test_id, named_version_id,
+                        version_reason)
                 except Exception as e:
                     # Bookkeeping must never cost the history row. Roll the
                     # aborted sub-work back or the pool's COMMIT on exit takes
@@ -1400,7 +1552,8 @@ class RunRegistry:
                         test_id, test_version_id, org_id = self._attach_test(
                             conn, run_id, user_id, (user or {}).get("email"),
                             user_query, robot_code, rerun_of, org_id,
-                            is_platform_admin)
+                            is_platform_admin, named_test_id,
+                            named_version_id, version_reason)
                     except Exception as e:
                         conn.rollback()
                         test_id = test_version_id = None
@@ -2249,6 +2402,106 @@ class RunRegistry:
             logger.error(f"[RUN_REGISTRY] list_tests failed: {e}")
             return [], 0
 
+    def get_test_head(
+        self,
+        test_id: str,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """One test's head plus its CURRENT version's id and code (P2 Task 7).
+
+        The pre-flight read behind POST /api/tests/{test_id}/versions and
+        behind POST /execute-test's test_id path. Both need the same five
+        facts before they start anything expensive: does this caller see the
+        test (404 otherwise), is it theirs to update (org_id and user_id feed
+        the Move terms the route re-uses from the Tests list), what
+        description are we comparing the submitted one against (user_query,
+        for spec section 7.4's 'regenerated' vs 'edited' label), and is there
+        a current version with code to run (409 otherwise -- case 31).
+
+        The TEST predicate stack is get_test_detail's, term for term and in
+        the same order -- _group_join_for_tests, _VISIBLE_TEST_SQL, the
+        te.org_id term, the include_unowned fallback, join params first. It
+        is the same question, so it must not be a second answer to it: a test
+        the drawer will not show must not be regenerable one POST deeper.
+        No RESULT predicate is built, because no row this returns is a
+        result.
+
+        The current version is resolved through _CURRENT_VERSION_SQL rather
+        than by a second SELECT keyed on current_version, so "the current
+        version" means here exactly what it means in list_tests and in the
+        drawer. It is a LEFT join: a test whose current_version names no row
+        comes back with version_id and robot_code None rather than not at
+        all, which is what lets the route answer 409 with the reason instead
+        of a bare 404 (case 31).
+
+        Returns None when the test does not exist, when this caller may not
+        see it, or when the read fails -- the same three-way collapse
+        get_test_detail documents, for the same reason."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["te.test_id = %s"]
+        params: list = [test_id]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params.append(org_id)
+        # Join params FIRST -- _group_join_for_tests' placeholder sits
+        # earlier in the SQL text than any WHERE clause's, and psycopg binds
+        # %s strictly by position. _CURRENT_VERSION_SQL binds none of its own.
+        params = join_params + params
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT te.test_id, te.user_id, te.org_id, "
+                    "       te.user_query, te.current_version, "
+                    "       cv.version_id, cv.robot_code "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"WHERE {' AND '.join(clauses)}",
+                    params,
+                ).fetchone()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_test_head failed: {e}")
+            return None
+        return dict(row) if row else None
+
+    def get_run_version(
+        self, run_id: str
+    ) -> Tuple[Optional[str], Optional[int]]:
+        """(test_id, version n) for one run -- the /versions stream's
+        read-back (P2 Task 7).
+
+        record_start swallows every failure it meets, deadlocks included, so
+        the only honest way for the stream to tell the client a version
+        landed is to go and look. n is None when the run names no version
+        (the opening row of a regeneration, or a failed one), and both are
+        None for a run this registry has never heard of.
+
+        A storage error also answers (None, None): the caller's response to
+        "not confirmed" and to "could not check" is the same event, and it
+        says the version could not be CONFIRMED rather than that it was not
+        saved, precisely because this read cannot tell those apart."""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT r.test_id, v.n FROM test_runs r"
+                    " LEFT JOIN test_versions v"
+                    "   ON v.version_id = r.test_version_id"
+                    " WHERE r.run_id = %s", (run_id,)).fetchone()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_run_version failed: {e}")
+            return (None, None)
+        if row is None:
+            return (None, None)
+        return (row["test_id"], row["n"])
+
     def get_test_detail(
         self,
         test_id: str,
@@ -2409,9 +2662,9 @@ class RunRegistry:
                 if row is None:
                     return None
                 versions = conn.execute(
-                    "SELECT n, user_query, robot_code, created_by, reason,"
-                    " created_at FROM test_versions WHERE test_id = %s"
-                    " ORDER BY n DESC",
+                    "SELECT n, user_query, robot_code, created_by,"
+                    " created_by_email, reason, created_at FROM test_versions"
+                    " WHERE test_id = %s ORDER BY n DESC",
                     (test_id,),
                 ).fetchall()
                 # Same predicate as the page below, built once: a count that
@@ -2459,6 +2712,24 @@ class RunRegistry:
                 "user_query": v["user_query"],
                 "robot_code": v["robot_code"],
                 "created_by": v["created_by"],
+                # The appender's email, and the ONE case it may be filled in
+                # from the test: a row written before created_by_email
+                # existed has created_by equal to the test's author by
+                # construction (the mint and the migration collapse both set
+                # it from the value they write into tests.user_id), so
+                # tests.user_email IS that version's author's email. The
+                # fallback must not fire when created_by differs -- naming
+                # the test's author beside a version someone else wrote is
+                # worse than naming nobody -- and `created_by is not None`
+                # is load-bearing for the usual reason: two NULLs must not
+                # compare equal, or an author-less version would borrow an
+                # author-less test's email.
+                "created_by_email": (
+                    v["created_by_email"] if v["created_by_email"] is not None
+                    else (row["user_email"]
+                          if v["created_by"] is not None
+                          and v["created_by"] == row["user_id"] else None)
+                ),
                 "reason": v["reason"],
                 "created_at": v["created_at"].isoformat(),
             } for v in versions],

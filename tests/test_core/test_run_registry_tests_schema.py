@@ -46,8 +46,8 @@ def test_tables_are_created_with_the_specified_columns(scratch):
         "user_query",
     ]
     assert _columns(admin, name, "test_versions") == [
-        "created_at", "created_by", "n", "reason", "robot_code",
-        "test_id", "user_query", "version_id",
+        "created_at", "created_by", "created_by_email", "n", "reason",
+        "robot_code", "test_id", "user_query", "version_id",
     ]
     for col in ("test_id", "test_version_id", "ran_as_platform_admin"):
         assert col in _columns(admin, name, "test_runs")
