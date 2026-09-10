@@ -1,16 +1,20 @@
-"""GET /api/tests -- the Tests page's list endpoint.
+"""The /api/tests routes -- list, detail, move, and the regeneration write.
 
 Registry-level predicate/filter/aggregate coverage (visibility, health,
-spark, fan-out) lives in tests/test_core/test_run_registry_list_tests.py.
-This file covers what that one cannot: the HTTP layer -- query-param
+spark, fan-out, and the version append itself) lives in
+tests/test_core/test_run_registry_list_tests.py,
+test_run_registry_get_test_detail.py and test_run_registry_versions.py.
+This file covers what those cannot: the HTTP layer -- query-param
 parsing/validation mirroring /api/history's conventions, auth wiring
-through require_user/history_scope, and can_move computed against a REAL
-caller scope (owner / org_admin / peer) end to end.
+through require_user/history_scope, and can_move (and the update gate that
+shares its three terms) computed against a REAL caller scope
+(owner / org_admin / peer / platform admin) end to end.
 
 Referenced by: none (route tests only).
 Depends on: src/backend/api/tests_endpoints.py, tests/test_auth/conftest.py
 (auth_isolated_schema), tests/test_api/conftest.py (register_active).
 """
+import contextlib
 import uuid
 
 import pytest
@@ -855,3 +859,316 @@ def test_detail_does_not_offer_a_result_that_history_hides(client):
     hist = client.get("/api/history", headers=_auth(tok_peer))
     assert hist.status_code == 200, hist.text
     assert orphan not in [x["run_id"] for x in hist.json()["runs"]]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/tests/{test_id}/versions -- the Update dialog's write (Task 7).
+#
+# Generation itself is patched out at the route's own boundary: what is under
+# test here is WHO may regenerate a test, WHAT the pipeline is told to do, and
+# which of the two labels spec section 7.4 records. The append itself lives in
+# tests/test_core/test_run_registry_versions.py.
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _generation_captured():
+    """Replace the generation stream, keeping every argument it was given."""
+    from unittest.mock import patch
+    from src.backend.api import tests_endpoints as te
+    calls = []
+
+    async def _fake(user_query, model_provider, model_name, user=None, **kw):
+        calls.append({"user_query": user_query, "user": user, **kw})
+        yield 'data: {"stage": "generation"}\n\n'
+
+    with patch.object(te, "stream_generate_only", _fake):
+        yield calls
+
+
+def _regenerate(client, tok, test_id, query, mode="update"):
+    return client.post(f"/api/tests/{test_id}/versions",
+                       json={"user_query": query, "mode": mode},
+                       headers=_auth(tok) if tok else {})
+
+
+def _seeded_test_for(client, prefix="rgn"):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"{prefix}-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    return tok, claims, test_id
+
+
+def test_versions_regenerates_the_test_for_its_own_author(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        r = _regenerate(client, tok, test_id, "search boots")
+    assert r.status_code == 200, r.text
+    assert len(calls) == 1
+    assert calls[0]["user_query"] == "search boots"
+    assert calls[0]["regenerate_test_id"] == test_id
+    assert calls[0]["report_version"] is True
+
+
+def test_versions_label_an_unchanged_description_as_regenerated(client):
+    """The user believes the description is right and the code is wrong --
+    the whole of the drift signal spec section 9 records."""
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id,
+                           "search shoes").status_code == 200
+    assert calls[0]["version_reason"] == "regenerated"
+
+
+def test_versions_label_a_changed_description_as_edited(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id,
+                           "search boots").status_code == 200
+    assert calls[0]["version_reason"] == "edited"
+
+
+def test_versions_ignore_only_the_whitespace_around_the_description(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id,
+                           "  search shoes \n").status_code == 200
+    assert calls[0]["version_reason"] == "regenerated"
+    # ...and what generation is asked for is the trimmed text, so the
+    # description stored on the test cannot drift from what was compared.
+    assert calls[0]["user_query"] == "search shoes"
+
+
+def test_versions_treat_a_case_change_as_an_edit(client):
+    """A capital letter can change what a test asserts, so the comparison is
+    case-sensitive: a false 'regenerated' pollutes the drift signal, while a
+    false 'edited' only loses a candidate."""
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id,
+                           "Search shoes").status_code == 200
+    assert calls[0]["version_reason"] == "edited"
+
+
+def test_versions_treat_inner_spacing_as_an_edit(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id,
+                           "search  shoes").status_code == 200
+    assert calls[0]["version_reason"] == "edited"
+
+
+def test_versions_label_a_description_less_test_as_edited(client):
+    """Paste-and-execute mints a test with user_query NULL (spec case 9).
+    Nothing was ever asked for, so nothing came back unchanged."""
+    from src.backend.core.run_registry import get_run_registry
+    tok, _claims, test_id = _seeded_test_for(client)
+    with get_run_registry()._pool.connection() as conn:
+        conn.execute("UPDATE tests SET user_query = NULL WHERE test_id = %s",
+                     (test_id,))
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id, "anything").status_code == 200
+    assert calls[0]["version_reason"] == "edited"
+
+
+def test_versions_let_an_org_admin_update_a_members_test(client):
+    from src.backend.auth.jwt_utils import decode_token
+    tok_admin, tok_member, _tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok_admin, test_id, "x").status_code == 200
+    assert calls[0]["regenerate_test_id"] == test_id
+
+
+def test_versions_answer_404_for_a_peer_who_can_see_the_test(client):
+    """Updating rewrites the code every later run of the test executes, for
+    everyone -- a larger power than MOVING it, which decision D4 already
+    withholds from peers. Seeing a published test is not authority over it."""
+    from src.backend.auth.jwt_utils import decode_token
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    _file_into_new_folder(org_id, member["user_id"], test_id)
+    assert _row_for(client, tok_peer, test_id) is not None
+
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok_peer, test_id, "x").status_code == 404
+    assert calls == []
+
+
+def test_versions_answer_404_for_an_org_admin_on_an_author_less_test(client):
+    """The reason the gate is visibility AND the move rule, not the move rule
+    alone: assign_tests' org_admin branch never looks at the author, so an
+    org_admin passes the move terms for a test include_unowned hides from
+    them. An update must not target a test the caller cannot list."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+    tok_admin, tok_member, _tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    with get_run_registry()._pool.connection() as conn:
+        conn.execute("UPDATE tests SET user_id = NULL WHERE test_id = %s",
+                     (test_id,))
+    assert _row_for(client, tok_admin, test_id) is None
+
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok_admin, test_id, "x").status_code == 404
+    assert calls == []
+
+
+def test_versions_answer_404_for_a_platform_admin_in_another_org(client):
+    """The org-equality term, and the one caller shape that can reach it.
+    Hints come from the CALLER's token org (SmartKeywordProvider's org_id),
+    so without this term a platform admin regenerates org B's test using org
+    A's learned hints and writes the result into org B's code."""
+    from src.backend.auth.jwt_utils import create_access_token, decode_token
+    email = f"pa-{uuid.uuid4().hex[:8]}@e.com"
+    claims = decode_token(_register(client, email))
+    foreign_email = f"pa2-{uuid.uuid4().hex[:8]}@e.com"
+    foreign = decode_token(_register(client, foreign_email))
+    test_id, _ = _seed_test(foreign["user_id"], foreign["org_id"],
+                            foreign_email)
+    admin_tok = create_access_token({
+        "id": claims["user_id"], "email": email, "role": "admin",
+        "display_name": "", "org_id": claims["org_id"],
+        "org_role": claims["org_role"],
+        "token_version": claims["token_version"], "status": "active",
+    })
+    # The platform admin CAN see it -- so this is the move rule refusing,
+    # not visibility.
+    assert client.get(f"/api/tests/{test_id}",
+                      headers=_auth(admin_tok)).status_code == 200
+
+    with _generation_captured() as calls:
+        assert _regenerate(client, admin_tok, test_id, "x").status_code == 404
+    assert calls == []
+
+
+def test_versions_refuse_a_token_less_update_with_403(client):
+    """403 rather than 404 for a refusal about the CALLER, and never 401 --
+    the SPA reads every 401 as an expired session and logs the app out."""
+    _tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, None, test_id, "x").status_code == 403
+    assert calls == []
+
+
+def test_versions_refuse_an_org_less_update_with_403(client):
+    from src.backend.auth.jwt_utils import create_access_token, decode_token
+    email = f"rgno-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+    orgless = create_access_token({
+        "id": claims["user_id"], "email": email, "role": "user",
+        "display_name": "", "org_id": None, "org_role": None,
+        "token_version": claims["token_version"], "status": "active",
+    })
+    with _generation_captured() as calls:
+        assert _regenerate(client, orgless, test_id, "x").status_code == 403
+    assert calls == []
+
+
+def test_versions_answer_404_for_a_test_that_does_not_exist(client):
+    tok, _claims, _test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        r = _regenerate(client, tok, str(uuid.uuid4()), "x")
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_versions_answer_400_for_a_malformed_test_id(client):
+    tok, _claims, _test_id = _seeded_test_for(client)
+    with _generation_captured():
+        assert _regenerate(client, tok, "not-a-uuid", "x").status_code == 400
+
+
+def test_versions_answer_400_for_an_empty_description(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        assert _regenerate(client, tok, test_id, "").status_code == 400
+        assert _regenerate(client, tok, test_id, "   \n ").status_code == 400
+    assert calls == []
+
+
+def test_versions_answer_422_for_an_unknown_mode(client):
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured():
+        r = client.post(f"/api/tests/{test_id}/versions",
+                        json={"user_query": "x", "mode": "duplicate"},
+                        headers=_auth(tok))
+    assert r.status_code == 422
+
+
+def test_new_test_mode_needs_only_visibility(client):
+    """The peer refused above is exactly who this mode exists for: they take
+    a copy of their own instead of rewriting a colleague's test. No target
+    goes to the pipeline, so it mints one the way Generate does."""
+    from src.backend.auth.jwt_utils import decode_token
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    _file_into_new_folder(org_id, member["user_id"], test_id)
+
+    with _generation_captured() as calls:
+        r = _regenerate(client, tok_peer, test_id, "search boots",
+                        mode="new_test")
+    assert r.status_code == 200, r.text
+    assert calls[0]["regenerate_test_id"] is None
+    assert calls[0]["version_reason"] is None
+    assert calls[0]["report_version"] is True
+
+
+def test_new_test_mode_still_refuses_a_test_the_caller_cannot_see(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"nt-{uuid.uuid4().hex[:8]}@e.com"
+    _register(client, email)
+    foreign_email = f"nt2-{uuid.uuid4().hex[:8]}@e.com"
+    foreign = decode_token(_register(client, foreign_email))
+    foreign_test, _ = _seed_test(foreign["user_id"], foreign["org_id"],
+                                 foreign_email)
+    tok = _login(client, email)
+
+    with _generation_captured() as calls:
+        r = _regenerate(client, tok, foreign_test, "x", mode="new_test")
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_new_test_mode_does_not_require_a_token(client):
+    """The same rule POST /generate-test applies: with AUTH_ENFORCED off the
+    token-less dev caller may generate. Only `update` needs an identity,
+    because only `update` rewrites somebody else's test."""
+    _tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        r = _regenerate(client, None, test_id, "x", mode="new_test")
+    assert r.status_code == 200, r.text
+    assert calls[0]["regenerate_test_id"] is None
+
+
+def test_versions_audit_the_mode_that_was_asked_for(client, monkeypatch):
+    """The path already names the test and the method already says it is a
+    write; `mode` is the one thing in the request that changes what the
+    write means. The 200 records that the stream STARTED -- the audit floor
+    runs before a StreamingResponse has produced anything."""
+    from src.backend.core import audit_log
+    rows: list = []
+    monkeypatch.setattr(audit_log, "write_audit_log",
+                        lambda **kw: rows.append(kw))
+    tok, _claims, test_id = _seeded_test_for(client)
+
+    rows.clear()
+    with _generation_captured():
+        assert _regenerate(client, tok, test_id, "x").status_code == 200
+    written = [r for r in rows if r["path"].endswith("/versions")]
+    assert len(written) == 1
+    assert written[0]["detail"] == '{"mode": "update"}'
+
+    rows.clear()
+    with _generation_captured():
+        r = _regenerate(client, tok, str(uuid.uuid4()), "x")
+    assert r.status_code == 404
+    refused = [x for x in rows if x["path"].endswith("/versions")]
+    assert len(refused) == 1 and refused[0]["detail"] is None

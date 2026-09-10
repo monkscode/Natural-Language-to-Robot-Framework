@@ -35,6 +35,7 @@ class ExecuteRequest(BaseModel):
     user_query: Optional[str] = None  # Optional: original user query for pattern learning
     workflow_id: Optional[str] = None  # Optional: workflow ID from generation for unified tracking
     rerun_of: Optional[str] = None  # Optional: run id whose STORED code to re-execute (learning skipped)
+    test_id: Optional[str] = None  # Optional: TEST whose current version to re-run (learning skipped); rejects every other field
 
 @router.post('/generate-test')
 async def generate_test_only(query: Query, user: dict | None = Depends(require_user)):
@@ -141,6 +142,89 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     )
 
 
+def _run_current_version(test_id: str, user: dict | None) -> StreamingResponse:
+    """Re-execute a TEST's current version as a fresh run — the Tests page's
+    Run button (spec section 6.4, owner ruling R7-7).
+
+    A RE-RUN, in every sense the codebase already gives that word, and the
+    reasons are the ones _rerun_from_history states for its own path. No LLM
+    and no regeneration cost. Learning is deliberately skipped
+    (user_query=None): the generation that produced this version already
+    recorded the (query -> code) evidence, so a passing re-run would
+    double-count it and a failing one usually means site drift rather than
+    bad generation. The test's description still lands on the new history row
+    via history_query, so the run is recognisable in Activity.
+
+    What it does NOT inherit, and why:
+
+    - rerun_of stays NULL. Results carry no lineage between them (spec case
+      1); every one of them points at the test, which is the whole of the
+      split. The consequence is disclosed rather than hidden: a run recorded
+      this way has no learning record, so a direct POST /api/feedback for it
+      answers no_record. No SPA surface reaches that today (only Generate's
+      panel posts feedback), and _get_with_retry's docstring names this
+      population.
+    - no group_id. The run inherits its test's folder by JOIN, so a folder
+      column of its own could only ever go stale after a move; a NULL one
+      cannot.
+    - no workflow_id. The id is minted server-side by stream_execute_only,
+      never taken from the request — which is why the caller may not send one
+      (the combination check on the route above), and why record_start's
+      adoption trap is unreachable from here.
+
+    The version is resolved ONCE, here, and passed down. The run therefore
+    records the version it actually executed even if a regeneration lands
+    while it is still going (spec case 14), which is exactly why the result
+    stores a version id rather than reading current_version later.
+
+    Authority is VISIBILITY of the test (decision D5): a team files a test
+    into a folder so the team can run it. That is strictly weaker than
+    updating it, and deliberately so — running executes what is already
+    there, while an update rewrites what everyone else will run next.
+    Rejection reads as 404 with the same body an id that exists nowhere
+    gets, and a storage failure inside the registry lands there too.
+
+    409, not 404, when the test is visible but has nothing to run: the caller
+    may see it, so refusing without the reason would send them looking for a
+    test that is right there. Two shapes reach it — a current_version naming
+    no row at all, and a version row whose robot_code is NULL (spec case 31,
+    the migrated code-less row). The Tests page disables the button using the
+    same fact, but the server is the half that binds every client.
+    """
+    try:
+        test_id = str(uuid.UUID(test_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid test_id: must be a UUID")
+
+    # history_scope is the single scope computation (never re-derive it here)
+    # and carries the re-validated platform-admin flag, so the run's D7 column
+    # costs no extra DB round-trip.
+    scope = history_scope(user)
+    head = get_run_registry().get_test_head(
+        test_id, user_id=scope.user_id, org_id=scope.org_id,
+        folder_org_id=scope.folder_org_id,
+        include_unowned=scope.is_admin or scope.caller_user_id is None,
+    )
+    if head is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+    if not head["version_id"] or not head["robot_code"]:
+        raise HTTPException(
+            status_code=409,
+            detail="This test has no runnable code in its current version — regenerate it first.",
+        )
+
+    logging.info("[RUN TEST] Re-executing version %s of test %s as a new run",
+                 head["current_version"], test_id)
+    return StreamingResponse(
+        stream_execute_only(head["robot_code"], user=user,
+                            history_query=head["user_query"],
+                            is_platform_admin=scope.is_admin,
+                            test_id=head["test_id"],
+                            test_version_id=head["version_id"]),
+        media_type=SSE_MEDIA_TYPE,
+    )
+
+
 @router.post('/execute-test')
 async def execute_test_only(request: ExecuteRequest, user: dict | None = Depends(require_user)):
     """
@@ -151,7 +235,31 @@ async def execute_test_only(request: ExecuteRequest, user: dict | None = Depends
     Optional: Pass workflow_id for unified ID tracking (same ID for metrics and files).
     Optional: Pass rerun_of (instead of robot_code) to re-execute a history
     run's stored code as a new run — learning is skipped by design.
+    Optional: Pass test_id (alone) to re-run a TEST's current version — the
+    Tests page's Run button. See _run_current_version above.
     """
+    if request.test_id:
+        # A 400, not a precedence rule. Each of these names a different thing
+        # to run, or a different id to write the run under, and the LAST time
+        # this endpoint let a client-supplied id select the row it writes
+        # (workflow_id) that was the door an ownership hole went through —
+        # stream_execute_only reuses a supplied id whenever the row is
+        # unowned. The test_id path mints its id server-side and can afford
+        # to refuse rather than guess. rerun_of's own tolerance of extra
+        # fields is left exactly as it is: it is an existing contract, and
+        # only the new field tightens.
+        conflicting = [name for name in
+                       ("rerun_of", "robot_code", "workflow_id", "user_query")
+                       if getattr(request, name)]
+        if conflicting:
+            raise HTTPException(
+                status_code=400,
+                detail="test_id cannot be combined with: " + ", ".join(conflicting))
+        # Threaded for the same reason the rerun path is: the pre-flight read
+        # and the admin re-validation both block, while the StreamingResponse
+        # only wraps a generator that has not started.
+        return await asyncio.to_thread(_run_current_version, request.test_id, user)
+
     if request.rerun_of:
         # Threaded: source-run lookup, admin re-validation and the stored-code
         # disk fallback all block; the StreamingResponse it returns only wraps

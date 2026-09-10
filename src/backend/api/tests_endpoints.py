@@ -2,15 +2,19 @@
 query + its generated Robot code; distinct from its individual RUNS, which
 Activity/`/api/history` keeps listing).
 
-Three routes. The two reads narrow the caller the same way: GET /api/tests
+Four routes. The two reads narrow the caller the same way: GET /api/tests
 lists the visible tests, GET /api/tests/{test_id} returns one of them with
 all of its versions and one page of its results. The second resolves
 visibility through the SAME _VISIBLE_TEST_SQL predicate as the first, so a
 test the list will not show is not readable one URL deeper; it answers 404
-rather than 403 so a rejection cannot confirm that an id is real. The
-write, PUT /api/tests/assignments, files tests into a folder -- the move
+rather than 403 so a rejection cannot confirm that an id is real. The two
+writes: PUT /api/tests/assignments files tests into a folder -- the move
 spec section 7.2 puts on a Tests row and section 10 case 6 defines as
-moving the TEST, its results following by join.
+moving the TEST, its results following by join -- and
+POST /api/tests/{test_id}/versions regenerates a test, appending version
+n+1 on success (section 6.3). Both reads and both writes resolve the test
+through the SAME predicate stack, and the two writes share the same three
+authority terms through _may_move_test.
 
 GET /api/tests lists the caller's visible tests newest-result-first: their
 own tests plus every test their org has published into a folder (the same
@@ -27,8 +31,10 @@ rules behind each field.
 can_move on a list row reports the SAME three terms PUT
 /api/tests/assignments then enforces -- the caller has a concrete org, the
 TEST's org equals it, and the caller is an org_admin or the test's own
-author -- and the two live in this one module so they can be read against
-each other rather than kept in step by hand.
+author -- and since Task 7 they are one function, _may_move_test, because
+POST /api/tests/{test_id}/versions asks the same question. On a list row
+"may move" and "may update" are therefore one answer, which is what lets
+the Tests page offer both controls exactly where they will be honoured.
 
 It deliberately no longer mirrors list_history's can_move for RUNS, which
 omits the org term on its owner branch. history_scope gives BOTH a
@@ -46,7 +52,12 @@ constraint.
 
 Referenced by: main.py (router registration).
 Depends on: core/run_registry.py (RunRegistry.list_tests,
-RunRegistry.get_test_detail, RunRegistry.assign_tests), api/history_scope.py
+RunRegistry.get_test_detail, RunRegistry.get_test_head,
+RunRegistry.assign_tests),
+services/workflow_service.py (stream_generate_only -- the same generation
+POST /generate-test runs, told which test to append to),
+api/endpoints.py (SSE_MEDIA_TYPE -- imported rather than restated so every
+streaming route in this app declares one media type), api/history_scope.py
 (the shared caller scope, shared with /api/history and /api/groups),
 api/history_endpoints.py (_REPORT_STATUSES -- imported rather than restated
 so both detail routes answer "is there a log.html" identically),
@@ -62,15 +73,19 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from src.backend.api.endpoints import SSE_MEDIA_TYPE
 from src.backend.api.groups_endpoints import (
     _require_identity, _require_org_scope, _valid_uuid,
 )
 from src.backend.api.history_endpoints import _REPORT_STATUSES
 from src.backend.api.history_scope import history_scope
 from src.backend.auth.jwt_utils import require_user
+from src.backend.core.config import settings
 from src.backend.core.run_registry import get_run_registry
+from src.backend.services.workflow_service import stream_generate_only
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +104,44 @@ _TEST_IDS_MAX = 500
 class TestAssignmentsIn(BaseModel):
     test_ids: list[str]
     group_id: str | None = None
+
+
+class TestVersionIn(BaseModel):
+    user_query: str
+    # FastAPI answers 422 for anything else before the handler runs, the same
+    # shape the list's health/sort params already use.
+    mode: Literal["update", "new_test"]
+
+
+def _may_move_test(scope, test_org_id: str | None,
+                   test_user_id: str | None) -> bool:
+    """The three terms PUT /api/tests/assignments enforces, in one place.
+
+    The caller has a concrete org, the TEST's org equals it, and the caller
+    is an org_admin or the test's own author. Written once because two
+    surfaces now ask it -- can_move on every list row, and the update gate on
+    POST /api/tests/{test_id}/versions -- and two copies of an authorization
+    rule are two rules that can drift.
+
+    The folder_org_id term is load-bearing, not defensive. Without it a
+    caller with no org compares None to an ORG-LESS test's None and reads
+    True on a write the server refuses, which is the same "two NULLs must
+    not compare equal" trap _attach_test's authorship gate needs its own
+    `user_id is not None` for. It also excludes the token-less dev caller,
+    whose mutations are 403 by design (groups_endpoints' module docstring).
+
+    Truthiness, not `is not None`, so that "the caller has a concrete org" is
+    ONE test everywhere it is asked rather than three that merely agree
+    today: _require_org_scope refuses on `if not org_id` and history_scope
+    qualifies is_org_admin on bool(folder_org_id). No login path mints
+    org_id="" -- _token_payload reads it from `orgs[0]` or omits it entirely
+    -- so this closes a divergence in the claim above rather than a reachable
+    defect."""
+    return (
+        bool(scope.folder_org_id)
+        and test_org_id == scope.folder_org_id
+        and (scope.is_org_admin or test_user_id == scope.caller_user_id)
+    )
 
 
 @router.get("/tests")
@@ -150,29 +203,11 @@ def list_tests(
     for t in tests:
         # The three terms PUT /api/tests/assignments enforces, and nothing
         # else -- see this module's own docstring for why this no longer
-        # mirrors list_history's flag for runs.
-        #
-        # The folder_org_id term is load-bearing, not defensive. Without it
-        # a caller with no org compares None to an ORG-LESS test's None and
-        # reads True on a move that route answers 403 for, which is the
-        # same "two NULLs must not compare equal" trap the authorship gate
-        # in _attach_test needs its own `user_id is not None` for. It also
-        # excludes the token-less dev caller, whose mutations are 403 by
-        # design (groups_endpoints' module docstring).
-        #
-        # Truthiness, not `is not None`, so that "the caller has a concrete
-        # org" is ONE test everywhere it is asked rather than three that
-        # merely agree today: _require_org_scope refuses on `if not org_id`
-        # and history_scope qualifies is_org_admin on bool(folder_org_id).
-        # No login path mints org_id="" -- _token_payload reads it from
-        # `orgs[0]` or omits it entirely -- so this closes a divergence in
-        # the claim above rather than a reachable defect.
-        t["can_move"] = (
-            bool(scope.folder_org_id)
-            and t.get("org_id") == scope.folder_org_id
-            and (scope.is_org_admin
-                 or t.get("user_id") == scope.caller_user_id)
-        )
+        # mirrors list_history's flag for runs, and _may_move_test for why
+        # each term is there. Shared with the update gate below rather than
+        # restated, so a Tests row can never offer a control one of the two
+        # writes then refuses.
+        t["can_move"] = _may_move_test(scope, t.get("org_id"), t.get("user_id"))
         # org_id was selected only to answer can_move, same as list_history.
         t.pop("org_id", None)
         if not scope.is_admin:
@@ -332,3 +367,118 @@ def assign_tests(
     # bounded.
     request.state.audit_detail = {"group_id": group_id, "test_ids": test_ids}
     return {"assigned": len(test_ids), "group_id": group_id}
+
+
+@router.post("/tests/{test_id}/versions")
+def create_test_version(
+    request: Request,
+    test_id: str,
+    body: TestVersionIn,
+    user: dict | None = Depends(require_user),
+):
+    """Regenerate a test: run the pipeline, and on success append version
+    n+1 to this test (spec section 6.3 / 7.4). This is the Update dialog's
+    write.
+
+    `mode` picks between two different powers, and they have two different
+    gates.
+
+    **update** rewrites the code every LATER run of this test executes, for
+    everyone who can see it -- a larger power than moving the test, which
+    decision D4 already withholds from a peer. So it takes the same three
+    terms `can_move` reports on each row above (_may_move_test), AND
+    visibility of the test. Both, not either: an org_admin passes the move
+    terms for an AUTHOR-LESS test in their org, because assign_tests'
+    org_admin branch never looks at the author -- while include_unowned
+    hides that test from them in the list. Requiring both means an update
+    can never target a test the caller cannot list, and on every Tests row
+    "may move" and "may update" are one answer.
+
+    The org-equality term is not bookkeeping either. Generation reads its
+    hints from the CALLER's token org (run_crew passes it to
+    SmartKeywordProvider), so without it a platform admin regenerates
+    another org's test with THIS org's learned hints and writes the result
+    into the other org's code.
+
+    **new_test** takes only visibility, and no identity at all -- the same
+    rule POST /generate-test applies, so the token-less dev caller may use
+    it with AUTH_ENFORCED off. It is what the refused peer does instead:
+    generation runs unchanged, so the new test is minted exactly as Generate
+    mints one (their org, them as author, no folder, version 1 with no
+    reason) and nothing links it to the source. Inheriting the source's
+    folder was rejected: filing a test PUBLISHES it, which would hand a
+    peer's private copy to the whole org.
+
+    403, not 404, for a caller with no identity or no org on `update`: those
+    refusals are about the CALLER and not about a test whose existence a 404
+    protects. Not 401 either -- the SPA reads every 401 as "session expired",
+    clears the token and redirects to /login. Every other refusal is 404
+    with one body, so a rejection cannot confirm that an id is real.
+
+    The `reason` is computed HERE, from the pre-flight read, and never at
+    append time: comparing at append would label an untouched description
+    'edited' whenever somebody else's update landed mid-generation.
+    'regenerated' means the description came back byte-identical once
+    trimmed -- case-sensitive, inner whitespace kept, because a capital
+    letter or a doubled space can change what a test asserts. It is a drift
+    signal (spec section 9): a false 'regenerated' pollutes it, a false
+    'edited' only loses a candidate. A test whose user_query is NULL
+    (paste-and-execute, case 9) is always 'edited' -- nothing was ever asked
+    for, so nothing came back unchanged. The TRIMMED text is what generation
+    receives and therefore what becomes tests.user_query, so the stored
+    description can never differ from the text this comparison was made on.
+
+    The audit floor records this request whatever the outcome; `mode` is the
+    one thing in it that changes what the write MEANS, and the path already
+    names the test. Its 200 records that the stream started -- the floor runs
+    when the response object is made, which for a StreamingResponse is before
+    a single event has been produced, let alone a version written.
+    """
+    test_id = _valid_uuid(test_id, "test id")
+    user_query = body.user_query.strip()
+    if not user_query:
+        raise HTTPException(400, "Query not provided")
+    if body.mode == "update":
+        _require_identity(user)
+        _require_org_scope(user)
+
+    scope = history_scope(user)
+    head = get_run_registry().get_test_head(
+        test_id, user_id=scope.user_id, org_id=scope.org_id,
+        # The FOLDER scope is the caller's own org even when their TEST
+        # scope is every org -- see history_scope.folder_org_id.
+        folder_org_id=scope.folder_org_id,
+        # Only a platform admin (or the token-less dev caller) may read a
+        # test no user owns, the same rule the two reads above apply.
+        include_unowned=scope.is_admin or scope.caller_user_id is None,
+    )
+    if head is None:
+        raise HTTPException(404, "Test not found")
+
+    target = reason = None
+    if body.mode == "update":
+        if not _may_move_test(scope, head["org_id"], head["user_id"]):
+            raise HTTPException(404, "Test not found")
+        target = head["test_id"]
+        current = head["user_query"]
+        reason = ("regenerated"
+                  if current is not None and user_query == current.strip()
+                  else "edited")
+
+    # The same provider/key checks POST /generate-test makes, and for the
+    # same reason: a missing key must fail here rather than inside the
+    # stream, where the client has already been told generation began.
+    model_provider = settings.MODEL_PROVIDER
+    model_name = (settings.LOCAL_MODEL if model_provider == "local"
+                  else settings.ONLINE_MODEL)
+    if model_provider == "gemini" and not settings.GEMINI_API_KEY:
+        raise HTTPException(
+            500, "GEMINI_API_KEY environment variable is not set.")
+
+    request.state.audit_detail = {"mode": body.mode}
+    return StreamingResponse(
+        stream_generate_only(user_query, model_provider, model_name,
+                             user=user, regenerate_test_id=target,
+                             version_reason=reason, report_version=True),
+        media_type=SSE_MEDIA_TYPE,
+    )
