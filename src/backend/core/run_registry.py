@@ -2001,14 +2001,21 @@ class RunRegistry:
         different, identifiable org — where naming it would leak a
         foreign tenant's run_id and hiding wins instead.
 
-        That SELECT is a snapshot under READ COMMITTED, not a lock: a run
-        assigned to this folder concurrently — after the snapshot but
-        before the DELETE proceeds — is ungrouped by that same DELETE
+        That SELECT is itself a snapshot under READ COMMITTED, not a lock:
+        a run assigned to this folder concurrently — after the snapshot
+        but before the DELETE proceeds — is ungrouped by that same DELETE
         without ever appearing in this list (assign_runs' own
         ForeignKeyViolation handling is the other side of the same race),
         and so is a run whose TEST is filed here concurrently. The list is
         therefore what this transaction's snapshot could see, not a
         guarantee of the folder's full membership at delete time.
+
+        The lock-order SELECT that now runs ahead of it narrows that by
+        exactly one shape and no more: a test being moved OUT of this
+        folder is waited for, so the audit sees it settled either way. A
+        test being moved INTO the folder is not in it when that statement
+        runs, so it is not locked and the race above is unchanged for it.
+        The lock is there for the deadlock, not for the audit.
         Appended only once the DELETE actually removes a row, so it stays
         empty on every False return, the same guarantee rename_group's
         audit_old_name makes."""
@@ -2017,6 +2024,32 @@ class RunRegistry:
         with self._pool.connection() as conn:
             if self._visible_group(conn, org_id, group_id) is None:
                 return False
+            # TESTS FIRST, before the DELETE takes anything. The DELETE is a
+            # single statement whose two cascades are foreign-key ACTIONS, so
+            # which table it locks first is decided by trigger-name order and
+            # by no line of code at all — measured on a fresh database it
+            # reached the result row before the test row, which deadlocked
+            # with assign_tests (tests, then that test's results). An
+            # explicit leading lock is the only way to make the order
+            # deterministic here, and it must stay even if a database is ever
+            # observed cascading the other way: an UPGRADED database may order
+            # its triggers differently from the fresh one this was measured on.
+            # Same mode and same ordering as assign_runs' lock, for the same
+            # reasons.
+            #
+            # A run filed here whose TEST is filed elsewhere is reached only by
+            # the run-side cascade and takes no lock in this statement. It
+            # cannot deadlock through that: the writer holding such a run is
+            # moving a test this folder does not contain, so it never waits on
+            # anything this transaction holds.
+            #
+            # Cost on that same 500k-run schema: 1.37 ms for a folder
+            # holding 500 tests, 0.64 ms for an empty one.
+            conn.execute(
+                "SELECT test_id FROM tests WHERE group_id = %s"
+                " ORDER BY test_id FOR NO KEY UPDATE",
+                (group_id,),
+            )
             run_ids = None
             if audit_run_ids is not None:
                 rows = conn.execute(
@@ -2862,6 +2895,47 @@ class RunRegistry:
                 allowed = "user_id = %s"
                 params.append(user_id)
             try:
+                # TESTS FIRST, before either test_runs write below. Every
+                # writer that touches both tables has to take them in one
+                # order, and the order is forced rather than chosen:
+                # record_start calls _attach_test before its own run upsert,
+                # so the mint, the org write-back and the version append all
+                # reach `tests` first by construction — and record_start is
+                # also the party that swallows its own abort, so a deadlock
+                # there loses a history row in silence. assign_tests already
+                # goes tests-then-runs. This method went the other way, and
+                # measured against both of them it deadlocked: no route
+                # handler has a try, and the except below catches only
+                # ForeignKeyViolation, so DeadlockDetected reached the caller
+                # as an unhandled 500.
+                #
+                # The tests of the NAMED runs, which is a SUPERSET of what the
+                # third UPDATE touches — that one adds the authority filter,
+                # which can only narrow — so nothing it writes is unlocked. A
+                # re-run child shares its parent's test (see _attach_test's
+                # rerun branch), so the cascade needs no row of its own here.
+                # A run whose test_id is NULL (decision D8) contributes
+                # nothing and needs nothing: it has no test to contend over.
+                #
+                # FOR NO KEY UPDATE, not FOR UPDATE, for the reason
+                # _attach_test states at its own lock: FOR UPDATE also
+                # conflicts with the FOR KEY SHARE a foreign-key check takes,
+                # so it would stall every concurrent INSERT of a run
+                # referencing these tests. ORDER BY test_id so two callers
+                # naming overlapping batches agree between themselves too.
+                #
+                # Cost, on the same throwaway 500k-run / 50-org / 200-folder
+                # schema the cascade note below was measured on (median of
+                # 7, one connection): 0.91 ms for one id, 1.15 ms at fifty,
+                # 8.06 ms at the endpoint's 500-id cap — against 0.69 ms
+                # and 8.82 ms for the parent UPDATE on the same batches. It
+                # costs about what one of the writes already here costs.
+                conn.execute(
+                    "SELECT test_id FROM tests WHERE test_id IN"
+                    "   (SELECT test_id FROM test_runs WHERE run_id = ANY(%s))"
+                    " ORDER BY test_id FOR NO KEY UPDATE",
+                    [list(run_ids)],
+                )
                 # Children FIRST, in the same transaction: the self-join reads
                 # the parent's folder off the row, so once the parent UPDATE
                 # below has run there is no pre-move value left to match on.
