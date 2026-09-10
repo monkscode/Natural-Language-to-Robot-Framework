@@ -808,3 +808,50 @@ def test_a_token_less_caller_is_refused_403_not_401(client):
     r = client.put("/api/tests/assignments",
                    json={"test_ids": [str(uuid.uuid4())], "group_id": None})
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Result-level visibility through the route.
+#
+# auth/ownership.py states the contract: no list may offer a row
+# caller_can_access then refuses. Passing the TEST gate is not authority over
+# every result underneath it, and this route sets has_report off `status`
+# alone -- so a row it should not have listed also renders a report link that
+# the /reports guard answers 404 for.
+# ---------------------------------------------------------------------------
+
+def test_detail_does_not_offer_a_result_that_history_hides(client):
+    """An UNATTRIBUTED result under a published test. The peer reaches the
+    test through the folder, so the drawer opens -- but this row is
+    platform-admin-only (ownership rule 3 requires owner_id non-NULL), and
+    /api/history already hides it from the same caller."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member_claims = decode_token(tok_member)
+    test_id, authored_run = _file_into_new_folder_test(
+        client, org_id, member_claims)
+
+    orphan = str(uuid.uuid4())
+    reg = get_run_registry()
+    with reg._pool.connection() as conn:
+        version_id = conn.execute(
+            "SELECT test_version_id FROM test_runs WHERE run_id = %s",
+            (authored_run,)).fetchone()["test_version_id"]
+        conn.execute(
+            "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+            " status, org_id, test_id, test_version_id)"
+            " VALUES (%s, NULL, NULL, 'q', 'passed', %s, %s, %s)",
+            (orphan, org_id, test_id, version_id))
+
+    r = client.get(f"/api/tests/{test_id}", headers=_auth(tok_peer))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [x["run_id"] for x in body["results"]] == [authored_run]
+    # The count has to apply the same predicate as the page.
+    assert body["results_total"] == 1
+
+    # ...which is exactly what /api/history answers for the same caller.
+    hist = client.get("/api/history", headers=_auth(tok_peer))
+    assert hist.status_code == 200, hist.text
+    assert orphan not in [x["run_id"] for x in hist.json()["runs"]]

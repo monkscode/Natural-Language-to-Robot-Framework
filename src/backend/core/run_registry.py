@@ -2263,14 +2263,26 @@ class RunRegistry:
         test drawer reads it; nothing else does yet -- spec section 6.2).
 
         user_id/org_id/folder_org_id/include_unowned mean exactly what they
-        mean in list_tests, and the visibility clauses below are that
-        method's own stack with the q/group/health filters dropped and a
-        `te.test_id = %s` term added: the same _group_join_for_tests, the
-        same _VISIBLE_TEST_SQL, the same te.org_id term, the same
-        include_unowned fallback, in the same order. That is the point
-        -- a test the Tests page will not list must not become readable one
-        URL deeper, and a second predicate written here would be a second
-        answer to the same question.
+        mean in list_tests and list_runs, and this method binds BOTH of those
+        predicate stacks -- one for the test, one for its results -- because
+        it returns both kinds of row and they are not the same question.
+
+        The TEST stack is list_tests' own with the q/group/health filters
+        dropped and a `te.test_id = %s` term added: the same
+        _group_join_for_tests, the same _VISIBLE_TEST_SQL, the same
+        te.org_id term, the same include_unowned fallback, in the same
+        order. A test the Tests page will not list must not become readable
+        one URL deeper.
+
+        The RESULT stack is list_runs' own, unchanged: the same _group_join,
+        the same _VISIBLE_RUN_SQL / _OWNED_RUN_SQL pair, the same t.org_id
+        term. Passing the test gate is not authority over every result
+        underneath it -- see the comment on the clause build below for the
+        two shapes that fail this while the test itself passes, and for why
+        offering them broke the contract auth/ownership.py states.
+
+        Neither stack is written out by hand here: a second predicate would
+        be a second answer to the same question.
 
         Returns None when the test does not exist, when this caller may not
         see it, OR when the read fails. The caller cannot tell those three
@@ -2292,9 +2304,12 @@ class RunRegistry:
         to keep straight (rulings R1/R2):
 
         - `versions` and `results` are WHOLE-TEST. Every version ever
-          written, and every result ever recorded against this test_id
-          whatever version it names. `results_total` counts the whole test,
-          not the page.
+          written, and every result recorded against this test_id whatever
+          version it names -- the axis being widened here is the VERSION
+          one, not the caller one: results stay narrowed by the run
+          predicate above, so "whole-test" never means "rows this caller
+          may not see". `results_total` counts the whole test rather than
+          the page, within that same predicate.
         - `health` is scoped to the CURRENT version alone, off the same two
           module-level joins list_tests uses (_CURRENT_VERSION_SQL and
           _HEALTH_SQL) mapped by the same _health_value, so the drawer's
@@ -2341,6 +2356,41 @@ class RunRegistry:
         # than any WHERE clause's, and psycopg binds %s strictly by
         # position. The two laterals below bind nothing of their own.
         params = join_params + params
+        # The RESULTS carry their own predicate, and it is the RUN one --
+        # _group_join plus _VISIBLE_RUN_SQL/_OWNED_RUN_SQL, bound exactly as
+        # list_runs binds them for the same caller. Passing the test gate
+        # above says this caller may see the TEST; it says nothing about each
+        # result underneath it, and auth/ownership.py's stated contract is
+        # that no list may offer a row caller_can_access then refuses. Two
+        # shapes it refuses can sit under a perfectly visible test: a result
+        # nobody owns (rule 3 requires owner_id non-NULL, and rule 5's
+        # ownership test cannot match None either, so it is platform-admin
+        # only) and one whose org is not the caller's (rules 3 and 5 both
+        # require the orgs to match). Without this the drawer listed both,
+        # counted them in results_total, and the API layer then set
+        # has_report on them off `status` alone -- a report link that 404s.
+        # Reachable go-forward rather than legacy-only: _attach_test's
+        # rerun_of branch returns the SOURCE's test_id whoever the caller is,
+        # and rule 1 admits the token-less AUTH_ENFORCED=off caller, so one
+        # "Run again" lands an unattributed result under an authored test.
+        #
+        # The join is unconditional even for the two callers whose clause
+        # list never mentions `g`, so the SQL text and the positional binding
+        # are identical on every branch rather than varying with the caller.
+        run_join, run_join_params = self._group_join(
+            folder_org_id or org_id, identified=user_id is not None)
+        rclauses = ["t.test_id = %s"]
+        rparams: list = [test_id]
+        if user_id is not None:
+            rclauses.append(_VISIBLE_RUN_SQL)
+            rparams.append(user_id)
+        elif not include_unowned:
+            rclauses.append(_OWNED_RUN_SQL)
+        if org_id is not None:
+            rclauses.append("t.org_id = %s")
+            rparams.append(org_id)
+        rparams = run_join_params + rparams
+        rwhere = " AND ".join(rclauses)
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
@@ -2364,23 +2414,27 @@ class RunRegistry:
                     " ORDER BY n DESC",
                     (test_id,),
                 ).fetchall()
+                # Same predicate as the page below, built once: a count that
+                # applied a different one would advertise rows the page then
+                # never hands over.
                 total = conn.execute(
-                    "SELECT COUNT(*) AS n FROM test_runs WHERE test_id = %s",
-                    (test_id,),
+                    f"SELECT COUNT(*) AS n FROM test_runs t {run_join} "
+                    f"WHERE {rwhere}",
+                    rparams,
                 ).fetchone()["n"]
                 # v is joined on its PRIMARY KEY, so this is at most one row
                 # per result and cannot fan out. LEFT, so a result naming no
                 # version survives the join with n NULL rather than being
                 # dropped from its own test's timeline.
                 results = conn.execute(
-                    "SELECT r.run_id, r.status, r.created_at, v.n "
-                    "FROM test_runs r "
+                    "SELECT t.run_id, t.status, t.created_at, v.n "
+                    f"FROM test_runs t {run_join} "
                     "LEFT JOIN test_versions v"
-                    "  ON v.version_id = r.test_version_id "
-                    "WHERE r.test_id = %s "
-                    "ORDER BY r.created_at DESC, r.run_id DESC "
+                    "  ON v.version_id = t.test_version_id "
+                    f"WHERE {rwhere} "
+                    "ORDER BY t.created_at DESC, t.run_id DESC "
                     "LIMIT %s OFFSET %s",
-                    (test_id, limit, offset),
+                    rparams + [limit, offset],
                 ).fetchall()
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] get_test_detail failed: {e}")

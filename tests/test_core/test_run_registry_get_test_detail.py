@@ -486,3 +486,195 @@ def test_the_token_less_caller_reads_any_test(reg):
                                folder_org_id=None, include_unowned=True)
     assert detail is not None
     assert detail["test"]["test_id"] == test_id
+
+
+# ---------------------------------------------------------------------------
+# Result-level visibility -- the drawer may not offer a result that
+# /api/history hides and the /reports gate then refuses.
+#
+# auth/ownership.py states the invariant these pin: "_VISIBLE_RUN_SQL and
+# _OWNED_RUN_SQL carry the same `user_id IS NOT NULL` term, so no list can
+# offer a row this refuses." The TEST gate above says nothing about the
+# individual results underneath it, so the run predicate has to be applied
+# here too -- against the same _group_join every other run-scoped read uses,
+# so the two cannot drift into different answers.
+#
+# Reachable go-forward, not only from legacy rows: _attach_test's rerun_of
+# branch returns the SOURCE's test_id whoever the caller is, and
+# caller_can_access rule 1 admits the token-less AUTH_ENFORCED=off caller, so
+# one "Run again" against an authored, foldered test lands an unattributed
+# result underneath it.
+# ---------------------------------------------------------------------------
+
+def _authored_test_with_an_unattributed_result(admin, group_id=None):
+    """An AUTHORED test (so it is visible) holding two results: one authored
+    by its author, one with no user at all."""
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id, user_id="alice", org_id=ORG_A,
+              group_id=group_id)
+    version_id = _version_row(admin, test_id, 1)
+    authored = _run_row(admin, test_id, version_id, "passed",
+                        "2026-01-01T10:00:00Z", user_id="alice")
+    orphan = _run_row(admin, test_id, version_id, "passed",
+                      "2026-01-01T11:00:00Z", user_id=None, user_email=None)
+    return test_id, authored, orphan
+
+
+def test_an_unattributed_result_is_hidden_from_a_peer_and_from_the_total(reg):
+    """The measured gap. /api/history showed the peer 1 row; the drawer
+    showed 2, counted 2, and set has_report on the one the /reports gate
+    refuses."""
+    r, admin = reg
+    group_id = str(uuid.uuid4())
+    _folder(admin, group_id)
+    test_id, authored, orphan = _authored_test_with_an_unattributed_result(
+        admin, group_id=group_id)
+
+    detail = r.get_test_detail(test_id, user_id="bob", org_id=ORG_A,
+                               folder_org_id=ORG_A, include_unowned=False)
+
+    assert [x["run_id"] for x in detail["results"]] == [authored]
+    # The count beside the page must apply the same predicate, or the drawer
+    # advertises rows it will never hand over.
+    assert detail["results_total"] == 1
+    # Exactly what /api/history answers for the same caller.
+    assert r.list_runs(user_id="bob", org_id=ORG_A,
+                       folder_org_id=ORG_A)[1] == 1
+
+
+def test_a_peers_authored_result_is_still_visible_through_the_folder(reg):
+    """The other half: filing a test PUBLISHES its results, so a colleague's
+    authored result must still reach the drawer. A fix that hid it would be
+    an over-correction."""
+    r, admin = reg
+    group_id = str(uuid.uuid4())
+    _folder(admin, group_id)
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id, user_id="alice", org_id=ORG_A,
+              group_id=group_id)
+    version_id = _version_row(admin, test_id, 1)
+    mine = _run_row(admin, test_id, version_id, "passed",
+                    "2026-01-01T10:00:00Z", user_id="bob")
+    peers = _run_row(admin, test_id, version_id, "failed",
+                     "2026-01-01T11:00:00Z", user_id="alice")
+
+    detail = r.get_test_detail(test_id, user_id="bob", org_id=ORG_A,
+                               folder_org_id=ORG_A, include_unowned=False)
+
+    assert set(x["run_id"] for x in detail["results"]) == {mine, peers}
+    assert detail["results_total"] == 2
+
+
+def test_an_unattributed_result_is_hidden_from_an_org_admin(reg):
+    """An org_admin carries user_id None, so _VISIBLE_RUN_SQL never binds for
+    them -- _OWNED_RUN_SQL is what fails them closed, exactly as it does in
+    list_runs. caller_can_access refuses owner_id None to a same-org
+    org_admin too (ownership.py rule 3 requires it non-NULL)."""
+    r, admin = reg
+    test_id, authored, orphan = _authored_test_with_an_unattributed_result(
+        admin)
+
+    detail = r.get_test_detail(test_id, user_id=None, org_id=ORG_A,
+                               folder_org_id=ORG_A, include_unowned=False)
+
+    assert [x["run_id"] for x in detail["results"]] == [authored]
+    assert detail["results_total"] == 1
+
+
+def test_an_unattributed_result_is_shown_to_a_platform_admin(reg):
+    """Rule 2 allows it, so the list must offer it -- the invariant runs both
+    ways."""
+    r, admin = reg
+    test_id, authored, orphan = _authored_test_with_an_unattributed_result(
+        admin)
+
+    detail = r.get_test_detail(test_id, user_id=None, org_id=None,
+                               folder_org_id=ORG_A, include_unowned=True)
+
+    assert set(x["run_id"] for x in detail["results"]) == {authored, orphan}
+    assert detail["results_total"] == 2
+
+
+def test_an_unattributed_result_is_hidden_from_the_tests_own_author(reg):
+    """Owning the TEST is not authority over a result nobody owns. The author
+    reading their own UNFILED test gets the same answer /api/history gives
+    them, which is the whole point of reusing the run predicate."""
+    r, admin = reg
+    test_id, authored, orphan = _authored_test_with_an_unattributed_result(
+        admin)
+
+    detail = r.get_test_detail(test_id, user_id="alice", org_id=ORG_A,
+                               folder_org_id=ORG_A, include_unowned=False)
+
+    assert [x["run_id"] for x in detail["results"]] == [authored]
+    assert detail["results_total"] == 1
+
+
+def test_a_foreign_org_result_is_hidden_even_from_its_own_author(reg):
+    """The org term is load-bearing on its own. This result is authored by
+    the caller, so _VISIBLE_RUN_SQL's first term admits it; only the separate
+    t.org_id clause -- the one list_runs binds for the same caller -- keeps a
+    row whose org and test disagree out of the drawer. caller_can_access
+    rules 3 and 5 both refuse it, so offering it would be a list that lies.
+
+    _attach_test's own docstring is the authority on how a test's runs come to
+    span two concrete orgs; D6 aims at equality without making it an
+    invariant."""
+    r, admin = reg
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id, user_id="alice", org_id=ORG_A)
+    version_id = _version_row(admin, test_id, 1)
+    home = _run_row(admin, test_id, version_id, "passed",
+                    "2026-01-01T10:00:00Z", user_id="alice", org_id=ORG_A)
+    foreign = _run_row(admin, test_id, version_id, "passed",
+                       "2026-01-01T11:00:00Z", user_id="alice", org_id=ORG_B)
+
+    detail = r.get_test_detail(test_id, user_id="alice", org_id=ORG_A,
+                               folder_org_id=ORG_A, include_unowned=False)
+
+    assert [x["run_id"] for x in detail["results"]] == [home]
+    assert detail["results_total"] == 1
+
+
+def test_the_token_less_caller_still_sees_every_result(reg):
+    """Rule 1 exempts it from everything, and include_unowned=True is how
+    that reaches this read."""
+    r, admin = reg
+    test_id, authored, orphan = _authored_test_with_an_unattributed_result(
+        admin)
+
+    detail = r.get_test_detail(test_id, user_id=None, org_id=None,
+                               folder_org_id=None, include_unowned=True)
+
+    assert set(x["run_id"] for x in detail["results"]) == {authored, orphan}
+    assert detail["results_total"] == 2
+
+
+def test_an_org_less_caller_sees_only_their_own_results_on_their_own_test(reg):
+    """The `identified` half of _group_join, which only this caller shape
+    reaches: a token carrying an identity but no org (history_scope gives it
+    user_id set, org_id and folder_org_id None). ON FALSE resolves no folder,
+    so nothing is published to them and _VISIBLE_RUN_SQL reduces to their own
+    rows -- the answer list_runs gives the same caller, and the one
+    caller_can_access gives too, since its no-org branch is owner-only. The
+    unfiltered form would resolve the test's folder and hand them a
+    colleague's result through it."""
+    r, admin = reg
+    group_id = str(uuid.uuid4())
+    _folder(admin, group_id)
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id, user_id="alice", org_id=ORG_A,
+              group_id=group_id)
+    version_id = _version_row(admin, test_id, 1)
+    mine = _run_row(admin, test_id, version_id, "passed",
+                    "2026-01-01T10:00:00Z", user_id="alice")
+    _run_row(admin, test_id, version_id, "passed",
+             "2026-01-01T11:00:00Z", user_id="bob")
+
+    detail = r.get_test_detail(test_id, user_id="alice", org_id=None,
+                               folder_org_id=None, include_unowned=False)
+
+    assert [x["run_id"] for x in detail["results"]] == [mine]
+    assert detail["results_total"] == 1
+    assert r.list_runs(user_id="alice", org_id=None,
+                       folder_org_id=None)[1] == 1
