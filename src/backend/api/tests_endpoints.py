@@ -159,8 +159,16 @@ def list_tests(
         # in _attach_test needs its own `user_id is not None` for. It also
         # excludes the token-less dev caller, whose mutations are 403 by
         # design (groups_endpoints' module docstring).
+        #
+        # Truthiness, not `is not None`, so that "the caller has a concrete
+        # org" is ONE test everywhere it is asked rather than three that
+        # merely agree today: _require_org_scope refuses on `if not org_id`
+        # and history_scope qualifies is_org_admin on bool(folder_org_id).
+        # No login path mints org_id="" -- _token_payload reads it from
+        # `orgs[0]` or omits it entirely -- so this closes a divergence in
+        # the claim above rather than a reachable defect.
         t["can_move"] = (
-            scope.folder_org_id is not None
+            bool(scope.folder_org_id)
             and t.get("org_id") == scope.folder_org_id
             and (scope.is_org_admin
                  or t.get("user_id") == scope.caller_user_id)

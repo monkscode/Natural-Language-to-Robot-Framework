@@ -759,7 +759,7 @@ def test_an_org_less_caller_is_offered_no_move_and_is_refused(client):
 
 
 def test_an_org_less_test_is_not_movable_by_its_org_less_author(client):
-    """The one shape can_move's `folder_org_id is not None` term refuses on
+    """The one shape can_move's `bool(scope.folder_org_id)` term refuses on
     its own: both sides of the org comparison are None, and two NULLs must
     not compare equal. Reached by mutation rather than by reasoning -- with
     that term removed every other assertion in this file still passed.
