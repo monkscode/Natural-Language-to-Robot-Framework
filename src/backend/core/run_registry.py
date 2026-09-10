@@ -656,6 +656,50 @@ _VISIBLE_TEST_SQL = (
     " OR (g.group_id IS NOT NULL AND te.user_id IS NOT NULL))"
 )
 
+# Resolves the CURRENT version's own row once, for a read whose rows are
+# tests (alias `te`). test_versions is UNIQUE (test_id, n), so this is at
+# most one row -- no fan-out risk. Module-level rather than local to one
+# method because list_tests and get_test_detail must agree on what "the
+# current version" is; two copies of this join are two definitions that can
+# drift apart. It binds NO parameter of its own, so it never disturbs the
+# positional order of a caller's %s placeholders.
+_CURRENT_VERSION_SQL = (
+    "LEFT JOIN LATERAL ("
+    "  SELECT v.version_id, v.robot_code FROM test_versions v"
+    "  WHERE v.test_id = te.test_id AND v.n = te.current_version"
+    ") cv ON TRUE "
+)
+
+# The current version's last COMPLETED result -- the raw status `health` is
+# derived from (section 6.1, ruling R1). LIMIT 1 makes it at most one row.
+# 'running' and 'generated' are excluded deliberately: case 18 says a stuck
+# in-flight result must never read a passing test as failing, and a version
+# that exists but has completed nothing reads "not run" (case 11).
+# It correlates on cv.version_id, so _CURRENT_VERSION_SQL must appear BEFORE
+# it in the FROM clause. Binds no parameter of its own, same as above.
+_HEALTH_SQL = (
+    "LEFT JOIN LATERAL ("
+    "  SELECT r.status FROM test_runs r"
+    "  WHERE r.test_id = te.test_id AND r.test_version_id = cv.version_id"
+    "    AND r.status IN ('passed', 'failed', 'error')"
+    "  ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"
+    ") hlt ON TRUE "
+)
+
+
+def _health_value(status: Optional[str]) -> str:
+    """The public health word for one raw status off _HEALTH_SQL.
+
+    'passed' -> "passing"; 'failed' and 'error' -> "failing"; None (the
+    lateral matched nothing, so the current version has no completed result
+    at all) -> "not_run". 'error' has no bucket of its own: owner ruling O2
+    removed "flaky" from this vocabulary and the field's only other values
+    are passing/failing/not_run, so among COMPLETED outcomes an error reads
+    as a failure signal rather than vanishing from the field."""
+    if status is None:
+        return "not_run"
+    return "passing" if status == "passed" else "failing"
+
 
 class RunOwnership(NamedTuple):
     """What the authorization gates need to know about one run.
@@ -2090,32 +2134,17 @@ class RunRegistry:
         # match literal strings, so they add no parameter to reorder.
         params = join_params + params
 
-        # Resolves the CURRENT version's own row once; hlt, spk and the
-        # inline `running` EXISTS all read cv.version_id/cv.robot_code
-        # rather than re-deriving it. test_versions is UNIQUE (test_id, n),
-        # so this is at most one row -- no fan-out risk.
-        version_lookup = (
-            "LEFT JOIN LATERAL ("
-            "  SELECT v.version_id, v.robot_code FROM test_versions v"
-            "  WHERE v.test_id = te.test_id AND v.n = te.current_version"
-            ") cv ON TRUE "
-        )
-        # The current version's last COMPLETED result (section 6.1/R1). LIMIT
-        # 1 makes this at most one row; reused by both the total COUNT (when
-        # health is filtered) and the row SELECT (to render "health").
-        health_lookup = (
-            "LEFT JOIN LATERAL ("
-            "  SELECT r.status FROM test_runs r"
-            "  WHERE r.test_id = te.test_id AND r.test_version_id = cv.version_id"
-            "    AND r.status IN ('passed', 'failed', 'error')"
-            "  ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"
-            ") hlt ON TRUE "
-        )
+        # cv resolves the current version's row once; hlt, spk and the inline
+        # `running` EXISTS all read cv.version_id/cv.robot_code rather than
+        # re-deriving it. Both joins live at module level so get_test_detail
+        # reads health off the same two -- see their own comments there.
+        # hlt is used by BOTH statements below: the total COUNT needs it when
+        # health is filtered, and the row SELECT needs it to render "health".
         try:
             with self._pool.connection() as conn:
                 total = conn.execute(
                     f"SELECT COUNT(*) AS n FROM tests te {join} "
-                    f"{version_lookup}{health_lookup}{where}",
+                    f"{_CURRENT_VERSION_SQL}{_HEALTH_SQL}{where}",
                     params,
                 ).fetchone()["n"]
                 rows = conn.execute(
@@ -2136,8 +2165,8 @@ class RunRegistry:
                     "       spk.statuses AS spark_statuses, "
                     "       cv.robot_code AS current_robot_code "
                     f"FROM tests te {join} "
-                    f"{version_lookup}"
-                    f"{health_lookup}"
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"{_HEALTH_SQL}"
                     # Whole-test aggregate: one pass over every result this
                     # test has ever had, whatever version it names. Each
                     # ARRAY_AGG(... ORDER BY ...)[1] picks that column off
@@ -2188,13 +2217,6 @@ class RunRegistry:
             for r in rows:
                 r = dict(r)
                 spark_statuses = r["spark_statuses"] or []
-                health_status = r["health_status"]
-                if health_status is None:
-                    health_value = "not_run"
-                elif health_status == "passed":
-                    health_value = "passing"
-                else:
-                    health_value = "failing"
                 out.append({
                     "test_id": r["test_id"],
                     "name": r["name"],
@@ -2212,7 +2234,7 @@ class RunRegistry:
                     "last_run_at": (r["last_run_at"].isoformat()
                                     if r["last_run_at"] else None),
                     "last_run_id": r["last_run_id"],
-                    "health": health_value,
+                    "health": _health_value(r["health_status"]),
                     "running": r["running"],
                     "spark": ["pass" if s == "passed" else "fail"
                              for s in spark_statuses],
@@ -2222,6 +2244,177 @@ class RunRegistry:
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] list_tests failed: {e}")
             return [], 0
+
+    def get_test_detail(
+        self,
+        test_id: str,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """One test, all of its versions, and ONE PAGE of its results (P2's
+        test drawer reads it; nothing else does yet -- spec section 6.2).
+
+        user_id/org_id/folder_org_id/include_unowned mean exactly what they
+        mean in list_tests, and the visibility clauses below are that
+        method's own stack with the q/group/health filters dropped and a
+        `te.test_id = %s` term added: the same _group_join_for_tests, the
+        same _VISIBLE_TEST_SQL, the same te.org_id term, the same
+        include_unowned fallback, in the same order. That is the point
+        -- a test the Tests page will not list must not become readable one
+        URL deeper, and a second predicate written here would be a second
+        answer to the same question.
+
+        Returns None when the test does not exist, when this caller may not
+        see it, OR when the read fails. The caller cannot tell those three
+        apart, and that is deliberate on the first two (an existence-leaking
+        403 is what the 404 convention exists to avoid) and inherited on the
+        third: every single-row read in this module collapses a storage
+        error into None so that a swallowed failure can never be mistaken
+        for an authorization answer -- see get_run, get_owner and
+        get_run_owner, whose docstrings say the same. A page read must not
+        break like a mutation.
+
+        Three separate statements, not one join, because `versions` and
+        `results` are independent one-to-many children of `tests`: read
+        through a single join they multiply, and a test with 3 versions and
+        7 results would report 21 of each. The same trap list_groups'
+        docstring names for run_count/test_count.
+
+        WHOLE-TEST vs VERSION-SCOPED, the distinction the whole split exists
+        to keep straight (rulings R1/R2):
+
+        - `versions` and `results` are WHOLE-TEST. Every version ever
+          written, and every result ever recorded against this test_id
+          whatever version it names. `results_total` counts the whole test,
+          not the page.
+        - `health` is scoped to the CURRENT version alone, off the same two
+          module-level joins list_tests uses (_CURRENT_VERSION_SQL and
+          _HEALTH_SQL) mapped by the same _health_value, so the drawer's
+          header and the row it was opened from cannot disagree.
+
+        `versions` are newest first (n DESC) and are NOT paged -- spec case
+        28 pages the drawer over RESULTS only. `results` are newest first
+        (created_at DESC, run_id as tiebreaker, the same order list_tests'
+        whole-test aggregate uses to pick last_*), limited and offset by the
+        caller, with `results_total` the unpaged count.
+
+        Every result names its OWN version's `n` (case 15), including a
+        result of a SUPERSEDED version. `n` is None where the result points
+        at no version: the code-less row the collapse attached (owner
+        decision D8 writes test_id and leaves test_version_id NULL) and,
+        were a version ever deleted, any row fk_test_runs_version's
+        ON DELETE SET NULL had nulled -- nothing deletes versions today.
+        Rendering such a row as the CURRENT version would attribute code it
+        never ran, which is exactly what case 15 forbids.
+
+        `failure_class` and `failure_locator` are on every result and are
+        ALWAYS None. They are P3 columns (section 8): `test_runs` has no
+        such columns yet and no analyzer writes them. The keys exist so the
+        drawer can build its seam against a stable shape; the values are
+        placeholders, and no caller should read anything into a null one.
+
+        `has_report` is NOT set here. The API layer derives it from `status`
+        with history_endpoints' own _REPORT_STATUSES, so the two detail
+        routes cannot answer it differently."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["te.test_id = %s"]
+        params: list = [test_id]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params.append(org_id)
+        # Join params FIRST, for the reason list_tests states at length:
+        # _group_join_for_tests' placeholder sits earlier in the SQL text
+        # than any WHERE clause's, and psycopg binds %s strictly by
+        # position. The two laterals below bind nothing of their own.
+        params = join_params + params
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT te.test_id, te.name, te.user_query, te.user_id, "
+                    "       te.user_email, te.org_id, "
+                    "       g.group_id, g.name AS group_name, "
+                    "       te.current_version, te.created_at, "
+                    "       te.updated_at, "
+                    "       hlt.status AS health_status "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"{_HEALTH_SQL}"
+                    f"WHERE {' AND '.join(clauses)}",
+                    params,
+                ).fetchone()
+                if row is None:
+                    return None
+                versions = conn.execute(
+                    "SELECT n, user_query, robot_code, created_by, reason,"
+                    " created_at FROM test_versions WHERE test_id = %s"
+                    " ORDER BY n DESC",
+                    (test_id,),
+                ).fetchall()
+                total = conn.execute(
+                    "SELECT COUNT(*) AS n FROM test_runs WHERE test_id = %s",
+                    (test_id,),
+                ).fetchone()["n"]
+                # v is joined on its PRIMARY KEY, so this is at most one row
+                # per result and cannot fan out. LEFT, so a result naming no
+                # version survives the join with n NULL rather than being
+                # dropped from its own test's timeline.
+                results = conn.execute(
+                    "SELECT r.run_id, r.status, r.created_at, v.n "
+                    "FROM test_runs r "
+                    "LEFT JOIN test_versions v"
+                    "  ON v.version_id = r.test_version_id "
+                    "WHERE r.test_id = %s "
+                    "ORDER BY r.created_at DESC, r.run_id DESC "
+                    "LIMIT %s OFFSET %s",
+                    (test_id, limit, offset),
+                ).fetchall()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_test_detail failed: {e}")
+            return None
+        return {
+            "test": {
+                "test_id": row["test_id"],
+                "name": row["name"],
+                "user_query": row["user_query"],
+                "user_id": row["user_id"],
+                "user_email": row["user_email"],
+                "org_id": row["org_id"],
+                "group_id": row["group_id"],
+                "group_name": row["group_name"],
+                "current_version": row["current_version"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+                "health": _health_value(row["health_status"]),
+            },
+            "versions": [{
+                "n": v["n"],
+                "user_query": v["user_query"],
+                "robot_code": v["robot_code"],
+                "created_by": v["created_by"],
+                "reason": v["reason"],
+                "created_at": v["created_at"].isoformat(),
+            } for v in versions],
+            "results": [{
+                "run_id": x["run_id"],
+                "status": x["status"],
+                "n": x["n"],
+                "created_at": x["created_at"].isoformat(),
+                # P3 columns (section 8); see the docstring above.
+                "failure_class": None,
+                "failure_locator": None,
+            } for x in results],
+            "results_total": total,
+        }
 
     def assign_runs(
         self,

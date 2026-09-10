@@ -312,3 +312,240 @@ def test_limit_is_capped_like_history(client):
     _, kwargs = stub.list_tests.call_args
     assert kwargs["limit"] == 200
     assert kwargs["offset"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GET /api/tests/{test_id} -- the drawer's data source. Registry-level
+# predicate/paging/version coverage lives in
+# tests/test_core/test_run_registry_get_test_detail.py; this section covers
+# the HTTP layer: path validation, the 404 convention, has_report, and the
+# same field redaction the list applies.
+# ---------------------------------------------------------------------------
+
+def _add_result(test_id, status, created_at, user_id="someone",
+                org_id=None, version_id=None):
+    """One extra result against an existing test, written straight to the
+    table: record_start cannot mint a second result with a chosen status and
+    timestamp for a test that already exists."""
+    from src.backend.core.run_registry import get_run_registry
+    reg = get_run_registry()
+    run_id = str(uuid.uuid4())
+    with reg._pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+            " status, org_id, test_id, test_version_id, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (run_id, user_id, "x@x.com", "q", status, org_id, test_id,
+             version_id, created_at))
+    return run_id
+
+
+def test_detail_returns_the_test_its_versions_and_its_paged_results(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"td-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, run_id = _seed_test(claims["user_id"], claims["org_id"], email)
+
+    r = client.get(f"/api/tests/{test_id}", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["test"]["test_id"] == test_id
+    assert body["test"]["user_query"] == "search shoes"
+    assert body["test"]["current_version"] == 1
+    assert body["test"]["health"] == "passing"
+    assert body["test"]["user_email"] == email
+    assert body["test"]["created_at"]
+    assert [v["n"] for v in body["versions"]] == [1]
+    assert body["versions"][0]["robot_code"] == "*** Tasks ***"
+    assert body["versions"][0]["user_query"] == "search shoes"
+    assert body["results_total"] == 1
+    assert body["results"][0]["run_id"] == run_id
+    assert body["results"][0]["n"] == 1
+    assert body["results"][0]["status"] == "passed"
+
+
+def test_detail_reaches_a_peers_test_through_a_folder(client):
+    """The same publication rule the list applies: a colleague's test filed
+    into a folder this caller's org owns."""
+    from src.backend.auth.jwt_utils import decode_token
+    _tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member_claims = decode_token(tok_member)
+    test_id, _ = _file_into_new_folder_test(client, org_id, member_claims)
+
+    r = client.get(f"/api/tests/{test_id}", headers=_auth(tok_peer))
+    assert r.status_code == 200, r.text
+    assert r.json()["test"]["group_id"]
+    # ...and it is NOT reachable once nobody has published it (case 5).
+    unfiled_id, _ = _seed_test(member_claims["user_id"], org_id,
+                               member_claims["email"], query="unfiled")
+    assert client.get(f"/api/tests/{unfiled_id}",
+                      headers=_auth(tok_peer)).status_code == 404
+
+
+def test_detail_answers_404_never_403_for_a_test_in_another_org(client):
+    """Rejection must not distinguish "exists but forbidden" from "no such
+    test" -- the convention groups_endpoints' assignment handler states."""
+    tok = _register(client, f"tf-{uuid.uuid4().hex[:8]}@e.com")
+    foreign_id, _ = _seed_test("someone-else", str(uuid.uuid4()),
+                               "stranger@x.com")
+
+    r = client.get(f"/api/tests/{foreign_id}", headers=_auth(tok))
+    assert r.status_code == 404
+    # Byte-identical to the answer for an id that exists nowhere: the body
+    # is what would leak existence, not just the code.
+    missing = client.get(f"/api/tests/{uuid.uuid4()}", headers=_auth(tok))
+    assert missing.status_code == 404
+    assert r.json() == missing.json()
+
+
+def test_detail_answers_400_for_a_non_uuid_test_id(client):
+    """Same shape /api/history/{run_id} uses for a malformed id -- every
+    test_id this codebase mints is a uuid4 (the mint and the collapse both
+    generate one), so a non-uuid is a bad request, not a missing row."""
+    tok = _register(client, f"tb-{uuid.uuid4().hex[:8]}@e.com")
+    r = client.get("/api/tests/not-a-uuid", headers=_auth(tok))
+    assert r.status_code == 400
+
+
+def test_detail_has_report_uses_the_history_rule_and_nothing_else(client):
+    """_REPORT_STATUSES is ("passed", "failed") -- the statuses with a
+    log.html on disk. 'error', 'running' and 'generated' have none, and this
+    endpoint must not invent a second answer."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"th-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, passed_run = _seed_test(claims["user_id"], claims["org_id"],
+                                     email)
+    made = {"passed": passed_run}
+    for i, status in enumerate(("failed", "error", "running", "generated")):
+        made[status] = _add_result(
+            test_id, status, f"2026-03-0{i + 1}T10:00:00Z",
+            user_id=claims["user_id"], org_id=claims["org_id"])
+
+    body = client.get(f"/api/tests/{test_id}", headers=_auth(tok)).json()
+    by_run = {x["run_id"]: x for x in body["results"]}
+    assert by_run[made["passed"]]["has_report"] is True
+    assert by_run[made["failed"]]["has_report"] is True
+    assert by_run[made["error"]]["has_report"] is False
+    assert by_run[made["running"]]["has_report"] is False
+    assert by_run[made["generated"]]["has_report"] is False
+
+
+def test_detail_failure_fields_are_present_and_null(client):
+    """P3 columns (section 8). The keys exist so the drawer can build its
+    seam; nothing writes a value until P3."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tn-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email,
+                            status="failed")
+
+    result = client.get(f"/api/tests/{test_id}",
+                        headers=_auth(tok)).json()["results"][0]
+    assert result["failure_class"] is None
+    assert result["failure_locator"] is None
+
+
+def test_detail_redacts_org_id_from_everyone_and_ids_from_non_admins(client):
+    """The list's own field discipline, restated over this payload: org_id is
+    internal, the internal user id is admin-only, and the EMAIL stays so a
+    shared folder can still say who authored what. created_by is redacted
+    alongside user_id because it holds a user id rather than an email, and
+    today always the TEST'S author -- so returning it would hand back the
+    value the pop above just removed."""
+    from unittest.mock import patch
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tr-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, _ = _seed_test(claims["user_id"], claims["org_id"], email)
+
+    body = client.get(f"/api/tests/{test_id}", headers=_auth(tok)).json()
+    assert "org_id" not in body["test"]
+    assert "user_id" not in body["test"]
+    assert body["test"]["user_email"] == email
+    assert "created_by" not in body["versions"][0]
+
+    with patch("src.backend.api.history_scope.is_validated_admin",
+               return_value=True):
+        as_admin = client.get(f"/api/tests/{test_id}",
+                              headers=_auth(tok)).json()
+    assert as_admin["test"]["user_id"] == claims["user_id"]
+    assert as_admin["versions"][0]["created_by"] == claims["user_id"]
+    # org_id is internal to the server on BOTH paths -- unlike user_id it is
+    # never part of this response.
+    assert "org_id" not in as_admin["test"]
+
+
+def test_detail_limit_is_capped_like_history(client):
+    """?limit=99999&offset=-5 must reach the registry already clamped to
+    [1, 200] / floored at 0, the same convention list_history and
+    GET /api/tests apply. Patches get_run_registry so the assertion is on the
+    kwargs the endpoint computed rather than on seeded row counts."""
+    from unittest.mock import MagicMock, patch
+    tok = _register(client, f"tl-{uuid.uuid4().hex[:8]}@e.com")
+
+    stub = MagicMock()
+    stub.get_test_detail.return_value = {
+        "test": {"test_id": "x", "user_id": None, "org_id": None},
+        "versions": [], "results": [], "results_total": 0,
+    }
+    with patch("src.backend.api.tests_endpoints.get_run_registry",
+               return_value=stub):
+        r = client.get(f"/api/tests/{uuid.uuid4()}?limit=99999&offset=-5",
+                       headers=_auth(tok))
+
+    assert r.status_code == 200, r.text
+    _, kwargs = stub.get_test_detail.call_args
+    assert kwargs["limit"] == 200
+    assert kwargs["offset"] == 0
+
+
+def test_detail_pages_its_results(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tp-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    # record_start stamps created_at with now(), so the seeded result is the
+    # NEWEST of the four and the dated ones below sit under it, oldest last.
+    test_id, newest = _seed_test(claims["user_id"], claims["org_id"], email)
+    older = [
+        _add_result(test_id, "passed", f"2026-04-0{i}T10:00:00Z",
+                    user_id=claims["user_id"], org_id=claims["org_id"])
+        for i in (1, 2, 3)
+    ]
+
+    page1 = client.get(f"/api/tests/{test_id}?limit=2&offset=0",
+                       headers=_auth(tok)).json()
+    assert page1["results_total"] == 4
+    assert [x["run_id"] for x in page1["results"]] == [newest, older[2]]
+
+    page2 = client.get(f"/api/tests/{test_id}?limit=2&offset=2",
+                       headers=_auth(tok)).json()
+    assert page2["results_total"] == 4
+    assert [x["run_id"] for x in page2["results"]] == [older[1], older[0]]
+
+
+def test_detail_resolves_folder_names_only_from_the_callers_own_org(client):
+    """A validated platform admin's TEST scope is every org while their
+    FOLDER scope stays their own (history_scope.folder_org_id). So they can
+    READ a foreign org's test and must still not be told which of that org's
+    folders it sits in -- the folder join binds their own org and resolves
+    nothing. This is the one caller shape where folder_org_id and org_id
+    differ: for everyone else `folder_org_id or org_id` makes them the same
+    value, so no other test can pin this parameter."""
+    from unittest.mock import patch
+    foreign_org = str(uuid.uuid4())
+    foreign_id, _ = _seed_test("someone-else", foreign_org, "stranger@x.com")
+    _file_into_new_folder(foreign_org, "someone-else", foreign_id)
+
+    tok = _register(client, f"tg-{uuid.uuid4().hex[:8]}@e.com")
+    with patch("src.backend.api.history_scope.is_validated_admin",
+               return_value=True):
+        r = client.get(f"/api/tests/{foreign_id}", headers=_auth(tok))
+    assert r.status_code == 200, r.text
+    assert r.json()["test"]["group_id"] is None
+    assert r.json()["test"]["group_name"] is None
