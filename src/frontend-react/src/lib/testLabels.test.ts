@@ -21,9 +21,10 @@ describe('labelFrom', () => {
     expect(labelFrom('   ', '  buy a thing  ')).toBe('buy a thing')
   })
 
-  it('names a test with neither, rather than rendering an empty cell', () => {
-    // Paste-and-execute mints a test with a NULL description (spec case 9).
-    expect(labelFrom(null, null)).toBe('Untitled test')
+  it('names a test with neither as a pasted test, which is the only kind that has none', () => {
+    // Paste-and-execute mints a test with a NULL description (spec case 9), and
+    // the spec names it "Pasted test" to match Activity's "Pasted code run".
+    expect(labelFrom(null, null)).toBe('Pasted test')
   })
 })
 

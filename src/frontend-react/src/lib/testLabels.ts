@@ -18,7 +18,7 @@
  *  the backend writes that column. It is kept as the first term so a later
  *  short-title feature needs no migration and no second definition here. */
 export function labelFrom(name: string | null, userQuery: string | null): string {
-  return name?.trim() || userQuery?.trim() || 'Untitled test'
+  return name?.trim() || userQuery?.trim() || 'Pasted test'
 }
 
 /** The version a result ran, short, with the sentence that explains it.
