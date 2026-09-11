@@ -70,9 +70,9 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, d
     login: vi.fn(), signup: vi.fn(), loginWithToken: vi.fn(), logout: vi.fn(), logoutAll: vi.fn(),
   })
   mockUseRunGroups.mockReturnValue({
-    groups: [], ungroupedCount: 0, error: '', loaded: true,
+    groups: [], ungroupedCount: 0, ungroupedTestCount: 0, error: '', loaded: true,
     refresh: vi.fn(), createGroup: vi.fn(), renameGroup: vi.fn(),
-    deleteGroup: vi.fn(), assignRuns: vi.fn(),
+    deleteGroup: vi.fn(), assignRuns: vi.fn(), assignTests: vi.fn(),
     groupFilter: null, setGroupFilter: vi.fn(),
   })
   mockApi.mockResolvedValue({ runs: [RUN], total: 1, scope: 'own' })
@@ -277,7 +277,7 @@ const RUN_B = {
   user_email: 'colleague@x.com', created_at: '2026-08-30T00:00:00Z', updated_at: '2026-08-30T00:00:00Z',
   has_report: false, can_move: false,
 }
-const CHECKOUT = { group_id: 'g-1', name: 'Checkout', created_by: 'u-me', run_count: 0 }
+const CHECKOUT = { group_id: 'g-1', name: 'Checkout', created_by: 'u-me', run_count: 0, test_count: 0 }
 const CODE = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    New Page    https://example.com'
 
 function stubClipboard() {
@@ -338,9 +338,10 @@ function setupList(runs: unknown[], opts: {
     setGroupFilter: vi.fn(),
   }
   mockUseRunGroups.mockReturnValue({
-    groups: opts.groups ?? [], ungroupedCount: opts.ungroupedCount ?? 0, error: opts.groupsError ?? '', loaded: true,
+    groups: opts.groups ?? [], ungroupedCount: opts.ungroupedCount ?? 0, ungroupedTestCount: 0,
+    error: opts.groupsError ?? '', loaded: true,
     refresh: spies.refreshGroups, createGroup: spies.createGroup, renameGroup: spies.renameGroup,
-    deleteGroup: spies.deleteGroup, assignRuns: spies.assignRuns,
+    deleteGroup: spies.deleteGroup, assignRuns: spies.assignRuns, assignTests: vi.fn(),
     groupFilter: opts.groupFilter ?? null, setGroupFilter: spies.setGroupFilter,
   })
   mockApi.mockImplementation(async (path: string) => {

@@ -37,10 +37,14 @@ interface Props {
   onCreateGroup: (name: string) => Promise<RunGroup>
   /** The button that opens the menu (wrapped with asChild). */
   trigger: ReactNode
+  /** What is being filed, for the New-group dialog's sentence: runs on
+   *  Activity (the default), tests on the Tests page. */
+  noun?: 'runs' | 'tests'
 }
 
 export function MoveToGroupMenu({
   groups, currentGroupId, showRemove, onMove, onCreateGroup, trigger,
+  noun = 'runs',
 }: Props) {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -129,8 +133,8 @@ export function MoveToGroupMenu({
           <DialogHeader>
             <DialogTitle>New group</DialogTitle>
             <DialogDescription>
-              The selected runs move into it right away, and everyone in your
-              organization can see them there.
+              The selected {noun} move into it right away, and everyone in
+              your organization can see them there.
             </DialogDescription>
           </DialogHeader>
           <form

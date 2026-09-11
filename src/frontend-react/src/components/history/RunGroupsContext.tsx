@@ -31,6 +31,8 @@ export type GroupFilter = string | null
 interface RunGroupsValue {
   groups: RunGroup[]
   ungroupedCount: number
+  /** The Tests page's Ungrouped chip: TESTS in no folder, not results. */
+  ungroupedTestCount: number
   error: string
   loaded: boolean
   refresh: () => Promise<void>
@@ -38,6 +40,7 @@ interface RunGroupsValue {
   renameGroup: (groupId: string, name: string) => Promise<void>
   deleteGroup: (groupId: string) => Promise<void>
   assignRuns: (runIds: string[], groupId: string | null) => Promise<void>
+  assignTests: (testIds: string[], groupId: string | null) => Promise<void>
   groupFilter: GroupFilter
   setGroupFilter: (value: GroupFilter) => void
 }
@@ -46,8 +49,8 @@ const RunGroupsContext = createContext<RunGroupsValue | null>(null)
 
 export function RunGroupsProvider({ children }: { children: ReactNode }) {
   const {
-    groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, ungroupedTestCount, error, loaded,
+    refresh, createGroup, renameGroup, deleteGroup, assignRuns, assignTests,
   } = useGroups()
   const [groupFilter, setGroupFilter] = useState<GroupFilter>(null)
 
@@ -66,12 +69,12 @@ export function RunGroupsProvider({ children }: { children: ReactNode }) {
   }, [error, loaded, groups, groupFilter])
 
   const value = useMemo<RunGroupsValue>(() => ({
-    groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, ungroupedTestCount, error, loaded,
+    refresh, createGroup, renameGroup, deleteGroup, assignRuns, assignTests,
     groupFilter, setGroupFilter,
   }), [
-    groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, ungroupedTestCount, error, loaded,
+    refresh, createGroup, renameGroup, deleteGroup, assignRuns, assignTests,
     groupFilter,
   ])
 

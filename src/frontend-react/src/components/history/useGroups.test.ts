@@ -15,7 +15,7 @@ const { api } = await import('@/lib/api')
 const apiMock = vi.mocked(api)
 
 const group = (name: string): RunGroup => ({
-  group_id: `id-${name}`, name, created_by: 'u1', run_count: 0,
+  group_id: `id-${name}`, name, created_by: 'u1', run_count: 0, test_count: 0,
 })
 
 /** One controllable promise per api() call, in call order. */
@@ -80,5 +80,32 @@ describe('useGroups', () => {
     expect(apiMock.mock.calls[0][1]).toMatchObject({ method: 'POST' })
     expect(apiMock.mock.calls[1]).toEqual(['/api/groups'])
     expect(result.current.groups.map(g => g.name)).toEqual(['Checkout'])
+  })
+
+  it('keeps the Tests page’s Ungrouped count beside the runs one', async () => {
+    // Two different populations: results filed nowhere, and tests filed
+    // nowhere. The server sends both; Activity reads one, Tests the other.
+    apiMock.mockResolvedValue({ groups: [], ungrouped_count: 3, ungrouped_test_count: 2 })
+    const { result } = renderHook(() => useGroups())
+
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.ungroupedCount).toBe(3)
+    expect(result.current.ungroupedTestCount).toBe(2)
+  })
+
+  it('files tests through the tests route, then re-reads the list', async () => {
+    apiMock.mockResolvedValue({ groups: [], ungrouped_count: 0, ungrouped_test_count: 0 })
+    const { result } = renderHook(() => useGroups())
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    apiMock.mockClear()
+
+    await act(async () => { await result.current.assignTests(['t-1'], 'g-1') })
+
+    // Moving a test moves its results with it, so both chip counts change —
+    // the same re-read every other mutation here makes.
+    expect(apiMock.mock.calls[0]).toEqual(['/api/tests/assignments', {
+      method: 'PUT', body: JSON.stringify({ test_ids: ['t-1'], group_id: 'g-1' }),
+    }])
+    expect(apiMock.mock.calls[1]).toEqual(['/api/groups'])
   })
 })

@@ -15,7 +15,7 @@ import { GroupChipsRow } from './GroupChipsRow'
 import type { RunGroup } from './useGroups'
 
 const CHECKOUT: RunGroup = {
-  group_id: 'g-1', name: 'Checkout', created_by: 'u-creator', run_count: 4,
+  group_id: 'g-1', name: 'Checkout', created_by: 'u-creator', run_count: 4, test_count: 2,
 }
 
 const noop = async () => {}
@@ -297,5 +297,44 @@ describe('GroupChipsRow — deleting a group', () => {
     fireEvent.click(screen.getByText('Delete group'))
 
     expect(await screen.findByText('Only an org admin may delete a group')).toBeInTheDocument()
+  })
+})
+
+// The same row on the Tests page, where a folder holds TESTS. CHECKOUT holds
+// 2 tests and 4 runs, so every assertion below tells the two counts apart.
+describe('GroupChipsRow — counting tests (unit="test")', () => {
+  it('shows the folder’s TEST count on the active chip and in the browse list', () => {
+    renderRow({ unit: 'test', active: 'g-1' })
+
+    expect(screen.getByTitle('Switch or manage groups').textContent).toContain('· 2')
+    fireEvent.click(screen.getByTitle('Switch or manage groups'))
+    expect(screen.getByText('· 2 tests')).toBeInTheDocument()
+    expect(screen.queryByText(/4 runs/)).not.toBeInTheDocument()
+  })
+
+  it('says tests wherever the row names what it filters', () => {
+    renderRow({ unit: 'test' })
+
+    expect(screen.getByTitle('Show only tests that are in no group')).toBeInTheDocument()
+    openBrowse()
+    expect(screen.getByText(/Pick a group to filter the tests/)).toBeInTheDocument()
+  })
+
+  it('tells the truth about who can see a test once its folder is deleted', () => {
+    renderRow({ unit: 'test', canDelete: () => true })
+    openBrowse()
+    fireEvent.click(screen.getByLabelText('Delete Checkout'))
+
+    expect(screen.getByText(/The tests are NOT deleted/)).toBeInTheDocument()
+    expect(screen.queryByText(/The runs are NOT deleted/)).not.toBeInTheDocument()
+  })
+
+  it('keeps History’s run counts and wording when no unit is given', () => {
+    renderRow({ active: 'g-1' })
+
+    expect(screen.getByTitle('Switch or manage groups').textContent).toContain('· 4')
+    fireEvent.click(screen.getByTitle('Switch or manage groups'))
+    expect(screen.getByText('· 4 runs')).toBeInTheDocument()
+    expect(screen.getByText(/Pick a group to filter the runs/)).toBeInTheDocument()
   })
 })

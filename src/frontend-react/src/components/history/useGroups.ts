@@ -1,10 +1,10 @@
 /**
- * Org run-groups state for the Test Runs page and the sidebar.
+ * Org run-groups state for the Tests and Activity pages and the sidebar.
  *
  * Folders belong to the caller's ORGANISATION — every member sees every
  * folder and every run filed into one, so there is no per-folder visibility
- * to model here. Owns the /api/groups list (with live run counts) and every
- * group mutation. Each mutation re-fetches the list so chip counts stay
+ * to model here. Owns the /api/groups list (with live run and test counts)
+ * and every group mutation. Each mutation re-fetches the list so chip counts stay
  * honest without the callers having to know what changed; `refresh` is also
  * exported so the page can re-sync counts after something OTHER than a
  * mutation changed them — a re-run, or the Refresh button. Server errors
@@ -23,11 +23,17 @@ export interface RunGroup {
   created_by: string
   /** The folder's WHOLE contents, org-wide — not the caller's share of it. */
   run_count: number
+  /** How many TESTS are filed there, org-wide — the Tests page's count, as
+   *  run_count is Activity's. POST /api/groups answers 0 for a new folder. */
+  test_count: number
 }
 
 export function useGroups() {
   const [groups, setGroups] = useState<RunGroup[]>([])
   const [ungroupedCount, setUngroupedCount] = useState(0)
+  // The same chip on the Tests page counts TESTS filed nowhere, a different
+  // population from the results ungroupedCount counts.
+  const [ungroupedTestCount, setUngroupedTestCount] = useState(0)
   const [error, setError] = useState('')
   // First fetch settled (success OR failure). Consumers need this to tell
   // "no groups exist" apart from "the list hasn't arrived yet" — without it
@@ -43,10 +49,13 @@ export function useGroups() {
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current
     try {
-      const data = await api<{ groups: RunGroup[]; ungrouped_count: number }>('/api/groups')
+      const data = await api<{
+        groups: RunGroup[]; ungrouped_count: number; ungrouped_test_count: number
+      }>('/api/groups')
       if (seq === refreshSeq.current) {
         setGroups(data.groups)
         setUngroupedCount(data.ungrouped_count)
+        setUngroupedTestCount(data.ungrouped_test_count)
         setError('')
       }
     } catch (e) {
@@ -89,8 +98,18 @@ export function useGroups() {
     await refresh()
   }, [refresh])
 
+  // Files TESTS — PUT /api/tests/assignments, the Tests page's Move. A test's
+  // results follow it by join, so both chip counts move and the list is
+  // re-read exactly as it is after every other mutation here.
+  const assignTests = useCallback(async (testIds: string[], groupId: string | null) => {
+    await api('/api/tests/assignments', {
+      method: 'PUT', body: JSON.stringify({ test_ids: testIds, group_id: groupId }),
+    })
+    await refresh()
+  }, [refresh])
+
   return {
-    groups, ungroupedCount, error, loaded,
-    refresh, createGroup, renameGroup, deleteGroup, assignRuns,
+    groups, ungroupedCount, ungroupedTestCount, error, loaded,
+    refresh, createGroup, renameGroup, deleteGroup, assignRuns, assignTests,
   }
 }

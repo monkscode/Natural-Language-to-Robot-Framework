@@ -20,8 +20,8 @@ import type { RunGroup } from './useGroups'
 
 afterEach(() => vi.resetAllMocks())
 
-const CHECKOUT: RunGroup = { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 3 }
-const REGRESSION: RunGroup = { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 1 }
+const CHECKOUT: RunGroup = { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 3, test_count: 1 }
+const REGRESSION: RunGroup = { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 1, test_count: 1 }
 
 function renderMenu(overrides: Partial<React.ComponentProps<typeof MoveToGroupMenu>> = {}) {
   const props: React.ComponentProps<typeof MoveToGroupMenu> = {
@@ -192,5 +192,18 @@ describe('MoveToGroupMenu — create-and-move', () => {
     expect(screen.queryByPlaceholderText('e.g. Checkout flows')).not.toBeInTheDocument()
     expect(onCreateGroup).not.toHaveBeenCalled()
     expect(onMove).not.toHaveBeenCalled()
+  })
+
+  it('says runs by default, and tests when it is filing tests', () => {
+    const { unmount } = renderMenu()
+    openMenu()
+    fireEvent.click(screen.getByText('New group…'))
+    expect(screen.getByText(/The selected runs move into it right away/)).toBeInTheDocument()
+    unmount()
+
+    renderMenu({ noun: 'tests' })
+    openMenu()
+    fireEvent.click(screen.getByText('New group…'))
+    expect(screen.getByText(/The selected tests move into it right away/)).toBeInTheDocument()
   })
 })

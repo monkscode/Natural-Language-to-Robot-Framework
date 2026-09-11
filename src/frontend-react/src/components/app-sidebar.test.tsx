@@ -169,8 +169,8 @@ describe('AppSidebar — the Test Runs quick-access group list', () => {
     renderSidebar(PLAIN, {
       loaded: true, error: '',
       groups: [
-        { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 2 },
-        { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 5 },
+        { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 2, test_count: 1 },
+        { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 5, test_count: 3 },
       ],
       setGroupFilter,
     })
