@@ -1169,6 +1169,68 @@ describe('TestsPage — the Update dialog’s first run', () => {
       'Version 3 of “search flipkart for shoes” was saved. Running it failed (run wf-1): runner unreachable',
     )).toBeInTheDocument()
   })
+
+  it('refreshes the list when a regeneration fails, because its run attaches to the test', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Planning the steps…' })
+      onEvent({ status: 'error', message: 'Vertex refused the request (429)' })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    const before = listCalls().length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await within(dialog).findByText('Vertex refused the request (429)')
+    // Spec case 10 / 37(b): no version is written, and the run that failed
+    // is still attached to this test — so the test has one more result than
+    // it did, and the list is where that shows.
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before))
+  })
+
+  it('does not move the drawer when an existing test is updated', async () => {
+    setup()
+    updateStream({ testId: 't-pass', n: 3, runId: 'wf-1' })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(runAfter(dialog))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    // Only a test that did not exist a moment ago is opened. Updating in
+    // place changes the row the reader is already looking at, and going and
+    // opening it is not what they asked for.
+    expect(detailCalls().filter(c => c.includes('limit=50'))).toEqual([])
+  })
+
+  it('says the version is saved when the run cannot even start, and still refreshes', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (String(path).endsWith('/versions')) {
+        onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+        onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+        return
+      }
+      throw new ApiError(503, 'Docker is unavailable.')
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    const before = listCalls().length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await screen.findByText(
+      'Version 3 of “search flipkart for shoes” was saved, but the run could not start — Docker is unavailable.',
+    )).toBeInTheDocument()
+    // This run never reached an event carrying its id, so the refresh made
+    // when the stream ends is the only one there is.
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before))
+  })
 })
 
 describe('TestsPage — Update from the drawer', () => {
