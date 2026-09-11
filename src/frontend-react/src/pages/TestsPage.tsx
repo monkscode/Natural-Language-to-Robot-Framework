@@ -16,8 +16,9 @@
  * Run re-executes the test's CURRENT version as a new run via
  * POST /execute-test {test_id} — no LLM, no regeneration, learning skipped.
  * Move files the test via PUT /api/tests/assignments; its results follow it.
- * Update (spec 7.4) is not on the row yet — its dialog is not built — and the
- * actions column is already sized for it. Opening a row opens the drawer,
+ * Update (spec 7.4) regenerates the test from an editable copy of its
+ * description through POST /api/tests/{test_id}/versions, either in place or
+ * as a new test. Opening a row opens the drawer,
  * which makes its own read of GET /api/tests/{test_id} (spec 7.3): the
  * results this viewer may open, newest first and ruled where the code
  * changed, the current version's Robot code, and the version history.
@@ -32,11 +33,15 @@ import { useNavigate } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
+import { Textarea } from '@/components/ui/textarea'
 import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, RefreshCw, Search, Zap } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
@@ -364,7 +369,7 @@ function TestsTableHead() {
   )
 }
 
-function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, onRun, onMove, onCreateGroup }: Readonly<{
+function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, onRun, onUpdate, onMove, onCreateGroup }: Readonly<{
   row: TestRow
   groupFilter: GroupFilter
   groups: RunGroup[]
@@ -372,6 +377,7 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
   runDisabled: boolean
   onOpen: (testId: string) => void
   onRun: (row: TestRow) => void
+  onUpdate: (row: TestRow) => void
   onMove: (testIds: string[], groupId: string | null) => void
   onCreateGroup: (name: string) => Promise<RunGroup>
 }>) {
@@ -444,6 +450,20 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
                 <Play className="h-3.5 w-3.5" />
               </Button>
             </span>
+          )}
+          {/* Offered on the same term as Move, because the route asks the
+              same question of an update (_may_move_test). Offered even where
+              can_run is false: a test whose current version has no code is
+              exactly one you regenerate — which is what NO_CODE says to do. */}
+          {row.can_move && (
+            <Button
+              variant="ghost" size="icon" className="h-7 w-7"
+              title="Update — regenerate this test from its description"
+              aria-label={`Update ${label}`}
+              onClick={() => onUpdate(row)}
+            >
+              <Zap className="h-3.5 w-3.5" />
+            </Button>
           )}
           {row.can_move && (
             <MoveToGroupMenu
@@ -632,6 +652,203 @@ function DrawerVersions({ versions, current }: Readonly<{
   )
 }
 
+/** One "just copied" key at a time, cleared after a moment. Shared by the
+ *  drawer and the Update dialog, which both render DrawerCode. */
+function useCopiedKey(): [string | null, (text: string, key: string) => Promise<void>, () => void] {
+  const [copied, setCopied] = useState<string | null>(null)
+  const copy = useCallback(async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      setTimeout(() => setCopied(null), 1500)
+    } catch { /* clipboard unavailable — non-fatal */ }
+  }, [])
+  const clear = useCallback(() => setCopied(null), [])
+  return [copied, copy, clear]
+}
+
+type UpdateMode = 'update' | 'new_test'
+
+/** What the Update stream actually landed, read off its terminal event.
+ *  `testId` is that event's own test_id: for mode 'new_test' it names the
+ *  NEW test, not the one the dialog was opened on. */
+interface SavedVersion {
+  mode: UpdateMode
+  testId: string
+  n: number
+  runId: string | null
+  robotCode: string | null
+  userQuery: string
+}
+
+/** The confirm step for a regeneration (spec 7.4). Not a navigation: the
+ *  Regenerate it replaces left the page and lost every bit of context.
+ *
+ * Offered exactly where `can_move` is true, which is the authority the route
+ * itself applies to `mode: "update"` (_may_move_test, plus visibility) — so
+ * "may move" and "may update" are one answer on every row.
+ *
+ * It makes its own read rather than taking the drawer's, because it opens
+ * from a row too, and a row carries no code and no version list.
+ */
+function UpdateDialog({ target, onClose, onFinished }: Readonly<{
+  target: { testId: string; label: string } | null
+  onClose: () => void
+  onFinished: (saved: SavedVersion | null) => void
+}>) {
+  const [detail, setDetail] = useState<TestDetail | null>(null)
+  const [query, setQuery] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [stage, setStage] = useState('')
+  const [error, setError] = useState('')
+  const [copied, copy, clearCopied] = useCopiedKey()
+
+  const testId = target?.testId ?? null
+
+  useEffect(() => {
+    setDetail(null); setQuery(''); setBusy(false); setStage(''); setError(''); clearCopied()
+    if (!testId) return
+    let live = true
+    // limit=1 is the route's own floor — it clamps limit to [1, 200] — and
+    // the newest result is the one a P3 classifier would explain, which is
+    // where spec 7.4's failure-reason section will read from. Versions are
+    // never paged, so one request carries the whole version list.
+    api<TestDetail>(`/api/tests/${testId}?limit=1&offset=0`)
+      .then(d => { if (live) { setDetail(d); setQuery(d.test.user_query ?? '') } })
+      .catch(e => { if (live) setError(e instanceof Error ? e.message : 'Failed to load this test') })
+    return () => { live = false }
+  }, [testId, clearCopied])
+
+  const submit = async (mode: UpdateMode) => {
+    if (!testId || busy || !query.trim()) return
+    setBusy(true); setError(''); setStage('Starting the regeneration…')
+    // Held on one object because these are written from inside the event
+    // callback and read after the stream ends.
+    const out: { saved: SavedVersion | null; failed: boolean; touched: boolean
+                 code: string | null; runId: string | null } =
+      { saved: null, failed: false, touched: false, code: null, runId: null }
+    try {
+      // The description goes UNTRIMMED: the route trims it, and decides from
+      // that trimmed comparison whether the version reads 'regenerated' or
+      // 'edited'. Trimming here as well would be a second copy of a rule
+      // that belongs to the server.
+      await streamSSE(`/api/tests/${testId}/versions`, { user_query: query, mode }, ev => {
+        out.touched = true
+        // Read FIRST: the terminal version event carries status 'complete'
+        // too, so a read-back failure would otherwise land in the branch
+        // below and be mistaken for the generation finishing.
+        if (ev.stage === 'version') {
+          if (ev.status === 'complete' && typeof ev.test_id === 'string' && typeof ev.n === 'number') {
+            out.saved = {
+              mode, testId: ev.test_id, n: ev.n,
+              runId: typeof ev.run_id === 'string' ? ev.run_id : out.runId,
+              robotCode: out.code, userQuery: query,
+            }
+          } else {
+            out.failed = true
+            setError(ev.message || 'The new version could not be confirmed.')
+          }
+          return
+        }
+        if (ev.status === 'running') {
+          if (ev.message) setStage(String(ev.message))
+        } else if (ev.status === 'complete' && ev.robot_code) {
+          // Generation is done; the version has not landed yet.
+          out.code = String(ev.robot_code)
+          out.runId = typeof ev.workflow_id === 'string' ? ev.workflow_id : null
+          setStage('Saving the new version…')
+        } else if (ev.status === 'error') {
+          out.failed = true
+          setError(ev.message || 'Generation failed')
+        }
+      })
+      if (!out.saved && !out.failed) {
+        setError('The server ended the stream without saying whether a version was written. Reload the list to see whether it is there.')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The update request failed')
+    } finally {
+      setBusy(false)
+      // Any event at all means record_start wrote a run against this test —
+      // a regeneration that FAILS attaches to it with no version (spec case
+      // 10), so the list is told either way. A refusal answered before the
+      // stream began wrote nothing, and says nothing.
+      if (out.touched) onFinished(out.saved)
+    }
+  }
+
+  const current = detail?.versions.find(v => v.n === detail.test.current_version) ?? null
+  const canWrite = !!detail && !!query.trim() && !busy
+
+  return (
+    <Dialog open={!!target} onOpenChange={o => { if (!o && !busy) onClose() }}>
+      {/* Every dismissal route Radix has — the X, Escape, a click outside —
+          ends in onOpenChange, so one guard closes all three while a
+          generation is in flight. The server keeps generating whatever the
+          client does, and a version landing with the page told nothing is
+          exactly the dishonesty this prevents. */}
+      <DialogContent className="max-h-[85vh] gap-3 overflow-y-auto sm:max-w-xl" showClose={!busy}>
+        <DialogHeader className="pr-6 text-left">
+          <DialogTitle>Update test</DialogTitle>
+          <DialogDescription className="text-xs">
+            Regenerate <span className="font-medium text-foreground">{target?.label}</span> from
+            the description below. Its results and its earlier versions are kept.
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* Spec 7.4 item 1 — the classified failure reason — renders nothing
+            in P2, and this is not a placeholder for content that exists:
+            test_runs has no failure_class column and get_test_detail hands
+            back a literal None for every result. The seam is the read above,
+            which fetches the newest result for a classifier to explain. */}
+
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="update-description"
+            className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            Description
+          </label>
+          <Textarea
+            id="update-description"
+            value={query}
+            disabled={busy || !detail}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="What should this test do?"
+            className="min-h-[90px] text-sm"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            Leave it as it is to regenerate the same test; change it to change what the test does.
+          </p>
+        </div>
+
+        <DrawerCode version={current} copied={copied} onCopy={copy} />
+
+        {busy && <p className="text-xs text-muted-foreground" aria-live="polite">{stage}</p>}
+        {error && <p className="text-xs text-destructive">{error}</p>}
+
+        {!busy && (
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              type="button" size="sm" variant="outline"
+              disabled={!canWrite}
+              onClick={() => void submit('new_test')}
+            >
+              Save as a new test
+            </Button>
+            <Button type="button" size="sm" disabled={!canWrite} onClick={() => void submit('update')}>
+              Update this test
+            </Button>
+          </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** The open test: its own read of GET /api/tests/{test_id} (spec 7.3), keyed
  *  on the test id rather than on the row it was opened from — a row that
  *  leaves the list (a folder filter, a refusal) no longer closes the drawer,
@@ -655,7 +872,7 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [copied, setCopied] = useState<string | null>(null)
+  const [copied, copy, clearCopied] = useCopiedKey()
   // One ticket per read, as the list does: only the newest may write, so the
   // answer for a test the user already closed cannot repaint this one.
   const readSeq = useRef(0)
@@ -696,7 +913,7 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
 
   // Opening a different test must not show the previous one's timeline for
   // the length of a request.
-  useEffect(() => { setDetail(null); setResults([]); setTotal(0); setError(''); setCopied(null) }, [testId])
+  useEffect(() => { setDetail(null); setResults([]); setTotal(0); setError(''); clearCopied() }, [testId, clearCopied])
   useEffect(() => { void read(0, 'replace') }, [read])
   // The page's refresh, and only that: `read` changing here as well would
   // fire a second request for a test that was merely opened.
@@ -706,14 +923,6 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
     seenTick.current = refreshTick
     void read(0, 'merge')
   }, [refreshTick, read])
-
-  const copy = useCallback(async (text: string, key: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(key)
-      setTimeout(() => setCopied(null), 1500)
-    } catch { /* clipboard unavailable — non-fatal */ }
-  }, [])
 
   const eff = effectiveVersions(results)
   // What this test RUNS today — which is `current_version`, not whichever
@@ -819,6 +1028,9 @@ export default function TestsPage() {
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [runError, setRunError] = useState('')
   const [moveError, setMoveError] = useState('')
+  // The test the Update dialog is open on, with the name to call it by
+  // while its own read is still in flight.
+  const [updating, setUpdating] = useState<{ testId: string; label: string } | null>(null)
   // Bumped every time the list is re-read, so the open drawer re-reads its
   // own test with it rather than going stale behind a finished run.
   const [refreshTick, setRefreshTick] = useState(0)
@@ -938,6 +1150,17 @@ export default function TestsPage() {
     }
   }, [reloadAll])
 
+  // Called once per Update stream that produced any event at all. A version
+  // that landed closes the dialog; one that did not leaves it open with the
+  // server's words in it, so a retry costs no retyping. Either way the list
+  // is re-read, because a failed regeneration still attaches its run to the
+  // test (spec case 10) — and refreshLoaded bumps the tick the open drawer
+  // re-reads on.
+  const updateFinished = useCallback((saved: SavedVersion | null) => {
+    if (saved) setUpdating(null)
+    void reloadAll()
+  }, [reloadAll])
+
   const moveTests = useCallback(async (testIds: string[], groupId: string | null) => {
     setMoveError('')
     try {
@@ -1037,6 +1260,7 @@ export default function TestsPage() {
                           runDisabled={inFlight.has(row.test_id)}
                           onOpen={setSelected}
                           onRun={r => void runTest(r)}
+                          onUpdate={r => setUpdating({ testId: r.test_id, label: labelOf(r) })}
                           onMove={(ids, gid) => void moveTests(ids, gid)}
                           onCreateGroup={createGroup}
                         />
@@ -1062,6 +1286,16 @@ export default function TestsPage() {
         row={selectedRow}
         refreshTick={refreshTick}
         onClose={() => setSelected(null)}
+      />
+
+      {/* One instance for the whole page, not one per row: a dialog rendered
+          inside a row bubbles its React synthetic events to that row's
+          onClick and opens the drawer behind itself (the defect Task 11
+          fixes for MoveToGroupMenu). Out here there is no row to bubble to. */}
+      <UpdateDialog
+        target={updating}
+        onClose={() => setUpdating(null)}
+        onFinished={updateFinished}
       />
     </div>
   )

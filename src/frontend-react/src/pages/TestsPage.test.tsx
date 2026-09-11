@@ -820,6 +820,245 @@ describe('TestsPage — Move', () => {
   })
 })
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Task 10 — the Update dialog (spec 7.4, POST /api/tests/{test_id}/versions).
+ * ─────────────────────────────────────────────────────────────────────── */
+
+const openUpdate = async (name = 'search flipkart for shoes') => {
+  fireEvent.click(await screen.findByRole('button', { name: `Update ${name}` }))
+  return screen.findByRole('dialog', { name: 'Update test' })
+}
+const description = (dialog: HTMLElement) =>
+  within(dialog).getByRole('textbox', { name: 'Description' }) as HTMLTextAreaElement
+
+describe('TestsPage — the Update dialog', () => {
+  it('is offered exactly where can_move is true', async () => {
+    setup()
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    expect(screen.getByRole('button', { name: 'Update search flipkart for shoes' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update log in and open orders' })).not.toBeInTheDocument()
+    // A test with no runnable code is exactly one you would regenerate — it
+    // is withheld here only because THIS row may not be moved.
+    expect(screen.queryByRole('button', { name: 'Update legacy migrated test' })).not.toBeInTheDocument()
+  })
+
+  it('reads the test itself and prefills the description the server holds', async () => {
+    setup()
+    renderPage()
+
+    const dialog = await openUpdate()
+
+    // limit=1: the newest result is the one whose failure motivated the
+    // update, and it is the route's own floor (it clamps to [1, 200]).
+    await waitFor(() => expect(detailCalls()).toContain('/api/tests/t-pass?limit=1&offset=0'))
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+  })
+
+  it('shows the current version’s code for reference and lets nobody edit it', async () => {
+    setup()
+    renderPage()
+
+    const dialog = await openUpdate()
+
+    const code = await within(dialog).findByRole('region', { name: 'Robot code' })
+    expect(code.textContent).toContain('New Page    https://flipkart.com')
+    // One editable control in the whole dialog: the description. The code
+    // block is a <pre>, so it cannot be one.
+    expect(within(dialog).getAllByRole('textbox')).toHaveLength(1)
+  })
+
+  it('writes nothing when the dialog is cancelled', async () => {
+    setup()
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.change(description(dialog), { target: { value: 'a completely different test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(mockStreamSSE).not.toHaveBeenCalled()
+  })
+
+  it('offers no write while the description is empty', async () => {
+    setup()
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.change(description(dialog), { target: { value: '   ' } })
+
+    expect(within(dialog).getByRole('button', { name: 'Update this test' })).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Save as a new test' })).toBeDisabled()
+  })
+
+  it('sends the description as typed, under the mode the button names', async () => {
+    setup()
+    mockStreamSSE.mockResolvedValue(undefined)
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    // Sent untrimmed on purpose: the route trims, and it decides from the
+    // trimmed comparison whether this version reads 'regenerated' or
+    // 'edited'. One rule, and it is the server's.
+    fireEvent.change(description(dialog), { target: { value: '  search flipkart for boots  ' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalled())
+    expect(mockStreamSSE.mock.calls[0][0]).toBe('/api/tests/t-pass/versions')
+    expect(mockStreamSSE.mock.calls[0][1]).toEqual({
+      user_query: '  search flipkart for boots  ', mode: 'update',
+    })
+  })
+
+  it('asks for a new test when that is the button pressed', async () => {
+    setup()
+    mockStreamSSE.mockResolvedValue(undefined)
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save as a new test' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalled())
+    expect(mockStreamSSE.mock.calls[0][1]).toEqual({
+      user_query: 'search flipkart for shoes', mode: 'new_test',
+    })
+  })
+
+  it('claims nothing when generation finishes but no version has landed', async () => {
+    setup()
+    let finish: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Finding elements on the page…' })
+      // Generation's own terminal event. It says the model produced code,
+      // which is a different fact from "version n+1 exists".
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('Saving the new version…')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Update test' })).toBeInTheDocument()
+    finish()
+  })
+
+  it('cannot be dismissed while the generation is in flight', async () => {
+    setup()
+    let finish: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Planning the steps…' })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('Planning the steps…')).toBeInTheDocument()
+    // The server keeps generating whatever the client does, so every way
+    // out is withheld: a version landing with the page told nothing is the
+    // dishonesty this prevents.
+    expect(within(dialog).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(screen.getByRole('dialog', { name: 'Update test' })).toBeInTheDocument()
+    finish()
+  })
+
+  it('closes and refreshes only once the server confirms the version', async () => {
+    const spies = setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    const before = listCalls().length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before))
+    expect(spies.refresh).toHaveBeenCalled()
+  })
+
+  it('says why, and keeps what was typed, when generation fails', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Planning the steps…' })
+      onEvent({ status: 'error', message: 'Vertex refused the request (429)' })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.change(description(dialog), { target: { value: 'log in and open orders' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('Vertex refused the request (429)')).toBeInTheDocument()
+    // Still open, still holding their words: no version was written, so a
+    // retry must not cost them the edit.
+    expect(description(dialog).value).toBe('log in and open orders')
+  })
+
+  it('repeats the server’s words when the version could not be confirmed', async () => {
+    const MSG = 'Generation finished, but the new version could not be confirmed. Reload the test list to see whether it is there.'
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      onEvent({ stage: 'version', status: 'error', run_id: 'wf-1', message: MSG })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText(MSG)).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Update test' })).toBeInTheDocument()
+  })
+
+  it('does not read a silent stream as success', async () => {
+    setup()
+    mockStreamSSE.mockResolvedValue(undefined)
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText(
+      'The server ended the stream without saying whether a version was written. Reload the list to see whether it is there.',
+    )).toBeInTheDocument()
+  })
+
+  it('shows the server’s own refusal, and asks the list for nothing', async () => {
+    setup()
+    mockStreamSSE.mockRejectedValue(new ApiError(404, 'Test not found'))
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    const before = listCalls().length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('Test not found')).toBeInTheDocument()
+    // A refusal is answered before the stream starts, so no run of this
+    // test exists to refresh the list for.
+    expect(listCalls().length).toBe(before)
+  })
+})
+
 describe('TestsPage — the folder chips', () => {
   it('count tests, not runs', async () => {
     // The shared state carries both: 11 results and 2 tests are in no
