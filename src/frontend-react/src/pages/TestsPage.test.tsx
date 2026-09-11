@@ -627,7 +627,33 @@ describe('TestsPage — paging the drawer’s timeline', () => {
 
     await waitFor(() => expect(timelineRows(drawer)).toHaveLength(5))
     expect(detailCalls().some(p => p.includes('offset=4'))).toBe(true)
-    expect(timelineIds(drawer)).toContain('55555555-5555-4555-8555-555555555555')
+    // Newest first: an older page belongs at the BOTTOM, never on top of
+    // the results already on screen.
+    expect(timelineIds(drawer)[4]).toBe('55555555-5555-4555-8555-555555555555')
+  })
+
+  it('replaces the timeline with the server’s words when a re-read fails', async () => {
+    // A re-read that fails is not a blip to paper over: the commonest reason
+    // is that this caller may no longer open the test, and going on showing
+    // its results would be a lie about what they can see.
+    let fail = false
+    setup({ detail: () => (fail ? Promise.reject(new ApiError(404, 'Test not found')) : DETAIL) as never })
+    let finish: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-new' })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(4))
+
+    fail = true
+    finish()
+
+    expect(await within(drawer).findByText('Test not found')).toBeInTheDocument()
+    expect(within(drawer).queryByTitle('Copy run id')).not.toBeInTheDocument()
   })
 
   it('offers nothing more when the timeline already holds every result', async () => {
