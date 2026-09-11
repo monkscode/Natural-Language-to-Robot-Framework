@@ -145,8 +145,9 @@ its parent would report a cost delta on a pass delta of zero.
 
 **A blank `dryrun_status` usually means the gate passed — but not on a run
 that never reached it, and you should never re-derive this yourself.**
-`workflow_service.py:889` only attaches `dryrun_status` to the SSE `complete`
-event when the gate did *not* pass, so silence is success on a completed run.
+`run_agentic_workflow` (in `workflow_service.py`) only attaches `dryrun_status`
+to the SSE `complete` event when the gate did *not* pass, so silence is success
+on a completed run.
 But 34 runs never completed generation at all (`generation_status = 'error'`)
 and are also blank — reading those as `passed` invents a gate result they
 never reached. The loader resolves this once, into

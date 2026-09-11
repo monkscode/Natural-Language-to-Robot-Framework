@@ -8,9 +8,9 @@ waits on an LLM.
 
 The other contract pinned here is the hand-off between them.  The hint metadata
 cache is consumed with a destructive .pop() in the record half
-(workflow_service.py:131-147), and the pre-run record read there is the only one
-that predates the store — so the attribution half must take both as arguments
-and re-read neither.
+(_process_learning_record in workflow_service.py), and the pre-run record read
+there is the only one that predates the store — so the attribution half must
+take both as arguments and re-read neither.
 """
 import asyncio
 import json

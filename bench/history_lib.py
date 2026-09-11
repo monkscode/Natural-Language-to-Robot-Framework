@@ -166,9 +166,10 @@ def normalise_dryrun(generation_status: str | None,
        All 34 such rows have a blank cell, and none carries a recorded value,
        so this branch and branch 1 are disjoint on the real corpus. Calling
        these `passed` would invent a gate result.
-    4. Blank on a completed run means PASSED. workflow_service.py:889 attaches
-       dryrun_status to the SSE `complete` event only when the gate did not
-       pass, so silence is success — for 1,982 of 1,984 rows.
+    4. Blank on a completed run means PASSED. run_agentic_workflow (in
+       workflow_service.py) attaches dryrun_status to the SSE `complete` event
+       only when the gate did not pass, so silence is success — for 1,982 of
+       1,984 rows.
 
     Never returns NULL and never returns 'unknown': rendering blank as
     "unknown" would invert the pipeline's main quality gate on almost the

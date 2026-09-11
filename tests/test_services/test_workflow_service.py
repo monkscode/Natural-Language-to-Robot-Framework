@@ -355,13 +355,13 @@ class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator.
 
     stream_execute_only drives the real _stream_docker_execution
-    (workflow_service.py:1154), which reaches three external dependencies
+    (workflow_service.py), which reaches three external dependencies
     imported at module level: get_run_registry() writes a test_runs row
     (_record_run before it, _set_run_status inside it); get_artifact_store()
     writes a test.robot file under robot_tests/
     (run_dir(run_id, create=True)); and, on the success path, _process_learning_record
-    (:1222) calls get_feedback_loop() as the first statement in its try block
-    (:361) — before the empty-user_query guard a few lines below it, so it
+    calls get_feedback_loop() as the first statement in its try block
+    — before the empty-user_query guard a few lines below it, so it
     runs even though these tests never reach the learning call itself. With
     OPTIMIZATION_ENABLED=true (the real .env), that constructs a real
     FeedbackLoop backed by a live psycopg connection to Postgres. All three
