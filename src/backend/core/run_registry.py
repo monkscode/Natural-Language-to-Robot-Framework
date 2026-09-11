@@ -994,9 +994,10 @@ class RunRegistry:
         the callers who do reach it may then do to the test is decided
         here, not there, which is the whole reason the two gates below
         exist. Nothing in this codebase ever
-        un-writes tests.org_id once it is non-NULL (verified: the only two
-        statements that ever set it, this one and backfill_org_ids', both
-        require the CURRENT value to be NULL first). Left unguarded, that
+        un-writes tests.org_id once it is non-NULL (verified: every UPDATE
+        tests statement in this file that sets it selects only rows whose
+        org_id IS NULL, and an INSERT sets it only on the row it creates).
+        Left unguarded, that
         write would let D6 give every later result of this test the
         writer's org, and so would get_run_owner().org_id — which is what
         attributes LLM traces (trace_store.py) and learning records
