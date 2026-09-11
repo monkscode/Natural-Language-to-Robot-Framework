@@ -17,8 +17,10 @@
  * POST /execute-test {test_id} — no LLM, no regeneration, learning skipped.
  * Move files the test via PUT /api/tests/assignments; its results follow it.
  * Update (spec 7.4) is not on the row yet — its dialog is not built — and the
- * actions column is already sized for it. The drawer shows only what the row
- * already knows; its timeline, code and versions (spec 7.3) are not built.
+ * actions column is already sized for it. Opening a row opens the drawer,
+ * which makes its own read of GET /api/tests/{test_id} (spec 7.3): the
+ * results this viewer may open, newest first and ruled where the code
+ * changed, the current version's Robot code, and the version history.
  *
  * Referenced by: App.tsx (PAGES).
  * Depends on: lib/api, lib/sse, lib/time, auth/AuthContext,
@@ -31,6 +33,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Separator } from '@/components/ui/separator'
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
@@ -544,6 +547,91 @@ function TimelineResult({ result, copied, onCopy }: Readonly<{
   )
 }
 
+/** Why a version was written, in words. `null` for every version minted
+ *  before the Update dialog existed, and for the first version of any test —
+ *  nothing is claimed about those. */
+const REASON_WORDS: Record<string, string> = {
+  edited: 'description edited',
+  regenerated: 'regenerated',
+}
+
+/* ── The current version's code: what this test runs today. Older versions'
+   code is not shown — the list below says what they were, not what they
+   said ── */
+function DrawerCode({ version, copied, onCopy }: Readonly<{
+  version: TestVersion | null
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  const code = version?.robot_code ?? null
+  return (
+    <section className="flex flex-col gap-2" aria-label="Robot code">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Robot code
+        </span>
+        {code && (
+          <Button
+            variant="ghost" size="icon" className="h-7 w-7"
+            title="Copy code"
+            aria-label="Copy code"
+            onClick={() => onCopy(code, 'code')}
+          >
+            {copied === 'code' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        )}
+      </div>
+      {code ? (
+        <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
+          {code}
+        </pre>
+      ) : (
+        // The server's own sentence, the one the disabled Run gives.
+        <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs italic text-muted-foreground">
+          {NO_CODE}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/* ── Every version this test has had, newest first ── */
+function DrawerVersions({ versions, current }: Readonly<{
+  versions: TestVersion[]
+  current: number | null
+}>) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Versions
+      </span>
+      {versions.length === 0 ? (
+        <p className="py-2 text-xs text-muted-foreground">No version recorded for this test.</p>
+      ) : (
+        <ul className="divide-y" aria-label="Versions, newest first">
+          {versions.map(v => (
+            <li key={v.n} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-xs">
+              <span className="font-medium">Version {v.n}</span>
+              {v.n === current && (
+                <Badge variant="secondary" className="text-[10px]">current</Badge>
+              )}
+              <span className="text-muted-foreground" title={formatDate(v.created_at)}>
+                {timeAgo(v.created_at)}
+              </span>
+              {/* An appender the server could not name stays unnamed: naming
+                  the test's author beside someone else's version is worse. */}
+              <span className="text-muted-foreground">{v.created_by_email ?? 'author unknown'}</span>
+              {v.reason && (
+                <span className="text-muted-foreground">{REASON_WORDS[v.reason] ?? v.reason}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /** The open test: its own read of GET /api/tests/{test_id} (spec 7.3), keyed
  *  on the test id rather than on the row it was opened from — a row that
  *  leaves the list (a folder filter, a refusal) no longer closes the drawer,
@@ -628,6 +716,9 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
   }, [])
 
   const eff = effectiveVersions(results)
+  // What this test RUNS today — which is `current_version`, not whichever
+  // version happens to be newest in the list.
+  const currentVersion = detail?.versions.find(v => v.n === detail.test.current_version) ?? null
   const t = detail?.test
   const health = t?.health ?? row?.health ?? 'not_run'
   const h = HEALTH[health]
@@ -646,7 +737,7 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
                 {h.label}
               </Badge>
               {version != null && (
-                <span className="text-xs text-muted-foreground">Version {version}</span>
+                <span className="text-xs text-muted-foreground">Current version {version}</span>
               )}
             </div>
             <SheetTitle className="text-base leading-snug">{label}</SheetTitle>
@@ -690,6 +781,15 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
               </div>
             )}
           </div>
+        )}
+
+        {detail && (
+          <>
+            <Separator />
+            <DrawerCode version={currentVersion} copied={copied} onCopy={copy} />
+            <Separator />
+            <DrawerVersions versions={detail.versions} current={detail.test.current_version} />
+          </>
         )}
       </SheetContent>
     </Sheet>

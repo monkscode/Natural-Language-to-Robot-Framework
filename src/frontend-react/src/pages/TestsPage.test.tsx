@@ -1,5 +1,6 @@
 /**
- * TestsPage — the landing list (spec section 7.2, P2 Task 8).
+ * TestsPage — the landing list (spec section 7.2, P2 Task 8) and the test
+ * drawer it opens (section 7.3, P2 Task 9).
  *
  * Driven through mocked useAuth / useRunGroups / api / sse, as
  * HistoryPage.test.tsx does, so nothing here reaches the network. The api
@@ -14,6 +15,15 @@
  * {test_id} alone; the row is reachable by keyboard; Move is offered exactly
  * where can_move says and files through the tests route; and a click inside
  * Move's portalled dialog never opens the row behind it.
+ *
+ * And of the drawer: it reads the test it was opened on by id and believes
+ * that read over the row; it lists the results newest first with every run
+ * id in full; it offers a report only where the server says there is one; it
+ * rules the timeline where the code changed and nowhere else, keeping a
+ * result that names no version with the code that was current when it ran;
+ * it pages off results_total and keeps the pages already loaded when a run
+ * ends; it shows the CURRENT version's code, says so plainly when there is
+ * none, and names a version's author only when the server did.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -411,7 +421,7 @@ describe('TestsPage — opening a test', () => {
     const drawer = await screen.findByRole('dialog')
     expect(within(drawer).getByText('search flipkart for shoes')).toBeInTheDocument()
     expect(within(drawer).getByText('Passing')).toBeInTheDocument()
-    expect(within(drawer).getByText('Version 2')).toBeInTheDocument()
+    expect(within(drawer).getByText('Current version 2')).toBeInTheDocument()
     expect(within(drawer).getByText('In Checkout')).toBeInTheDocument()
   })
 
@@ -653,6 +663,75 @@ describe('TestsPage — paging the drawer’s timeline', () => {
     // The refresh re-reads page zero; the page the user asked for stays.
     await waitFor(() => expect(detailCalls().filter(p => p.includes('offset=0')).length).toBeGreaterThan(1))
     expect(timelineIds(drawer)).toContain('55555555-5555-4555-8555-555555555555')
+  })
+})
+
+describe('TestsPage — the drawer’s code and versions', () => {
+  it('shows the code of the CURRENT version, not of the newest one', async () => {
+    // current_version names version 1 while version 2 is the newest row —
+    // reading versions[0] would show code this test does not run.
+    setup({ detail: { ...DETAIL, test: { ...DETAIL.test, current_version: 1 } } })
+    renderPage()
+    const drawer = await openDrawer()
+
+    const code = await within(drawer).findByRole('region', { name: 'Robot code' })
+    expect(code.textContent).toContain('Go To    https://flipkart.com')
+    expect(code.textContent).not.toContain('New Page    https://flipkart.com')
+  })
+
+  it('copies the current version’s code', async () => {
+    const writeText = stubClipboard()
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+
+    fireEvent.click(await within(drawer).findByRole('button', { name: 'Copy code' }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(CODE_V2))
+  })
+
+  it('says the current version has no code rather than showing an empty block', async () => {
+    setup({
+      detail: {
+        ...DETAIL,
+        test: { ...DETAIL.test, current_version: 1 },
+        versions: [{ ...DETAIL.versions[1], robot_code: null }],
+      },
+    })
+    renderPage()
+    const drawer = await openDrawer()
+
+    expect(await within(drawer).findByText(/no runnable code in its current version/)).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: 'Copy code' })).not.toBeInTheDocument()
+  })
+
+  it('lists every version, newest first, with who wrote it and why', async () => {
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+
+    const list = await within(drawer).findByRole('list', { name: 'Versions, newest first' })
+    const rows = [...list.children].map(li => li.textContent!.replace(/\s+/g, ' ').trim())
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toContain('Version 2')
+    expect(rows[0]).toContain('current')
+    expect(rows[0]).toContain('b@b.com')
+    expect(rows[0]).toContain('description edited')
+    expect(rows[1]).toContain('Version 1')
+    expect(rows[1]).toContain('a@b.com')
+    expect(rows[1]).not.toContain('current')
+  })
+
+  it('names no author rather than the wrong one when the server gives none', async () => {
+    setup({
+      detail: { ...DETAIL, versions: [{ ...DETAIL.versions[0], created_by_email: null }] },
+    })
+    renderPage()
+    const drawer = await openDrawer()
+
+    const list = await within(drawer).findByRole('list', { name: 'Versions, newest first' })
+    expect(list.textContent).toContain('author unknown')
+    expect(list.textContent).not.toContain('a@b.com')
   })
 })
 
