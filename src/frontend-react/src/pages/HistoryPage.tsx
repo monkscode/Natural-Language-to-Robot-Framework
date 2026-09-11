@@ -27,7 +27,9 @@ import {
 } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
+import { formatDate, timeAgo } from '@/lib/time'
 import { useFetch } from '@/lib/useFetch'
+import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
 import { useRunGroups, type GroupFilter } from '@/components/history/RunGroupsContext'
@@ -101,28 +103,6 @@ const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
 
 const FILTERS = ['all', 'passed', 'failed', 'generated', 'error'] as const
 type Filter = (typeof FILTERS)[number]
-
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
-
-/** "2h ago" for the table; the exact stamp lives in the cell tooltip. */
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  if (Number.isNaN(ms)) return iso
-  const mins = Math.floor(ms / 60_000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
-}
 
 /** scope='all' means "no per-user narrowing", NOT "every user on the
     platform": the server returns it to any org_admin, and every solo signup
@@ -692,25 +672,10 @@ export default function HistoryPage() {
   // still loads, because GET /api/groups answers 200 with an empty list.
   const { user, isAdmin } = useAuth()
 
-  // Mirrors the server's rules, which differ per action. A hint only — the
-  // server 404s any folder the caller may not mutate either way.
-  const canRename = useCallback((g: RunGroup) => (
-    !!user && (g.created_by === user.id || user.can_manage_org_folders === true)
-  ), [user])
-
-  // Narrower on purpose: deleting a folder returns every run inside it to
-  // Ungrouped, which un-shares them from the whole org. That consequence is
-  // the org's, so the authority is an org-admin's — not the folder creator's.
-  //
-  // can_manage_org_folders, NOT is_org_admin. The two are different questions:
-  // is_org_admin is is_team_admin(), team orgs only, and gates the Team page;
-  // folder authority is the org_role claim, which ensure_personal_org grants
-  // every user over their own personal org. Reading the wrong one drew no
-  // Delete control for any solo user while DELETE /api/groups/{id} answered
-  // 204 for them — i.e. for every new signup.
-  const canDelete = useCallback((_g: RunGroup) => (
-    !!user && user.can_manage_org_folders === true
-  ), [user])
+  // Mirrors the server's rules, which differ per action — see
+  // folderPermissions for each rule and the trap the delete one avoids.
+  const canRename = useCallback((g: RunGroup) => canRenameFolder(user, g), [user])
+  const canDelete = useCallback((_g: RunGroup) => canDeleteFolder(user), [user])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"

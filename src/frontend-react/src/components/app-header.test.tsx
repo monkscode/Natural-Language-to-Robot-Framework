@@ -55,8 +55,9 @@ function renderAt(path: string, mode: 'light' | 'dark' | 'system', theme: 'profe
 
 describe('AppHeader — breadcrumb page label', () => {
   it.each([
+    ['/tests', 'Tests'],
     ['/generate', 'Generate'],
-    ['/history', 'Test Runs'],
+    ['/history', 'Activity'],
     ['/metrics', 'Metrics'],
     ['/learning', 'Learning'],
     ['/access', 'Access'],

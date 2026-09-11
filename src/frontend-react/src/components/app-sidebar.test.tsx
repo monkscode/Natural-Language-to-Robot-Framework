@@ -15,8 +15,8 @@
  * component, table-driven over every nav item x every role, so the DOM output
  * itself is what gets checked, not just the data feeding it.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/auth/AuthContext', () => ({ useAuth: vi.fn() }))
@@ -54,9 +54,15 @@ describe('gateAllowed for the Learning nav item', () => {
 const mockUseAuth = vi.mocked(useAuth)
 const mockUseRunGroups = vi.mocked(useRunGroups)
 
+/** Shows where the router is, so a navigation the sidebar makes is visible. */
+function WhereAmI() {
+  return <span data-testid="where">{useLocation().pathname}</span>
+}
+
 function renderSidebar(
   flags: GateFlags,
   runGroups: Partial<ReturnType<typeof useRunGroups>> = {},
+  path = '/',
 ) {
   mockUseAuth.mockReturnValue({
     isAdmin: flags.isAdmin, isOrgAdmin: flags.isOrgAdmin, canViewLearning: flags.canViewLearning,
@@ -70,10 +76,11 @@ function renderSidebar(
     ...runGroups,
   } as unknown as ReturnType<typeof useRunGroups>)
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <SidebarProvider>
         <AppSidebar />
       </SidebarProvider>
+      <WhereAmI />
     </MemoryRouter>,
   )
 }
@@ -97,7 +104,8 @@ const ROLES: Array<{ name: string; flags: GateFlags }> = [
 // version too. Same reasoning as App.test.tsx's PAGE_CASES.
 const NAV_CASES: Array<{ title: string; gate: Gate }> = [
   { title: 'Generate', gate: {} },
-  { title: 'Test Runs', gate: {} },
+  { title: 'Tests', gate: {} },
+  { title: 'Activity', gate: {} },
   { title: 'Metrics', gate: { admin: true } },
   { title: 'Learning', gate: { viewLearning: true } },
   { title: 'Access', gate: { admin: true } },
@@ -141,7 +149,7 @@ describe('AppSidebar — every nav item x every role, rendered for real', () => 
   }
 })
 
-describe('AppSidebar — the Test Runs quick-access group list', () => {
+describe('AppSidebar — the folder quick-access lists on Tests and Activity', () => {
   beforeEach(() => {
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: false, media: query, onchange: null,
@@ -152,39 +160,73 @@ describe('AppSidebar — the Test Runs quick-access group list', () => {
   })
   afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks() })
 
-  const openList = () => fireEvent.click(screen.getByTitle('Show groups'))
+  // Both entries carry a folder list now, so each is opened within its own
+  // entry rather than by a title two buttons share.
+  const entry = (title: string) => screen.getByText(title).closest('li')!
+  const openList = (title: string) =>
+    fireEvent.click(within(entry(title)).getByTitle('Show groups'))
+
+  const TWO_FOLDERS = [
+    { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 2, test_count: 1 },
+    { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 5, test_count: 3 },
+  ]
 
   it('stays collapsed until the chevron is clicked', () => {
     renderSidebar(PLAIN, { loaded: false })
 
     expect(screen.queryByText(/Loading groups/)).not.toBeInTheDocument()
 
-    openList()
+    openList('Activity')
 
     expect(screen.getByText(/Loading groups/)).toBeInTheDocument()
   })
 
   it('lists each group by name, and clicking one sets the filter to ITS id', () => {
     const setGroupFilter = vi.fn()
-    renderSidebar(PLAIN, {
-      loaded: true, error: '',
-      groups: [
-        { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 2, test_count: 1 },
-        { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 5, test_count: 3 },
-      ],
-      setGroupFilter,
-    })
-    openList()
+    renderSidebar(PLAIN, { loaded: true, error: '', groups: TWO_FOLDERS, setGroupFilter })
+    openList('Activity')
 
-    fireEvent.click(screen.getByText('Checkout'))
+    fireEvent.click(within(entry('Activity')).getByText('Checkout'))
 
     expect(setGroupFilter).toHaveBeenCalledWith('g-1')
     expect(setGroupFilter).not.toHaveBeenCalledWith('g-2')
   })
 
+  it('counts each folder’s TESTS under Tests and its RUNS under Activity', () => {
+    renderSidebar(PLAIN, { loaded: true, error: '', groups: TWO_FOLDERS })
+    openList('Tests')
+    openList('Activity')
+
+    const checkoutUnder = (title: string) =>
+      within(entry(title)).getByText('Checkout').closest('button')!.textContent
+    expect(checkoutUnder('Tests')).toContain('1')
+    expect(checkoutUnder('Tests')).not.toContain('2')
+    expect(checkoutUnder('Activity')).toContain('2')
+  })
+
+  it('takes a folder picked under Tests to the Tests page', () => {
+    const setGroupFilter = vi.fn()
+    renderSidebar(PLAIN, { loaded: true, error: '', groups: TWO_FOLDERS, setGroupFilter }, '/history')
+    openList('Tests')
+
+    fireEvent.click(within(entry('Tests')).getByText('Regression'))
+
+    expect(setGroupFilter).toHaveBeenCalledWith('g-2')
+    expect(screen.getByTestId('where').textContent).toBe('/tests')
+  })
+
+  it('opens only the current page’s list when a folder is chosen', () => {
+    // One shared filter drives both lists; revealing it under both would
+    // stack two identical lists in the sidebar.
+    renderSidebar(PLAIN, { loaded: true, error: '', groups: TWO_FOLDERS, groupFilter: 'g-1' }, '/tests')
+
+    expect(within(entry('Tests')).getByText('Checkout')).toBeInTheDocument()
+    expect(within(entry('Activity')).queryByText('Checkout')).not.toBeInTheDocument()
+  })
+
   it('shows the load error instead of a false "no groups" empty state', () => {
     renderSidebar(PLAIN, { loaded: true, error: 'network down', groups: [] })
-    openList()
+    openList('Activity')
 
     expect(screen.getByText(/Couldn.t load groups — network down/)).toBeInTheDocument()
     expect(screen.queryByText(/No groups yet/)).not.toBeInTheDocument()
@@ -192,8 +234,29 @@ describe('AppSidebar — the Test Runs quick-access group list', () => {
 
   it('says "No groups yet" only once loading finished AND the list is truly empty', () => {
     renderSidebar(PLAIN, { loaded: true, error: '', groups: [] })
-    openList()
+    openList('Activity')
+    openList('Tests')
 
-    expect(screen.getByText(/No groups yet — create one on Test Runs/)).toBeInTheDocument()
+    // Each names its own page — both pages create folders.
+    expect(within(entry('Activity')).getByText(/No groups yet — create one on Activity/)).toBeInTheDocument()
+    expect(within(entry('Tests')).getByText(/No groups yet — create one on Tests/)).toBeInTheDocument()
+  })
+})
+
+describe('AppSidebar — the logo', () => {
+  beforeEach(() => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: false, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }))
+  })
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks() })
+
+  it('goes home, and lets the index route decide where home is', () => {
+    renderSidebar(PLAIN)
+
+    expect(screen.getByText('Mark 1').closest('a')).toHaveAttribute('href', '/')
   })
 })

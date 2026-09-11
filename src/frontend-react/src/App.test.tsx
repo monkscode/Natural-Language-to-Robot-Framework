@@ -49,6 +49,7 @@ vi.mock('@/pages/GeneratePage', () => ({
   ),
 }))
 vi.mock('@/pages/HistoryPage', () => ({ default: () => <span>HISTORY_PAGE</span> }))
+vi.mock('@/pages/TestsPage', () => ({ default: () => <span>TESTS_PAGE</span> }))
 vi.mock('@/pages/MetricsPage', () => ({
   default: () => (
     <>
@@ -116,6 +117,7 @@ const ROLES: Array<{ name: string; flags: GateFlags }> = [
 ]
 
 const PAGE_CASES: Array<{ path: string; marker: string; gate: Gate }> = [
+  { path: '/tests', marker: 'TESTS_PAGE', gate: {} },
   { path: '/generate', marker: 'GENERATE_PAGE', gate: {} },
   { path: '/history', marker: 'HISTORY_PAGE', gate: {} },
   { path: '/metrics', marker: 'METRICS_PAGE', gate: { admin: true } },
@@ -144,6 +146,24 @@ describe('KeepAlivePages — the gate table, every page x every role', () => {
       }
     })
   }
+})
+
+describe('Where a signed-in user lands', () => {
+  it('opens the bare site address on Tests — the landing page (spec 7.1)', () => {
+    setAuth(PLAIN)
+    renderAt('/')
+
+    expect(screen.getByText('TESTS_PAGE')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/tests')
+  })
+
+  it('still sends an unknown address to Generate — a fallback, not a landing choice', () => {
+    setAuth(PLAIN)
+    renderAt('/no-such-page')
+
+    expect(screen.getByText('GENERATE_PAGE')).toBeInTheDocument()
+    expect(screen.queryByText('TESTS_PAGE')).toBeNull()
+  })
 })
 
 describe('KeepAlivePages — keep-alive across navigation', () => {

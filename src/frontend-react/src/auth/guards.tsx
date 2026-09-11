@@ -7,7 +7,7 @@
  *
  * Admin gating is no longer a route guard: KeepAlivePages (App.tsx) owns it,
  * mounting admin-only pages only for admins and bouncing non-admins to
- * /generate. Regular users get Generate + their own History.
+ * /generate. Regular users get Tests, Generate and Activity.
  */
 
 import type { ReactElement } from 'react'

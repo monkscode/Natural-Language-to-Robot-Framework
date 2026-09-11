@@ -10,6 +10,7 @@ import { AppHeader } from '@/components/app-header'
 import { RunGroupsProvider } from '@/components/history/RunGroupsContext'
 import GeneratePage from '@/pages/GeneratePage'
 import HistoryPage from '@/pages/HistoryPage'
+import TestsPage from '@/pages/TestsPage'
 import MetricsPage from '@/pages/MetricsPage'
 import SettingsPage from '@/pages/SettingsPage'
 import LearningPage from '@/pages/LearningPage'
@@ -45,6 +46,7 @@ import TeamPage from '@/pages/TeamPage'
  * hijack navigation.
  */
 export const PAGES: Array<Gate & { path: string; node: JSX.Element }> = [
+  { path: '/tests', node: <TestsPage /> },
   { path: '/generate', node: <GeneratePage /> },
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
@@ -86,8 +88,9 @@ function KeepAlivePages() {
 /** Full app layout: sidebar + topbar + keep-alive page content.
  *
  * RunGroupsProvider sits above BOTH the sidebar and the pages: the sidebar's
- * group quick-access and the Test Runs page filter the same runs, so they read
- * and write one shared filter instead of two copies that could disagree. */
+ * group quick-access, the Tests page and the Activity page filter by the same
+ * folder, so they read and write one shared filter instead of copies that
+ * could disagree. */
 function AppLayout() {
   return (
     <RunGroupsProvider>
@@ -130,8 +133,13 @@ export default function App() {
                 routes render null: KeepAlivePages (in AppLayout) owns the
                 page elements so they persist across navigation. */}
             <Route element={<RequireAuth><GatedLayout /></RequireAuth>}>
-              <Route index            element={<Navigate to="/generate" replace />} />
-              {/* Every authenticated user gets Generate + their own History */}
+              {/* HOME, and the one place that says where it is: sign-in,
+                  sign-up, the Google callback and the logo all go to "/".
+                  Tests, because a returning user opens the product asking
+                  "what do I have, and what is broken" (spec 7.1). */}
+              <Route index            element={<Navigate to="/tests" replace />} />
+              {/* Every authenticated user gets Tests, Generate and Activity */}
+              <Route path="/tests"    element={null} />
               <Route path="/generate" element={null} />
               <Route path="/history"  element={null} />
               {/* Admin-only pages (gated inside KeepAlivePages) */}
@@ -140,7 +148,8 @@ export default function App() {
               <Route path="/settings"  element={null} />
               <Route path="/access" element={null} />
               <Route path="/team"   element={null} />
-              {/* catch-all */}
+              {/* catch-all — an unknown address, not a landing choice, so it
+                  stays on Generate rather than following home */}
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>

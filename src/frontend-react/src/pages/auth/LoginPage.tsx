@@ -68,7 +68,7 @@ function LoginForm({ className }: { className?: string }) {
     setLoading(true)
     try {
       await login(email, password)
-      navigate('/generate', { replace: true })
+      navigate('/', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed')
       setLoading(false)

@@ -58,7 +58,7 @@ describe('OAuthCallback — the StrictMode double-invocation guard', () => {
 
     renderCallback(true)
 
-    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/generate', { replace: true }))
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true }))
     expect(loginWithToken).toHaveBeenCalledTimes(1)
     expect(loginWithToken).toHaveBeenCalledWith('abc123')
     // Without the ranOnce guard, the second invocation re-reads the hash
@@ -76,7 +76,7 @@ describe('OAuthCallback — the StrictMode double-invocation guard', () => {
 
     renderCallback(false)
 
-    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/generate', { replace: true }))
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true }))
     expect(loginWithToken).toHaveBeenCalledTimes(1)
     expect(loginWithToken).toHaveBeenCalledWith('xyz789')
   })
@@ -96,7 +96,7 @@ describe('OAuthCallback — reading the token', () => {
     expect(window.location.hash).toBe('')
 
     resolveLogin()
-    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/generate', { replace: true }))
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true }))
   })
 
   it('shows an error and never calls loginWithToken when the fragment has no token', async () => {
