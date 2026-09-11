@@ -24,9 +24,11 @@ of the design spec for why results and tests need separate predicates).
 
 Field scoping, restated here because it is easy to get backwards: version_count,
 result_count, pass_count, last_status/last_run_at/last_run_id are WHOLE-TEST
-(every version, every result); health, running and spark are scoped to the
-CURRENT version only. See RunRegistry.list_tests' own docstring for the full
-rules behind each field.
+(every version); health, running and spark are scoped to the CURRENT version
+only. Every run-derived field is computed over the results THIS caller may
+open, never over every result the test holds -- version_count is the one
+above that is not run-derived. See RunRegistry.list_tests' own docstring for
+the full rules behind each field.
 
 can_move on a list row reports the SAME three terms PUT
 /api/tests/assignments then enforces -- the caller has a concrete org, the

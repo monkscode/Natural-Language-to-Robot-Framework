@@ -3,7 +3,9 @@
 Every row aggregates test_versions/test_runs for ONE test. Two different
 scopes matter and this file pins the difference: result_count, pass_count,
 last_status/last_run_at/last_run_id are WHOLE-TEST (every version, every
-result); health, running and spark are scoped to the CURRENT version only.
+result the caller may open -- that narrowing is pinned in
+test_run_registry_list_tests_scope.py); health, running and spark are scoped
+to the CURRENT version only.
 Getting the two scopes crossed is the exact defect the split exists to
 remove (a test broken through v1-v9 and fixed at v10 must not render a
 mostly-red sparkline).
