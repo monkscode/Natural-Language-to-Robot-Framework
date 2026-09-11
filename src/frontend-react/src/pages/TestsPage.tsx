@@ -46,6 +46,7 @@ import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, Ref
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
+import { labelFrom, versionLabel } from '@/lib/testLabels'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
@@ -171,13 +172,6 @@ const HEALTH: Record<Health, { label: string; dot: string; badge: string; title:
 const SPARK_MARK: Record<'pass' | 'fail', string> = {
   pass: 'bg-green-500 dark:bg-green-400',
   fail: 'bg-red-500 dark:bg-red-400',
-}
-
-/** What a test is called: its name, else its description. Takes the two
- *  fields rather than a row, because the drawer names the same test from the
- *  detail payload, which is not a row. */
-function labelFrom(name: string | null, userQuery: string | null): string {
-  return name?.trim() || userQuery?.trim() || 'Untitled test'
 }
 
 function labelOf(t: TestRow): string {
@@ -536,8 +530,8 @@ function TimelineResult({ result, copied, onCopy }: Readonly<{
       <ResultBadge status={result.status} />
       {/* Short here, spelled out in the header and on the version rule: a
           row repeats this once per result. */}
-      <span className="text-muted-foreground" title={result.n == null ? 'This result names no version' : `Ran version ${result.n}`}>
-        {result.n == null ? 'no version' : `v${result.n}`}
+      <span className="text-muted-foreground" title={versionLabel(result.n).title}>
+        {versionLabel(result.n).text}
       </span>
       <span className="text-muted-foreground" title={formatDate(result.created_at)}>
         {timeAgo(result.created_at)}
