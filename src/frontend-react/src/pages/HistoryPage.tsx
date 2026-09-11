@@ -84,6 +84,12 @@ interface Run {
 
 interface RunDetail extends Run {
   robot_code: string | null
+  // Server-computed: would GET /api/feedback/{run_id} answer this caller
+  // at all? The drawer asks only when this says so. It cannot be derived
+  // here — the feedback route withholds is_grouped where the detail route
+  // passes it, and both a platform admin and the token-less dev caller may
+  // read a peer's corrections while the client knows it is neither.
+  can_read_feedback?: boolean
 }
 
 interface HistoryResponse {
@@ -881,7 +887,20 @@ export default function HistoryPage() {
   // (get_run_corrections, endpoints.py). An error banner would put a red
   // box on every shared run in the org. An empty list degrades the same
   // way, silently: silence claims nothing either way.
-  const feedbackPath = selected ? `/api/feedback/${selected}` : null
+  // Only ask for a read the server has already said this caller may make.
+  // GET /api/feedback/{id} withholds is_grouped where the detail read above
+  // passes it, so a peer's published run is refused there by design — and
+  // this drawer used to discover that by BEING refused, once per open, which
+  // P1 turned from a rarity into the common case.
+  //
+  // Gated on `d` rather than on `selected`, so the flag always belongs to the
+  // row on screen. That also makes the request wait for the detail read
+  // instead of racing it, which costs nothing: the panel below cannot render
+  // without `d` either.
+  //
+  // The silent-degrade path described below STAYS. This suppresses an offered
+  // request; it does not replace the server's refusal.
+  const feedbackPath = d?.can_read_feedback ? `/api/feedback/${d.run_id}` : null
   const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
   const corrections = visibleCorrections(d, feedbackLoading, feedbackError, feedback)
 

@@ -87,25 +87,61 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, d
     if (path?.startsWith('/api/feedback/')) {
       return { data: feedbackFetch.data, loading: feedbackFetch.loading ?? false, error: feedbackFetch.error, reload: vi.fn() }
     }
-    return { data: { ...RUN, run_id: detailRunId, robot_code: null, ...detailExtra }, loading: false, error: '', reload: vi.fn() }
+    // can_read_feedback defaults TRUE because the corrections fetch is now
+    // gated on it: the drawer asks only for a read the server has already
+    // said this caller may make (R5). detailExtra overrides it to false,
+    // which is the peer's-published-run case.
+    return { data: { ...RUN, run_id: detailRunId, robot_code: null, can_read_feedback: true, ...detailExtra }, loading: false, error: '', reload: vi.fn() }
   })
 }
 
 async function openDrawer() {
   render(<MemoryRouter><HistoryPage /></MemoryRouter>)
   fireEvent.click(await screen.findByText('search flipkart for shoes'))
-  await waitFor(() => expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1'))
+  // Waits on the DETAIL read, not the corrections one: the corrections fetch
+  // is conditional now, and one of the tests below deliberately produces a
+  // drawer that must never fire it.
+  await waitFor(() => expect(mockUseFetch).toHaveBeenCalledWith('/api/history/run-1'))
 }
 
 describe('HistoryPage drawer — the corrections fetch', () => {
-  it('fires GET /api/feedback/{run_id} when a row is opened', async () => {
+  it('fires GET /api/feedback/{run_id} when the server says this caller may read it', async () => {
     setup({ data: null, error: '' })
 
     await openDrawer()
 
-    // openDrawer's own waitFor is the assertion; this is just its
-    // documented restatement.
-    expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1')
+    await waitFor(() =>
+      expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1'))
+  })
+
+  // Defect 2, fixed server-side under ruling R5. GET /api/history/{id}
+  // passes is_grouped to caller_can_access and GET /api/feedback/{id}
+  // deliberately does not, so a peer's published run 200s in the drawer and
+  // 403s here — by design on both sides. The drawer used to learn that by
+  // being refused, once per open, and P1 made every peer row reach it.
+  it('does not ask for corrections the server has already said it will refuse', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { can_read_feedback: false })
+
+    await openDrawer()
+
+    expect(mockUseFetch).not.toHaveBeenCalledWith('/api/feedback/run-1')
+    // useFetch takes null to mean "do not fetch", so the call still happens
+    // — with nothing to fetch. Asserting the ARGUMENT is what distinguishes
+    // "suppressed" from "the hook was never reached at all".
+    expect(mockUseFetch).toHaveBeenCalledWith(null)
+  })
+
+  it('asks for nothing while the detail read has not caught up to the open row', async () => {
+    // The flag belongs to a run, so it is only trustworthy once the detail
+    // echoes the row that is open. Until then there is no answer to act on
+    // and the drawer asks for neither.
+    setup({ data: null, error: '' }, 'run-DIFFERENT-FROM-OPENED-ROW')
+
+    await openDrawer()
+
+    expect(mockUseFetch).not.toHaveBeenCalledWith('/api/feedback/run-1')
+    expect(mockUseFetch).not.toHaveBeenCalledWith(
+      '/api/feedback/run-DIFFERENT-FROM-OPENED-ROW')
   })
 
   it('renders no error text when the corrections read is refused (403 — a published run whose corrections stay private)', async () => {
