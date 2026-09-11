@@ -25,6 +25,12 @@ un-filing the original un-publishes it. Both are computed by _can_open, the
 same function that gates the detail endpoint, so the flag is that endpoint's
 answer rather than a guess about it.
 
+The detail response also carries can_read_feedback: whether
+GET /api/feedback/{run_id} would answer this caller at all. That route
+withholds is_grouped where this one passes it, so a peer reading a
+published run is refused there and admitted here — and only the server
+can tell the drawer which it is (_can_read_feedback).
+
 Authorization for the report FILES under /reports/{run_id}/ is enforced
 separately by authorize_report_access (auth/jwt_utils.py) using the same
 ownership rows, so a user cannot open another user's log.html by URL.
@@ -45,7 +51,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from src.backend.api.history_scope import HistoryScope, history_scope
 from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
-from src.backend.core.run_registry import get_run_registry
+from src.backend.core.run_registry import RunOwnership, get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
 
 logger = logging.getLogger(__name__)
@@ -104,16 +110,21 @@ def _hide_admin_author(run: dict, scope: HistoryScope) -> None:
     run["user_email"] = None
 
 
-def _reachable_originals(
-    run_ids: set[str], scope: HistoryScope, user: dict | None,
-) -> set[str]:
-    """Which of these original runs this caller could actually open.
+def _original_owners(
+    run_ids: set[str], scope: HistoryScope,
+) -> dict[str, RunOwnership]:
+    """Ownership rows for the ORIGINAL runs some re-run rows point at.
 
     ONE query for the whole page, and none at all when the set is empty —
     most pages carry no re-run row, and a per-row lookup was never on the
     table (owner ruling R4). Ids that are not well-formed UUIDs are dropped
     rather than looked up: run_detail answers 400 for those, which is not a
     200, so they are unreachable by the same definition.
+
+    Split out from _reachable_originals so run_detail can answer TWO
+    questions about the same original — "could you open it" and "may you read
+    its feedback" — off one read. The two apply different predicates to these
+    same rows, which is the whole point: they are different questions.
     """
     ids = set()
     for rid in run_ids:
@@ -121,16 +132,75 @@ def _reachable_originals(
             ids.add(str(uuid.UUID(rid)))
         except (ValueError, AttributeError, TypeError):
             continue
-    owners = get_run_registry().get_run_owners_for_caller(
+    return get_run_registry().get_run_owners_for_caller(
         sorted(ids), org_id=scope.folder_org_id,
         identified=scope.caller_user_id is not None,
     )
+
+
+def _openable(
+    owners: dict[str, RunOwnership], scope: HistoryScope, user: dict | None,
+) -> set[str]:
+    """Which of these runs GET /api/history/{id} would answer 200 for."""
     return {
         rid for rid, own in owners.items()
         if _can_open(scope, user,
                      {"user_id": own.user_id, "org_id": own.org_id,
                       "group_id": own.group_id})
     }
+
+
+def _reachable_originals(
+    run_ids: set[str], scope: HistoryScope, user: dict | None,
+) -> set[str]:
+    """Which of these original runs this caller could actually open."""
+    return _openable(_original_owners(run_ids, scope), scope, user)
+
+
+def _can_read_feedback(
+    run: dict, scope: HistoryScope, user: dict | None,
+    originals: dict[str, RunOwnership],
+) -> bool:
+    """Would GET /api/feedback/{run['run_id']} answer anything but 403?
+
+    The same two gates get_run_corrections applies, in the same order:
+    caller_can_access on the SUBMITTED row, then — because a re-run owns no
+    learning record of its own and the read redirects to `rerun_of` — the
+    same predicate again on the ORIGINAL (_gated_feedback_target). Both are
+    computed off rows this request has already read.
+
+    is_grouped is NOT passed, on either, and that omission is the entire
+    reason this flag exists. _can_open above DOES pass it, so a peer opens a
+    colleague's published run in the drawer; feedback deliberately does not,
+    because filing a test into a folder publishes the test and never the
+    corrections written against it. The drawer had no way to tell those two
+    answers apart — a platform admin and the token-less dev caller may both
+    read a peer's feedback, and the client knows it is neither — so it fired
+    the request on every peer row and collected a 403 each time.
+
+    An original that does not resolve is absent from `originals` and arrives
+    here as two Nones, which caller_can_access refuses for everyone but a
+    platform admin. That matches _gated_feedback_target, which substitutes an
+    empty dict for an unreadable original and gates exactly that.
+
+    This suppresses an OFFERED request; it does not replace a refusal. The
+    feedback route keeps its own authorization unchanged, and the drawer
+    keeps degrading silently if the request is ever made anyway.
+    """
+    if not caller_can_access(
+            user, run.get("user_id"), run.get("org_id"),
+            is_platform_admin=scope.is_admin):
+        return False
+    rerun_of = run.get("rerun_of")
+    if not rerun_of:
+        return True
+    original = originals.get(rerun_of)
+    return caller_can_access(
+        user,
+        original.user_id if original else None,
+        original.org_id if original else None,
+        is_platform_admin=scope.is_admin,
+    )
 
 
 def resolve_robot_code(run: dict) -> str | None:
@@ -274,9 +344,19 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     run["has_report"] = run["status"] in _REPORT_STATUSES
     # At most ONE extra lookup, and only for a row that IS a re-run — the
     # drawer header offers the same link the row pill does, so it needs the
-    # same answer. Same helper, so the two cannot disagree.
-    run["rerun_of_accessible"] = run.get("rerun_of") in _reachable_originals(
-        {run["rerun_of"]} if run.get("rerun_of") else set(), scope, user)
+    # same answer. Same helper, so the two cannot disagree. The feedback flag
+    # below asks a DIFFERENT question of the same rows, so it shares the read
+    # rather than taking a second one.
+    originals = _original_owners(
+        {run["rerun_of"]} if run.get("rerun_of") else set(), scope)
+    run["rerun_of_accessible"] = run.get("rerun_of") in _openable(
+        originals, scope, user)
+    # Whether GET /api/feedback/{run_id} would answer this caller at all. The
+    # drawer fires that read on every open and it 403s by design for a peer's
+    # published run, so without this the SPA could only learn the answer by
+    # being refused. scope.is_admin is the same is_validated_admin result the
+    # feedback route computes for itself — reused, not looked up again.
+    run["can_read_feedback"] = _can_read_feedback(run, scope, user, originals)
     run["can_move"] = (
         scope.caller_user_id is None
         or run.get("user_id") == scope.caller_user_id
