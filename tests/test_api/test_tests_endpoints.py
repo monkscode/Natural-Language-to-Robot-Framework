@@ -381,7 +381,7 @@ def test_counts_are_asked_with_exactly_the_rows_filter(client):
 def test_limit_is_capped_like_history(client):
     """?limit=99999&offset=-5 must reach RunRegistry.list_tests already
     clamped to [1, 200] / floored at 0 -- the same convention list_history
-    applies (history_endpoints.py:127-128). Patches get_run_registry so the
+    applies (history_endpoints.py). Patches get_run_registry so the
     assertion is on the exact kwargs the endpoint computed and passed down,
     not on how many rows happen to exist in the isolated test schema (which
     would need 200+ seeded rows to tell a capped page apart from an

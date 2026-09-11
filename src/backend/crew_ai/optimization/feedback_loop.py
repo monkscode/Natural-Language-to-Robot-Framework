@@ -1310,7 +1310,7 @@ class FeedbackLoop:
                 # row exists — verified: AntiPatternEngine, KeywordCorrection-
                 # Engine and StructuralRuleEngine define no learn_from_feedback
                 # of their own and inherit LearningEngine's no-op `pass`
-                # (learning_config.py:428-437), so their outcome can never
+                # (in learning_config.py), so their outcome can never
                 # speak for "the correction was stored." That is why only this
                 # call is awaited for a real verdict; the three above stay
                 # fire-and-forget, unchanged from before this task.
