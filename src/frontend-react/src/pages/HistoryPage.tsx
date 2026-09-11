@@ -22,12 +22,14 @@ import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
 import {
-  Check, ChevronRight, Copy, Download, Folder, FolderInput, ListChecks,
+  Check, ChevronRight, Copy, Download, FlaskConical, Folder, FolderInput,
+  ListChecks,
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
+import { labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
@@ -58,6 +60,21 @@ interface Run {
   created_at: string
   updated_at: string
   has_report: boolean
+  // The test this result belongs to, and the version of THAT test it ran
+  // (spec 7.5). Both are permanently nullable and neither means "missing":
+  // test_id is NULL for a generation that failed before any code existed
+  // (owner decision D8(a)), and test_version_n for a regeneration that failed
+  // after the test already existed (D8(b), spec case 10).
+  test_id?: string | null
+  test_name?: string | null
+  test_query?: string | null
+  test_version_n?: number | null
+  // Server-computed (D7): this result was made with platform-admin authority.
+  // The server withholds the author's ADDRESS on such a row from every caller
+  // who does not hold that authority, so this is what the author column
+  // renders in its place. Never re-derive it: the role is evaluated per
+  // request and test_runs stores none.
+  ran_as_platform_admin?: boolean
   // Server-computed: may THIS caller file THIS run? Seeing a run and being
   // able to move it are different questions — a grouped run is visible to
   // the whole org, but only its owner or an org_admin moves it. Never
@@ -150,6 +167,61 @@ function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
   )
 }
 
+
+/** "Platform admin" — what a result made with platform-admin authority names
+ *  as its author, to every viewer who does not hold that authority. One
+ *  definition: the table's author column and the drawer's header both use it. */
+const PLATFORM_ADMIN = 'Platform admin'
+
+/** Which test a result belongs to, and the version of it that ran — the chip
+ *  that replaced the re-run pill (spec 7.5).
+ *
+ *  The test's LABEL is drawn only when it differs from the row's own
+ *  description. Owner decision D2 made a test's name its per-org key and left
+ *  `tests.name` NULL for good, so labelFrom always falls through to the
+ *  TEST's description — which, on a test nobody has edited, is the same
+ *  sentence this cell already shows an inch to the right. Printing it twice
+ *  would be the whole column, permanently. It reappears the moment the two
+ *  diverge, which is exactly when it says something the row does not: the
+ *  description travels with each new version, so an older result's test
+ *  acquires a different name as soon as someone updates it.
+ *
+ *  That suppression hides nothing and needs no sr-only counterpart, unlike
+ *  the inaccessible re-run pill it replaced: the label is dropped only when
+ *  the identical string is already on the row as the description. The title
+ *  carries both facts for a mouse.
+ *
+ *  No chip at all when the run names no test. That is permanent and legal
+ *  rather than missing data (owner decision D8(a)) — a generation that failed
+ *  before any code existed belongs to no test and never will. */
+function ResultTestChip({ run }: Readonly<{ run: Run }>) {
+  if (!run.test_id) return null
+  const label = labelFrom(run.test_name ?? null, run.test_query ?? null)
+  const version = versionLabel(run.test_version_n ?? null)
+  const echoesTheRow = label === (run.user_query ?? '').trim()
+  return (
+    <span className="shrink-0" title={`Test: ${label} — ${version.title}`}>
+      {/* FlaskConical is the sidebar's own Tests icon, so the chip reads as
+          "this belongs to a test" in the vocabulary the nav already taught. */}
+      <Badge variant="outline" className="gap-1 text-xs font-normal text-muted-foreground">
+        <FlaskConical className="h-3 w-3" />
+        {!echoesTheRow && <span className="max-w-[10rem] truncate">{label}</span>}
+        <span>{version.text}</span>
+      </Badge>
+    </span>
+  )
+}
+
+/** Who the drawer names as this result's author, or null for nobody worth
+ *  naming. The viewer's own address says nothing and is suppressed; an
+ *  address the server withheld under D7 is replaced by the authority that ran
+ *  it, because the row does the same and the two must agree. */
+function drawerAuthor(d: RunDetail | null, viewerEmail: string | undefined): string | null {
+  if (!d) return null
+  if (d.user_email) return d.user_email === viewerEmail ? null : d.user_email
+  return d.ran_as_platform_admin ? PLATFORM_ADMIN : null
+}
+
 /* ── The drawer's "re-run of {id}" trail. The original id is always shown in
    full; whether it is a link depends on rerun_of_accessible, and the
    inaccessible branch keeps a copy control so an id you cannot open can still
@@ -222,15 +294,16 @@ function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy
     <SheetHeader className="space-y-2 pr-6 text-left">
       <div className="flex items-center gap-2">
         {d && STATUS_BADGE[d.status]}
+        {d && <ResultTestChip run={d} />}
         {d?.rerun_of && (
           <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
             <Repeat2 className="h-3 w-3" />
             <span>Re-run</span>
           </Badge>
         )}
-        {d?.user_email && d.user_email !== viewerEmail && (
+        {drawerAuthor(d, viewerEmail) && (
           <span className="text-xs text-muted-foreground" title="Who ran this test">
-            {d.user_email}
+            {drawerAuthor(d, viewerEmail)}
           </span>
         )}
       </div>
@@ -1122,44 +1195,12 @@ export default function HistoryPage() {
                       <td className="py-3 px-4">{STATUS_BADGE[row.status] ?? row.status}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          {row.rerun_of && (row.rerun_of_accessible ? (
-                            <button
-                              type="button"
-                              className="shrink-0"
-                              title={`Re-run of ${row.rerun_of} — click to open the original run`}
-                              onClick={e => { e.stopPropagation(); setSelected(row.rerun_of!) }}
-                            >
-                              {/* Same pill family as the status badges so it
-                                  reads as a first-class chip, not a footnote. */}
-                              <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-200">
-                                <Repeat2 className="h-3 w-3" />
-                                <span>Re-run</span>
-                              </Badge>
-                            </button>
-                          ) : (
-                            /* Still a re-run — that stays true — but the
-                               original is no longer ours to open, so the pill
-                               is a statement, not a control. Muted and
-                               non-interactive; the full original id lives in
-                               the tooltip, never truncated. */
-                            <span
-                              className="shrink-0"
-                              title={`Re-run of ${row.rerun_of} — you no longer have access to the original run`}
-                            >
-                              <Badge className="gap-1 border-border bg-muted text-xs text-muted-foreground hover:bg-muted">
-                                <Repeat2 className="h-3 w-3" />
-                                <span>Re-run</span>
-                                {/* The title attribute is mouse-only. This
-                                    span is the same sentence as real text, so
-                                    a keyboard or screen-reader user is told
-                                    why the pill does nothing instead of
-                                    meeting a badge with no explanation. */}
-                                <span className="sr-only">
-                                  {` of ${row.rerun_of} — you no longer have access to the original run`}
-                                </span>
-                              </Badge>
-                            </span>
-                          ))}
+                          {/* What the re-run pill used to be (spec 7.5).
+                              Lineage between two RESULTS is gone as a
+                              concept; lineage to the TEST replaces it. The
+                              drawer still shows `rerun_of` in full, and P3
+                              drops that column and the trail together. */}
+                          <ResultTestChip run={row} />
                           <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
                             {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
                           </span>
@@ -1185,6 +1226,14 @@ export default function HistoryPage() {
                             >
                               {row.user_email}
                             </button>
+                          ) : row.ran_as_platform_admin ? (
+                            /* D7. A statement, not a control: there is no
+                               individual to filter by, and the address such a
+                               button would need is precisely what the server
+                               withheld from this viewer. */
+                            <span className="block max-w-full truncate" title="Who ran this test">
+                              {PLATFORM_ADMIN}
+                            </span>
                           ) : '—'}
                         </td>
                       )}

@@ -222,6 +222,51 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 })
 
+describe('HistoryPage drawer — the test, the version and who ran it', () => {
+  // The table reads the list and the drawer reads the detail. Both carry the
+  // same five fields now, so both must say the same thing about one run — a
+  // drawer that named a different version, or named the person the row would
+  // not, is the defect these pin.
+  it('names the same version the row does', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { test_id: 't-1', test_name: null, test_query: 'search flipkart for shoes', test_version_n: 2 })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Test: search flipkart for shoes — Ran version 2'))
+      .toBeInTheDocument()
+  })
+
+  it('names the test when the description has moved on without it', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { test_id: 't-2', test_name: null, test_query: 'checkout with a coupon', test_version_n: 3 })
+
+    await openDrawer()
+
+    expect(await screen.findByText('checkout with a coupon')).toBeInTheDocument()
+    expect(screen.getByText('v3')).toBeInTheDocument()
+  })
+
+  it('says Platform admin where the server withheld the address', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { user_email: null, ran_as_platform_admin: true })
+
+    await openDrawer()
+
+    expect(await screen.findByText('Platform admin')).toBeInTheDocument()
+  })
+
+  it('still shows a colleague’s address when the server sent one', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { user_email: 'colleague@x.com', ran_as_platform_admin: true })
+
+    await openDrawer()
+
+    expect(await screen.findByText('colleague@x.com')).toBeInTheDocument()
+    expect(screen.queryByText('Platform admin')).toBeNull()
+  })
+})
+
 describe('HistoryPage drawer — the re-run-of id', () => {
   // The owner's standing rule is unconditional: a run/workflow id shown in
   // any UI is full AND click-to-copy. The accessible branch already satisfies
@@ -277,6 +322,33 @@ const RUN_B = {
   user_email: 'colleague@x.com', created_at: '2026-08-30T00:00:00Z', updated_at: '2026-08-30T00:00:00Z',
   has_report: false, can_move: false,
 }
+// The four shapes the test/version chip has to tell apart. RUN_A's own
+// description is 'search flipkart for shoes', so TEST_SAME is the ordinary
+// row — D2 froze tests.name at NULL, so the test's label IS its description
+// and on an untouched test that is the same sentence the row already shows.
+const TEST_SAME = {
+  ...RUN_A, test_id: 't-1', test_name: null,
+  test_query: 'search flipkart for shoes', test_version_n: 2,
+}
+const TEST_EDITED = {
+  ...RUN_A, run_id: 'run-E', user_query: 'checkout flow',
+  test_id: 't-2', test_name: null,
+  test_query: 'checkout with a coupon', test_version_n: 3,
+}
+const TEST_NO_VERSION = {
+  ...RUN_A, run_id: 'run-N', user_query: 'a failed regeneration',
+  test_id: 't-3', test_name: null,
+  test_query: 'a failed regeneration', test_version_n: null,
+}
+const TEST_NONE = {
+  ...RUN_A, run_id: 'run-X', user_query: 'a generation that died early',
+  test_id: null, test_name: null, test_query: null, test_version_n: null,
+}
+
+function rowOf(description: string): HTMLElement {
+  return screen.getByText(description).closest('tr') as HTMLElement
+}
+
 const CHECKOUT = { group_id: 'g-1', name: 'Checkout', created_by: 'u-me', run_count: 0, test_count: 0 }
 const CODE = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    New Page    https://example.com'
 
@@ -536,6 +608,126 @@ describe('HistoryPage — who ran it', () => {
 
     expect(screen.getByPlaceholderText(/Search description/)).toHaveValue('colleague@x.com')
   })
+
+  // D7. The server withholds the address on a run made with platform-admin
+  // authority from every caller who does not hold it, and ships the flag in
+  // its place (_hide_admin_author, history_endpoints.py). The client's whole
+  // job is to render the role instead of an unattributed dash — and NOT to
+  // offer a control that would need the address it was not given.
+  it('names the role, not a person, on a run made with platform-admin authority', async () => {
+    setupList([
+      RUN_A,
+      { ...RUN_B, run_id: 'run-ADM', user_query: 'an admin ran this',
+        user_email: null, ran_as_platform_admin: true },
+    ])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const label = within(rowOf('an admin ran this')).getByText('Platform admin')
+    // A statement, not a control: there is no individual to filter by, and a
+    // button here could only put an address on screen that the server
+    // deliberately withheld.
+    expect(label.closest('button')).toBeNull()
+  })
+
+  it('still shows the address when the server sent one, flag or no flag', async () => {
+    // A platform admin viewing the same row gets the email, so the flag
+    // alone must not drive the rendering.
+    setupList([
+      RUN_A,
+      { ...RUN_B, run_id: 'run-ADM', user_query: 'an admin ran this',
+        user_email: 'admin@x.com', ran_as_platform_admin: true },
+    ])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('an admin ran this')
+    expect(within(row).getByText('admin@x.com')).toBeInTheDocument()
+    expect(within(row).queryByText('Platform admin')).toBeNull()
+  })
+
+  it('still shows a dash for a row with no author and no authority', async () => {
+    setupList([RUN_A, { ...RUN_B, user_email: null }])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    expect(within(rowOf('checkout flow')).getByText('—')).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage — which test and version a result ran', () => {
+  it('shows the version a result ran, in place of the re-run pill', async () => {
+    setupList([TEST_SAME])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('search flipkart for shoes')
+    expect(within(row).getByText('v2')).toBeInTheDocument()
+    expect(within(row).getByTitle('Test: search flipkart for shoes — Ran version 2'))
+      .toBeInTheDocument()
+  })
+
+  it('does not print the test’s name beside a description that already says it', async () => {
+    // D2 keeps tests.name NULL, so labelFrom always falls through to the
+    // test's description — which, on an untouched test, is the sentence one
+    // cell to the right. Drawing it twice would be every row, forever.
+    setupList([TEST_SAME])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    expect(within(rowOf('search flipkart for shoes'))
+      .getAllByText('search flipkart for shoes')).toHaveLength(1)
+  })
+
+  it('names the test once it stops matching the row’s own description', async () => {
+    // The description travels with each new version, so an older result's
+    // test acquires a different name the moment someone edits it — which is
+    // exactly when naming it carries something.
+    setupList([TEST_EDITED])
+    renderPage()
+    await screen.findByText('checkout flow')
+
+    const row = rowOf('checkout flow')
+    expect(within(row).getByText('checkout with a coupon')).toBeInTheDocument()
+    expect(within(row).getByText('v3')).toBeInTheDocument()
+  })
+
+  it('says so when a result recorded no version at all', async () => {
+    // D8(b) / spec case 10: a regeneration that failed attaches to its test
+    // and writes no version. Ordinary and permanent, not missing data.
+    setupList([TEST_NO_VERSION])
+    renderPage()
+    await screen.findByText('a failed regeneration')
+
+    const row = rowOf('a failed regeneration')
+    expect(within(row).getByText('no version')).toBeInTheDocument()
+    expect(within(row).getByTitle(/This result names no version/)).toBeInTheDocument()
+  })
+
+  it('draws no chip at all for a run that belongs to no test', async () => {
+    // D8(a): a generation that failed before any code existed. There is no
+    // test to name and there never will be.
+    setupList([TEST_NONE])
+    renderPage()
+    await screen.findByText('a generation that died early')
+
+    const row = rowOf('a generation that died early')
+    expect(within(row).queryByTitle(/^Test: /)).toBeNull()
+    expect(within(row).queryByText('no version')).toBeNull()
+  })
+
+  it('no longer offers a re-run pill on the row; the trail is the drawer’s', async () => {
+    // Spec 7.5 replaces the pill. `rerun_of` stays on the wire through P2 and
+    // the DRAWER still shows the original's full id, so the lineage is not
+    // lost — it moved off the table, which is where the version now sits.
+    setupList([{ ...TEST_SAME, rerun_of: 'run-ORIGINAL', rerun_of_accessible: true }])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('search flipkart for shoes')
+    expect(within(row).queryByText('Re-run')).toBeNull()
+    expect(within(row).queryByTitle(/Re-run of run-ORIGINAL/)).toBeNull()
+  })
 })
 
 describe('HistoryPage — the table’s run id column (never truncated, click-to-copy)', () => {
@@ -701,13 +893,18 @@ describe('HistoryPage — running a row again', () => {
     await waitFor(() => expect(playBtn).not.toBeDisabled())
   })
 
-  it('clicking the Re-run pill opens the ORIGINAL run’s drawer, not the re-run’s own', async () => {
+  it('opens the ORIGINAL run from the drawer’s trail, not the re-run’s own', async () => {
+    // This pinned the ROW's re-run pill until Task 11 replaced it with the
+    // test/version chip (spec 7.5). The capability itself did not go: it is
+    // the drawer's "re-run of {id}" line, which keeps the full id and opens
+    // the original, and which survives until P3 drops `rerun_of` entirely.
     const RUN_RERUN = { ...RUN_A, run_id: 'run-RERUN', rerun_of: 'run-ORIGINAL', rerun_of_accessible: true }
     setupList([RUN_RERUN])
+    withDetail('run-RERUN', { rerun_of: 'run-ORIGINAL', rerun_of_accessible: true })
     renderPage()
-    const row = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
 
-    fireEvent.click(within(row).getByTitle('Re-run of run-ORIGINAL — click to open the original run'))
+    fireEvent.click(await screen.findByTitle(/Open the original run/))
 
     const idBtn = await screen.findByTitle('Copy run id')
     expect(idBtn.textContent).toContain('run-ORIGINAL')
