@@ -340,14 +340,14 @@ def test_count_ungrouped_tests_for_an_identified_caller_with_no_org(reg):
 
 @pytest.mark.xfail(
     raises=AssertionError, strict=True, reason=(
-        "Confirmed divergence, not yet resolved: Task 2's platform-admin "
+        "Accepted divergence (owner, 2026-09-11): Task 2's platform-admin "
         "write-back guard (owner ruling, 2026-09-08) leaves a cross-org-"
         "rerun's TEST permanently org-less and unowned while the RUN takes "
         "the admin's own org, so count_ungrouped and count_ungrouped_tests "
         "disagree for that caller. Left failing on purpose as the regression "
         "net section 5a asks for; do not widen _VISIBLE_TEST_SQL/"
         "_VISIBLE_RUN_SQL or change the guard to force this green — the "
-        "owner is deciding the guard's consequences separately. strict=True "
+        "owner accepted this consequence over both. strict=True "
         "reports an unexpected pass (the day this is fixed) as a failure "
         "instead of silently going green. raises=AssertionError additionally "
         "means an exception of any OTHER type -- e.g. a schema-drift crash "
