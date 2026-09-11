@@ -573,3 +573,22 @@ def test_no_workflow_checkout_persists_the_token():
     assert not persisting, (
         f"these jobs check out with credential persistence on, leaving "
         f"GITHUB_TOKEN in .git/config for every later step to read: {persisting}")
+
+
+def test_every_job_that_checks_out_code_declares_its_token_permissions():
+    """A job with no `permissions:` - at job or workflow level - gets whatever
+    the repository default is, and that is a setting outside this repo that
+    anyone with admin can widen to read-write. A job that checks out the tree
+    runs code from it, so its token scope must be stated here.
+
+    Scoped to checkout jobs on purpose: a job that checks nothing out (the
+    build summary) runs no repository code for a token to be exposed to.
+    """
+    checkout_jobs = [(wf, doc, job_name, job) for wf, doc, job_name, job in _workflow_jobs()
+                     if _checkout_steps(job)]
+    assert checkout_jobs, "found no job with an actions/checkout step - the scan is broken"
+    undeclared = [f"{wf}:{job_name}" for wf, doc, job_name, job in checkout_jobs
+                  if "permissions" not in job and "permissions" not in doc]
+    assert not undeclared, (
+        f"these jobs check out and run repository code with no permissions "
+        f"block, so their token scope is whatever the repo default is: {undeclared}")
