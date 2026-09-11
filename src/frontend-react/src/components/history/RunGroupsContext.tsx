@@ -1,23 +1,25 @@
 /**
- * Run groups — ONE source of truth shared by the sidebar and the Test Runs page.
+ * Run groups — ONE source of truth shared by the sidebar, the Tests page and
+ * Activity.
  *
- * Both surfaces can change the active group (the sidebar's quick-access list,
- * the page's chip row and browse dialog) and both must reflect what the other
- * did. Two independent copies of that state would drift the moment a user
- * picked a group in one place and a different one in the other, so the filter
- * and the group list live here instead — mounted above both consumers, so
- * there is exactly one value and no synchronisation to get wrong.
+ * Every surface can change the active group (the sidebar's quick-access
+ * lists, each page's chip row and browse dialog) and each must reflect what
+ * the others did. Independent copies of that state would drift the moment a
+ * user picked a group in one place and a different one in another, so the
+ * filter and the group list live here instead — mounted above every
+ * consumer, so there is exactly one value and no synchronisation to get wrong.
  *
  * It also owns the single /api/groups fetch: one list means a rename made on
- * the page relabels the sidebar entry immediately, with no second request and
- * no stale copy.
+ * either page relabels the sidebar entry immediately, with no second request
+ * and no stale copy.
  *
  * Deliberately NOT in the URL. This app keeps every page mounted (see the
  * keep-alive note in App.tsx) so page state survives navigation; a ?group=
  * param would be dropped the moment the user visited another page, silently
  * clearing their filter and firing a refetch on a hidden page.
  *
- * Referenced by: App.tsx (provider), app-sidebar.tsx, pages/HistoryPage.tsx.
+ * Referenced by: App.tsx (provider), app-sidebar.tsx, pages/HistoryPage.tsx,
+ * pages/TestsPage.tsx.
  * Depends on: ./useGroups.
  */
 import {

@@ -1,15 +1,16 @@
 /**
- * "Move to group…" dropdown — the single filing control used by the Test Runs
- * row actions, the detail drawer, and the bulk-select toolbar. Lists the org's
- * folders (check-marking the run's current one), offers Remove from group, and
- * can create-and-move in one gesture via the New group… item.
+ * "Move to group…" dropdown — the single filing control, used by Activity's
+ * row actions, detail drawer and bulk-select toolbar, and by the Tests page's
+ * row actions. Lists the org's folders (check-marking the current one),
+ * offers Remove from group, and can create-and-move in one gesture via the
+ * New group… item.
  *
  * Filing a run into a folder is what publishes it to the org; Remove from
  * group takes it back to its author alone. The copy says so, because the
  * consequence is invisible otherwise.
  *
- * The row and drawer instances are only rendered when can_move on the history
- * row says so, but the bulk-select toolbar instance renders for any signed-in
+ * The row and drawer instances are only rendered when the row's can_move
+ * says so, but the bulk-select toolbar instance renders for any signed-in
  * user regardless of can_move — a folder deleted out from under the selection
  * 404s there, and the page already handles that path via setMoveError.
  */
