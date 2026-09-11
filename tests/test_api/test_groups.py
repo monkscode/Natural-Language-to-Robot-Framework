@@ -95,6 +95,15 @@ class TestGroupRegistryCrud:
         listed = reg.list_groups(ORG_A)
         assert [x["name"] for x in listed] == ["Checkout"]
 
+    def test_a_created_group_has_the_same_keys_as_a_listed_one(self, reg):
+        """The SPA types both responses as one RunGroup, and the Tests page
+        reads test_count off it: a created folder that lacks a key the list
+        carries is a shape the client cannot trust."""
+        created = reg.create_group(ORG_A, "u1", "Checkout")
+        listed = reg.list_groups(ORG_A)[0]
+        assert created["test_count"] == 0
+        assert set(listed) <= set(created)
+
     def test_list_groups_is_per_org_and_name_sorted(self, reg):
         reg.create_group(ORG_A, "u1", "smoke")
         reg.create_group(ORG_A, "u1", "Checkout")

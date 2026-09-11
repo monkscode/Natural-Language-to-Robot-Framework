@@ -1821,7 +1821,10 @@ class RunRegistry:
         except psycopg.errors.UniqueViolation:
             raise DuplicateGroupName(self._colliding_group_name(org_id, name))
         row = dict(row)
+        # Both counts list_groups carries, so the one RunGroup shape the SPA
+        # reads holds for a folder it has just made. A new folder holds none.
         row["run_count"] = 0
+        row["test_count"] = 0
         row["created_at"] = row["created_at"].isoformat()
         row["updated_at"] = row["updated_at"].isoformat()
         return row
