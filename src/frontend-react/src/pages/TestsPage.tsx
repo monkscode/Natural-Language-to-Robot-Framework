@@ -34,7 +34,7 @@ import { Input } from '@/components/ui/input'
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
-import { ChevronRight, Folder, FolderInput, Play, RefreshCw, Search, Zap } from 'lucide-react'
+import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, RefreshCw, Search, Zap } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
@@ -68,6 +68,50 @@ interface TestRow {
   can_move: boolean
 }
 
+/** One result under a test, as GET /api/tests/{test_id} returns it (spec
+ *  6.2). `n` is the version it ran; null for a result that names none — a
+ *  regeneration that failed before a version landed, or a row migrated from
+ *  before versions existed. failure_class/failure_locator are P3 columns and
+ *  are always null today. */
+interface TestResult {
+  run_id: string
+  status: string
+  n: number | null
+  created_at: string
+  has_report: boolean
+  failure_class: string | null
+  failure_locator: string | null
+}
+
+interface TestVersion {
+  n: number
+  user_query: string | null
+  robot_code: string | null
+  created_by_email: string | null
+  reason: string | null
+  created_at: string
+}
+
+interface TestDetail {
+  test: {
+    test_id: string
+    name: string | null
+    user_query: string | null
+    user_email: string | null
+    group_id: string | null
+    group_name: string | null
+    current_version: number | null
+    created_at: string
+    updated_at: string
+    health: Health
+  }
+  versions: TestVersion[]
+  results: TestResult[]
+  /** The whole caller-scoped set, which is what the timeline pages over —
+   *  never the version count, and never the row's own result_count. */
+  results_total: number
+}
+
 type Tab = 'all' | 'failing' | 'passing'
 type Counts = Record<Tab, number>
 
@@ -79,6 +123,9 @@ interface TestsResponse {
 }
 
 const PAGE = 100
+/** The drawer's page over ONE test's results. The endpoint's own default,
+ *  and its ceiling is 200. */
+const RESULTS_PAGE = 50
 
 const TABS: ReadonlyArray<{ key: Tab; label: string }> = [
   { key: 'all', label: 'All' },
@@ -118,9 +165,34 @@ const SPARK_MARK: Record<'pass' | 'fail', string> = {
   fail: 'bg-red-500 dark:bg-red-400',
 }
 
-/** What a row is called: its name, else its description. */
+/** What a test is called: its name, else its description. Takes the two
+ *  fields rather than a row, because the drawer names the same test from the
+ *  detail payload, which is not a row. */
+function labelFrom(name: string | null, userQuery: string | null): string {
+  return name?.trim() || userQuery?.trim() || 'Untitled test'
+}
+
 function labelOf(t: TestRow): string {
-  return t.name?.trim() || t.user_query?.trim() || 'Untitled test'
+  return labelFrom(t.name, t.user_query)
+}
+
+/** History's result palette (passed / failed / error / generated / running),
+ *  with the dark variants that page does not have yet — Task 11 retrofits it
+ *  there. A status with no entry keeps its own word in a plain outline badge
+ *  rather than borrowing another status's colour. */
+const RESULT_BADGE: Record<string, string> = {
+  passed: 'bg-green-100 text-green-700 border-green-200 hover:bg-green-100 dark:bg-green-950 dark:text-green-300 dark:border-green-900 dark:hover:bg-green-950',
+  failed: 'bg-red-100 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-950 dark:text-red-300 dark:border-red-900 dark:hover:bg-red-950',
+  error: 'bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-900 dark:hover:bg-amber-950',
+}
+
+function ResultBadge({ status }: Readonly<{ status: string }>) {
+  if (status === 'running') return <RunningBadge />
+  const tone = RESULT_BADGE[status]
+  const label = status.charAt(0).toUpperCase() + status.slice(1)
+  return tone
+    ? <Badge className={`shrink-0 text-xs ${tone}`}>{label}</Badge>
+    : <Badge variant="outline" className="shrink-0 text-xs">{label}</Badge>
 }
 
 /** Same three cases historySubtitle separates, for the same reason:
@@ -397,29 +469,156 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
   )
 }
 
-/** Header only: every field here is already on the list row, so opening it
- *  costs no request. The timeline, code and version list (spec 7.3) are not
- *  built yet. */
-function TestDrawer({ row, onClose }: Readonly<{ row: TestRow | null; onClose: () => void }>) {
-  const h = row ? HEALTH[row.health] : null
+/* ── One result in the drawer's timeline: what it did, which version it ran,
+   when, its report, and its full id ── */
+function TimelineResult({ result, copied, onCopy }: Readonly<{
+  result: TestResult
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
   return (
-    <Sheet open={!!row} onOpenChange={open => { if (!open) onClose() }}>
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-xs">
+      <ResultBadge status={result.status} />
+      {/* Short here, spelled out in the header and on the version rule: a
+          row repeats this once per result. */}
+      <span className="text-muted-foreground" title={result.n == null ? 'This result names no version' : `Ran version ${result.n}`}>
+        {result.n == null ? 'no version' : `v${result.n}`}
+      </span>
+      <span className="text-muted-foreground" title={formatDate(result.created_at)}>
+        {timeAgo(result.created_at)}
+      </span>
+      {result.has_report && (
+        <a
+          className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
+          href={`/reports/${result.run_id}/log.html`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <FileTerminal className="h-3 w-3" /> Report
+        </a>
+      )}
+      {/* The full id, never a prefix — a standing rule, and the only thing
+          you can do with a result you cannot open is hand its id over. */}
+      <button
+        type="button"
+        className="inline-flex basis-full items-center gap-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+        title="Copy run id"
+        onClick={() => onCopy(result.run_id, result.run_id)}
+      >
+        {result.run_id}
+        {copied === result.run_id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      </button>
+    </li>
+  )
+}
+
+/** The open test: its own read of GET /api/tests/{test_id} (spec 7.3), keyed
+ *  on the test id rather than on the row it was opened from — a row that
+ *  leaves the list (a folder filter, a refusal) no longer closes the drawer,
+ *  and the detail is the later of the two reads, so it wins wherever they
+ *  disagree. The row still fills the header for the moment before the read
+ *  lands; both carry ONE definition of health (run_registry's single
+ *  lateral), so the swap changes a value only when a result landed between
+ *  the two requests.
+ *
+ * `refreshTick` is the page's own list refresh. Without it a run that ends
+ * while the drawer is open leaves the timeline saying "Running" under a row
+ * that already says Passed. */
+function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
+  testId: string | null
+  row: TestRow | null
+  refreshTick: number
+  onClose: () => void
+}>) {
+  const [detail, setDetail] = useState<TestDetail | null>(null)
+  const [results, setResults] = useState<TestResult[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState<string | null>(null)
+  // One ticket per read, as the list does: only the newest may write, so the
+  // answer for a test the user already closed cannot repaint this one.
+  const readSeq = useRef(0)
+
+  const read = useCallback(async () => {
+    if (!testId) return
+    const seq = ++readSeq.current
+    setLoading(true)
+    setError('')
+    try {
+      const page = await api<TestDetail>(`/api/tests/${testId}?limit=${RESULTS_PAGE}&offset=0`)
+      if (seq !== readSeq.current) return
+      setDetail(page)
+      setResults(page.results)
+    } catch (e) {
+      if (seq !== readSeq.current) return
+      setError(e instanceof Error ? e.message : 'Failed to load this test')
+      setDetail(null)
+      setResults([])
+    } finally {
+      if (seq === readSeq.current) setLoading(false)
+    }
+  }, [testId])
+
+  // Opening a different test must not show the previous one's timeline for
+  // the length of a request.
+  useEffect(() => { setDetail(null); setResults([]); setError(''); setCopied(null) }, [testId])
+  useEffect(() => { void read() }, [read, refreshTick])
+
+  const copy = useCallback(async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      setTimeout(() => setCopied(null), 1500)
+    } catch { /* clipboard unavailable — non-fatal */ }
+  }, [])
+
+  const t = detail?.test
+  const health = t?.health ?? row?.health ?? 'not_run'
+  const h = HEALTH[health]
+  const version = t ? t.current_version : row?.current_version ?? null
+  const groupName = t ? t.group_name : row?.group_name ?? null
+  const label = t ? labelFrom(t.name, t.user_query) : (row ? labelOf(row) : '')
+
+  return (
+    <Sheet open={!!testId} onOpenChange={open => { if (!open) onClose() }}>
       <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-2xl">
-        {row && h && (
+        {testId && (
           <SheetHeader className="space-y-2 pr-6 text-left">
             <div className="flex items-center gap-2">
-              <Badge variant={row.health === 'not_run' ? 'outline' : 'default'} className={`text-xs ${h.badge}`}>
+              <Badge variant={health === 'not_run' ? 'outline' : 'default'} className={`text-xs ${h.badge}`}>
                 {h.label}
               </Badge>
-              {row.current_version != null && (
-                <span className="text-xs text-muted-foreground">Version {row.current_version}</span>
+              {version != null && (
+                <span className="text-xs text-muted-foreground">Version {version}</span>
               )}
             </div>
-            <SheetTitle className="text-base leading-snug">{labelOf(row)}</SheetTitle>
+            <SheetTitle className="text-base leading-snug">{label}</SheetTitle>
             <SheetDescription className="text-xs">
-              {row.group_name ? `In ${row.group_name}` : 'Not in a group'}
+              {groupName ? `In ${groupName}` : 'Not in a group'}
             </SheetDescription>
           </SheetHeader>
+        )}
+
+        {testId && (
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Results
+            </span>
+            {error && <p className="py-4 text-xs text-destructive">{error}</p>}
+            {!error && loading && results.length === 0 && (
+              <p className="py-4 text-xs text-muted-foreground">Loading results…</p>
+            )}
+            {!error && !loading && results.length === 0 && (
+              <p className="py-4 text-xs text-muted-foreground">
+                No result of this test that you can open.
+              </p>
+            )}
+            <ul className="divide-y">
+              {results.map(r => (
+                <TimelineResult key={r.run_id} result={r} copied={copied} onCopy={copy} />
+              ))}
+            </ul>
+          </div>
         )}
       </SheetContent>
     </Sheet>
@@ -449,6 +648,9 @@ export default function TestsPage() {
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [runError, setRunError] = useState('')
   const [moveError, setMoveError] = useState('')
+  // Bumped every time the list is re-read, so the open drawer re-reads its
+  // own test with it rather than going stale behind a finished run.
+  const [refreshTick, setRefreshTick] = useState(0)
 
   // The same folder state, filter included, that Activity and the sidebar
   // read — a folder picked on any of them scopes all of them.
@@ -514,6 +716,7 @@ export default function TestsPage() {
         const tail = prev.filter(t => !fresh.has(t.test_id) && !dropIds?.has(t.test_id))
         return [...page.tests, ...tail]
       })
+      setRefreshTick(n => n + 1)
     } catch { /* a transient refresh failure leaves the rows in place */ } finally {
       if (seq === listSeq.current) setLoading(false)
     }
@@ -683,7 +886,12 @@ export default function TestsPage() {
         </CardContent>
       </Card>
 
-      <TestDrawer row={selectedRow} onClose={() => setSelected(null)} />
+      <TestDrawer
+        testId={selected}
+        row={selectedRow}
+        refreshTick={refreshTick}
+        onClose={() => setSelected(null)}
+      />
     </div>
   )
 }

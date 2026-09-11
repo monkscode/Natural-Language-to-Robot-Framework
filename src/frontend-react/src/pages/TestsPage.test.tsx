@@ -70,13 +70,71 @@ const GROUPS = [
   { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 3, test_count: 2 },
 ]
 
+const CODE_V2 = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    New Page    https://flipkart.com'
+const CODE_V1 = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    Go To    https://flipkart.com'
+
+/** GET /api/tests/{test_id} for t-pass, shaped as the route answers it (spec
+ *  6.2): the test plus health, every version newest-first, ONE page of
+ *  results, and results_total for the whole (caller-scoped) set. The results
+ *  deliberately hold two of version 2, then a version-less row, then one of
+ *  version 1 — one code change, and a result that names no version. */
+const DETAIL = {
+  test: {
+    test_id: 't-pass', name: null, user_query: 'search flipkart for shoes',
+    user_email: 'a@b.com', group_id: 'g-1', group_name: 'Checkout',
+    current_version: 2, created_at: hoursAgo(50), updated_at: hoursAgo(2),
+    health: 'passing',
+  },
+  versions: [
+    { n: 2, user_query: 'search flipkart for shoes', robot_code: CODE_V2, created_by_email: 'b@b.com', reason: 'edited', created_at: hoursAgo(30) },
+    { n: 1, user_query: 'search flipkart', robot_code: CODE_V1, created_by_email: 'a@b.com', reason: null, created_at: hoursAgo(50) },
+  ],
+  results: [
+    { run_id: '11111111-1111-4111-8111-111111111111', status: 'passed', n: 2, created_at: hoursAgo(2), has_report: true, failure_class: null, failure_locator: null },
+    { run_id: '22222222-2222-4222-8222-222222222222', status: 'failed', n: 2, created_at: hoursAgo(3), has_report: true, failure_class: null, failure_locator: null },
+    { run_id: '33333333-3333-4333-8333-333333333333', status: 'error', n: null, created_at: hoursAgo(4), has_report: false, failure_class: null, failure_locator: null },
+    { run_id: '44444444-4444-4444-8444-444444444444', status: 'passed', n: 1, created_at: hoursAgo(5), has_report: true, failure_class: null, failure_locator: null },
+  ],
+  results_total: 4,
+}
+
+type Detail = typeof DETAIL
 type Row = typeof PASSING | typeof FAILING | typeof CODELESS
+
+/** What GET /api/tests/{test_id} answers for a row other than t-pass: the
+ *  same test, told the way the detail route tells it, so a drawer opened on
+ *  the wrong id shows the wrong test rather than passing by luck. */
+const detailOf = (r: Row) => ({
+  test: {
+    test_id: r.test_id, name: r.name, user_query: r.user_query, user_email: r.user_email,
+    group_id: r.group_id, group_name: r.group_name, current_version: r.current_version,
+    created_at: hoursAgo(60), updated_at: r.last_run_at ?? hoursAgo(60), health: r.health,
+  },
+  versions: [{
+    n: r.current_version, user_query: r.user_query, robot_code: r.can_run ? CODE_V1 : null,
+    created_by_email: r.user_email, reason: null, created_at: hoursAgo(60),
+  }],
+  results: r.last_run_id && r.last_run_at ? [{
+    run_id: r.last_run_id, status: r.last_status!, n: r.current_version,
+    created_at: r.last_run_at, has_report: true, failure_class: null, failure_locator: null,
+  }] : [],
+  results_total: r.result_count,
+})
+
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true, writable: true })
+  return writeText
+}
 
 function setup(opts: {
   rows?: Row[]
   counts?: { all: number; passing: number; failing: number }
   total?: number
   groupFilter?: string | null
+  // The drawer's own read. A function so a test can answer the second page
+  // differently from the first, or refuse the read outright.
+  detail?: Detail | ((path: string) => Detail | Promise<Detail>)
 } = {}) {
   const rows = opts.rows ?? [PASSING, FAILING, CODELESS]
   const counts = opts.counts ?? {
@@ -102,8 +160,16 @@ function setup(opts: {
     groupFilter: opts.groupFilter ?? null, setGroupFilter: vi.fn(),
   })
   // Answer by the filter actually asked for: a tab that sends the wrong
-  // health gets the wrong rows back and the test sees it.
+  // health gets the wrong rows back and the test sees it. The drawer's read
+  // is a different path shape (/api/tests/{id}) and is answered separately —
+  // a list payload returned there would let a drawer that ignores its own
+  // request pass.
   mockApi.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/tests/')) {
+      if (opts.detail) return typeof opts.detail === 'function' ? opts.detail(path) : opts.detail
+      const id = path.slice('/api/tests/'.length).split('?')[0]
+      return id === 't-pass' ? DETAIL : detailOf(rows.find(r => r.test_id === id)!)
+    }
     const health = new URL(path, 'http://x').searchParams.get('health')
     const page = health ? rows.filter(r => r.health === health) : rows
     return { tests: page, total: opts.total ?? page.length, counts, scope: 'own' }
@@ -359,6 +425,122 @@ describe('TestsPage — opening a test', () => {
     const drawer = await screen.findByRole('dialog')
     expect(within(drawer).getByText('Failing')).toBeInTheDocument()
     expect(within(drawer).getByText('Not in a group')).toBeInTheDocument()
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Task 9 — the drawer's own read (spec 7.3, GET /api/tests/{test_id}).
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const detailCalls = () => mockApi.mock.calls.map(c => String(c[0])).filter(p => p.startsWith('/api/tests/'))
+const openDrawer = async (name = 'search flipkart for shoes') => {
+  fireEvent.click(await screen.findByRole('button', { name }))
+  return screen.findByRole('dialog')
+}
+/** The run ids on screen, in the order the timeline lists them. */
+const timelineIds = (drawer: HTMLElement) =>
+  within(drawer).getAllByTitle('Copy run id').map(b => b.textContent!.trim())
+/** Each result row, in the same order — the id's own row, so a row is read
+ *  whole rather than by a word that repeats across results. */
+const timelineRows = (drawer: HTMLElement) =>
+  within(drawer).getAllByTitle('Copy run id').map(b => b.closest('li')!)
+
+describe('TestsPage — the drawer’s results timeline', () => {
+  it('reads the open test by id and lists its results newest first', async () => {
+    setup()
+    renderPage()
+
+    const drawer = await openDrawer()
+
+    await waitFor(() => expect(detailCalls()).toContain('/api/tests/t-pass?limit=50&offset=0'))
+    await waitFor(() => expect(timelineIds(drawer)).toEqual([
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+    ]))
+    const rows = timelineRows(drawer)
+    expect(rows.map(li => within(li).getByText(/^(Passed|Failed|Error|Generated|Running)$/).textContent))
+      .toEqual(['Passed', 'Failed', 'Error', 'Passed'])
+    // The version each result RAN, including the one that names none.
+    expect(rows.map(li => within(li).getByText(/^(v\d+|no version)$/).textContent))
+      .toEqual(['v2', 'v2', 'no version', 'v1'])
+  })
+
+  it('asks for nothing until a test is opened', async () => {
+    setup()
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    expect(detailCalls()).toEqual([])
+  })
+
+  it('shows every run id in full and copies the one that was clicked', async () => {
+    const writeText = stubClipboard()
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineIds(drawer)).toHaveLength(4))
+
+    fireEvent.click(within(drawer).getAllByTitle('Copy run id')[1])
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222'))
+  })
+
+  it('offers a report only for the results the server says have one', async () => {
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineIds(drawer)).toHaveLength(4))
+
+    const reports = within(drawer).getAllByRole('link', { name: /report/i })
+    expect(reports.map(a => a.getAttribute('href'))).toEqual([
+      '/reports/11111111-1111-4111-8111-111111111111/log.html',
+      '/reports/22222222-2222-4222-8222-222222222222/log.html',
+      '/reports/44444444-4444-4444-8444-444444444444/log.html',
+    ])
+  })
+
+  it('believes the detail, not the row it was opened from', async () => {
+    // Same test, read twice: the row said passing, the drawer's own read says
+    // failing. The later read wins — a result can land between the two.
+    setup({ detail: { ...DETAIL, test: { ...DETAIL.test, health: 'failing', group_name: 'Regression' } } })
+    renderPage()
+
+    const drawer = await openDrawer()
+
+    await waitFor(() => expect(within(drawer).getByText('Failing')).toBeInTheDocument())
+    expect(within(drawer).getByText('In Regression')).toBeInTheDocument()
+    expect(within(drawer).queryByText('Passing')).not.toBeInTheDocument()
+  })
+
+  it('shows the server’s refusal instead of a timeline it could not read', async () => {
+    setup({ detail: () => Promise.reject(new ApiError(404, 'Test not found')) as never })
+    renderPage()
+
+    const drawer = await openDrawer()
+
+    expect(await within(drawer).findByText('Test not found')).toBeInTheDocument()
+    expect(within(drawer).queryByTitle('Copy run id')).not.toBeInTheDocument()
+  })
+
+  it('re-reads the open test when a run of it ends', async () => {
+    setup()
+    let finish: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-new' })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineIds(drawer)).toHaveLength(4))
+    const before = detailCalls().length
+
+    finish()
+
+    await waitFor(() => expect(detailCalls().length).toBeGreaterThan(before))
   })
 })
 
