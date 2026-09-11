@@ -444,6 +444,13 @@ const timelineIds = (drawer: HTMLElement) =>
  *  whole rather than by a word that repeats across results. */
 const timelineRows = (drawer: HTMLElement) =>
   within(drawer).getAllByTitle('Copy run id').map(b => b.closest('li')!)
+/** The timeline exactly as it is laid out: each result as its run id, each
+ *  version rule as RULE:<its label>, in order. */
+const timelineItems = (drawer: HTMLElement) =>
+  [...within(drawer).getByRole('list', { name: 'Results, newest first' }).children].map(li => {
+    const id = within(li as HTMLElement).queryByTitle('Copy run id')
+    return id ? id.textContent!.trim() : `RULE:${li.textContent!.trim()}`
+  })
 
 describe('TestsPage — the drawer’s results timeline', () => {
   it('reads the open test by id and lists its results newest first', async () => {
@@ -541,6 +548,111 @@ describe('TestsPage — the drawer’s results timeline', () => {
     finish()
 
     await waitFor(() => expect(detailCalls().length).toBeGreaterThan(before))
+  })
+})
+
+describe('TestsPage — the drawer’s version rules', () => {
+  it('rules off where the code changed, and nowhere else', async () => {
+    // Two results of version 2, then a version-less one, then version 1:
+    // ONE code change, so ONE rule — never one per result.
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(4))
+
+    expect(timelineItems(drawer)).toEqual([
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      'RULE:Version 1',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+    ])
+  })
+
+  it('keeps a result that names no version with the code that was current when it ran', async () => {
+    // The version-less row above sits BELOW the rule, with version 1: a
+    // regeneration that failed left the old code in place, so a streak
+    // across it is not broken. Here there is nothing older to inherit from,
+    // so it stands in its own block and says so.
+    setup({
+      detail: {
+        ...DETAIL,
+        results: DETAIL.results.slice(0, 1).concat(DETAIL.results.slice(2, 3)),
+        results_total: 2,
+      },
+    })
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(2))
+
+    expect(timelineItems(drawer)).toEqual([
+      '11111111-1111-4111-8111-111111111111',
+      'RULE:No version recorded',
+      '33333333-3333-4333-8333-333333333333',
+    ])
+  })
+})
+
+describe('TestsPage — paging the drawer’s timeline', () => {
+  const PAGE_TWO = {
+    ...DETAIL,
+    results: [{
+      run_id: '55555555-5555-4555-8555-555555555555', status: 'passed', n: 1,
+      created_at: hoursAgo(9), has_report: false, failure_class: null, failure_locator: null,
+    }],
+    results_total: 5,
+  }
+
+  it('offers the rest off results_total and appends them at the right offset', async () => {
+    setup({
+      detail: (path: string) => (path.includes('offset=4')
+        ? PAGE_TWO
+        : { ...DETAIL, results_total: 5 }),
+    })
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(4))
+
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Load more (1 more)' }))
+
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(5))
+    expect(detailCalls().some(p => p.includes('offset=4'))).toBe(true)
+    expect(timelineIds(drawer)).toContain('55555555-5555-4555-8555-555555555555')
+  })
+
+  it('offers nothing more when the timeline already holds every result', async () => {
+    setup()
+    renderPage()
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(4))
+
+    expect(within(drawer).queryByRole('button', { name: /Load more/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps the pages already loaded when a run of the test ends', async () => {
+    setup({
+      detail: (path: string) => (path.includes('offset=4')
+        ? PAGE_TWO
+        : { ...DETAIL, results_total: 5 }),
+    })
+    let finish: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-new' })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+    const drawer = await openDrawer()
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(4))
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Load more (1 more)' }))
+    await waitFor(() => expect(timelineRows(drawer)).toHaveLength(5))
+
+    finish()
+
+    // The refresh re-reads page zero; the page the user asked for stays.
+    await waitFor(() => expect(detailCalls().filter(p => p.includes('offset=0')).length).toBeGreaterThan(1))
+    expect(timelineIds(drawer)).toContain('55555555-5555-4555-8555-555555555555')
   })
 })
 

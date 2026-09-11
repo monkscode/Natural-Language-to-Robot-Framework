@@ -25,7 +25,7 @@
  * components/history (the shared folder state, chip row, move menu and
  * folder permissions).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -469,6 +469,38 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
   )
 }
 
+/** The version each result RAN, in the timeline's own order (newest first).
+ *
+ * A result that names no version — a regeneration that failed before one
+ * landed, or a row migrated from before versions existed — inherits the
+ * version of the next OLDER result that names one, because that is the code
+ * the test held at the time. It therefore never reads as a code change of
+ * its own. A version-less result with nothing older to inherit from keeps
+ * null and stands in its own block.
+ */
+function effectiveVersions(results: TestResult[]): Array<number | null> {
+  const eff: Array<number | null> = new Array<number | null>(results.length).fill(null)
+  let carry: number | null = null
+  for (let i = results.length - 1; i >= 0; i--) {
+    if (results[i].n != null) carry = results[i].n
+    eff[i] = results[i].n ?? carry
+  }
+  return eff
+}
+
+/* ── The rule drawn where the code changed. A streak across it means
+   nothing (spec section 8), which is the whole reason it is drawn ── */
+function VersionRule({ version }: Readonly<{ version: number | null }>) {
+  const label = version == null ? 'No version recorded' : `Version ${version}`
+  return (
+    <li className="flex items-center gap-2 py-2" title="The code changed here — a streak across this line means nothing">
+      <span className="h-px flex-1 bg-border" />
+      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <span className="h-px flex-1 bg-border" />
+    </li>
+  )
+}
+
 /* ── One result in the drawer's timeline: what it did, which version it ran,
    when, its report, and its full id ── */
 function TimelineResult({ result, copied, onCopy }: Readonly<{
@@ -532,6 +564,7 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
 }>) {
   const [detail, setDetail] = useState<TestDetail | null>(null)
   const [results, setResults] = useState<TestResult[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState<string | null>(null)
@@ -539,21 +572,35 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
   // answer for a test the user already closed cannot repaint this one.
   const readSeq = useRef(0)
 
-  const read = useCallback(async () => {
+  /** replace = this test, freshly opened; append = the next page the reader
+   *  asked for; merge = page zero over what is already loaded, which is how a
+   *  refresh keeps the pages they asked for (the list does the same). */
+  const read = useCallback(async (offset: number, mode: 'replace' | 'append' | 'merge') => {
     if (!testId) return
     const seq = ++readSeq.current
     setLoading(true)
     setError('')
     try {
-      const page = await api<TestDetail>(`/api/tests/${testId}?limit=${RESULTS_PAGE}&offset=0`)
+      const page = await api<TestDetail>(`/api/tests/${testId}?limit=${RESULTS_PAGE}&offset=${offset}`)
       if (seq !== readSeq.current) return
       setDetail(page)
-      setResults(page.results)
+      setTotal(page.results_total)
+      setResults(prev => {
+        if (mode === 'replace') return page.results
+        // Results written between two reads shift every offset after them,
+        // so the same run can arrive twice — keep the first copy.
+        const seen = new Set(page.results.map(r => r.run_id))
+        const rest = prev.filter(r => !seen.has(r.run_id))
+        return mode === 'append' ? [...rest, ...page.results] : [...page.results, ...rest]
+      })
     } catch (e) {
       if (seq !== readSeq.current) return
       setError(e instanceof Error ? e.message : 'Failed to load this test')
-      setDetail(null)
-      setResults([])
+      if (mode !== 'append') {
+        setDetail(null)
+        setResults([])
+        setTotal(0)
+      }
     } finally {
       if (seq === readSeq.current) setLoading(false)
     }
@@ -561,8 +608,16 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
 
   // Opening a different test must not show the previous one's timeline for
   // the length of a request.
-  useEffect(() => { setDetail(null); setResults([]); setError(''); setCopied(null) }, [testId])
-  useEffect(() => { void read() }, [read, refreshTick])
+  useEffect(() => { setDetail(null); setResults([]); setTotal(0); setError(''); setCopied(null) }, [testId])
+  useEffect(() => { void read(0, 'replace') }, [read])
+  // The page's refresh, and only that: `read` changing here as well would
+  // fire a second request for a test that was merely opened.
+  const seenTick = useRef(refreshTick)
+  useEffect(() => {
+    if (seenTick.current === refreshTick) return
+    seenTick.current = refreshTick
+    void read(0, 'merge')
+  }, [refreshTick, read])
 
   const copy = useCallback(async (text: string, key: string) => {
     try {
@@ -572,12 +627,14 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
     } catch { /* clipboard unavailable — non-fatal */ }
   }, [])
 
+  const eff = effectiveVersions(results)
   const t = detail?.test
   const health = t?.health ?? row?.health ?? 'not_run'
   const h = HEALTH[health]
   const version = t ? t.current_version : row?.current_version ?? null
   const groupName = t ? t.group_name : row?.group_name ?? null
-  const label = t ? labelFrom(t.name, t.user_query) : (row ? labelOf(row) : '')
+  const rowLabel = row ? labelOf(row) : ''
+  const label = t ? labelFrom(t.name, t.user_query) : rowLabel
 
   return (
     <Sheet open={!!testId} onOpenChange={open => { if (!open) onClose() }}>
@@ -613,11 +670,25 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
                 No result of this test that you can open.
               </p>
             )}
-            <ul className="divide-y">
-              {results.map(r => (
-                <TimelineResult key={r.run_id} result={r} copied={copied} onCopy={copy} />
+            <ul className="divide-y" aria-label="Results, newest first">
+              {results.map((r, i) => (
+                <Fragment key={r.run_id}>
+                  {i > 0 && eff[i] !== eff[i - 1] && <VersionRule version={eff[i]} />}
+                  <TimelineResult result={r} copied={copied} onCopy={copy} />
+                </Fragment>
               ))}
             </ul>
+            {results.length < total && (
+              <div className="pt-2">
+                <Button
+                  size="sm" variant="outline" className="h-7 text-xs"
+                  disabled={loading}
+                  onClick={() => void read(results.length, 'append')}
+                >
+                  Load more ({total - results.length} more)
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </SheetContent>
