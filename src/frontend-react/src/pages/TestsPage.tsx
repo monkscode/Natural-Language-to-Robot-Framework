@@ -178,10 +178,11 @@ function labelOf(t: TestRow): string {
   return labelFrom(t.name, t.user_query)
 }
 
-/** History's result palette (passed / failed / error / generated / running),
- *  with the dark variants that page does not have yet — Task 11 retrofits it
- *  there. A status with no entry keeps its own word in a plain outline badge
- *  rather than borrowing another status's colour. */
+/** Activity's result palette (passed / failed / error / generated / running),
+ *  dark variants included — Task 11 retrofitted the same values onto that
+ *  page's STATUS_BADGE, so the two agree. A status with no entry keeps its
+ *  own word in a plain outline badge rather than borrowing another status's
+ *  colour. */
 const RESULT_BADGE: Record<string, string> = {
   passed: 'bg-green-100 text-green-700 border-green-200 hover:bg-green-100 dark:bg-green-950 dark:text-green-300 dark:border-green-900 dark:hover:bg-green-950',
   failed: 'bg-red-100 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-950 dark:text-red-300 dark:border-red-900 dark:hover:bg-red-950',

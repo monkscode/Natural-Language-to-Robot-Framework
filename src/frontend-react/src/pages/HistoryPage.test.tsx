@@ -694,6 +694,39 @@ describe('HistoryPage — who ran it', () => {
   })
 })
 
+describe('HistoryPage — the status badges in dark mode', () => {
+  // The three coloured badges carried a light-only palette, so on a dark
+  // page they kept a pastel pill (measured in Chromium: Failed rendered
+  // rgb(185,28,28) on rgb(254,226,226) against a body of rgb(2,8,23)).
+  // TestsPage's RESULT_BADGE already held the dark variants and its comment
+  // said this page would get them; this is that retrofit. Asserted as
+  // classes rather than computed colours because jsdom applies no Tailwind
+  // stylesheet — the browser check is what confirms the colours.
+  it.each([
+    ['passed', 'Passed', 'dark:bg-green-950'],
+    ['failed', 'Failed', 'dark:bg-red-950'],
+    ['error', 'Error', 'dark:bg-amber-950'],
+  ])('gives the %s badge a dark variant', async (status, label, darkClass) => {
+    setupList([{ ...RUN_A, status }])
+    renderPage()
+
+    const badge = await screen.findByText(label)
+    expect(badge.className).toContain(darkClass)
+    // The light palette stays: this adds a dark variant, it does not swap one.
+    expect(badge.className).toMatch(/bg-(green|red|amber)-100/)
+  })
+
+  it('leaves the two badges that already use theme tokens alone', async () => {
+    // Generated is variant="outline" and Running variant="secondary", both
+    // of which resolve through the theme. A dark: override on either would
+    // be a second source of truth for a colour the token already answers.
+    setupList([{ ...RUN_A, status: 'generated' }])
+    renderPage()
+
+    expect((await screen.findByText('Generated')).className).not.toMatch(/dark:/)
+  })
+})
+
 describe('HistoryPage — which test and version a result ran', () => {
   it('shows the version a result ran, in place of the re-run pill', async () => {
     setupList([TEST_SAME])
