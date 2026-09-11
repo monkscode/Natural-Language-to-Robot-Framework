@@ -458,7 +458,7 @@ def test_deleting_a_folder_does_not_audit_a_run_from_a_different_org(reg):
     delete_group's docstring. get_run_owner anchors g.org_id = t.org_id and
     list_runs filters t.org_id = %s, so every caller whose row filter binds
     a concrete org is excluded -- but a validated PLATFORM ADMIN calls
-    list_runs with org_id None (api/history_scope.py:90-92), which is
+    list_runs with org_id None (the admin branch of history_scope()), which is
     exactly that filter, so GET /api/history?group=<this folder> does list
     the foreign run. The org term on the audit rests on the naming argument
     in delete_group's docstring instead: an audit of a destructive action
@@ -532,12 +532,13 @@ def test_deleting_a_folder_does_not_audit_a_foreign_run_filed_directly(reg):
     """F9b: the org guard covers the DIRECT-COLUMN arm too, not only the
     test branch. record_start's rerun path can produce this exact shape --
     a foreign-org run whose OWN test_runs.group_id names this folder --
-    without ever going through assign_runs: _fileable_group_id (:718-764)
-    validates an inherited group_id against the caller's PRE-D6 org at
-    :920-921, _attach_test's D6 rule (:791-796, rerun branch :821-833) then
-    reassigns the row's FINAL org_id to the shared test's own org, and the
-    INSERT (:970-988) writes the pre-D6-checked group_id beside the
-    post-D6 org_id with nothing re-validating the pair. Seeded directly by
+    without ever going through assign_runs: _fileable_group_id validates an
+    inherited group_id against the caller's PRE-D6 org, called from
+    record_start before its call to _attach_test; _attach_test's D6 rule
+    (rerun_of branch) then reassigns the row's FINAL org_id to the shared
+    test's own org, and record_start's own INSERT/UPSERT writes the
+    pre-D6-checked group_id beside the post-D6 org_id with nothing
+    re-validating the pair. Seeded directly by
     SQL here -- driving it through record_start needs a second org's own
     test/run graph built first -- but the shape itself is real, reachable
     on the rerun path just named, not hypothetical."""

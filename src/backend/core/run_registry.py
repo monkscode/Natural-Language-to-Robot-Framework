@@ -1984,7 +1984,7 @@ class RunRegistry:
         for every caller whose row filter binds a concrete org. But a
         validated PLATFORM ADMIN calls list_runs with `user_id=None,
         org_id=None, folder_org_id=<their own org>`
-        (api/history_scope.py:90-92, deliberately, so their History
+        (the admin branch of history_scope(), deliberately, so their History
         spans every org while their folders stay their own) — org_id
         is exactly the row filter that excludes the foreign run for
         everyone else, and it is the one argument that caller does
@@ -3812,7 +3812,7 @@ class RunRegistry:
                 # roll the transaction back, discard the RUNS repair too, and
                 # return 0 — while run_migration_once writes the
                 # data_org_id_backfill marker unconditionally after migrate()
-                # returns (migration_state.py:89-95), so the backfill would
+                # returns, so the backfill would
                 # never run again. The tests repair is allowed to fail; taking
                 # the runs repair with it, permanently, is not.
                 n_tests = 0

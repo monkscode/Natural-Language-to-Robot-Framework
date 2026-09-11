@@ -630,8 +630,8 @@ def test_a_failed_tests_backfill_does_not_discard_the_runs_backfill(reg):
     SAVEPOINT a failure in the second would roll the FIRST one back as well —
     and that loss is permanent: backfill_org_ids swallows and returns 0,
     migrate() returns normally, and run_migration_once then writes the
-    data_org_id_backfill marker unconditionally (migration_state.py:89-95), so
-    the backfill never runs again. The tests repair may fail; it may not take
+    data_org_id_backfill marker unconditionally, so the backfill never runs
+    again. The tests repair may fail; it may not take
     the runs repair with it."""
     from contextlib import contextmanager
 
