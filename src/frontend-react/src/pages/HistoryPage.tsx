@@ -173,7 +173,6 @@ function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
   )
 }
 
-
 /** "Platform admin" — what a result made with platform-admin authority names
  *  as its author, to every viewer who does not hold that authority. One
  *  definition: the table's author column and the drawer's header both use it. */
@@ -879,27 +878,29 @@ export default function HistoryPage() {
   // question about staleness rather than about fetching — visibleCorrections
   // above states the rule and why each half of it is required.
   //
-  // Errors are read but never rendered as their own text. A 403 here is
-  // EXPECTED and correct: GET /api/history/{run_id} above passes
-  // is_grouped=true (a colleague's run published into a shared folder opens
-  // in this drawer), while GET /api/feedback/{run_id} deliberately does not
-  // — publishing a test does not publish the corrections filed against it
+  // Errors are read but never rendered as their own text, and that stays the
+  // backstop rather than the mechanism. A 403 here is legitimate and always
+  // was: GET /api/history/{run_id} above passes is_grouped=true (a
+  // colleague's run published into a shared folder opens in this drawer),
+  // while GET /api/feedback/{run_id} deliberately does not — publishing a
+  // test does not publish the corrections filed against it
   // (get_run_corrections, endpoints.py). An error banner would put a red
   // box on every shared run in the org. An empty list degrades the same
   // way, silently: silence claims nothing either way.
-  // Only ask for a read the server has already said this caller may make.
-  // GET /api/feedback/{id} withholds is_grouped where the detail read above
-  // passes it, so a peer's published run is refused there by design — and
-  // this drawer used to discover that by BEING refused, once per open, which
-  // P1 turned from a rarity into the common case.
+  //
+  // What CHANGED is that the request is no longer offered when the server has
+  // already said it will refuse it. can_read_feedback is that answer,
+  // computed by run_detail with the same gate the feedback route applies —
+  // and only the server can compute it, since a platform admin and the
+  // token-less dev caller may both read a peer's corrections while the client
+  // knows it is neither. Until Task 11 this drawer discovered the refusal by
+  // RECEIVING it, once per open, which P1 turned from a rarity into the
+  // common case by letting peers see published siblings at all.
   //
   // Gated on `d` rather than on `selected`, so the flag always belongs to the
   // row on screen. That also makes the request wait for the detail read
-  // instead of racing it, which costs nothing: the panel below cannot render
-  // without `d` either.
-  //
-  // The silent-degrade path described below STAYS. This suppresses an offered
-  // request; it does not replace the server's refusal.
+  // instead of racing it, which costs nothing: the panel cannot render
+  // without `d` either (visibleCorrections).
   const feedbackPath = d?.can_read_feedback ? `/api/feedback/${d.run_id}` : null
   const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
   const corrections = visibleCorrections(d, feedbackLoading, feedbackError, feedback)

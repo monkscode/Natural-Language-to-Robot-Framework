@@ -8,7 +8,10 @@
  * HintDrawer.test.tsx already use for the same three hooks.
  *
  * What this pins: opening a run in the drawer fires
- * GET /api/feedback/{run_id}; a successful read renders the correction
+ * GET /api/feedback/{run_id} — but only when the detail read's
+ * can_read_feedback says the server will answer it, which Task 11 added
+ * because a peer's published run 403s there by design and the drawer used to
+ * find that out by being refused; a successful read renders the correction
  * text on screen, and — when `applied_to` differs from the open row — the
  * "filed against the original run" notice with its full, untruncated id;
  * a refused read renders no error text (the behaviour GeneratePage's
