@@ -190,18 +190,28 @@ def list_tests(
             raise HTTPException(status_code=400, detail="Invalid group id")
 
     scope = history_scope(user)
-    tests, total = get_run_registry().list_tests(
-        user_id=scope.user_id, org_id=scope.org_id,
-        limit=limit, offset=offset, q=q, group=group, health=health,
-        sort=sort,
+    # Everything that says WHICH tests, built once and handed to both reads
+    # below, so the tab counts can never be asked about a different list
+    # than the rows are.
+    which = {
+        "user_id": scope.user_id, "org_id": scope.org_id,
+        "q": q, "group": group,
         # The FOLDER scope is the caller's own org even when their TEST scope
         # is every org -- see history_scope.folder_org_id.
-        folder_org_id=scope.folder_org_id,
+        "folder_org_id": scope.folder_org_id,
         # Only a platform admin (or the token-less dev caller) may READ a
         # test no user owns, so only they may list one -- the same rule
         # list_history applies to runs.
-        include_unowned=scope.is_admin or scope.caller_user_id is None,
-    )
+        "include_unowned": scope.is_admin or scope.caller_user_id is None,
+    }
+    reg = get_run_registry()
+    tests, total = reg.list_tests(
+        limit=limit, offset=offset, health=health, sort=sort, **which)
+    # Every tab's number, not only the open one's (spec section 7.2): `total`
+    # answers for the active health filter alone. Per-viewer, as the rows
+    # are -- see count_tests_by_health for why each count equals the total
+    # that tab would list.
+    counts = reg.count_tests_by_health(**which)
     for t in tests:
         # The three terms PUT /api/tests/assignments enforces, and nothing
         # else -- see this module's own docstring for why this no longer
@@ -221,6 +231,7 @@ def list_tests(
     return {
         "tests": tests,
         "total": total,
+        "counts": counts,
         # Same vocabulary /api/history returns for the same caller -- "all"
         # means scope.user_id is None (a validated platform admin, an
         # org_admin viewing their whole org, or the token-less dev caller),

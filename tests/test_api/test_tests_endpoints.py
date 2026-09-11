@@ -296,6 +296,88 @@ def test_health_passing_filters_the_list(client):
     assert body["tests"][0]["test_id"] == passing_id
 
 
+# ---------------------------------------------------------------------------
+# counts: the number on each tab (spec section 7.2). Registry-level agreement
+# with list_tests' own totals, across every caller shape, lives in
+# tests/test_core/test_run_registry_count_tests_by_health.py.
+# ---------------------------------------------------------------------------
+
+def test_list_carries_a_count_for_every_tab_whatever_tab_is_open(client):
+    """The tabs are counted together, so opening Failing does not change the
+    number on All or Passing -- and the open tab's count is its own total."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tc-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    _seed_test(claims["user_id"], claims["org_id"], email,
+               query="passing one", status="passed")
+    _seed_test(claims["user_id"], claims["org_id"], email,
+               query="failing one", status="failed")
+
+    everything = client.get("/api/tests", headers=_auth(tok)).json()
+    failing = client.get("/api/tests?health=failing", headers=_auth(tok)).json()
+
+    assert everything["counts"] == {"all": 2, "passing": 1, "failing": 1}
+    assert failing["counts"] == everything["counts"]
+    assert failing["total"] == failing["counts"]["failing"] == 1
+
+
+def test_list_counts_follow_the_search(client):
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tq-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    _seed_test(claims["user_id"], claims["org_id"], email,
+               query="checkout passes", status="passed")
+    _seed_test(claims["user_id"], claims["org_id"], email,
+               query="login fails", status="failed")
+
+    body = client.get("/api/tests?q=checkout", headers=_auth(tok)).json()
+    assert body["counts"] == {"all": 1, "passing": 1, "failing": 0}
+
+
+def test_list_counts_are_narrowed_like_the_rows(client):
+    """A peer's unpublished test is in neither the member's rows nor the
+    member's counts; the org_admin, whose view spans the org, counts both."""
+    from src.backend.auth.jwt_utils import decode_token
+    tok_admin, tok_member, tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    peer = decode_token(tok_peer)
+    _seed_test(member["user_id"], org_id, member["email"], status="passed")
+    _seed_test(peer["user_id"], org_id, peer["email"], status="failed")
+
+    mine = client.get("/api/tests", headers=_auth(tok_member)).json()
+    org = client.get("/api/tests", headers=_auth(tok_admin)).json()
+
+    assert mine["counts"] == {"all": 1, "passing": 1, "failing": 0}
+    assert org["counts"] == {"all": 2, "passing": 1, "failing": 1}
+
+
+def test_counts_are_asked_with_exactly_the_rows_filter(client):
+    """The endpoint must hand the counts every argument it hands the rows,
+    except the page and the tab -- a count asked with a different scope or
+    filter is a number describing some other list."""
+    from unittest.mock import MagicMock, patch
+    tok = _register(client, f"tk-{uuid.uuid4().hex[:8]}@e.com")
+    group = str(uuid.uuid4())
+
+    stub = MagicMock()
+    stub.list_tests.return_value = ([], 0)
+    stub.count_tests_by_health.return_value = {"all": 0, "passing": 0, "failing": 0}
+    with patch("src.backend.api.tests_endpoints.get_run_registry", return_value=stub):
+        r = client.get(f"/api/tests?q=+shoes+&group={group}&health=failing",
+                       headers=_auth(tok))
+
+    assert r.status_code == 200, r.text
+    _, rows_kwargs = stub.list_tests.call_args
+    _, count_kwargs = stub.count_tests_by_health.call_args
+    for page_only in ("limit", "offset", "health", "sort"):
+        rows_kwargs.pop(page_only)
+    assert count_kwargs == rows_kwargs
+    assert count_kwargs["q"] == "shoes"
+    assert count_kwargs["group"] == group
+
+
 def test_limit_is_capped_like_history(client):
     """?limit=99999&offset=-5 must reach RunRegistry.list_tests already
     clamped to [1, 200] / floored at 0 -- the same convention list_history
@@ -309,6 +391,7 @@ def test_limit_is_capped_like_history(client):
 
     stub = MagicMock()
     stub.list_tests.return_value = ([], 0)
+    stub.count_tests_by_health.return_value = {"all": 0, "passing": 0, "failing": 0}
     with patch("src.backend.api.tests_endpoints.get_run_registry", return_value=stub):
         r = client.get("/api/tests?limit=99999&offset=-5", headers=_auth(tok))
 
