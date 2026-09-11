@@ -33,9 +33,7 @@ import { FeedbackPanel } from './GeneratePage'
 const THANKS = 'Thanks — your feedback helps the system learn.'
 const NO_RECORD =
   'We could not find the learning record this belongs to, so nothing was ' +
-  'learned from it. If the run only just finished, send it again in a ' +
-  'moment. Runs that skip learning, such as a Tests-page Run or pasted ' +
-  'code, never get a record, so sending again will not help for those.'
+  'learned from it. Please send it again in a moment.'
 const PAUSED =
   'Learning is paused right now, so this correction was not recorded. ' +
   'Please send it again later.'

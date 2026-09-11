@@ -366,17 +366,9 @@ _FEEDBACK_OUTCOME_MESSAGES = {
         "Nothing was learned because no description was given, though this "
         "submission was sent to be recorded against the run."
     ),
-    # Two populations share this outcome: a record still in flight, where a
-    # retry helps, and a run that skipped learning and never gets one, where it
-    # cannot (see _get_with_retry in feedback_loop.py). The route cannot tell
-    # them apart — a Tests-page Run's test_runs.user_query holds the test's
-    # description via history_query, just like a generated run's — so the
-    # sentence has to be true for both.
     "no_record": (
         "We could not find the learning record this belongs to, so nothing "
-        "was learned from it. If the run only just finished, send it again in "
-        "a moment. Runs that skip learning, such as a Tests-page Run or pasted "
-        "code, never get a record, so sending again will not help for those."
+        "was learned from it. Please send it again in a moment."
     ),
     "learning_paused": (
         "Learning is paused right now, so this correction was not recorded. "

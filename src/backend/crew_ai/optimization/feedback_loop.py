@@ -91,11 +91,9 @@ def _get_with_retry(
     can reach the feedback panel from the SPA: GeneratePage renders it only
     when its own typed generation filled generatedQuery, and every other SPA
     call to /api/feedback is a GET — so a direct API caller is the only party
-    that lands here.  The no_record message the API returns is written for that
-    caller: it names the runs that skip learning rather than promising that a
-    retry will help.  A surface that grows a feedback control on a result it
-    did not itself generate should gate that control the way GeneratePage
-    does, not rely on the sentence.
+    that lands here.  A surface that grows a feedback control on a result it
+    did not itself generate makes that false, and the "Please send it again in
+    a moment" this returns has to be rewritten before it does.
 
     Neither LLM pipeline runs on the writer thread (fire_usage_attribution and
     fire_conflict_detection both call the model on their caller's thread), so a
