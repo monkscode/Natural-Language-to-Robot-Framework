@@ -1171,6 +1171,63 @@ describe('TestsPage — the Update dialog’s first run', () => {
   })
 })
 
+describe('TestsPage — Update from the drawer', () => {
+  it('is offered on the same term the row is', async () => {
+    setup()
+    renderPage()
+
+    const drawer = await openDrawer()
+    expect(await within(drawer).findByRole('button', { name: 'Update' })).toBeInTheDocument()
+
+    fireEvent.keyDown(drawer, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // can_move false on this row, and GET /api/tests/{id} answers no
+    // can_move of its own — so the control is withheld rather than offered
+    // and refused.
+    const other = await openDrawer('log in and open orders')
+    await within(other).findByRole('list', { name: 'Results, newest first' })
+    expect(within(other).queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+  })
+
+  it('opens over the drawer, on the test the drawer is showing', async () => {
+    setup()
+    renderPage()
+
+    const drawer = await openDrawer()
+    fireEvent.click(await within(drawer).findByRole('button', { name: 'Update' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Update test' })
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    // The drawer is still there behind it, timeline and all: the dialog
+    // is the confirm step for the test being read, not a replacement for
+    // reading it. Measured: Radix marks the layer underneath
+    // aria-hidden while the dialog is over it, which is why this looks
+    // at the element rather than asking for its role.
+    expect(drawer).toBeInTheDocument()
+    expect(drawer.getAttribute('aria-hidden')).toBe('true')
+    expect(within(drawer).queryAllByTitle('Copy run id')).toHaveLength(4)
+  })
+
+  it('leaves the open drawer to re-read once a version lands', async () => {
+    setup()
+    updateStream({ testId: 't-pass', n: 3, runId: 'wf-1' })
+    renderPage()
+
+    const drawer = await openDrawer()
+    fireEvent.click(await within(drawer).findByRole('button', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Update test' })
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    const before = detailCalls().filter(p => p.includes('limit=50')).length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    await waitFor(() => expect(
+      detailCalls().filter(p => p.includes('limit=50')).length,
+    ).toBeGreaterThan(before))
+  })
+})
+
 describe('TestsPage — the folder chips', () => {
   it('count tests, not runs', async () => {
     // The shared state carries both: 11 results and 2 tests are in no

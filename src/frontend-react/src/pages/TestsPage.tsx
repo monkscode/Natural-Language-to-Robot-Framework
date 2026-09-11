@@ -891,10 +891,11 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
  * `refreshTick` is the page's own list refresh. Without it a run that ends
  * while the drawer is open leaves the timeline saying "Running" under a row
  * that already says Passed. */
-function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
+function TestDrawer({ testId, row, refreshTick, onUpdate, onClose }: Readonly<{
   testId: string | null
   row: TestRow | null
   refreshTick: number
+  onUpdate: (testId: string, label: string) => void
   onClose: () => void
 }>) {
   const [detail, setDetail] = useState<TestDetail | null>(null)
@@ -977,6 +978,19 @@ function TestDrawer({ testId, row, refreshTick, onClose }: Readonly<{
               </Badge>
               {version != null && (
                 <span className="text-xs text-muted-foreground">Current version {version}</span>
+              )}
+              {/* Gated on the ROW, because GET /api/tests/{test_id} answers
+                  no can_move and the dialog's write asks the same question
+                  Move does. A drawer whose row has left the list therefore
+                  offers nothing here rather than offering a refusal. */}
+              {row?.can_move && (
+                <Button
+                  variant="outline" size="sm" className="ml-auto h-7 gap-1.5 text-xs"
+                  title="Update — regenerate this test from its description"
+                  onClick={() => onUpdate(testId, label)}
+                >
+                  <Zap className="h-3.5 w-3.5" /> Update
+                </Button>
               )}
             </div>
             <SheetTitle className="text-base leading-snug">{label}</SheetTitle>
@@ -1366,6 +1380,7 @@ export default function TestsPage() {
         testId={selected}
         row={selectedRow}
         refreshTick={refreshTick}
+        onUpdate={(testId, label) => setUpdating({ testId, label })}
         onClose={() => setSelected(null)}
       />
 
