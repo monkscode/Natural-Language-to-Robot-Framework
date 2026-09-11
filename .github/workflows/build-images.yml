@@ -94,8 +94,12 @@ jobs:
           --health-retries 10
 
     steps:
+      # No credentials in .git/config: the suite below runs code this pull
+      # request authored, and no step here needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -136,8 +140,11 @@ jobs:
       packages: write
 
     steps:
+      # No credentials in .git/config: no step below needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -211,8 +218,11 @@ jobs:
       packages: write
 
     steps:
+      # No credentials in .git/config: no step below needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -337,8 +347,11 @@ jobs:
       packages: write
 
     steps:
+      # No credentials in .git/config: no step below needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -403,8 +416,11 @@ jobs:
       packages: write
 
     steps:
+      # No credentials in .git/config: no step below needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -470,8 +486,11 @@ jobs:
       packages: write
 
     steps:
+      # No credentials in .git/config: no step below needs git authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

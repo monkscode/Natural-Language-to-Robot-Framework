@@ -532,3 +532,44 @@ def test_the_sonar_workflow_rewrites_lcov_paths_to_repo_root():
     assert "exit 1" in runs, (
         "the lcov rewrite is not verified in CI; a partial rewrite would pass "
         "silently and produce a wrong coverage number rather than a failure")
+
+
+# ---------------------------------------------------------------------------
+# Token hygiene across EVERY workflow, not just the jobs named above.
+#
+# actions/checkout writes GITHUB_TOKEN into .git/config unless told not to, and
+# every later step in the job can read it off disk - including a pytest or npm
+# run of code the pull request authored. The frontend gate above was the first
+# job to switch it off; this holds every workflow to the same rule, so a new
+# job cannot quietly bring the token back.
+# ---------------------------------------------------------------------------
+
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+
+
+def _workflow_jobs() -> list[tuple[str, dict, str, dict]]:
+    """(file name, parsed workflow, job name, job) for every job in every workflow."""
+    import yaml
+    jobs = []
+    for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in (doc.get("jobs") or {}).items():
+            jobs.append((path.name, doc, job_name, job))
+    return jobs
+
+
+def _checkout_steps(job: dict) -> list[dict]:
+    return [s for s in job.get("steps") or []
+            if str(s.get("uses", "")).startswith("actions/checkout")]
+
+
+def test_no_workflow_checkout_persists_the_token():
+    checkouts = [(wf, job_name, step) for wf, _, job_name, job in _workflow_jobs()
+                 for step in _checkout_steps(job)]
+    # An empty list would pass the assertion below for the wrong reason.
+    assert checkouts, "found no actions/checkout step in .github/workflows - the scan is broken"
+    persisting = [f"{wf}:{job_name}" for wf, job_name, step in checkouts
+                  if (step.get("with") or {}).get("persist-credentials") is not False]
+    assert not persisting, (
+        f"these jobs check out with credential persistence on, leaving "
+        f"GITHUB_TOKEN in .git/config for every later step to read: {persisting}")
