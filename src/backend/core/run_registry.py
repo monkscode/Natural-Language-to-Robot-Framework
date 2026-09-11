@@ -654,6 +654,21 @@ _VISIBLE_RUN_SQL = (
 # now shows an author column and an unowned row renders blank and unopenable.
 _OWNED_RUN_SQL = "t.user_id IS NOT NULL"
 
+# The version a RESULT ran, for the two caller-scoped reads over
+# test_runs. test_runs.test_version_id references test_versions.version_id,
+# which is that table's PRIMARY KEY, so this matches at most one row and
+# cannot fan a run out into several. It carries NO placeholder, which is
+# what lets it be appended after _group_join without disturbing the strict
+# positional binding those params depend on.
+#
+# NULL is ordinary and permanent rather than a gap to be repaired: a
+# regeneration that fails attaches its run to the test with no version at
+# all (owner decision D8(b), spec case 10), and a run with no test has no
+# version by construction.
+_VERSION_JOIN = (
+    " LEFT JOIN test_versions tv ON tv.version_id = t.test_version_id"
+)
+
 # The same sentence as _VISIBLE_RUN_SQL — you see it if you own it, or the org
 # published it into a folder — over `tests` instead of `test_runs`.
 #
@@ -3590,9 +3605,13 @@ class RunRegistry:
                     f"SELECT t.run_id, t.user_id, t.user_email, t.org_id, "
                     f"       t.user_query, "
                     f"       t.rerun_of, t.status, t.created_at, t.updated_at, "
+                    f"       t.test_id, t.ran_as_platform_admin, "
+                    f"       te.name AS test_name, "
+                    f"       te.user_query AS test_query, "
+                    f"       tv.n AS test_version_n, "
                     f"       g.group_id, g.name AS group_name "
                     f"FROM test_runs t "
-                    f"{join}"
+                    f"{join}{_VERSION_JOIN}"
                     f"{where} "
                     f"ORDER BY t.created_at DESC, t.run_id LIMIT %s OFFSET %s",
                     params + [limit, offset],
@@ -3884,9 +3903,13 @@ class RunRegistry:
                     "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     "       t.robot_code, t.rerun_of, t.status, t.org_id, "
                     "       t.created_at, t.updated_at, "
+                    "       t.test_id, t.ran_as_platform_admin, "
+                    "       te.name AS test_name, "
+                    "       te.user_query AS test_query, "
+                    "       tv.n AS test_version_n, "
                     "       g.group_id, g.name AS group_name "
                     "FROM test_runs t "
-                    f"{join} "
+                    f"{join}{_VERSION_JOIN} "
                     "WHERE t.run_id = %s",
                     params + [run_id],
                 ).fetchone()

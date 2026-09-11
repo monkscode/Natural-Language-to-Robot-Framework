@@ -13,6 +13,12 @@ GET /api/history/{run_id} is the detail view (drawer): the same row plus the
 run's stored Robot code via resolve_robot_code(). Unknown ids and other
 users' runs both 404 so run existence cannot be probed by id.
 
+Both responses also name the TEST a result belongs to and the version it
+ran (test_id / test_name / test_query / test_version_n, spec 7.5), and
+carry ran_as_platform_admin so the author column can honour D7 — a run
+made with platform-admin authority names the role rather than a person to
+every caller who does not hold that authority (_hide_admin_author).
+
 Both responses carry rerun_of_accessible beside rerun_of: whether THIS caller
 could open the original this row was cloned from, which is a live question —
 un-filing the original un-publishes it. Both are computed by _can_open, the
@@ -67,6 +73,35 @@ def _can_open(scope: HistoryScope, user: dict | None, run: dict) -> bool:
         is_platform_admin=scope.is_admin,
         is_grouped=run.get("group_id") is not None,
     )
+
+
+def _hide_admin_author(run: dict, scope: HistoryScope) -> None:
+    """D7: withhold the AUTHOR'S ADDRESS on a run made with platform-admin
+    authority, from every caller who does not hold that authority themselves.
+
+    The flag itself stays on the row, so the client can say "Platform admin"
+    rather than render an unattributed dash: the org is told who ran it in the
+    only sense that concerns them, without being handed a named individual.
+
+    Done here rather than as a rendering rule in the SPA, for two reasons that
+    are about this codebase rather than about taste. The row's author cell is
+    a "filter the list by this user" BUTTON, so an address that reaches the
+    client reaches the search box with it; and `user_id` is already dropped
+    from these same two payloads on the same principle. The stored COLUMN is
+    untouched — D7's "the email stays stored, so audit and platform-admin
+    views lose nothing" is about `test_runs`, not about this response.
+
+    The token-less dev caller keeps the address, because
+    is_validated_admin(None) is False and without the caller_user_id term the
+    one caller ownership.py rule 1 exempts from every other check would be the
+    only one reading History blind. It is the same disjunction list_history
+    already applies to include_unowned, for the same reason.
+    """
+    if not run.get("ran_as_platform_admin"):
+        return
+    if scope.is_admin or scope.caller_user_id is None:
+        return
+    run["user_email"] = None
 
 
 def _reachable_originals(
@@ -181,6 +216,7 @@ def list_history(
             or r.get("user_id") == scope.caller_user_id        # own run
             or (scope.is_org_admin and r.get("org_id") == scope.folder_org_id)
         )
+        _hide_admin_author(r, scope)
         # org_id was selected only to answer can_move.
         r.pop("org_id", None)
         if not scope.is_admin:
@@ -246,6 +282,7 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
         or run.get("user_id") == scope.caller_user_id
         or (scope.is_org_admin and run.get("org_id") == scope.folder_org_id)
     )
+    _hide_admin_author(run, scope)
     # org_id is internal — the _can_open access gate above and can_move are
     # its only readers; it is not part of the response.
     run.pop("org_id", None)
