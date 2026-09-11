@@ -130,7 +130,17 @@ export function MoveToGroupMenu({
       </DropdownMenu>
 
       <Dialog open={creating} onOpenChange={o => { if (!o) { setCreating(false); setBusy(false) } }}>
-        <DialogContent className="sm:max-w-sm" onCloseAutoFocus={returnFocusToTrigger}>
+        <DialogContent
+          className="sm:max-w-sm"
+          onCloseAutoFocus={returnFocusToTrigger}
+          // The same guard, and for the same reason, as the menu above: this
+          // dialog is portalled to <body> too, but it is a SIBLING in the
+          // React tree, so a click inside it bubbles to whatever wraps this
+          // menu. Measured without it: Cancel, Create & move and the close
+          // button each reached the History row's onClick and opened that
+          // run's drawer behind the dialog the user was dismissing.
+          onClick={e => e.stopPropagation()}
+        >
           <DialogHeader>
             <DialogTitle>New group</DialogTitle>
             <DialogDescription>
