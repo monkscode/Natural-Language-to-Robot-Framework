@@ -680,25 +680,9 @@ _CURRENT_VERSION_SQL = (
     ") cv ON TRUE "
 )
 
-# The current version's last COMPLETED result -- the raw status `health` is
-# derived from (section 6.1, ruling R1). LIMIT 1 makes it at most one row.
-# 'running' and 'generated' are excluded deliberately: case 18 says a stuck
-# in-flight result must never read a passing test as failing, and a version
-# that exists but has completed nothing reads "not run" (case 11).
-# It correlates on cv.version_id, so _CURRENT_VERSION_SQL must appear BEFORE
-# it in the FROM clause. Binds no parameter of its own, same as above.
-_HEALTH_SQL = (
-    "LEFT JOIN LATERAL ("
-    "  SELECT r.status FROM test_runs r"
-    "  WHERE r.test_id = te.test_id AND r.test_version_id = cv.version_id"
-    "    AND r.status IN ('passed', 'failed', 'error')"
-    "  ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"
-    ") hlt ON TRUE "
-)
-
-
 def _health_value(status: Optional[str]) -> str:
-    """The public health word for one raw status off _HEALTH_SQL.
+    """The public health word for one raw status off
+    _caller_results_lateral's health_status.
 
     'passed' -> "passing"; 'failed' and 'error' -> "failing"; None (the
     lateral matched nothing, so the current version has no completed result
@@ -2144,6 +2128,165 @@ class RunRegistry:
             [org_id],
         )
 
+    @staticmethod
+    def _visible_run_clauses(
+        user_id: Optional[str],
+        org_id: Optional[str],
+        include_unowned: bool,
+    ) -> Tuple[list, list]:
+        """list_runs' run-visibility stack as (clauses, params), over alias
+        `t` -- _VISIBLE_RUN_SQL / _OWNED_RUN_SQL and the row's org term, in
+        that order.
+
+        One definition, because three reads now ask the same question about
+        the same rows: the test drawer's results page and its count
+        (get_test_detail), and the per-row aggregate the Tests page shows
+        (_caller_results_lateral). A second copy written by hand is a second
+        answer, and the one place these must never disagree is exactly here
+        -- a row that advertises a result the drawer will not list is the
+        defect this stack exists to prevent.
+
+        The caller supplies its own subject term (`t.test_id = %s` for the
+        drawer, `t.test_id = te.test_id` for the lateral) and puts it FIRST,
+        so its parameter binds ahead of these -- psycopg binds %s strictly by
+        position."""
+        clauses: list = []
+        params: list = []
+        if user_id is not None:
+            clauses.append(_VISIBLE_RUN_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append(_OWNED_RUN_SQL)
+        if org_id is not None:
+            clauses.append("t.org_id = %s")
+            params.append(org_id)
+        return clauses, params
+
+    @staticmethod
+    def _group_join_for_test_results(
+        org_id: Optional[str], *, identified: bool = False
+    ) -> Tuple[str, list]:
+        """_group_join's three forms WITHOUT its `tests` hop, for a lateral
+        that already has the test in scope as the outer `te`.
+
+        Not a shortcut. Reusing _group_join inside such a lateral would be a
+        SILENT wrong answer: its hop is
+        `LEFT JOIN tests te ON te.test_id = t.test_id`, and inside a
+        correlated subquery that alias shadows the outer one -- so the
+        lateral's own `t.test_id = te.test_id` correlation would compare a
+        row to itself, match every result of every test, and still return a
+        number that looks entirely plausible.
+
+        The folder expression is _group_join's own,
+        COALESCE(te.group_id, t.group_id), read off the OUTER te -- the same
+        row the hop would have found, because every result the lateral scans
+        is a result of that test. The COALESCE stays for the reason
+        _group_join gives: a test may be unfiled while one of its results
+        carries a folder of its own, which the migration and delete_group's
+        docstring both name.
+
+        The alias stays `g` so _VISIBLE_RUN_SQL can be used character for
+        character. Inside the lateral it therefore means the RESULT'S folder
+        and shadows the outer `g`, which means the TEST'S; nothing inside the
+        lateral reads the outer one, and if anything ever needs to, it must
+        be renamed rather than assumed."""
+        folder = "COALESCE(te.group_id, t.group_id)"
+        if org_id is None:
+            if identified:
+                return "LEFT JOIN run_groups g ON FALSE", []
+            return f"LEFT JOIN run_groups g ON g.group_id = {folder}", []
+        return (
+            f"LEFT JOIN run_groups g ON g.group_id = {folder}"
+            " AND g.org_id = %s",
+            [org_id],
+        )
+
+    def _caller_results_lateral(
+        self,
+        user_id: Optional[str],
+        org_id: Optional[str],
+        folder_org_id: Optional[str],
+        include_unowned: bool,
+    ) -> Tuple[str, list]:
+        """ONE lateral over the outer test's results THIS CALLER MAY OPEN,
+        carrying every run-derived number a Tests row shows. Aliased `whole`.
+
+        Why narrowed at all: the row's numbers and the drawer's list are two
+        descriptions of one set, and un-narrowed the row described a bigger
+        one. A member's UNPUBLISHED test re-run by their org_admin gave the
+        member result_count=2, last_status='failed', a last_run_id the server
+        answers 404 for, and a failing health dot -- beside a drawer listing
+        the single result they own. Reachable in ordinary signed-in use, not
+        only by the token-less dev caller.
+
+        "Whole-test" keeps its meaning on the axis it was about: every
+        VERSION's results, not just the current one (ruling R2). The axis
+        that narrows is the CALLER one, which was never what R2 widened.
+
+        Both scopes come off ONE scan, which is what makes this cheaper than
+        the three joins it replaces rather than merely more correct:
+
+        - result_count, pass_count and last_* aggregate every row the scan
+          returns -- ARRAY_AGG(... ORDER BY created_at DESC)[1] picks the
+          newest row's column without a second pass;
+        - health_status, running and spark add a FILTER on cv.version_id, so
+          the current-version scope (ruling R1) is a filtered aggregate over
+          the same rows instead of two more laterals. cv must therefore
+          appear BEFORE this in the FROM clause, or its version_id is not
+          in scope to filter on.
+
+        health_status is the newest COMPLETED result of the current version.
+        'running' and 'generated' are excluded from it deliberately: case 18
+        says a stuck in-flight result must never read a passing test as
+        failing, and a version that exists but has completed nothing reads
+        "not run" (case 11). `running` is a bool_or over the
+        whole current version rather than a property of the newest row, which
+        is case 25: two results of one test may be in flight at once. It is
+        COALESCEd because bool_or over no rows is NULL, and the field's
+        contract is a boolean.
+
+        spark_statuses is EVERY completed result of the current version,
+        oldest first; the caller keeps the last ten. Aggregating them all
+        and trimming in Python is not a regression on the bounded inner
+        LIMIT 10 it replaced: at FIVE times the results per test this
+        shape pulls further ahead, not closer (list_tests' own numbers,
+        9.1x at 50 results against 2.3x at 10), because the bound cost a
+        whole extra scan and sort of the same rows to apply.
+
+        Binds the folder join's parameter first, then the visibility
+        clauses'. Every one of them sits inside the FROM clause of the
+        statement that embeds this, so they bind AFTER that statement's own
+        join params and BEFORE its WHERE params -- list_tests and
+        get_test_detail both order their params that way and say so."""
+        join, params = self._group_join_for_test_results(
+            folder_org_id or org_id, identified=user_id is not None)
+        extra, extra_params = self._visible_run_clauses(
+            user_id, org_id, include_unowned)
+        clauses = ["t.test_id = te.test_id"] + extra
+        newest = "ORDER BY t.created_at DESC, t.run_id DESC"
+        # The current version's completed results, as one FILTER reused by
+        # health and spark alike so the two can never disagree about which
+        # rows count.
+        current = ("FILTER (WHERE t.test_version_id = cv.version_id"
+                   " AND t.status IN ('passed', 'failed', 'error'))")
+        return (
+            "LEFT JOIN LATERAL ("
+            " SELECT COUNT(*) AS result_count,"
+            " COUNT(*) FILTER (WHERE t.status = 'passed') AS pass_count,"
+            f" (ARRAY_AGG(t.run_id {newest}))[1] AS last_run_id,"
+            f" (ARRAY_AGG(t.status {newest}))[1] AS last_status,"
+            f" (ARRAY_AGG(t.created_at {newest}))[1] AS last_run_at,"
+            f" (ARRAY_AGG(t.status {newest}) {current})[1] AS health_status,"
+            " COALESCE(bool_or(t.test_version_id = cv.version_id"
+            " AND t.status = 'running'), FALSE) AS running,"
+            " ARRAY_AGG(t.status ORDER BY t.created_at ASC, t.run_id ASC)"
+            f" {current} AS spark_statuses"
+            f" FROM test_runs t {join}"
+            f" WHERE {' AND '.join(clauses)}"
+            ") whole ON TRUE ",
+            params + extra_params,
+        )
+
     def count_ungrouped_tests(
         self,
         user_id: Optional[str] = None,
@@ -2212,17 +2355,26 @@ class RunRegistry:
         Literal and give this method real values to switch on without
         another signature change.
 
-        Two DIFFERENT scopes live in one row, and getting them crossed is
+        THREE scopes live in one row, and getting any two of them crossed is
         the defect this split exists to remove:
 
+        - every run-derived value is scoped to the results THIS CALLER MAY
+          OPEN -- list_runs' own predicate stack, applied once in
+          _caller_results_lateral. It is not a filter layered on top of the
+          numbers; it is the set the numbers are computed over, which is why
+          the row and the drawer can no longer describe different sets. See
+          that method for the shape this fixes and what it costs.
         - version_count, result_count, pass_count, last_status, last_run_at,
-          last_run_id are WHOLE-TEST -- every version, every result ever
-          recorded against this test_id. "This has run 312 times" is a fact
+          last_run_id are WHOLE-TEST -- every version, every result of this
+          test_id the caller may open. "This has run 312 times" is a fact
           about the test (section 6.1), and last_* is deliberately the
           newest row of ANY version (ruling R2): a re-run of an OLDER
           version fired after a newer one exists is still the test's most
           recent activity, even while health (below) reports the newer
-          version's own last outcome.
+          version's own last outcome. version_count is the exception that
+          proves the rule -- it counts test_versions, which are the TEST'S
+          and belong to no caller, so the narrowing does not touch it. Nor
+          does it touch can_run, which reads the version's own code.
         - health, running and spark are scoped to the CURRENT version alone
           (ruling R1 / section 6.1): resolved through test_versions.n =
           tests.current_version, never through current_version's ordinal
@@ -2243,7 +2395,7 @@ class RunRegistry:
         a different mechanism reaching the same health value). 'running' is
         excluded per case 18 so a stuck in-flight result can never read a
         passing test as failing; case 25 (two results running at once) is
-        why `running` is an EXISTS over the whole current version rather
+        why `running` is a bool_or over the whole current version rather
         than a property of whichever row happens to be newest.
 
         spark is the current version's last 10 completed results, oldest
@@ -2261,30 +2413,67 @@ class RunRegistry:
         fallback, because that fallback is a RUN concept and this is asking
         about a VERSION that may never have been executed at all.
 
+        TWO THINGS THE NARROWING MOVED that a reader will otherwise take for
+        a bug:
+
+        - the page's ORDER is per-viewer. ORDER BY reads the narrowed
+          last_run_at, so two people can see the same tests in a different
+          order, and a test whose only results are invisible to this caller
+          sorts to the bottom on NULLS LAST instead of by a date they cannot
+          see. Ordering a page by rows it does not show is the alternative,
+          and it is worse.
+        - the health tab TOTALS are per-viewer, exactly as History's counts
+          already are, because the filter reads the same narrowed health.
+          The COUNT applies the identical predicate to the identical
+          lateral, so the tab's number and its page can never disagree.
+
         Performance: one query for the rows and one for the total; no
-        per-test lookups from Python. The whole-test aggregate (result_count,
-        pass_count, last_*) is one LATERAL keyed on test_id, which idx_test_runs_test_time
-        serves directly. The version-scoped reads (health, running, spark)
-        additionally filter on test_version_id; they repeat the test_id
-        predicate alongside it -- redundant given every row's test_id agrees
-        with its own test_version_id's test_id by construction of
-        _attach_test, but that redundancy is what lets these still use
-        idx_test_runs_test_time's leading column rather than an unindexed
-        test_version_id scan. Whether a dedicated (test_id, test_version_id,
-        created_at) index is worth adding is a measurement this method does
-        not make (spec section 6.1 leaves it unmeasured); nothing here adds
-        one on a guess.
+        per-test lookups from Python. Every run-derived value comes off ONE
+        lateral keyed on test_id, which idx_test_runs_test_time serves
+        directly; the version-scoped three are filtered aggregates over that
+        same scan rather than joins of their own.
+
+        Measured end to end through this method -- the pre-change registry
+        loaded out of git as a second module and pointed at the SAME
+        throwaway schema, median of 7 after two warm-ups, whole request
+        including the COUNT:
+
+            3,000 tests x 10 results   All 104.7 ms -> 46.2 ms  (2.3x)
+                                   Failing 110.0 ms -> 82.5 ms  (1.3x)
+            1,000 tests x 50 results   All 480.6 ms -> 52.7 ms  (9.1x)
+                                   Failing 494.8 ms -> 90.8 ms  (5.5x)
+
+        Faster on both tabs at both shapes while answering a stricter
+        question, and it pulls further ahead as results per test grow --
+        which is the direction real data moves. The three joins it replaced
+        each re-scanned the same rows, and the deepest of them re-sorted
+        every result of the test to take an inner LIMIT 10.
+
+        The All tab's saving is structural rather than incidental: with no
+        health filter nothing references the lateral's output and the
+        planner elides it outright. Verified with EXPLAIN ANALYZE on the
+        COUNT statement this method actually builds -- the All plan does not
+        scan test_runs at all, while the Failing plan does. That is why the
+        SQL text stays identical on every tab instead of being assembled
+        differently per caller: the conditional is the planner's to make,
+        and making it here would put a second shape of this query into
+        circulation for nothing.
+
+        Whether a dedicated (test_id, test_version_id, created_at) index
+        would help is a measurement this method still does not make (spec
+        section 6.1 leaves it unmeasured); nothing here adds one on a guess,
+        and the FILTER form no longer keys on test_version_id at all.
 
         Do not fan out: every join below is provably at-most-one-row per
         test, each for a different reason -- cv is a UNIQUE (test_id, n)
-        lookup; whole and spk are aggregates with no GROUP BY, which always
-        collapse to one row; hlt and spk's own inner subquery take LIMIT 1
-        and LIMIT 10 respectively. Two independent one-to-many joins off
-        `tests` -- the trap list_groups' own docstring names for
-        run_count/test_count -- would multiply version_count and
-        result_count together; nothing here joins test_versions or
-        test_runs directly against `te` more than once without one of
-        those three collapsing it back to one row first.
+        lookup; `whole` is an aggregate with no GROUP BY, which always
+        collapses to one row; version_count is a scalar subquery. Two
+        independent one-to-many joins off `tests` -- the trap list_groups'
+        own docstring names for run_count/test_count -- would multiply
+        version_count and result_count together; collapsing every
+        run-derived value into ONE lateral removes that risk rather than
+        managing it, which is the second reason this shape is preferable to
+        the three joins it replaced.
 
         Swallows storage errors and returns ([], 0), matching list_runs:
         this is a page read, not a mutation, and must never break like one."""
@@ -2312,29 +2501,39 @@ class RunRegistry:
             clauses.append("te.user_query ILIKE %s")
             params.append(like)
         if health == "passing":
-            clauses.append("hlt.status = 'passed'")
+            clauses.append("whole.health_status = 'passed'")
         elif health == "failing":
-            clauses.append("hlt.status IN ('failed', 'error')")
+            clauses.append("whole.health_status IN ('failed', 'error')")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        # Join params FIRST: _group_join_for_tests' placeholder sits earlier
-        # in the SQL text than the WHERE clause's, and psycopg binds %s
-        # strictly by position (_group_join's docstring states the general
-        # rule this follows). The lateral joins below bind NOTHING of their
-        # own -- cv/hlt/whole/spk correlate on te.test_id/cv.version_id or
-        # match literal strings, so they add no parameter to reorder.
-        params = join_params + params
+        # Every run-derived number on a row comes from ONE lateral over the
+        # results this caller may open -- see _caller_results_lateral for
+        # what that fixes and why both scopes fit in one scan.
+        lateral, lateral_params = self._caller_results_lateral(
+            user_id, org_id, folder_org_id, include_unowned)
+        # THREE groups of parameters, in the order their placeholders appear
+        # in the SQL text, because psycopg binds %s strictly by position
+        # (_group_join's docstring states the general rule): the folder join
+        # on `tests`, then the lateral's own folder join and visibility
+        # clauses, then the WHERE. _CURRENT_VERSION_SQL sits between the
+        # first two and binds nothing of its own.
+        params = join_params + lateral_params + params
 
-        # cv resolves the current version's row once; hlt, spk and the inline
-        # `running` EXISTS all read cv.version_id/cv.robot_code rather than
-        # re-deriving it. Both joins live at module level so get_test_detail
-        # reads health off the same two -- see their own comments there.
-        # hlt is used by BOTH statements below: the total COUNT needs it when
-        # health is filtered, and the row SELECT needs it to render "health".
+        # cv resolves the current version's row once and the lateral reads
+        # cv.version_id off it, so cv must stay AHEAD of the lateral in the
+        # FROM clause. cv lives at module level because get_test_detail has
+        # to resolve the same version the same way.
+        # The lateral is used by BOTH statements below: the total COUNT needs
+        # it when health is filtered, and the row SELECT needs every column
+        # it returns. With no health filter nothing references its output
+        # and the planner elides it outright -- verified with EXPLAIN
+        # ANALYZE on this very statement: the All-tab plan does not scan
+        # test_runs at all. That is why the SQL text stays identical on
+        # every tab rather than being assembled per caller.
         try:
             with self._pool.connection() as conn:
                 total = conn.execute(
                     f"SELECT COUNT(*) AS n FROM tests te {join} "
-                    f"{_CURRENT_VERSION_SQL}{_HEALTH_SQL}{where}",
+                    f"{_CURRENT_VERSION_SQL}{lateral}{where}",
                     params,
                 ).fetchone()["n"]
                 rows = conn.execute(
@@ -2346,59 +2545,22 @@ class RunRegistry:
                     "          WHERE v2.test_id = te.test_id) AS version_count, "
                     "       whole.result_count, whole.pass_count, "
                     "       whole.last_status, whole.last_run_at, "
-                    "       whole.last_run_id, "
-                    "       hlt.status AS health_status, "
-                    "       EXISTS (SELECT 1 FROM test_runs r3 "
-                    "               WHERE r3.test_id = te.test_id "
-                    "                 AND r3.test_version_id = cv.version_id "
-                    "                 AND r3.status = 'running') AS running, "
-                    "       spk.statuses AS spark_statuses, "
+                    "       whole.last_run_id, whole.health_status, "
+                    "       whole.running, whole.spark_statuses, "
                     "       cv.robot_code AS current_robot_code "
                     f"FROM tests te {join} "
                     f"{_CURRENT_VERSION_SQL}"
-                    f"{_HEALTH_SQL}"
-                    # Whole-test aggregate: one pass over every result this
-                    # test has ever had, whatever version it names. Each
-                    # ARRAY_AGG(... ORDER BY ...)[1] picks that column off
-                    # the newest row (index 1 after a DESC sort) without a
-                    # second scan -- this is result_count/pass_count/last_*,
-                    # never version-scoped.
-                    "LEFT JOIN LATERAL ("
-                    "  SELECT COUNT(*) AS result_count, "
-                    "         COUNT(*) FILTER (WHERE r.status = 'passed')"
-                    "           AS pass_count, "
-                    "         (ARRAY_AGG(r.run_id"
-                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
-                    "         )[1] AS last_run_id, "
-                    "         (ARRAY_AGG(r.status"
-                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
-                    "         )[1] AS last_status, "
-                    "         (ARRAY_AGG(r.created_at"
-                    "            ORDER BY r.created_at DESC, r.run_id DESC)"
-                    "         )[1] AS last_run_at "
-                    "  FROM test_runs r WHERE r.test_id = te.test_id"
-                    ") whole ON TRUE "
-                    # The current version's last 10 completed results,
-                    # oldest first: an inner bounded top-10 (indexed,
-                    # LIMIT-ed) re-ordered by the outer aggregate so the
-                    # array reads chronologically for the sparkline.
-                    "LEFT JOIN LATERAL ("
-                    "  SELECT ARRAY_AGG(status ORDER BY created_at ASC,"
-                    "                   run_id ASC) AS statuses"
-                    "  FROM ("
-                    "    SELECT r.status, r.created_at, r.run_id"
-                    "    FROM test_runs r"
-                    "    WHERE r.test_id = te.test_id"
-                    "      AND r.test_version_id = cv.version_id"
-                    "      AND r.status IN ('passed', 'failed', 'error')"
-                    "    ORDER BY r.created_at DESC, r.run_id DESC LIMIT 10"
-                    "  ) recent"
-                    ") spk ON TRUE "
+                    f"{lateral}"
                     f"{where} "
                     # Case 27: last result time descending, test_id as
-                    # tiebreaker. NULLS LAST is defensive -- every test is
-                    # created together with the run that minted it, so
-                    # last_run_at should never actually be NULL.
+                    # tiebreaker. NULLS LAST stopped being decoration when
+                    # the lateral narrowed: a test whose only results belong
+                    # to someone else now genuinely has no last_run_at for
+                    # this caller, and belongs at the bottom rather than
+                    # sorted by a date they cannot see. The order is
+                    # therefore per-viewer, which is a visible change and a
+                    # deliberate one -- the alternative is ordering a page by
+                    # rows it does not show.
                     "ORDER BY whole.last_run_at DESC NULLS LAST, te.test_id "
                     "LIMIT %s OFFSET %s",
                     params + [limit, offset],
@@ -2406,7 +2568,14 @@ class RunRegistry:
             out = []
             for r in rows:
                 r = dict(r)
-                spark_statuses = r["spark_statuses"] or []
+                # The last TEN completed results of the current
+                # version, oldest first. The lateral aggregates every
+                # one of them off the same scan it already makes, so
+                # the bound is applied here rather than by a second,
+                # inner LIMIT-ed query -- which is measurably the
+                # cheaper of the two, not merely the tidier: see the
+                # spark note in _caller_results_lateral.
+                spark_statuses = (r["spark_statuses"] or [])[-10:]
                 out.append({
                     "test_id": r["test_id"],
                     "name": r["name"],
@@ -2596,10 +2765,11 @@ class RunRegistry:
           predicate above, so "whole-test" never means "rows this caller
           may not see". `results_total` counts the whole test rather than
           the page, within that same predicate.
-        - `health` is scoped to the CURRENT version alone, off the same two
-          module-level joins list_tests uses (_CURRENT_VERSION_SQL and
-          _HEALTH_SQL) mapped by the same _health_value, so the drawer's
-          header and the row it was opened from cannot disagree.
+        - `health` is scoped to the CURRENT version alone, off the same
+          _CURRENT_VERSION_SQL and the same _caller_results_lateral the
+          Tests row uses, mapped by the same _health_value -- so the
+          drawer's header and the row it was opened from cannot disagree,
+          about the version OR about which results count.
 
         `versions` are newest first (n DESC) and are NOT paged -- spec case
         28 pages the drawer over RESULTS only. `results` are newest first
@@ -2628,20 +2798,21 @@ class RunRegistry:
         join, join_params = self._group_join_for_tests(
             folder_org_id or org_id, identified=user_id is not None)
         clauses = ["te.test_id = %s"]
-        params: list = [test_id]
+        clause_params: list = [test_id]
         if user_id is not None:
             clauses.append(_VISIBLE_TEST_SQL)
-            params.append(user_id)
+            clause_params.append(user_id)
         elif not include_unowned:
             clauses.append("te.user_id IS NOT NULL")
         if org_id is not None:
             clauses.append("te.org_id = %s")
-            params.append(org_id)
-        # Join params FIRST, for the reason list_tests states at length:
-        # _group_join_for_tests' placeholder sits earlier in the SQL text
-        # than any WHERE clause's, and psycopg binds %s strictly by
-        # position. The two laterals below bind nothing of their own.
-        params = join_params + params
+            clause_params.append(org_id)
+        # Three groups, ordered the way list_tests orders its own and
+        # for the same reason: _group_join_for_tests' placeholder sits
+        # earliest in the SQL text, then the health lateral's, then the
+        # WHERE clause's, and psycopg binds %s strictly by position.
+        # They are kept apart rather than folded into one list because
+        # the lateral built below has to bind BETWEEN them.
         # The RESULTS carry their own predicate, and it is the RUN one --
         # _group_join plus _VISIBLE_RUN_SQL/_OWNED_RUN_SQL, bound exactly as
         # list_runs binds them for the same caller. Passing the test gate
@@ -2665,18 +2836,21 @@ class RunRegistry:
         # are identical on every branch rather than varying with the caller.
         run_join, run_join_params = self._group_join(
             folder_org_id or org_id, identified=user_id is not None)
-        rclauses = ["t.test_id = %s"]
-        rparams: list = [test_id]
-        if user_id is not None:
-            rclauses.append(_VISIBLE_RUN_SQL)
-            rparams.append(user_id)
-        elif not include_unowned:
-            rclauses.append(_OWNED_RUN_SQL)
-        if org_id is not None:
-            rclauses.append("t.org_id = %s")
-            rparams.append(org_id)
-        rparams = run_join_params + rparams
+        rextra, rextra_params = self._visible_run_clauses(
+            user_id, org_id, include_unowned)
+        rclauses = ["t.test_id = %s"] + rextra
+        rparams = run_join_params + [test_id] + rextra_params
         rwhere = " AND ".join(rclauses)
+        # The SAME stack again, inside a lateral, so the drawer's
+        # health dot is computed over the results it actually lists.
+        # It was read off a lateral with no caller predicate at all -- so a
+        # drawer could show one passing result under a failing dot,
+        # and the Tests row beside it could disagree with both. The
+        # lateral cannot reuse run_join: see
+        # _group_join_for_test_results for the alias that silently
+        # breaks if it does.
+        lateral, lateral_params = self._caller_results_lateral(
+            user_id, org_id, folder_org_id, include_unowned)
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
@@ -2685,12 +2859,12 @@ class RunRegistry:
                     "       g.group_id, g.name AS group_name, "
                     "       te.current_version, te.created_at, "
                     "       te.updated_at, "
-                    "       hlt.status AS health_status "
+                    "       whole.health_status "
                     f"FROM tests te {join} "
                     f"{_CURRENT_VERSION_SQL}"
-                    f"{_HEALTH_SQL}"
+                    f"{lateral}"
                     f"WHERE {' AND '.join(clauses)}",
-                    params,
+                    join_params + lateral_params + clause_params,
                 ).fetchone()
                 if row is None:
                     return None
