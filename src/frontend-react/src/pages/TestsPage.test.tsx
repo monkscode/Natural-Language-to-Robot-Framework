@@ -83,12 +83,34 @@ const GROUPS = [
 const CODE_V2 = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    New Page    https://flipkart.com'
 const CODE_V1 = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    Go To    https://flipkart.com'
 
+/** The payload shape, written out rather than inferred from the fixture
+ *  below: every field the route can answer with null must be nullable here,
+ *  or a case that pins the null branch fails `tsc`, which is half the
+ *  frontend gate. */
+interface DetailPayload {
+  test: {
+    test_id: string; name: string | null; user_query: string | null
+    user_email: string | null; group_id: string | null; group_name: string | null
+    current_version: number | null; created_at: string; updated_at: string
+    health: string
+  }
+  versions: Array<{
+    n: number | null; user_query: string | null; robot_code: string | null
+    created_by_email: string | null; reason: string | null; created_at: string
+  }>
+  results: Array<{
+    run_id: string; status: string; n: number | null; created_at: string
+    has_report: boolean; failure_class: string | null; failure_locator: string | null
+  }>
+  results_total: number
+}
+
 /** GET /api/tests/{test_id} for t-pass, shaped as the route answers it (spec
  *  6.2): the test plus health, every version newest-first, ONE page of
  *  results, and results_total for the whole (caller-scoped) set. The results
  *  deliberately hold two of version 2, then a version-less row, then one of
  *  version 1 — one code change, and a result that names no version. */
-const DETAIL = {
+const DETAIL: DetailPayload = {
   test: {
     test_id: 't-pass', name: null, user_query: 'search flipkart for shoes',
     user_email: 'a@b.com', group_id: 'g-1', group_name: 'Checkout',
@@ -108,7 +130,7 @@ const DETAIL = {
   results_total: 4,
 }
 
-type Detail = typeof DETAIL
+type Detail = DetailPayload
 type Row = typeof PASSING | typeof FAILING | typeof CODELESS
 
 /** What GET /api/tests/{test_id} answers for a row other than t-pass: the
