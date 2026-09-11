@@ -116,6 +116,21 @@ class TestTheFourOutcomes:
         assert "helps the system learn" not in body["message"]
         assert "again" in body["message"].lower()
 
+    def test_no_record_does_not_promise_a_retry_that_cannot_work(self, client_and_loop):
+        """A retry only helps a record that is late, not one that will never
+        exist. Runs that skip learning never get one - a Tests-page Run
+        (_run_current_version passes no user_query and sets no rerun_of) and
+        pasted code - and a direct API caller can post for either, reading this
+        same sentence. So the sentence has to say that retrying does not help
+        there, rather than advising it unconditionally."""
+        client, loop = client_and_loop
+        loop.process_user_feedback.return_value = _triage(outcome="no_record")
+
+        message = _post(client).json()["message"].lower()
+
+        assert "never" in message, message
+        assert "tests-page run" in message, message
+
     def test_learning_paused_says_nothing_was_recorded(self, client_and_loop):
         """The honesty gap that matters: today the user is thanked while the
         open circuit breaker throws their text away."""
