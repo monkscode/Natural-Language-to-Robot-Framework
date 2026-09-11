@@ -985,7 +985,7 @@ export default function HistoryPage() {
     <div className="mx-auto max-w-6xl">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Test Runs</h1>
+          <h1 className="text-xl font-bold tracking-tight">Activity</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {subtitle}
           </p>

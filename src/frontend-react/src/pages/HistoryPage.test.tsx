@@ -380,6 +380,13 @@ describe('HistoryPage — the runs table', () => {
     expect(screen.getByText('2 of 2 runs')).toBeInTheDocument()
   })
 
+  it('names itself Activity, the title its sidebar entry and header carry', async () => {
+    setupList([RUN_A])
+    renderPage()
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument()
+  })
+
   it('shows the loading placeholder before the first page resolves', async () => {
     setupList([RUN_A])
     mockApi.mockImplementation(() => new Promise(() => {}))
