@@ -137,7 +137,6 @@ jobs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
       contents: read
-      packages: write
 
     steps:
       # No credentials in .git/config: no step below needs git authentication.
@@ -215,7 +214,6 @@ jobs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
       contents: read
-      packages: write
 
     steps:
       # No credentials in .git/config: no step below needs git authentication.
@@ -344,7 +342,6 @@ jobs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
       contents: read
-      packages: write
 
     steps:
       # No credentials in .git/config: no step below needs git authentication.
@@ -413,7 +410,6 @@ jobs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
       contents: read
-      packages: write
 
     steps:
       # No credentials in .git/config: no step below needs git authentication.
@@ -483,7 +479,6 @@ jobs:
       image_size: ${{ steps.image_size.outputs.image_size }}
     permissions:
       contents: read
-      packages: write
 
     steps:
       # No credentials in .git/config: no step below needs git authentication.

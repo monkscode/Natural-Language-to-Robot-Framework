@@ -592,3 +592,21 @@ def test_every_job_that_checks_out_code_declares_its_token_permissions():
     assert not undeclared, (
         f"these jobs check out and run repository code with no permissions "
         f"block, so their token scope is whatever the repo default is: {undeclared}")
+
+
+def test_no_job_is_granted_github_packages_access():
+    """`packages` scopes the token for GitHub Packages (ghcr.io). Every image
+    here goes to Docker Hub, authenticated with DOCKER_PASSWORD - REGISTRY has
+    been docker.io since build-images.yml was first written - so a `packages`
+    grant only widens what a job's token can do. If images ever move to
+    ghcr.io, grant it back on the jobs that push, and change this test.
+    """
+    granted = []
+    for wf, doc, job_name, job in _workflow_jobs():
+        # A job-level block replaces the workflow-level one; it does not merge.
+        perms = job["permissions"] if "permissions" in job else doc.get("permissions")
+        if perms == "write-all" or (isinstance(perms, dict) and "packages" in perms):
+            granted.append(f"{wf}:{job_name}")
+    assert not granted, (
+        f"these jobs grant the token GitHub Packages access that nothing in "
+        f"this repo publishes with: {granted}")
