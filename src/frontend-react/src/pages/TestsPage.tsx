@@ -675,10 +675,15 @@ type UpdateMode = 'update' | 'new_test'
 interface SavedVersion {
   mode: UpdateMode
   testId: string
+  /** What to call the test this version belongs to — the row's label for an
+   *  update, the submitted description for a test that did not exist yet. */
+  label: string
   n: number
   runId: string | null
   robotCode: string | null
   userQuery: string
+  /** Whether the reader asked for this version to be run straight away. */
+  run: boolean
 }
 
 /** The confirm step for a regeneration (spec 7.4). Not a navigation: the
@@ -698,6 +703,7 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
 }>) {
   const [detail, setDetail] = useState<TestDetail | null>(null)
   const [query, setQuery] = useState('')
+  const [runAfter, setRunAfter] = useState(true)
   const [busy, setBusy] = useState(false)
   const [stage, setStage] = useState('')
   const [error, setError] = useState('')
@@ -706,7 +712,7 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
   const testId = target?.testId ?? null
 
   useEffect(() => {
-    setDetail(null); setQuery(''); setBusy(false); setStage(''); setError(''); clearCopied()
+    setDetail(null); setQuery(''); setRunAfter(true); setBusy(false); setStage(''); setError(''); clearCopied()
     if (!testId) return
     let live = true
     // limit=1 is the route's own floor — it clamps limit to [1, 200] — and
@@ -741,8 +747,11 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
           if (ev.status === 'complete' && typeof ev.test_id === 'string' && typeof ev.n === 'number') {
             out.saved = {
               mode, testId: ev.test_id, n: ev.n,
+              // 'new_test' minted a test nobody has named yet; the
+              // description they submitted is what labelFrom would call it.
+              label: mode === 'new_test' ? query.trim() : (target?.label ?? ''),
               runId: typeof ev.run_id === 'string' ? ev.run_id : out.runId,
-              robotCode: out.code, userQuery: query,
+              robotCode: out.code, userQuery: query, run: runAfter,
             }
           } else {
             out.failed = true
@@ -823,6 +832,27 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
         </div>
 
         <DrawerCode version={current} copied={copied} onCopy={copy} />
+
+        {/* The first run of a version is the only one that records anything:
+            learning is written during EXECUTION and only when a user_query
+            comes with it, and the row's own Run sends {test_id}, which
+            _run_current_version deliberately executes with none. Unticking
+            this is a real choice — a version with no result at all is spec
+            case 11 — and it is the reason this is not done automatically. */}
+        <label className="flex items-start gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-primary"
+            checked={runAfter}
+            disabled={busy}
+            onChange={e => setRunAfter(e.target.checked)}
+          />
+          <span>
+            Run the new version once it is saved. Only this first run records what
+            the generation learned; running it later re-executes the stored code
+            and records nothing.
+          </span>
+        </label>
 
         {busy && <p className="text-xs text-muted-foreground" aria-live="polite">{stage}</p>}
         {error && <p className="text-xs text-destructive">{error}</p>}
@@ -1150,6 +1180,46 @@ export default function TestsPage() {
     }
   }, [reloadAll])
 
+  // The first run of a freshly written version, and the ONLY form of run
+  // that records learning: _process_learning_record is called from the
+  // execution stream and returns early on an empty user_query, while the
+  // row's Run sends {test_id}, which _run_current_version runs with none.
+  // Re-using the generation's own workflow_id reuses that run row rather
+  // than minting a second one, and record_start COALESCEs test_id and
+  // test_version_id, so the result stays attached to the version just
+  // written.
+  const runNewVersion = useCallback(async (saved: SavedVersion) => {
+    const id = saved.testId
+    const what = `Version ${saved.n} of “${saved.label}”`
+    setInFlight(prev => new Set(prev).add(id))
+    setRunError('')
+    let refreshed = false
+    try {
+      await streamSSE('/execute-test', {
+        robot_code: saved.robotCode,
+        workflow_id: saved.runId,
+        user_query: saved.userQuery,
+      }, ev => {
+        if (!refreshed && typeof ev.run_id === 'string') {
+          refreshed = true
+          void reloadAll()
+        }
+        if (ev.status === 'error') {
+          const which = typeof ev.run_id === 'string' ? ` (run ${ev.run_id})` : ''
+          // Two facts, kept apart: the version IS written whatever the run
+          // does, and saying otherwise would send someone regenerating a
+          // test that is already up to date.
+          setRunError(`${what} was saved. Running it failed${which}: ${ev.message || 'execution failed'}`)
+        }
+      })
+    } catch (e) {
+      setRunError(`${what} was saved, but the run could not start — ${e instanceof Error ? e.message : 'the request failed'}`)
+    } finally {
+      setInFlight(prev => { const next = new Set(prev); next.delete(id); return next })
+      void reloadAll()
+    }
+  }, [reloadAll])
+
   // Called once per Update stream that produced any event at all. A version
   // that landed closes the dialog; one that did not leaves it open with the
   // server's words in it, so a retry costs no retyping. Either way the list
@@ -1157,9 +1227,20 @@ export default function TestsPage() {
   // test (spec case 10) — and refreshLoaded bumps the tick the open drawer
   // re-reads on.
   const updateFinished = useCallback((saved: SavedVersion | null) => {
-    if (saved) setUpdating(null)
-    void reloadAll()
-  }, [reloadAll])
+    if (!saved) { void reloadAll(); return }
+    setUpdating(null)
+    // The terminal event names the test the version landed on, which for
+    // mode 'new_test' is a test that did not exist a moment ago. Opening it
+    // is the only landing that reliably shows it: list_tests orders on
+    // last_run_at DESC NULLS LAST, so a test with no result sorts LAST and
+    // a refresh alone can leave it off the loaded page entirely.
+    if (saved.mode === 'new_test') setSelected(saved.testId)
+    // No code means there is nothing to post — /execute-test is given the
+    // code itself, and the {test_id} form it would otherwise take is the
+    // re-run that records nothing.
+    if (saved.run && saved.robotCode && saved.runId) void runNewVersion(saved)
+    else void reloadAll()
+  }, [reloadAll, runNewVersion])
 
   const moveTests = useCallback(async (testIds: string[], groupId: string | null) => {
     setMoveError('')

@@ -1059,6 +1059,118 @@ describe('TestsPage — the Update dialog', () => {
   })
 })
 
+/** Answers the /versions stream with a generation that produced `code` and
+ *  then the terminal version event the route builds from its read-back;
+ *  every other stream (the follow-up run) gets one execution event. Records
+ *  [path, body] per call, in order. */
+function updateStream(opts: { testId: string; n: number; runId: string; code?: string | null }) {
+  const calls: Array<[string, unknown]> = []
+  mockStreamSSE.mockImplementation(async (path, body, onEvent) => {
+    calls.push([String(path), body])
+    if (String(path).endsWith('/versions')) {
+      if (opts.code !== null) {
+        onEvent({ status: 'complete', robot_code: opts.code ?? 'NEW CODE', workflow_id: opts.runId })
+      }
+      onEvent({ stage: 'version', status: 'complete', test_id: opts.testId, n: opts.n, run_id: opts.runId })
+      return
+    }
+    onEvent({ stage: 'execution', status: 'running', run_id: opts.runId })
+  })
+  return calls
+}
+const runAfter = (dialog: HTMLElement) =>
+  within(dialog).getByRole('checkbox', { name: /Run the new version once it is saved/ })
+
+describe('TestsPage — the Update dialog’s first run', () => {
+  it('runs the new version through the one form that records learning', async () => {
+    setup()
+    const calls = updateStream({ testId: 't-pass', n: 3, runId: 'wf-1' })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    expect(runAfter(dialog)).toBeChecked()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(calls).toHaveLength(2))
+    // The generation's OWN workflow_id, so the run reuses that row rather
+    // than minting a second one, and a user_query, which is the whole of
+    // what makes this run teach anything. {test_id} — what the row's Run
+    // sends — would be a re-run and would record nothing.
+    expect(calls[1]).toEqual(['/execute-test', {
+      robot_code: 'NEW CODE', workflow_id: 'wf-1', user_query: 'search flipkart for shoes',
+    }])
+  })
+
+  it('runs nothing when the reader unticks it', async () => {
+    setup()
+    const calls = updateStream({ testId: 't-pass', n: 3, runId: 'wf-1' })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(runAfter(dialog))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(calls.map(c => c[0])).toEqual(['/api/tests/t-pass/versions'])
+  })
+
+  it('does not try to run a version whose code it never saw', async () => {
+    setup()
+    // The version landed, but this stream never carried the code — and
+    // /execute-test is given the code itself, not a version to look up.
+    const calls = updateStream({ testId: 't-pass', n: 3, runId: 'wf-1', code: null })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(calls.map(c => c[0])).toEqual(['/api/tests/t-pass/versions'])
+  })
+
+  it('opens the test the server named, not the one it was opened on', async () => {
+    setup()
+    // mode 'new_test' mints a different test, and the terminal event names
+    // THAT one. A test with no result sorts last (last_run_at DESC NULLS
+    // LAST), so a refresh alone can leave it off the loaded page entirely.
+    const calls = updateStream({ testId: 't-fail', n: 1, runId: 'wf-2' })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(runAfter(dialog))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save as a new test' }))
+
+    await waitFor(() => expect(detailCalls()).toContain('/api/tests/t-fail?limit=50&offset=0'))
+    expect(calls[0][1]).toEqual({ user_query: 'search flipkart for shoes', mode: 'new_test' })
+  })
+
+  it('says the version was saved even when running it fails', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (String(path).endsWith('/versions')) {
+        onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+        onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+        return
+      }
+      onEvent({ stage: 'execution', status: 'error', run_id: 'wf-1', message: 'runner unreachable' })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    // Two facts, and they are not the same fact: the version IS written.
+    expect(await screen.findByText(
+      'Version 3 of “search flipkart for shoes” was saved. Running it failed (run wf-1): runner unreachable',
+    )).toBeInTheDocument()
+  })
+})
+
 describe('TestsPage — the folder chips', () => {
   it('count tests, not runs', async () => {
     // The shared state carries both: 11 results and 2 tests are in no
