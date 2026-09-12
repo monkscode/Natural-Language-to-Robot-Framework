@@ -436,12 +436,22 @@ def create_test_version(
 
     **new_test** takes only visibility, and no identity at all -- the same
     rule POST /generate-test applies, so the token-less dev caller may use
-    it with AUTH_ENFORCED off. It is what the refused peer does instead:
+    it with AUTH_ENFORCED off. It is what a refused peer WOULD do instead:
     generation runs unchanged, so the new test is minted exactly as Generate
     mints one (their org, them as author, no folder, version 1 with no
     reason) and nothing links it to the source. Inheriting the source's
     folder was rejected: filing a test PUBLISHES it, which would hand a
     peer's private copy to the whole org.
+
+    NO UI REACHES IT YET, and the sentence above must not be read as
+    describing a path a user has. The SPA gates BOTH entry points to the
+    Update dialog -- the row control and the drawer's -- on can_move, and a
+    refused peer is exactly the caller whose can_move is false, so the peer
+    this mode was built for cannot open the dialog that would send it. Their
+    only path today is retyping the description into Generate. The gate is
+    deliberate and pinned by a live test, not an oversight; giving the peer
+    a fork control is new product surface and was deferred to P3 rather than
+    added at the end of this branch (docs/TODO.md).
 
     403, not 404, for a caller with no identity or no org on `update`: those
     refusals are about the CALLER and not about a test whose existence a 404
