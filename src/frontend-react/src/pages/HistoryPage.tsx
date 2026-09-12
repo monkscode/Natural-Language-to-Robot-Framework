@@ -111,14 +111,19 @@ interface FeedbackCorrectionsResponse {
 
 const PAGE = 100
 
-/* The dark variants are the SAME values TestsPage's RESULT_BADGE carries, and
-   that map's comment named this retrofit. Measured in Chromium before it: on
-   a body of rgb(2,8,23) the Failed badge still painted rgb(185,28,28) on
-   rgb(254,226,226) — the light pastel pill, legible but the one place the two
-   list pages visibly disagreed. Generated and Running are deliberately left
-   alone: variant="outline" and variant="secondary" resolve through the theme
-   already, and a dark: override on either would be a second answer to a
-   question the token has answered. */
+/* The three coloured badges' dark variants are the SAME values
+   TestsPage's RESULT_BADGE carries, and that map's comment named this
+   retrofit. Measured in Chromium before it: on a body of rgb(2,8,23)
+   the Failed badge still painted rgb(185,28,28) on rgb(254,226,226)
+   — the light pastel pill, legible but one of the two places the
+   list pages visibly disagreed. The Running dot below was the other.
+   Generated is deliberately left alone: variant="outline" resolves
+   through the theme already, and a dark: override on it would be a
+   second answer to a question the token has answered. Running's BADGE
+   is left alone for the same reason (variant="secondary") — but that
+   answers the CHROME only. The pulsing dot inside it is a raw
+   bg-blue-500 that no token speaks for, so it carries the dark variant
+   TestsPage's RunningBadge already pairs with the identical span. */
 const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
   passed: <Badge className="bg-green-100 text-green-700 border-green-200 hover:bg-green-100 dark:bg-green-950 dark:text-green-300 dark:border-green-900 dark:hover:bg-green-950 text-xs">Passed</Badge>,
   failed: <Badge className="bg-red-100 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-950 dark:text-red-300 dark:border-red-900 dark:hover:bg-red-950 text-xs">Failed</Badge>,
@@ -126,7 +131,7 @@ const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
   generated: <Badge variant="outline" className="text-xs">Generated</Badge>,
   running: (
     <Badge variant="secondary" className="gap-1.5 text-xs">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" />
       <span>Running</span>
     </Badge>
   ),

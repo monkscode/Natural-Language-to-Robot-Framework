@@ -716,14 +716,34 @@ describe('HistoryPage — the status badges in dark mode', () => {
     expect(badge.className).toMatch(/bg-(green|red|amber)-100/)
   })
 
-  it('leaves the two badges that already use theme tokens alone', async () => {
-    // Generated is variant="outline" and Running variant="secondary", both
-    // of which resolve through the theme. A dark: override on either would
-    // be a second source of truth for a colour the token already answers.
+  it('leaves the Generated badge’s theme token alone', async () => {
+    // Generated is variant="outline", which resolves through the theme.
+    // A dark: override on it would be a second source of truth for a
+    // colour the token already answers.
     setupList([{ ...RUN_A, status: 'generated' }])
     renderPage()
 
     expect((await screen.findByText('Generated')).className).not.toMatch(/dark:/)
+  })
+
+  it('gives the Running badge’s raw dot a dark variant, as TestsPage does', async () => {
+    // variant="secondary" carries the Badge CHROME through the theme,
+    // and it is left alone for the same reason Generated is. The pulsing
+    // dot INSIDE it is not chrome: bg-blue-500 is a raw palette value no
+    // token answers, and TestsPage's RunningBadge already pairs it with
+    // dark:bg-blue-400. This page's copy did not, so the two list pages
+    // disagreed on the one status colour they otherwise draw alike.
+    setupList([{ ...RUN_A, status: 'running' }])
+    renderPage()
+
+    const badge = (await screen.findByText('Running')).parentElement!
+    const dot = badge.querySelector('span.animate-pulse')!
+    // The light palette stays: this adds a dark variant, it does not
+    // swap one.
+    expect(dot.className).toContain('bg-blue-500')
+    expect(dot.className).toContain('dark:bg-blue-400')
+    // The chrome around it stays token-resolved.
+    expect(badge.className).not.toMatch(/dark:/)
   })
 })
 
