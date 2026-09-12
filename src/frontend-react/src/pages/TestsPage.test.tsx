@@ -97,6 +97,10 @@ interface DetailPayload {
   versions: Array<{
     n: number | null; user_query: string | null; robot_code: string | null
     created_by_email: string | null; reason: string | null; created_at: string
+    // Required, not optional: get_test_detail SELECTs it and assigns it on
+    // every version, so a fixture without it is a payload the route cannot
+    // produce -- which is the whole reason this local type exists.
+    creator_is_platform_admin: boolean
   }>
   results: Array<{
     run_id: string; status: string; n: number | null; created_at: string
@@ -118,8 +122,8 @@ const DETAIL: DetailPayload = {
     health: 'passing',
   },
   versions: [
-    { n: 2, user_query: 'search flipkart for shoes', robot_code: CODE_V2, created_by_email: 'b@b.com', reason: 'edited', created_at: hoursAgo(30) },
-    { n: 1, user_query: 'search flipkart', robot_code: CODE_V1, created_by_email: 'a@b.com', reason: null, created_at: hoursAgo(50) },
+    { n: 2, user_query: 'search flipkart for shoes', robot_code: CODE_V2, created_by_email: 'b@b.com', creator_is_platform_admin: false, reason: 'edited', created_at: hoursAgo(30) },
+    { n: 1, user_query: 'search flipkart', robot_code: CODE_V1, created_by_email: 'a@b.com', creator_is_platform_admin: false, reason: null, created_at: hoursAgo(50) },
   ],
   results: [
     { run_id: '11111111-1111-4111-8111-111111111111', status: 'passed', n: 2, created_at: hoursAgo(2), has_report: true, failure_class: null, failure_locator: null },
