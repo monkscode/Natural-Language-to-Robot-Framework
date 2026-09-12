@@ -433,6 +433,64 @@ describe('TestsPage — Run', () => {
 
     expect(await screen.findByText(/Couldn’t run “search flipkart for shoes” — This test has no runnable code/)).toBeInTheDocument()
   })
+
+  // The 409 above is deliberately NOT access loss, so it leaves the row in
+  // place — which is why it could never cover the two guards below. Both
+  // exist to stop a PHANTOM row: one the caller has lost access to, still
+  // carrying Run, Update and Move, every one of which can now only 404. The
+  // row survives refreshLoaded's merge on purpose (it keeps the Load-more
+  // tail alive), so dropping it takes an explicit id.
+  it('drops a row the server has stopped showing after a refused run', async () => {
+    setup()
+    // The colleague unfiled the test between the page load and the click:
+    // the run is refused 404, and the row is gone from the next list page.
+    let listed = [PASSING, FAILING]
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/tests/')) return DETAIL as never
+      return {
+        tests: listed, total: listed.length, scope: 'own',
+        counts: { all: listed.length, passing: 1, failing: 1 },
+      } as never
+    })
+    mockStreamSSE.mockRejectedValue(new ApiError(404, 'Test not found'))
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    listed = [FAILING]
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    // The banner is not the point — the row going away is.
+    expect(await screen.findByText(/Couldn’t run “search flipkart for shoes”/)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'search flipkart for shoes' })).toBeNull()
+    })
+    // The control, in the same test: the row the server still lists stays.
+    expect(screen.getByRole('button', { name: 'log in and open orders' })).toBeInTheDocument()
+  })
+
+  it('keeps a row the server still lists when the run merely errored', async () => {
+    // The known negative for the test above: a 503 is not access loss, so
+    // the row must survive even though the refreshed page happens not to
+    // carry it — that is what the Load-more tail is for.
+    setup()
+    let listed = [PASSING, FAILING]
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/tests/')) return DETAIL as never
+      return {
+        tests: listed, total: listed.length, scope: 'own',
+        counts: { all: listed.length, passing: 1, failing: 1 },
+      } as never
+    })
+    mockStreamSSE.mockRejectedValue(new ApiError(503, 'Docker is unavailable.'))
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    listed = [FAILING]
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    expect(await screen.findByText(/Couldn’t run “search flipkart for shoes”/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'search flipkart for shoes' })).toBeInTheDocument()
+  })
 })
 
 describe('TestsPage — opening a test', () => {
