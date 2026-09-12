@@ -243,6 +243,90 @@ def test_rows_carry_whether_the_caller_may_move_them(client, shared):
     assert next(r for r in rows if r["run_id"] == own)["can_move"] is True
 
 
+def _seed_coded_run(client, tok, query, **kw) -> str:
+    """_seed_run_for with robot_code, so the run MINTS A TEST.
+
+    The difference is the whole point of the two tests below: most folder
+    tests seed without robot_code, which leaves the run with no test at all
+    and exercises only the run rule. Filing is decided by the TEST now, so a
+    case about test authority has to have one."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+
+    claims = decode_token(tok)
+    rid = str(uuid.uuid4())
+    get_run_registry().record_start(
+        rid,
+        {"user_id": claims["user_id"], "email": claims["email"],
+         "org_id": claims["org_id"]},
+        query,
+        "generated",
+        robot_code="*** Test Cases ***\nT\n    Log    hi",
+        **kw,
+    )
+    return rid
+
+
+def test_a_peers_rerun_does_not_offer_a_move_the_server_refuses(client, shared):
+    """B re-ran A's test, so B owns a RESULT of it — and filing a run files
+    its TEST, which is A's. assign_runs refuses; the flag has to agree, or
+    the SPA draws the Move control on exactly the rows that 404."""
+    a_test = _seed_coded_run(client, shared["tok_a"], "A's real test")
+    b_rerun = _seed_coded_run(client, shared["tok_b"], "A's real test",
+                              rerun_of=a_test)
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [a_test], "group_id": shared["gid"]},
+        headers=_auth(shared["tok_a"]),
+    ).status_code == 200, "A could not publish their own test"
+
+    rows = client.get("/api/history", headers=_auth(shared["tok_b"])).json()["runs"]
+    row = next(r for r in rows if r["run_id"] == b_rerun)
+    assert row["can_move"] is False, (
+        "a peer's re-run of a colleague's test was offered a Move control")
+    detail = client.get(f"/api/history/{b_rerun}",
+                        headers=_auth(shared["tok_b"])).json()
+    assert detail["can_move"] is False, "the drawer disagreed with the list"
+
+    # The control, in the same run: B's OWN test is still B's to file.
+    b_own = _seed_coded_run(client, shared["tok_b"], "B's own test")
+    rows = client.get("/api/history", headers=_auth(shared["tok_b"])).json()["runs"]
+    assert next(r for r in rows if r["run_id"] == b_own)["can_move"] is True
+
+
+def test_an_author_cannot_move_a_peers_result_of_their_own_test(client, shared):
+    """The other direction, and the one a TEST-only rule gets wrong.
+
+    B (a plain member) wrote the test, so B may file the TEST — but A owns
+    THIS RESULT, and assign_runs' parent UPDATE still matches on the run's
+    owner, so the whole call rolls back on its rowcount check. Authority over
+    the test is necessary, not sufficient, and the flag has to say so."""
+    b_test = _seed_coded_run(client, shared["tok_b"], "B's published test")
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [b_test], "group_id": shared["gid"]},
+        headers=_auth(shared["tok_b"]),
+    ).status_code == 200, "B could not publish their own test"
+    a_rerun = _seed_coded_run(client, shared["tok_a"], "B's published test",
+                              rerun_of=b_test)
+
+    # The server's answer first, so the flag is measured against it and not
+    # against an expectation: B authors the test but owns no part of A's run.
+    assert client.put(
+        "/api/groups/assignments",
+        json={"run_ids": [a_rerun], "group_id": None},
+        headers=_auth(shared["tok_b"]),
+    ).status_code == 404, "the server let a non-owner file someone else's result"
+
+    rows = client.get("/api/history", headers=_auth(shared["tok_b"])).json()["runs"]
+    row = next(r for r in rows if r["run_id"] == a_rerun)
+    assert row["can_move"] is False, (
+        "the test's author was offered a Move on a result they do not own")
+    detail = client.get(f"/api/history/{a_rerun}",
+                        headers=_auth(shared["tok_b"])).json()
+    assert detail["can_move"] is False, "the drawer disagreed with the list"
+
+
 # ---------------------------------------------------------------------------
 # The published half is anchored to the CALLER'S org, not to the raw column
 # ---------------------------------------------------------------------------

@@ -38,7 +38,8 @@ ownership rows, so a user cannot open another user's log.html by URL.
 Referenced by: main.py (router registration), api/endpoints.py
 (resolve_robot_code for history reruns), frontend HistoryPage.
 Depends on: core/run_registry.py, api/history_scope.py (the shared run scope,
-shared with /api/groups), auth/jwt_utils.py, auth/ownership.py
+shared with /api/groups, and may_move_test -- the TEST authority half of
+can_move, shared with /api/tests), auth/jwt_utils.py, auth/ownership.py
 (caller_can_access), core/artifact_store.py (get_artifact_store).
 """
 
@@ -48,7 +49,9 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.backend.api.history_scope import HistoryScope, history_scope
+from src.backend.api.history_scope import (
+    HistoryScope, history_scope, may_move_test,
+)
 from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import RunOwnership, get_run_registry
@@ -108,6 +111,47 @@ def _hide_admin_author(run: dict, scope: HistoryScope) -> None:
     if scope.is_admin or scope.caller_user_id is None:
         return
     run["user_email"] = None
+
+
+def _can_move_run(run: dict, scope: HistoryScope) -> bool:
+    """May this caller file THIS run — the answer assign_runs will give.
+
+    The list and the drawer both call this so they cannot disagree, and it
+    mirrors assign_runs rather than restating a rule: that method refuses on
+    TWO independent conditions, so this is their conjunction.
+
+      * The TEST's authority (may_move_test). Filing a run files its test,
+        so owning a RESULT of a colleague's test is not authority over it —
+        a peer who re-ran a published test could otherwise re-publish, unfile
+        or relocate the author's test, and re-admit the org to /reports for
+        the author's own runs after the author took them private.
+      * The RUN's own authority, unchanged below. assign_runs' parent UPDATE
+        still matches on the run's owner and rolls the whole call back when
+        its rowcount comes up short, so the test's own AUTHOR is refused a
+        peer's result of it. Necessary and not sufficient, each way round.
+
+    A run with NO test (test_id NULL — decision D8, a run with no
+    robot_code) has no test authority to consult, and its owner files it on
+    the run rule exactly as before. The INNER JOIN in assign_runs' refusal
+    leaves that population alone for the same reason, so the two agree here
+    too.
+
+    Measured against assign_runs itself over 11 caller/run shapes: this
+    agrees on 10. The one divergence is pre-existing and not this rule's —
+    the token-less dev caller reads True on a run with no test while
+    groups_endpoints 403s them before the registry is reached. Recorded in
+    docs/TODO.md rather than closed here, because it is a behaviour change
+    to the AUTH_ENFORCED=false path and D1 is about test authority.
+    """
+    return (
+        scope.caller_user_id is None                       # dev, no token
+        or run.get("user_id") == scope.caller_user_id      # own run
+        or (scope.is_org_admin and run.get("org_id") == scope.folder_org_id)
+    ) and (
+        run.get("test_id") is None
+        or may_move_test(scope, run.get("test_org_id"),
+                         run.get("test_user_id"))
+    )
 
 
 def _original_owners(
@@ -281,14 +325,13 @@ def list_history(
         # moves it, and a platform admin's table spans orgs whose folders
         # they do not have. Without the flag the UI drew a Move control on
         # every row, and on those two kinds it could only ever answer 404.
-        r["can_move"] = (
-            scope.caller_user_id is None                       # dev, no token
-            or r.get("user_id") == scope.caller_user_id        # own run
-            or (scope.is_org_admin and r.get("org_id") == scope.folder_org_id)
-        )
+        r["can_move"] = _can_move_run(r, scope)
         _hide_admin_author(r, scope)
-        # org_id was selected only to answer can_move.
+        # org_id and the two test authority columns were selected only to
+        # answer can_move.
         r.pop("org_id", None)
+        r.pop("test_user_id", None)
+        r.pop("test_org_id", None)
         if not scope.is_admin:
             # The internal user id stays admin-only. The EMAIL does not: a
             # folder is shared, so a row a colleague wrote reaches this
@@ -357,15 +400,14 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     # being refused. scope.is_admin is the same is_validated_admin result the
     # feedback route computes for itself — reused, not looked up again.
     run["can_read_feedback"] = _can_read_feedback(run, scope, user, originals)
-    run["can_move"] = (
-        scope.caller_user_id is None
-        or run.get("user_id") == scope.caller_user_id
-        or (scope.is_org_admin and run.get("org_id") == scope.folder_org_id)
-    )
+    run["can_move"] = _can_move_run(run, scope)
     _hide_admin_author(run, scope)
     # org_id is internal — the _can_open access gate above and can_move are
-    # its only readers; it is not part of the response.
+    # its only readers; it is not part of the response. The two test
+    # authority columns are can_move's alone, and go the same way.
     run.pop("org_id", None)
+    run.pop("test_user_id", None)
+    run.pop("test_org_id", None)
     if not scope.is_admin:
         # The email stays — see the list endpoint for why.
         run.pop("user_id", None)

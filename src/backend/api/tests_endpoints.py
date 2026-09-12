@@ -14,7 +14,7 @@ moving the TEST, its results following by join -- and
 POST /api/tests/{test_id}/versions regenerates a test, appending version
 n+1 on success (section 6.3). Both reads and both writes resolve the test
 through the SAME predicate stack, and the two writes share the same three
-authority terms through _may_move_test.
+authority terms through may_move_test.
 
 GET /api/tests lists the caller's visible tests newest-result-first: their
 own tests plus every test their org has published into a folder (the same
@@ -33,7 +33,7 @@ the full rules behind each field.
 can_move on a list row reports the SAME three terms PUT
 /api/tests/assignments then enforces -- the caller has a concrete org, the
 TEST's org equals it, and the caller is an org_admin or the test's own
-author -- and since Task 7 they are one function, _may_move_test, because
+author -- and since Task 7 they are one function, may_move_test, because
 POST /api/tests/{test_id}/versions asks the same question. On a list row
 "may move" and "may update" are therefore one answer, which is what lets
 the Tests page offer both controls exactly where they will be honoured.
@@ -48,9 +48,14 @@ for the org-less caller PUT /api/tests/assignments answers 403 from
 _require_org_scope before the registry is reached, and RunRegistry.
 assign_tests refuses org_id=None on its own first statement in any case;
 for the platform admin the te.org_id term refuses each foreign-org test.
-list_history's own flag is left ALONE -- that gap is pre-existing and
-recorded, and widening this task to runs would break the surgical-diff
-constraint.
+
+list_history's flag is no longer simply left alone: it now asks may_move_test
+too, for a run that HAS a test, because filing a run files its test. It asks
+it ALONGSIDE the run's own authority rather than instead of it -- assign_runs
+refuses on either half independently -- so the two flags are deliberately not
+the same expression. See history_endpoints._can_move_run. What remains
+pre-existing and recorded there is the token-less dev caller, who still reads
+True on a run with no test while the route answers 403.
 
 Referenced by: main.py (router registration).
 Depends on: core/run_registry.py (RunRegistry.list_tests,
@@ -60,7 +65,9 @@ services/workflow_service.py (stream_generate_only -- the same generation
 POST /generate-test runs, told which test to append to),
 api/endpoints.py (SSE_MEDIA_TYPE -- imported rather than restated so every
 streaming route in this app declares one media type), api/history_scope.py
-(the shared caller scope, shared with /api/history and /api/groups),
+(the shared caller scope, shared with /api/history and /api/groups, and
+may_move_test -- which lives there rather than here because
+history_endpoints needs it and imports FROM this module would be a cycle),
 api/history_endpoints.py (_REPORT_STATUSES -- imported rather than restated
 so both detail routes answer "is there a log.html" identically),
 api/groups_endpoints.py (_require_identity / _require_org_scope /
@@ -83,7 +90,7 @@ from src.backend.api.groups_endpoints import (
     _require_identity, _require_org_scope, _valid_uuid,
 )
 from src.backend.api.history_endpoints import _REPORT_STATUSES
-from src.backend.api.history_scope import history_scope
+from src.backend.api.history_scope import history_scope, may_move_test
 from src.backend.auth.jwt_utils import require_user
 from src.backend.core.config import settings
 from src.backend.core.run_registry import get_run_registry
@@ -148,37 +155,6 @@ def _hide_platform_admin_author(row: dict, flag: str, scope) -> None:
     for field in ("user_email", "created_by_email"):
         if field in row:
             row[field] = None
-
-
-def _may_move_test(scope, test_org_id: str | None,
-                   test_user_id: str | None) -> bool:
-    """The three terms PUT /api/tests/assignments enforces, in one place.
-
-    The caller has a concrete org, the TEST's org equals it, and the caller
-    is an org_admin or the test's own author. Written once because two
-    surfaces now ask it -- can_move on every list row, and the update gate on
-    POST /api/tests/{test_id}/versions -- and two copies of an authorization
-    rule are two rules that can drift.
-
-    The folder_org_id term is load-bearing, not defensive. Without it a
-    caller with no org compares None to an ORG-LESS test's None and reads
-    True on a write the server refuses, which is the same "two NULLs must
-    not compare equal" trap _attach_test's authorship gate needs its own
-    `user_id is not None` for. It also excludes the token-less dev caller,
-    whose mutations are 403 by design (groups_endpoints' module docstring).
-
-    Truthiness, not `is not None`, so that "the caller has a concrete org" is
-    ONE test everywhere it is asked rather than three that merely agree
-    today: _require_org_scope refuses on `if not org_id` and history_scope
-    qualifies is_org_admin on bool(folder_org_id). No login path mints
-    org_id="" -- _token_payload reads it from `orgs[0]` or omits it entirely
-    -- so this closes a divergence in the claim above rather than a reachable
-    defect."""
-    return (
-        bool(scope.folder_org_id)
-        and test_org_id == scope.folder_org_id
-        and (scope.is_org_admin or test_user_id == scope.caller_user_id)
-    )
 
 
 @router.get("/tests")
@@ -250,11 +226,11 @@ def list_tests(
     for t in tests:
         # The three terms PUT /api/tests/assignments enforces, and nothing
         # else -- see this module's own docstring for why this no longer
-        # mirrors list_history's flag for runs, and _may_move_test for why
+        # mirrors list_history's flag for runs, and may_move_test for why
         # each term is there. Shared with the update gate below rather than
         # restated, so a Tests row can never offer a control one of the two
         # writes then refuses.
-        t["can_move"] = _may_move_test(scope, t.get("org_id"), t.get("user_id"))
+        t["can_move"] = may_move_test(scope, t.get("org_id"), t.get("user_id"))
         # org_id was selected only to answer can_move, same as list_history.
         t.pop("org_id", None)
         _hide_platform_admin_author(t, "author_is_platform_admin", scope)
@@ -444,7 +420,7 @@ def create_test_version(
     **update** rewrites the code every LATER run of this test executes, for
     everyone who can see it -- a larger power than moving the test, which
     decision D4 already withholds from a peer. So it takes the same three
-    terms `can_move` reports on each row above (_may_move_test), AND
+    terms `can_move` reports on each row above (may_move_test), AND
     visibility of the test. Both, not either: an org_admin passes the move
     terms for an AUTHOR-LESS test in their org, because assign_tests'
     org_admin branch never looks at the author -- while include_unowned
@@ -515,7 +491,7 @@ def create_test_version(
 
     target = reason = None
     if body.mode == "update":
-        if not _may_move_test(scope, head["org_id"], head["user_id"]):
+        if not may_move_test(scope, head["org_id"], head["user_id"]):
             raise HTTPException(404, "Test not found")
         target = head["test_id"]
         current = head["user_query"]

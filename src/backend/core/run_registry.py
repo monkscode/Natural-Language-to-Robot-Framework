@@ -3650,7 +3650,16 @@ class RunRegistry:
         include_unowned=False drops rows no user owns. Only a platform admin
         (and the token-less dev caller) may read those, so only they may list
         them — auth/ownership fails them closed for everyone else, and a list
-        that offers a row the drawer then refuses is a list that lies."""
+        that offers a row the drawer then refuses is a list that lies.
+
+        test_user_id / test_org_id are the TEST's authority columns, carried
+        on each row so history_endpoints can answer "may this caller file
+        this run" the way assign_runs decides it — off the test, not off the
+        run. They cost no join: _group_join already reaches `tests` for the
+        folder hop. They are INTERNAL, like org_id, and that endpoint pops
+        both before the response; nothing in the run shape the SPA types
+        describes them. Both are NULL for a run with no test (decision D8),
+        which is exactly how the endpoint tells the two rules apart."""
         join, join_params = self._group_join(
             folder_org_id or org_id, identified=user_id is not None)
         clauses: list = []
@@ -3714,6 +3723,8 @@ class RunRegistry:
                     f"       t.test_id, t.ran_as_platform_admin, "
                     f"       te.name AS test_name, "
                     f"       te.user_query AS test_query, "
+                    f"       te.user_id AS test_user_id, "
+                    f"       te.org_id AS test_org_id, "
                     f"       tv.n AS test_version_n, "
                     f"       g.group_id, g.name AS group_name "
                     f"FROM test_runs t "
@@ -4001,7 +4012,13 @@ class RunRegistry:
         The rerun path DOES pass a scope, and reads the authorization
         decision itself off the group_id this join returns: a re-run inherits
         its source's folder, and "is this run published to my org" is exactly
-        "did the folder resolve"."""
+        "did the folder resolve".
+
+        test_user_id / test_org_id ride along for the same reason they do on
+        list_runs — the drawer's can_move must agree with the list's, so both
+        read the TEST's authority from the same two columns. Internal:
+        history_endpoints pops them, and the other callers here read named
+        fields, never the whole row."""
         join, params = self._group_join(org_id, identified=identified)
         try:
             with self._pool.connection() as conn:
@@ -4012,6 +4029,8 @@ class RunRegistry:
                     "       t.test_id, t.ran_as_platform_admin, "
                     "       te.name AS test_name, "
                     "       te.user_query AS test_query, "
+                    "       te.user_id AS test_user_id, "
+                    "       te.org_id AS test_org_id, "
                     "       tv.n AS test_version_n, "
                     "       g.group_id, g.name AS group_name "
                     "FROM test_runs t "
