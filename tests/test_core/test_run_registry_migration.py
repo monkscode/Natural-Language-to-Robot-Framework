@@ -280,7 +280,11 @@ def test_migration_is_one_shot_and_a_later_null_row_cannot_re_arm_it(scratch):
     """THE defect this guard exists for. _SCHEMA_DDL re-runs on every
     RunRegistry() construction, and a generation failure writes a test_id NULL
     row at any time. Guarding on that column would re-collapse live data and
-    silently enact the go-forward dedup the design declined."""
+    silently enact the go-forward dedup the design declined.
+
+    This test does NOT hold the entry guard: its later row carries no code,
+    and the grouping query's `HAVING count(robot_code) > 0` drops that group
+    on its own. The test below is the one that holds it."""
     name, dsn, admin = scratch
     _bare_schema(admin, name)
     _seed(admin, name, [
@@ -300,6 +304,41 @@ def test_migration_is_one_shot_and_a_later_null_row_cannot_re_arm_it(scratch):
     assert admin.execute(f"SELECT count(*) FROM {name}.tests").fetchone()[0] == 1
     assert admin.execute(
         f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'later'").fetchone()[0] is None
+
+
+def test_a_later_coded_run_does_not_re_collapse_once_a_test_exists(scratch):
+    """The ENTRY guard itself: `IF EXISTS (SELECT 1 FROM tests) THEN RETURN`.
+
+    A coded run carrying no test needs no fabrication to reach. _attach_test
+    gives up after TWO key collisions and re-raises into record_start's outer
+    swallow, which rolls the attach back and then writes the run row with its
+    robot_code and test_id NULL. Without the entry guard every later
+    RunRegistry() construction — every process restart — mints a second test
+    out of that row and attaches the live run to it.
+    """
+    name, dsn, admin = scratch
+    _bare_schema(admin, name)
+    _seed(admin, name, [
+        {"run_id": "r1", "user_query": "q", "robot_code": "c",
+         "created_at": "2026-01-01T10:00:00Z"},
+    ])
+    _migrate(dsn)
+    minted = admin.execute(f"SELECT test_id FROM {name}.tests").fetchall()
+    assert len(minted) == 1, "premise: the first construction collapses"
+
+    # Exactly the row the collision path leaves behind: code, no test.
+    admin.execute(
+        f"INSERT INTO {name}.test_runs (run_id, user_id, user_query, robot_code,"
+        " status, org_id, created_at)"
+        " VALUES ('later','u1','q','code-2','generated','org-a', now())")
+    _migrate(dsn)   # a process restart, as _SCHEMA_DDL re-runs on every one
+
+    assert admin.execute(
+        f"SELECT test_id FROM {name}.tests").fetchall() == minted, (
+        "a restart re-collapsed a live row into a second test")
+    assert admin.execute(
+        f"SELECT test_id FROM {name}.test_runs WHERE run_id = 'later'"
+    ).fetchone()[0] is None, "the collapse adopted a run it must not touch"
 
 
 def test_the_scale_guard_aborts_rather_than_merging_an_uninspected_database(scratch):
