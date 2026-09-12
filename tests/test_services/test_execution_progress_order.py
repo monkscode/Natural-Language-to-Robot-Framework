@@ -134,3 +134,58 @@ class TestExecutionErrorsAreAlwaysReadable:
         assert errors, "no error event was emitted"
         assert key not in errors[-1]["message"]
         assert "[REDACTED]" in errors[-1]["message"]
+
+
+class TestRunIdRidesTheExecutionStream:
+    """Owner ruling R7-5: the SPA learns its new run's id from the stream.
+
+    /execute-test is an SSE stream with no response body for an id to come
+    back in, so both SPA clients read `run_id` off the first execution event
+    — TestsPage keys its in-flight refresh and its error copy on it. Nothing
+    on either side of the wire held that: the server could stop sending the
+    key with 60 tests green, and the client could switch to `ev.stage` with
+    65 green, so the two halves could drift to green independently. These are
+    the server half; the client half is in TestsPage.test.tsx.
+    """
+
+    def test_the_first_execution_event_carries_the_run_id(self, tmp_path):
+        """Not "an" event — the FIRST one. A client that has to wait for a
+        later event cannot show the run while it is still running, which is
+        the whole reason the key is on this event rather than the result."""
+        def fake_execute(run_id, test_filename):
+            return {"test_status": "passed", "logs": ""}
+
+        with patch.object(ws.runner_exec_client, "ensure_image", return_value=None), \
+             patch.object(ws.runner_exec_client, "execute", fake_execute), \
+             patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
+             patch.object(ws, "_process_learning_record", return_value=None):
+            store = ws.get_artifact_store()
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
+                captured = _drain(ws._stream_docker_execution(
+                    "run-abc", "*** Test Cases ***", None, lambda: None))
+
+        execution = [e for e in _events(captured) if e.get("stage") == "execution"]
+        assert execution, "no execution-stage event was emitted"
+        assert execution[0].get("run_id") == "run-abc", (
+            "the first execution event must name its run; the SPA has no "
+            f"other way to learn it — got {execution[0]}")
+
+    def test_the_file_save_error_carries_the_run_id_too(self, tmp_path):
+        """The one execution event that can arrive BEFORE the first one. A
+        client that never sees another event still has to learn which run
+        failed, so this branch carries the key for the same reason."""
+        def failing_open(*_a, **_kw):
+            raise OSError("disk full")
+
+        with patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
+             patch("builtins.open", failing_open):
+            store = ws.get_artifact_store()
+            with patch.object(type(store), "run_dir", return_value=tmp_path):
+                captured = _drain(ws._stream_docker_execution(
+                    "run-xyz", "*** Test Cases ***", None, lambda: None))
+
+        events = _events(captured)
+        assert events, "the save-failure branch emitted nothing at all"
+        assert events[0].get("run_id") == "run-xyz", events[0]

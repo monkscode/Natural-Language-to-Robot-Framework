@@ -468,6 +468,64 @@ describe('TestsPage — Run', () => {
     expect(screen.getByRole('button', { name: 'log in and open orders' })).toBeInTheDocument()
   })
 
+  // Owner ruling R7-5: the new run's id rides the FIRST execution event,
+  // because /execute-test is a stream with no response body to carry it.
+  // Both of these pin the KEY rather than the event: a client that refreshed
+  // on `ev.stage === 'execution'` instead passed every existing test, and the
+  // server could drop the key with its own suite green, so the two halves
+  // could drift to green independently. The server half is in
+  // tests/test_services/test_execution_progress_order.py.
+  it('refreshes on the first event that NAMES the run, not merely on a stage', async () => {
+    setup()
+    // The stream is held OPEN so the assertion lands while the run is still
+    // in flight. Counting reloads after it closes cannot tell the two rules
+    // apart: the finally block reloads either way, and a waitFor on the
+    // total passes on the transient value before the second one arrives.
+    let release: () => void = () => {}
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      // An execution-stage event with NO run_id: as far as this client can
+      // tell the row does not exist yet, so there is nothing to refresh for.
+      onEvent({ stage: 'execution', status: 'running', message: 'Preparing…' })
+      await new Promise<void>(resolve => { release = resolve })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    const before = listCalls().length
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    // In flight, and the event has been delivered — a client keying off
+    // ev.stage would already have reloaded by now.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Run search flipkart for shoes' })).toBeDisabled()
+    })
+    expect(listCalls().length).toBe(before)
+
+    release()
+    // ...and the finally block still reloads exactly once when it ends.
+    await waitFor(() => expect(listCalls().length).toBe(before + 1))
+  })
+
+  it('names the run in the failure banner from the event, not from a guess', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-42' })
+      onEvent({ stage: 'execution', status: 'error', run_id: 'run-42', message: 'boom' })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    const before = listCalls().length
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    expect(await screen.findByText(
+      'Run of “search flipkart for shoes” failed (run run-42): boom',
+    )).toBeInTheDocument()
+    // The id-bearing event refreshed the list WHILE the run was in flight —
+    // one more reload than the no-run_id case above.
+    await waitFor(() => expect(listCalls().length).toBe(before + 2))
+  })
+
   it('keeps a row the server still lists when the run merely errored', async () => {
     // The known negative for the test above: a 503 is not access loss, so
     // the row must survive even though the refreshed page happens not to
