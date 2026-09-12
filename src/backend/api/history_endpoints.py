@@ -10,8 +10,10 @@ GET /api/history lists test_runs rows newest-first:
   everything, mirroring require_user's permissive escape hatch.
 
 GET /api/history/{run_id} is the detail view (drawer): the same row plus the
-run's stored Robot code via resolve_robot_code(). Unknown ids and other
-users' runs both 404 so run existence cannot be probed by id.
+run's stored Robot code via resolve_robot_code(). It admits what the
+list admits, published runs included (D5), so a peer DOES open a
+colleague's filed run here. Everything this caller may not reach 404s,
+unknown ids included, so run existence cannot be probed by id.
 
 Both responses also name the TEST a result belongs to and the version it
 ran (test_id / test_name / test_query / test_version_n, spec 7.5), and
@@ -218,9 +220,12 @@ def _can_read_feedback(
     colleague's published run in the drawer; feedback deliberately does not,
     because filing a test into a folder publishes the test and never the
     corrections written against it. The drawer had no way to tell those two
-    answers apart — a platform admin and the token-less dev caller may both
-    read a peer's feedback, and the client knows it is neither — so it fired
-    the request on every peer row and collected a 403 each time.
+    answers apart — a platform admin, a same-org org_admin and the
+    token-less dev caller may all read a peer's feedback, and the client
+    knows it is none of them — so it fired the request on every peer
+    row and collected a 403 each time. The org_admin is the shape most
+    easily missed: with is_grouped withheld, caller_can_access' last org
+    rule still admits them on any OWNED row in their own org.
 
     An original that does not resolve is absent from `originals` and arrives
     here as two Nones, which caller_can_access refuses for everyone but a
@@ -358,9 +363,12 @@ def list_history(
 def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     """One run plus its stored Robot code — the History drawer's data source.
 
-    Same scoping as the list: owner or validated admin (or any caller when
-    AUTH_ENFORCED is off). Unattributed legacy rows are admin-only, matching
-    the /reports gate's fail-closed rule.
+    Same scoping as the list: the owner, an org_admin of the run's org,
+    any same-org caller on a run PUBLISHED into one of that org's
+    folders (D5, via _can_open's is_grouped), or a validated admin —
+    or any caller when AUTH_ENFORCED is off. Unattributed legacy rows
+    are admin-only, matching the /reports gate's fail-closed rule.
+    Everything else 404s, unknown ids included.
     """
     try:
         run_id = str(uuid.UUID(run_id))

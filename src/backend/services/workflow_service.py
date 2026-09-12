@@ -1040,10 +1040,15 @@ def _record_run(run_id: str, user: dict | None, user_query: str | None, status: 
     the guard sits here rather than relying on the registry's internal
     swallowing alone.
 
-    is_platform_admin becomes test_runs.ran_as_platform_admin (owner decision
-    D7), write-once on the row that CREATED it. Every call site in this
-    module passes the caller's is_validated_admin result here — computed once
-    per request, not once per call, by _compute_is_platform_admin below.
+    is_platform_admin becomes test_runs.ran_as_platform_admin (owner
+    decision D7), write-once on the row that CREATED it. Every call site
+    in this module passes an is_validated_admin result computed once per
+    REQUEST rather than once per call — but from two different places.
+    _compute_is_platform_admin below serves the generate paths
+    (stream_generate_only, stream_generate_and_run, and
+    stream_execute_only when nobody handed one in); the two re-run routes
+    pass history_scope()'s own flag straight through from
+    api/endpoints.py and never reach _compute_is_platform_admin at all.
 
     test_id/test_version_id/version_reason NAME the test this run belongs to,
     instead of letting the registry derive one (P2 Task 7). Only the
@@ -1613,11 +1618,14 @@ async def stream_execute_only(
             no owner term in that check, and there should not be: D5 lets any
             org member re-run a published test, and their re-run stays in the
             folder.
-        is_platform_admin: Pre-computed platform-admin flag. The rerun route
-            (_rerun_from_history in api/endpoints.py) already has this from
-            its own history_scope() call and passes it here instead of
-            paying for a second one. None on every other caller, which
-            computes it below via _compute_is_platform_admin instead.
+        is_platform_admin: Pre-computed platform-admin flag. Both
+            re-run routes in api/endpoints.py — _rerun_from_history
+            (History's "Run again") and _run_current_version (the Tests
+            page's Run) — already hold this from their own
+            history_scope() call and pass it here instead of paying for
+            a second one. Only the third caller, execute_test_only's
+            paste-and-execute path, leaves it None and pays for the
+            computation below.
         test_id/test_version_id: The test and the exact version being run,
             set only by POST /execute-test's test_id path (the Tests page's
             Run). The version is named rather than derived so a run that
@@ -1647,9 +1655,9 @@ async def stream_execute_only(
     run_id = None
     try:
         # Computed ONCE for this request — see _compute_is_platform_admin.
-        # The rerun route already has it from history_scope and passes it
-        # in above; every other caller leaves this None and pays for the
-        # computation here instead.
+        # Both re-run routes already have it from history_scope and pass
+        # it in above; only execute_test_only's paste-and-execute path
+        # leaves this None and pays for the computation here instead.
         if is_platform_admin is None:
             is_platform_admin = await _compute_is_platform_admin(user)
 

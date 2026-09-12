@@ -20,8 +20,12 @@ Detachment (owner requirement — bench data must never appear in History /
 metrics / pricing dashboards): after each run the runner captures evidence
 locally FIRST into bench/runs/<workflow_id>/ (metrics row, llm_traces rows,
 test_runs row, tests + test_versions rows, artifact dir copy), THEN deletes
-that run's rows from workflow_metrics, llm_traces, test_runs, tests and
-test_versions and removes the artifact run dir.
+that run's rows from workflow_metrics, llm_traces and test_runs and
+removes the artifact run dir. The run's TEST goes only if no test_runs
+row still points at it (detach_run's NOT EXISTS), and its versions go
+with it by cascade — so a bench-created test SURVIVES detachment for
+as long as a user's re-run holds it, because deleting it would cascade
+that user's run away too.
 Capture failure → nothing is deleted, a loud warning is printed. audit_log
 rows are deliberately kept (append-only audit trail). Assumes the local
 artifact store (dev stack) — S3 mode is out of scope for the bench.

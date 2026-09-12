@@ -421,10 +421,13 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
       >
         {row.last_run_at ? timeAgo(row.last_run_at) : 'Never'}
       </td>
-      {/* Every click in here stays here. The move menu's "New group" dialog
-          is portalled to <body>, but React events bubble the REACT tree, so
-          without this a click anywhere in that dialog opens this row's
-          drawer behind it. */}
+      {/* Every click in here stays here. The row's own onClick opens
+          the drawer, and Run, Update and the Move trigger are all
+          ordinary children of this cell, so one handler covers all
+          three. The move menu and its "New group" dialog are portalled
+          to <body> and do bubble the REACT tree, but each now carries
+          its own guard in MoveToGroupMenu, so this is no longer what
+          stops a click inside either one from reaching the row. */}
       <td className="py-3 px-2" onClick={e => e.stopPropagation()}>
         <div className="flex justify-end gap-1">
           {row.can_run ? (

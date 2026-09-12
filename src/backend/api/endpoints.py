@@ -76,8 +76,10 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     which is root-flattened below and would send a re-run of a since-moved
     re-run back to the ORIGINAL run's folder.
 
-    Access mirrors the detail endpoint: owner or validated admin; unknown ids
-    and other users' runs both 404.
+    Access mirrors the detail endpoint: the owner, an org_admin of the
+    run's org, any same-org caller on a run PUBLISHED into one of that
+    org's folders (D5 — the comment on the gate below says why), or a
+    validated admin. Everything else 404s, unknown ids included.
     """
     try:
         source_run_id = str(uuid.UUID(source_run_id))
