@@ -3517,6 +3517,35 @@ class RunRegistry:
                 allowed = "user_id = %s"
                 params.append(user_id)
             try:
+                # The batch's `tests` rows in test_id ORDER, before the
+                # UPDATE takes them in whatever order its scan returns.
+                # 4550db4 gave every writer that touches both tables one
+                # TABLE order and this method already obeyed it; what that
+                # change could not see is the order INSIDE `tests`, because
+                # every pair it measured was a SINGLE-test batch. Both
+                # siblings lock ORDER BY test_id -- assign_runs before its
+                # cascade, delete_group before its DELETE -- so a multi-test
+                # batch scanned in physical order met them head-on
+                # (measured: Index Scan using idx_tests_user, ids locked
+                # 3,2,1). Neither method catches DeadlockDetected, and the
+                # route has no try, so it reached the caller as the
+                # unhandled 500 that change set out to remove.
+                #
+                # No authority filter, exactly as assign_runs' lock has
+                # none: this locks a SUPERSET of what the UPDATE below
+                # writes, and a superset is what makes the order total. A
+                # row the caller may not file is released a statement later
+                # by the rowcount rollback.
+                #
+                # FOR NO KEY UPDATE for the reason both siblings give: FOR
+                # UPDATE also conflicts with the FOR KEY SHARE a foreign-key
+                # check takes, so it would stall every concurrent INSERT of
+                # a run referencing these tests.
+                conn.execute(
+                    "SELECT test_id FROM tests WHERE test_id = ANY(%s)"
+                    " ORDER BY test_id FOR NO KEY UPDATE",
+                    [list(test_ids)],
+                )
                 cur = conn.execute(
                     f"UPDATE tests SET group_id = %s, updated_at = now() "
                     f"WHERE test_id = ANY(%s) AND org_id = %s AND {allowed}",

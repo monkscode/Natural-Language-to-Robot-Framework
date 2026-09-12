@@ -134,6 +134,85 @@ def _race(dsn, test_id, target, victim):
     return errors["victim"], errors["counterparty"]
 
 
+def _seed_three(admin):
+    """One folder and THREE tests of one author, inserted highest-id-first so
+    the heap order a plain scan returns is the reverse of the id order."""
+    folder = str(uuid.uuid4())
+    admin.execute(
+        "INSERT INTO run_groups (group_id, name, org_id, created_by)"
+        " VALUES (%s, 'F3', %s, %s)", (folder, ORG, USER))
+    ids = sorted(str(uuid.uuid4()) for _ in range(3))
+    for key_n, test_id in enumerate(reversed(ids), start=1):
+        admin.execute(
+            "INSERT INTO tests (test_id, org_id, key_n, user_id, user_query,"
+            " current_version) VALUES (%s, %s, %s, %s, 'q', 1)",
+            (test_id, ORG, key_n, USER))
+    return folder, ids
+
+
+def test_assign_tests_takes_its_test_rows_in_id_order(reg):
+    """The order INSIDE `tests`, which the table order above cannot see.
+
+    `4550db4` made every writer take `tests` before `test_runs`. That is a
+    TABLE order. Within `tests`, assign_runs and delete_group lock rows
+    `ORDER BY test_id`; assign_tests had no lock of its own, so its UPDATE
+    took them in whatever order its scan returned — physical order, which a
+    multi-test batch can present in any sequence. Against a sibling holding
+    the lowest id and reaching for the highest, that is the opposite order
+    and one of the two dies. Neither method catches DeadlockDetected (both
+    catch only ForeignKeyViolation) and the route has no `try`, so it
+    surfaced as the unhandled 500 `4550db4` set out to remove.
+
+    The counterparty is the siblings' own lock statement rather than a call
+    to either of them: it is the ascending order that matters here, not
+    which method supplies it, and issuing it directly is what lets the
+    interleave be paused mid-batch."""
+    r, admin, dsn = reg
+    folder, ids = _seed_three(admin)
+    low, _mid, high = ids
+    out, errors = {}, {}
+
+    tx2 = psycopg.connect(dsn)
+    try:
+        tx2.execute("SELECT test_id FROM tests WHERE test_id = %s"
+                    " FOR NO KEY UPDATE", (low,))
+
+        def victim():
+            try:
+                errors["victim"] = None
+                out["ok"] = r.assign_tests(ORG, USER, False, ids, folder)
+            except Exception as e:                      # noqa: BLE001
+                errors["victim"] = e
+
+        t = threading.Thread(target=victim)
+        t.start()
+        # Ordered, assign_tests is now blocked on `low` holding nothing else;
+        # unordered, it holds `high` and `mid` and is blocked on `low`.
+        t.join(timeout=_SETTLE)
+        try:
+            tx2.execute("SELECT test_id FROM tests WHERE test_id = %s"
+                        " FOR NO KEY UPDATE", (high,))
+            tx2.commit()
+            errors["counterparty"] = None
+        except Exception as e:                          # noqa: BLE001
+            tx2.rollback()
+            errors["counterparty"] = e
+        t.join(timeout=30)
+        assert not t.is_alive(), "victim thread never finished"
+    finally:
+        tx2.close()
+
+    assert errors["victim"] is None, (
+        f"assign_tests aborted: {type(errors['victim']).__name__}")
+    assert errors["counterparty"] is None, (
+        f"counterparty aborted: {type(errors['counterparty']).__name__}")
+    assert out["ok"] is True
+    filed = admin.execute(
+        "SELECT count(*) FROM tests WHERE group_id = %s",
+        (folder,)).fetchone()[0]
+    assert filed == 3, "waiting is only right if the move still lands"
+
+
 def test_assign_runs_does_not_deadlock_with_assign_tests(reg):
     """Filing a run while a concurrent write files its test.
 
