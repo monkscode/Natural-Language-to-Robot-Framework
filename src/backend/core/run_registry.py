@@ -1615,6 +1615,7 @@ class RunRegistry:
         self,
         folder_org_id: Optional[str],
         run_org_id: Optional[str] = None,
+        include_unowned: bool = True,
     ) -> List[Dict[str, Any]]:
         """The org's folders, name-sorted, each with its run count.
 
@@ -1633,6 +1634,16 @@ class RunRegistry:
         it to the caller was what made a member's chip read 1 beside a folder
         holding 2 — the same defect as their table listing one run out of two.
 
+        include_unowned is the ONE caller-shaped term that remains, and it is
+        not a narrowing by user: it is "may this caller read a row nobody
+        owns", the same disjunction list_runs and list_tests apply. Without it
+        both counts reached rows no readable table shows — measured, for a
+        member, a peer and an org_admin alike: a token-less "Run again" left
+        run_count at 2 above a table of 1, and an author-less test left
+        test_count at 1 above a Tests table of 0. Spec section 14 D4 requires
+        each chip to EQUAL the table beneath it, so the fix is the table's own
+        predicate rather than two bolted-on terms.
+
         The run scope goes in the JOIN condition, not the WHERE clause: in
         the WHERE it would turn the LEFT JOIN into an inner one and drop
         every folder that holds no runs.
@@ -1644,10 +1655,18 @@ class RunRegistry:
         listed every org's folders.
 
         test_count arrived with the 2026-09-07 split and is additive —
-        run_count keeps its name AND its meaning, a count of RESULTS. The
-        subquery behind it is deliberately NOT scoped by run_org_id, and
-        adding one would silently zero the count for the token-less dev
-        caller, whose run_org_id is None.
+        run_count keeps its name AND its meaning, a count of RESULTS. Its
+        subquery IS scoped by run_org_id now, and the note that once stood
+        here — that adding an org scope would zero the count for the
+        token-less dev caller — is answered by the guard rather than by
+        leaving the term out: that caller's run_org_id is None, which emits
+        no term at all, exactly as it does for the run count beside it.
+
+        What the paragraph below argues is still worth keeping, because it is
+        why the org term was thought unnecessary rather than merely omitted —
+        and one of its two premises has since been strengthened: assign_runs
+        now binds te.org_id directly (the D1 fix), so it no longer reaches a
+        test merely THROUGH a run's org.
 
         What keeps that safe is assign_runs and assign_tests, the only two
         places this column mutates to a CONCRETE folder outside the one-time
@@ -1673,11 +1692,13 @@ class RunRegistry:
         tests.group_id.) The folder join then enforces the same thing at
         every read.
 
-        The exception, and it is real: a test whose runs span two orgs — a
-        known, ledgered gap — can be filed through its org-a run into an
-        org-a folder while tests.org_id says org-b. This subquery then counts
-        a test no org-scoped read can reach. Fixing it belongs with that gap,
-        not here.
+        The exception that used to be real: a test whose runs span two orgs —
+        a known, ledgered gap — could be filed through its org-a run into an
+        org-a folder while tests.org_id said org-b, and this subquery then
+        counted a test no org-scoped read can reach. TWO changes close it
+        independently now: assign_runs refuses unless te.org_id is the
+        caller's own, and the te2.org_id term above narrows the count itself.
+        The cross-org TEST gap it rides on is untouched and still ledgered.
 
         This run_count join is one of the THREE places a RUN's folder is
         expressed in SQL, and the second that cannot call _group_join: that
@@ -1696,6 +1717,27 @@ class RunRegistry:
         if run_org_id is not None:
             join = " AND t.org_id = %s"
             join_params = [run_org_id]
+        # The fail-closed half of both table predicates. Inside a FOLDER,
+        # _VISIBLE_RUN_SQL's own published term (g.group_id IS NOT NULL) is
+        # true by construction, so that constant collapses to exactly this
+        # for every identified caller — and _OWNED_RUN_SQL, which an
+        # org_admin gets, IS this. So one term serves both caller shapes, and
+        # include_unowned is the same disjunction list_runs applies: only a
+        # platform admin or the token-less dev caller may READ a row nobody
+        # owns, so only they may have it counted.
+        owned_run, owned_test = "", ""
+        if not include_unowned:
+            owned_run = " AND t.user_id IS NOT NULL"
+            owned_test = " AND te2.user_id IS NOT NULL"
+        # test_count had NO org term at all, which is what let it count an
+        # author-less test whose org the Tests table narrows away. run_org_id
+        # is the caller's row scope for BOTH counts — it is scope.org_id at
+        # the one call site, the same value list_tests binds to te.org_id —
+        # and its name predates the tests count rather than narrowing it.
+        test_org, test_org_params = "", []
+        if run_org_id is not None:
+            test_org = " AND te2.org_id = %s"
+            test_org_params = [run_org_id]
         where, where_params = "", []
         if folder_org_id is not None:
             where = "WHERE g.org_id = %s "
@@ -1709,14 +1751,20 @@ class RunRegistry:
                 # one-to-many joins multiply, and a folder of 3 tests and 30
                 # results would report 90 for BOTH counts.
                 "       (SELECT count(*) FROM tests te2 "
-                "          WHERE te2.group_id = g.group_id) AS test_count "
+                "          WHERE te2.group_id = g.group_id"
+                f"{test_org}{owned_test}) AS test_count "
                 "FROM run_groups g "
                 "LEFT JOIN (test_runs t "
                 "           LEFT JOIN tests te ON te.test_id = t.test_id) "
-                f"       ON COALESCE(te.group_id, t.group_id) = g.group_id{join} "
+                f"       ON COALESCE(te.group_id, t.group_id) = g.group_id"
+                f"{join}{owned_run} "
                 f"{where}"
                 "GROUP BY g.group_id ORDER BY lower(g.name)",
-                join_params + where_params,
+                # SELECT-list params FIRST: the test_count subquery sits
+                # earlier in the SQL text than the JOIN's, and psycopg binds
+                # %s strictly by position. Getting this order wrong filters
+                # on the wrong values without raising.
+                test_org_params + join_params + where_params,
             ).fetchall()
         out = []
         for r in rows:

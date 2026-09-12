@@ -675,6 +675,121 @@ class TestReadPathVisibility:
             assert total == row["run_count"] == 6, scope_user
             assert len(listed) == 6, scope_user
 
+    # Spec section 14 D4: each chip must EQUAL the table beneath it. The two
+    # tests below are the two shapes where it did not, both reachable without
+    # fabrication -- an unowned ROW is what AUTH_ENFORCED=false writes, and
+    # the bench and local dev run in that mode.
+    def _chip(self, reg, gid, **kw):
+        row = [g for g in reg.list_groups(self.ORG, run_org_id=self.ORG, **kw)
+               if g["group_id"] == gid]
+        return row[0]
+
+    def test_the_run_chip_does_not_count_a_run_no_table_can_show(self, reg):
+        """A token-less "Run again" of a filed run leaves a run with NO owner.
+        It inherits the folder through its test, so the chip's join reaches
+        it -- but every readable table drops an unowned row, because nobody
+        but a platform admin may open one. The chip then stood at 2 above a
+        table of 1 for a member, a peer and an org_admin alike."""
+        a1 = str(uuid.uuid4())
+        reg.record_start(
+            a1, {"user_id": self.ADMIN, "org_id": self.ORG,
+                 "email": "a@e.com"}, "q", "passed", robot_code="c")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1], gid) is True
+        # The token-less re-run: no user, no org, same test.
+        reg.record_start(str(uuid.uuid4()),
+                         {"user_id": None, "org_id": None, "email": None},
+                         "q", "passed", robot_code="c", rerun_of=a1)
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):   # plain member, then org_admin
+            _, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
+                                     folder_org_id=self.ORG, group=gid,
+                                     include_unowned=False)
+            assert chip["run_count"] == total == 1, scope_user
+
+        # The control, in the same test: a platform admin MAY read an unowned
+        # row, so for them the chip and the table are both 2. The rule is
+        # "the chip equals the table", not "the chip is smaller".
+        admin_chip = self._chip(reg, gid, include_unowned=True)
+        _, admin_total = reg.list_runs(user_id=None, org_id=None,
+                                       folder_org_id=self.ORG, group=gid,
+                                       include_unowned=True)
+        assert admin_chip["run_count"] == admin_total == 2
+
+    def test_the_test_chip_does_not_count_a_test_no_table_can_show(self, reg, db):
+        """An AUTHOR-LESS test with a CONCRETE org.
+
+        A token-less mint writes (tests.user_id NULL, tests.org_id NULL); a
+        later owned write adopts the RUN, and backfill_org_ids' tests UPDATE
+        then carries that org onto the TEST -- it keys on the test's NULL org
+        and derives the value from the test's runs, with no user_id condition
+        of its own. The org is set here directly rather than by calling
+        backfill_org_ids, which reads org_members from the shared public
+        schema and would make this test depend on live membership rows.
+
+        That row matters because an org_admin may still FILE it: assign_runs'
+        authority filter binds only te.org_id for them. test_count then
+        counted a test the Tests table refuses to list, because
+        _VISIBLE_TEST_SQL drops a row nobody owns."""
+        rid = str(uuid.uuid4())
+        reg.record_start(rid, {"user_id": None, "org_id": None, "email": None},
+                         "orphan", "generated", robot_code="c")
+        reg.record_start(rid, {"user_id": self.ADMIN, "org_id": self.ORG,
+                               "email": "a@e.com"}, "orphan", "passed")
+        db.execute("UPDATE tests SET org_id = %s WHERE org_id IS NULL",
+                   (self.ORG,))
+        assert db.execute(
+            "SELECT user_id, org_id FROM tests").fetchone() == {
+                "user_id": None, "org_id": self.ORG}, (
+            "the row this test is about was not built")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is True
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):
+            _, total = reg.list_tests(user_id=scope_user, org_id=self.ORG,
+                                      folder_org_id=self.ORG, group=gid,
+                                      include_unowned=False)
+            assert chip["test_count"] == total == 0, scope_user
+
+        # Control: the platform admin, who may read an unowned row, sees 1
+        # on both sides.
+        admin_chip = self._chip(reg, gid, include_unowned=True)
+        _, admin_total = reg.list_tests(user_id=None, org_id=None,
+                                        folder_org_id=self.ORG, group=gid,
+                                        include_unowned=True)
+        assert admin_chip["test_count"] == admin_total == 1
+
+    def test_the_test_chip_does_not_count_another_orgs_test(self, reg, db):
+        """A test whose own org is NOT the folder's.
+
+        list_tests narrows on te.org_id, so such a test is absent from the
+        table; test_count carried no org term at all and counted it anyway.
+        The two producers are an org MOVE, which rewrites tests.org_id while
+        group_id keeps pointing at the old org's folder, and the one-shot
+        collapse, which sets group_id at INSERT. assign_runs can no longer
+        make one — it binds te.org_id to the caller's own org — so the state
+        is built directly here rather than through a route that refuses it.
+
+        Fail-closed by design: if the chip and the table ever disagree about
+        which org a test belongs to, the chip is the one that must give way."""
+        rid = str(uuid.uuid4())
+        reg.record_start(rid, {"user_id": self.ADMIN, "org_id": self.ORG,
+                               "email": "a@e.com"}, "q", "passed",
+                         robot_code="c")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is True
+        # The org move: the test leaves, its folder pointer does not.
+        db.execute("UPDATE tests SET org_id = 'org-elsewhere'")
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):
+            _, total = reg.list_tests(user_id=scope_user, org_id=self.ORG,
+                                      folder_org_id=self.ORG, group=gid,
+                                      include_unowned=False)
+            assert chip["test_count"] == total == 0, scope_user
+
     # 14 ------------------------------------------------------------------
     def test_filtering_by_a_foreign_orgs_folder_returns_nothing(self, reg):
         """A folder id the caller's org does not own narrows to nothing rather

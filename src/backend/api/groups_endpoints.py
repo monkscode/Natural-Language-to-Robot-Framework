@@ -167,7 +167,13 @@ def list_groups(user: dict | None = Depends(require_user)):
     scope = history_scope(user)
     reg = get_run_registry()
     groups = (
-        reg.list_groups(scope.folder_org_id, run_org_id=scope.org_id)
+        reg.list_groups(
+            scope.folder_org_id, run_org_id=scope.org_id,
+            # The same disjunction the two chips below pass, and the same one
+            # /api/history passes: a chip must count exactly what the table
+            # beneath it lists, and only a platform admin (or the token-less
+            # dev caller) may read a row nobody owns.
+            include_unowned=scope.is_admin or scope.caller_user_id is None)
         if scope.folder_org_id else []
     )
     return {
