@@ -54,6 +54,12 @@ def _test_id(admin, run_id):
         (run_id,)).fetchone()[0]
 
 
+def _folder_of_test(admin, test_id):
+    return admin.execute(
+        "SELECT group_id FROM tests WHERE test_id = %s",
+        (test_id,)).fetchone()[0]
+
+
 def _test_folders(admin):
     return [r[0] for r in admin.execute(
         "SELECT group_id FROM tests ORDER BY key_n").fetchall()]
@@ -255,6 +261,84 @@ def test_filing_is_refused_without_authority_and_moves_no_test(reg):
     assert admin.execute(
         "SELECT group_id FROM test_runs WHERE run_id = 'run-x'"
     ).fetchone()[0] is None
+
+
+def _peer_rerun_of_alices_filed_test(r, admin):
+    """alice files her test; bob re-runs it (rule 3) and so owns a RESULT."""
+    _folder(admin, "g-1")
+    r.record_start("a1", OWNER, "q", "generated", robot_code="c")
+    assert r.assign_runs("org-a", "alice", False, ["a1"], "g-1") is True
+    r.record_start("b1", {"user_id": "bob", "org_id": "org-a",
+                          "email": "b@x.com"},
+                   "q", "generated", robot_code="c", rerun_of="a1")
+
+
+def test_owning_a_result_is_not_authority_over_its_test(reg):
+    """Spec 5: "A peer who re-ran a published test still cannot file it", and
+    6.6: deciding this from test_runs "would let a member who owns one RESULT
+    of a colleague's test file the colleague's test".
+
+    assign_runs files the TEST of every named run. It decided that off the
+    RUN (`r.user_id = caller`), so a peer who owns only a re-run drove the
+    author's publication decision: alice takes her test private, bob moves
+    HIS OWN re-run back into the folder, and the test is public again --
+    re-admitting every org member to /reports for alice's own runs. The
+    sibling mover, assign_tests, refuses the same caller.
+    """
+    r, admin = reg
+    _peer_rerun_of_alices_filed_test(r, admin)
+    assert r.assign_runs("org-a", "alice", False, ["a1"], None) is True
+    assert _test_folders(admin) == [None], "alice took her test private"
+
+    # The Tests-page mover refuses bob outright; the run mover must agree.
+    assert r.assign_tests("org-a", "bob", False, [_test_id(admin, "a1")],
+                          "g-1") is False
+    assert r.assign_runs("org-a", "bob", False, ["b1"], "g-1") is False
+    assert _test_folders(admin) == [None], (
+        "a peer who owns only a RESULT re-published the author's test")
+
+
+def test_owning_a_result_does_not_let_a_peer_unfile_its_test(reg):
+    """The same hole in the other direction: bob must not be able to take
+    alice's published test away from the org either."""
+    r, admin = reg
+    _peer_rerun_of_alices_filed_test(r, admin)
+
+    assert r.assign_runs("org-a", "bob", False, ["b1"], None) is False
+    assert _test_folders(admin) == ["g-1"], (
+        "a peer who owns only a RESULT unpublished the author's test")
+
+
+def test_one_unfilable_test_in_a_batch_refuses_the_whole_move(reg):
+    """All-or-nothing is per-TEST too, not only per-run: bob's own test must
+    not ride into a folder on a batch that also names a run of alice's."""
+    r, admin = reg
+    _peer_rerun_of_alices_filed_test(r, admin)
+    r.record_start("b0", {"user_id": "bob", "org_id": "org-a",
+                          "email": "b@x.com"},
+                   "bob's own query", "generated", robot_code="c")
+
+    assert r.assign_runs("org-a", "bob", False, ["b0", "b1"], "g-1") is False
+    folders = {
+        "alice": _folder_of_test(admin, _test_id(admin, "a1")),
+        "bob": _folder_of_test(admin, _test_id(admin, "b0")),
+    }
+    assert folders == {"alice": "g-1", "bob": None}, (
+        "the batch wrote a test through a run the caller could not file")
+
+
+def test_a_run_with_no_test_still_moves_on_run_authority(reg):
+    """The narrowness of the rule above. A run with no robot_code has no test
+    (D8 scenario a), so there is no test authority to have -- its own owner
+    still files it, exactly as before."""
+    r, admin = reg
+    _folder(admin, "g-1")
+    r.record_start("n1", {"user_id": "bob", "org_id": "org-a",
+                          "email": "b@x.com"}, "q", "passed")
+    assert r.assign_runs("org-a", "bob", False, ["n1"], "g-1") is True
+    assert admin.execute(
+        "SELECT group_id FROM test_runs WHERE run_id = 'n1'"
+    ).fetchone()[0] == "g-1"
 
 
 def test_ungrouping_a_run_unfiles_its_test(reg):

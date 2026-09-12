@@ -3224,6 +3224,42 @@ class RunRegistry:
                     " ORDER BY test_id FOR NO KEY UPDATE",
                     [list(run_ids)],
                 )
+                # Filing a run files its TEST, so the caller needs authority
+                # over the TEST, not merely over the run. Owning a RESULT is
+                # not authority over the test (D4; spec 5 "A peer who re-ran a
+                # published test still cannot file it", spec 6.6). Deciding it
+                # from test_runs let a peer who owns one re-run re-publish,
+                # unfile or relocate the author's test -- and re-admit the org
+                # to /reports for the author's own runs after the author took
+                # them private. This is the same rule assign_tests applies,
+                # read off the same columns, so the two movers agree.
+                #
+                # INNER JOIN on purpose: a run with no test (D8 scenario a,
+                # no robot_code) has no test authority to have, and its owner
+                # still files it on the run rule below, exactly as before.
+                #
+                # COALESCE, not a bare NOT: te.org_id or te.user_id being NULL
+                # makes the comparison NULL, and NOT NULL is NULL, so an
+                # author-less or org-less test would slip through the filter
+                # that is meant to catch it -- the NULL-is-not-a-value rule
+                # this file applies at every other identity comparison.
+                if is_org_admin:
+                    test_allowed, test_params = "te.org_id = %s", [org_id]
+                else:
+                    test_allowed = "(te.org_id = %s AND te.user_id = %s)"
+                    test_params = [org_id, user_id]
+                if conn.execute(
+                    "SELECT 1 FROM test_runs r"
+                    "  JOIN tests te ON te.test_id = r.test_id"
+                    " WHERE r.run_id = ANY(%s)"
+                    f"   AND NOT COALESCE({test_allowed}, FALSE) LIMIT 1",
+                    [list(run_ids)] + test_params,
+                ).fetchone() is not None:
+                    # All-or-nothing, like every other refusal here: one
+                    # unfilable test writes NOTHING, so a batch cannot carry
+                    # the caller's own test in beside a colleague's.
+                    conn.rollback()
+                    return False
                 # Children FIRST, in the same transaction: the self-join reads
                 # the parent's folder off the row, so once the parent UPDATE
                 # below has run there is no pre-move value left to match on.
@@ -3251,9 +3287,13 @@ class RunRegistry:
                     params,
                 )
                 # Publication belongs to the TEST now, so filing a run files
-                # its test. Driven off the SAME authority filter as the parent
-                # UPDATE, so it can never move a test through a run the caller
-                # could not have filed directly.
+                # its test. `r.{allowed}` here is the RUN's authority, which
+                # is NOT what decides a test: the same `{allowed}` string
+                # means tests.user_id in assign_tests and test_runs.user_id
+                # here, so reading it as "the same filter" is the mistake
+                # that shipped. What makes this statement safe is the TEST
+                # authority check above, which has already refused the whole
+                # call if any named run's test is not the caller's to file.
                 #
                 # test_runs.group_id keeps being written above, unchanged:
                 # spec 4.4 requires the old column to stay populated through P1
