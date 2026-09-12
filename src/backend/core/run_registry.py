@@ -7,8 +7,14 @@ generators in workflow_service:
   (workflow_service._make_start_recorder opens the row at 'running' with
   robot_code NULL — the moment the collapse's re-arm reasoning below depends
   on), a generation failure, generation complete, and Docker execution
-  starting. An upsert that NEVER steals ownership: the first writer's
-  user/query attribution wins, later calls only advance the status.
+  starting. An upsert that never CHANGES an owner: a run that already has
+  one keeps it, and later calls only advance the status. It does ADOPT
+  an unowned one -- `user_id = COALESCE(test_runs.user_id,
+  EXCLUDED.user_id)` fills a NULL from the next writer, which is how a
+  token-less first write ends up attributed to whoever runs it next.
+  Both Task 4.5 Criticals were that adoption being read as "never
+  changes hands"; it is deliberate, and must not be described as no
+  transfer at all.
 - set_status() when the Docker result (passed/failed) or an error is known.
 
 Read by:
@@ -442,8 +448,14 @@ _SCHEMA_DDL = (
     # record_start opens each run's row with robot_code NULL at generation
     # START (workflow_service._make_start_recorder's opening write) and
     # _SCHEMA_DDL re-runs on every RunRegistry() construction. The guard
-    # therefore RE-ARMS whenever `tests` returns to empty, which P2's delete
-    # path makes reachable on a live database. That is why both branches
+    # therefore RE-ARMS whenever `tests` returns to empty. NOTHING IN
+    # src/backend/ EMPTIES IT: there is no DELETE FROM tests anywhere in the
+    # application, and the P2 delete path this comment used to credit was
+    # never built. The only deleter in the repo is bench/run_bench.py's
+    # detachment, which removes its own token-less runs. The re-arm is real
+    # and worth keeping -- a fresh install, a dropped schema or a restored
+    # dump all reach it -- but no user action reaches it today.
+    # That is why both branches
     # below also require code: a run with
     # nothing to version must never mint a test (D8), or _attach_test's
     # short-circuit on an existing test_id then denies the real code its
@@ -940,18 +952,24 @@ class RunRegistry:
         migration may not be guarded on it.
 
         D6 — a result takes the org of its TEST, not of the caller. Only a
-        platform admin can re-run another org's test, and today that writes the
-        admin's org onto the row, which sends another org's learning signal
-        into the admin's store (get_run_owner().org_id is what attributes it).
+        platform admin can re-run another org's test, and BEFORE this rule that
+        wrote the admin's org onto the row, which SENT another org's learning
+        signal into the admin's store (get_run_owner().org_id is what
+        attributes it). The tense matters: measured at HEAD, an org-a admin
+        re-running an org-b test writes org-b, so that clause describes what
+        D6 REPLACED, not what the code does.
         When the test's own org_id is NULL and the caller's is not, the
         NULL-org fallback described below now writes the caller's org onto
         `tests` itself — renumbering key_n into the destination bucket —
-        before returning it, on both branches that read an existing test's
-        org, so the repair lands on the TEST and not only on the RUN: an
-        org-less run, later reached with an org resolved, no longer leaves
-        test.org_id NULL forever. Both branches gate that write, with the
-        SAME three terms — the paragraphs below are the authority on which
-        caller they admit. A write-back that loses a key_n
+        before returning it, on the TWO branches that write it back — the
+        existing-test branch and the rerun branch — so the repair lands on
+        the TEST and not only on the RUN: an org-less run, later reached with
+        an org resolved, no longer leaves test.org_id NULL forever. A THIRD
+        branch reads a test's org and takes the same caller-org fallback —
+        the named_test_id branch (P2 Task 7) — and deliberately never
+        writes back, as its own comment says. Both WRITING branches gate the
+        write, with the SAME three terms — the paragraphs below are the
+        authority on which caller they admit. A write-back that loses a key_n
         race to a concurrent one is logged and left NULL rather than
         retried — the run itself still gets the correct org, and the next
         caller to reach this test repeats the repair. This still does not
@@ -1095,8 +1113,10 @@ class RunRegistry:
         the SAME test for all three or one run would spawn three tests.
 
         Spec section 10 case 35 — the test wins, but only when it HAS an org.
-        A test whose org_id is NULL falls back to the caller's, on BOTH
-        branches that read a test's org. Two mechanisms reach that state, so
+        A test whose org_id is NULL falls back to the caller's on all THREE
+        branches that read a test's org (existing, rerun, named_test_id);
+        only the first two also write that org back.
+        Two mechanisms reach that state, so
         it is not the dead defensive branch it looks like: backfill_org_ids
         used to carry an org onto test_runs and not onto tests, and
         _lookup_org_id swallows its own failure, so the upsert that MINTS a
@@ -1700,14 +1720,16 @@ class RunRegistry:
         caller's own, and the te2.org_id term above narrows the count itself.
         The cross-org TEST gap it rides on is untouched and still ledgered.
 
-        This run_count join is one of the THREE places a RUN's folder is
+        This run_count join is one of the FOUR places a RUN's folder is
         expressed in SQL, and the second that cannot call _group_join: that
         join binds a CALLER's org and this one binds run_org_id in the JOIN,
-        so it hand-writes the same COALESCE. get_run_owner is the third.
-        Change what "published" means in any of them and change all three — a
+        so it hand-writes the same COALESCE. get_run_owner is the third, and
+        _group_join_for_test_results — added by c20c176, which is why the
+        older counts here said three — is the fourth.
+        Change what "published" means in any of them and change all four — a
         chip resolving a folder differently from the table it labels is the
         whole defect this count exists to make visible. The test_count
-        subquery above is NOT in that trio: its rows are tests, so it reads
+        subquery above is NOT one of the four: its rows are tests, so it reads
         tests.group_id with no COALESCE, exactly like _group_join_for_tests."""
         if run_org_id is None:
             run_org_id = folder_org_id
@@ -2373,8 +2395,11 @@ class RunRegistry:
 
         The same sentence as count_ungrouped, over `tests`: it uses
         _VISIBLE_TEST_SQL because these rows are tests, and binds te.user_id
-        rather than t.user_id for the same reason. Written in P1 and read by
-        nothing until P2, so it cannot move a number on any current screen."""
+        rather than t.user_id for the same reason. Written in P1 with no reader
+        at all; P2 gave it one — groups_endpoints returns it as
+        ungrouped_test_count and useGroups.ts reads it onto the Ungrouped
+        chip — so it DOES move a number on a current screen, which is
+        what this docstring's own first line already says."""
         join, params = self._group_join_for_tests(
             folder_org_id or org_id, identified=user_id is not None)
         clauses = ["g.group_id IS NULL"]
@@ -2465,9 +2490,10 @@ class RunRegistry:
         (code exists, never executed) is deliberately NOT a completed result
         for this purpose: it produces the same "not_run" outcome spec case 11
         names for a version with literally zero results (case 11's own
-        scenario is POST /api/tests/{id}/versions, not built by this task,
-        which mints a version without writing any test_runs row at all --
-        a different mechanism reaching the same health value). 'running' is
+        scenario is POST /api/tests/{id}/versions, which Task 7 has since
+        BUILT -- and whose append writes a test_runs row of its own at status
+        'generated', so that route now reaches "not_run" through THIS clause
+        rather than through zero results). 'running' is
         excluded per case 18 so a stuck in-flight result can never read a
         passing test as failing; case 25 (two results running at once) is
         why `running` is a bool_or over the whole current version rather
@@ -3634,14 +3660,19 @@ class RunRegistry:
         strictly by position.
 
         Several reads here resolve folder membership in SQL, and they do not
-        all have to agree. THREE of them answer "which folder is this RUN in"
-        and must stay identical in that answer — this join,
-        get_run_owner (no caller to bind, so it anchors to the run's own org)
-        and list_groups' run_count join (which binds run_org_id in the JOIN).
-        Neither of those two can call this one, for exactly those reasons.
-        Change what "published" means for a run and change all three.
+        all have to agree. FOUR of them answer "which folder is this RUN in"
+        and must stay identical in that answer — this join, get_run_owner
+        (no caller to bind, so it anchors to the run's own org), list_groups'
+        run_count join (which binds run_org_id in the JOIN), and
+        _group_join_for_test_results, whose COALESCE(te.group_id, t.group_id)
+        inside the results lateral means the RESULT'S folder. None of the
+        other three can call this one, for exactly those reasons.
+        Change what "published" means for a run and change all four. The
+        fourth was added by c20c176 and went unlisted here until the P2
+        whole-branch review, so a maintainer following "change all three"
+        left the Tests row and the drawer computing health on the old rule.
 
-        The rest differ ON PURPOSE and must not be dragged into that trio.
+        The rest differ ON PURPOSE and must not be dragged in with those four.
         _group_join_for_tests and list_groups' test_count subquery read
         tests.group_id with NO COALESCE, because their rows ARE the tests and
         there is no run column to fall back to. delete_group's audit SELECT
@@ -3841,12 +3872,14 @@ class RunRegistry:
         caller's); anchoring to t.org_id here makes the pair mean exactly
         what list_runs' _group_join means for the same caller.
 
-        This is one of TWO run-publication joins that are not _group_join —
-        list_groups' run_count join is the other — and nothing couples the
-        three but this sentence: _group_join binds a CALLER's org, list_groups
-        binds run_org_id in its JOIN, and this binds the row's own, so neither
-        can literally reuse it. Change any of those notions of "published"
-        over runs and change all three.
+        This is one of THREE run-publication joins that are not _group_join —
+        list_groups' run_count join and _group_join_for_test_results are the
+        others — and nothing couples the four but this sentence:
+        _group_join binds a CALLER's org, list_groups binds run_org_id in its
+        JOIN, _group_join_for_test_results resolves it inside the results
+        lateral, and this binds the row's own, so none of them can literally
+        reuse it. Change any of those notions of "published" over runs and
+        change all four.
 
         The folder is read through the run's TEST since 2026-09-07, matching
         _group_join's hop and its permanent COALESCE fallback to the run's own
