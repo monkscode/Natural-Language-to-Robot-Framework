@@ -194,6 +194,39 @@ def test_a_test_in_another_org_answers_404(client):
     assert calls == []
 
 
+def test_an_author_less_test_answers_404_and_starts_nothing(client):
+    """include_unowned on the pre-flight read behind Run.
+
+    A solo signup is org_admin of their own personal org, so history_scope
+    hands them a TEST filter with no user term -- their view spans the org.
+    The only thing left between them and a test nobody owns is
+    `te.user_id IS NOT NULL`, which get_test_head appends when
+    include_unowned is False. Without it the Tests page would refuse to list
+    the test while POST /execute-test happily ran its code.
+
+    Reachable without fabrication: a token-less mint writes tests.user_id
+    NULL, and one backfill_org_ids() call carries a concrete org onto that
+    same test. The author is dropped directly here rather than through
+    backfill_org_ids, which reads org_members from the shared public schema.
+
+    The 200 first is the control -- same caller, same test, refused only
+    once nobody owns it -- and `calls` proves no container was started."""
+    from src.backend.core.run_registry import get_run_registry
+    tok, _claims, test_id = _own_test(client, prefix="rtu")
+    with _execution_captured() as calls:
+        assert _run_test(client, tok, {"test_id": test_id}).status_code == 200
+    assert len(calls) == 1, "premise: this caller can run their own test"
+
+    with get_run_registry()._pool.connection() as conn:
+        conn.execute("UPDATE tests SET user_id = NULL WHERE test_id = %s",
+                     (test_id,))
+
+    with _execution_captured() as calls:
+        r = _run_test(client, tok, {"test_id": test_id})
+    assert r.status_code == 404
+    assert calls == []
+
+
 def test_a_test_that_does_not_exist_answers_the_same_404(client):
     tok, _claims, _test_id = _own_test(client)
     with _execution_captured() as calls:

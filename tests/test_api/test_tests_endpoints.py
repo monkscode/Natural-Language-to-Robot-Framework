@@ -486,6 +486,48 @@ def test_detail_answers_404_never_403_for_a_test_in_another_org(client):
     assert r.json() == missing.json()
 
 
+def test_detail_answers_404_for_an_org_admin_on_an_author_less_test(client):
+    """include_unowned, on the DETAIL read rather than the list.
+
+    An org_admin's TEST filter carries no user term at all -- their view
+    spans the org -- so the only thing standing between them and a test
+    nobody owns is `te.user_id IS NOT NULL`, which get_test_head and
+    get_test_detail append when include_unowned is False. The list already
+    applies it; the drawer one URL deeper must answer the same, or a row the
+    Tests page cannot list is readable by id.
+
+    The state is reachable without fabrication: a token-less mint writes
+    (tests.user_id NULL, tests.org_id NULL) and one backfill_org_ids() call
+    carries a CONCRETE org onto that test, leaving exactly this row. The
+    author is dropped here directly for the reason the folder-chip test
+    gives -- backfill_org_ids reads org_members from the shared public
+    schema.
+
+    The 200 before is the control: the same admin, the same test, refused
+    only once nobody owns it."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+    tok_admin, tok_member, _tok_peer, org_id = _team_of_three(client)
+    member = decode_token(tok_member)
+    test_id, _ = _seed_test(member["user_id"], org_id, member["email"])
+    assert client.get(f"/api/tests/{test_id}",
+                      headers=_auth(tok_admin)).status_code == 200, (
+        "premise: an org_admin reads their org's unpublished test")
+
+    with get_run_registry()._pool.connection() as conn:
+        conn.execute("UPDATE tests SET user_id = NULL WHERE test_id = %s",
+                     (test_id,))
+    assert _row_for(client, tok_admin, test_id) is None, (
+        "premise: the list already refuses it")
+
+    r = client.get(f"/api/tests/{test_id}", headers=_auth(tok_admin))
+    assert r.status_code == 404
+    # Byte-identical to a test that exists nowhere, like every other refusal
+    # on this route.
+    assert r.json() == client.get(f"/api/tests/{uuid.uuid4()}",
+                                  headers=_auth(tok_admin)).json()
+
+
 def test_detail_answers_400_for_a_non_uuid_test_id(client):
     """Same shape /api/history/{run_id} uses for a malformed id -- every
     test_id this codebase mints is a uuid4 (the mint and the collapse both
