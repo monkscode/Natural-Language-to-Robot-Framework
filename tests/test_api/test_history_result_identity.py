@@ -239,6 +239,38 @@ class TestPlatformAdminAuthorship:
         assert by_id[_RID_PLAIN]["user_email"] == "user1@test.local"
         assert by_id[_RID_PLAIN]["ran_as_platform_admin"] is False
 
+    def test_the_search_box_cannot_be_used_to_derive_the_withheld_address(
+            self, registry):
+        """D7 has to reach the SEARCH, not only the row.
+
+        The address is blanked on the row, but ?q= still MATCHED on it, and
+        the match is a substring -- so a caller who did not know the address
+        could derive it roughly 26 requests per character through the public
+        API. R11-2 chose server-side suppression because "the next reader of
+        row.user_email reintroduces the leak"; this clause was that reader.
+
+        The three controls are what make the zero meaningful: an ordinary
+        author is still searchable by address, the admin's own row is still
+        findable by its query, and an unfiltered call still returns both --
+        this narrows one term, it does not filter rows out.
+        """
+        _seed_both_authorities(registry)
+        with patch("src.backend.api.history_scope.is_validated_admin",
+                   return_value=False):
+            client = _client(registry, _USER1)
+            try:
+                def total(q):
+                    return client.get(f"/api/history?q={q}").json()["total"]
+
+                assert total("admin@test.local") == 0
+                assert total("admin@") == 0, "a substring derives it too"
+                # Controls.
+                assert total("user1@test.local") == 1
+                assert total("an+admin+ran") == 1, "the row is still findable"
+                assert client.get("/api/history").json()["total"] == 2
+            finally:
+                _close(client)
+
     def test_a_platform_admin_still_sees_the_address(self, registry):
         _seed_both_authorities(registry)
         with patch("src.backend.api.history_scope.is_validated_admin",

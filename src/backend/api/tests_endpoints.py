@@ -115,6 +115,41 @@ class TestVersionIn(BaseModel):
     mode: Literal["update", "new_test"]
 
 
+def _hide_platform_admin_author(row: dict, flag: str, scope) -> None:
+    """D7 on the Tests surface, and the same rule Activity applies to a run.
+
+    `_hide_admin_author` withholds the author's ADDRESS on a RESULT made with
+    platform-admin authority. A test and its versions are the same person's
+    same act one click away, so without this the address Activity withheld
+    arrived here instead -- measured on all three fields, reachable with no
+    cross-org action at all: a platform admin who is an ordinary member of an
+    org presses Generate, and the generation path computes the same flag.
+
+    The disjunction is `_hide_admin_author`'s, character for character and
+    for its reasons: a caller who holds the authority themselves keeps the
+    address, and so does the token-less dev caller, who is the one caller
+    ownership.py rule 1 exempts from every other check.
+
+    The flag STAYS on the row, exactly as `ran_as_platform_admin` does on a
+    run, and for the same reason _hide_admin_author gives: so the client can
+    say "Platform admin" rather than render an unattributed blank -- the org
+    is told who did it in the only sense that concerns them, without being
+    handed a named individual. It reveals nothing the label does not; what
+    R11-2 rejected was doing the SUPPRESSION on the client, not shipping the
+    fact. The suppression is here, on the server, where it cannot be skipped.
+    """
+    if not row.get(flag):
+        return
+    if scope.is_admin or scope.caller_user_id is None:
+        return
+    # Only fields the row already carries: a test row has user_email, a
+    # version row has created_by_email, and inventing the other one on
+    # either would change the response shape the SPA's types describe.
+    for field in ("user_email", "created_by_email"):
+        if field in row:
+            row[field] = None
+
+
 def _may_move_test(scope, test_org_id: str | None,
                    test_user_id: str | None) -> bool:
     """The three terms PUT /api/tests/assignments enforces, in one place.
@@ -222,11 +257,12 @@ def list_tests(
         t["can_move"] = _may_move_test(scope, t.get("org_id"), t.get("user_id"))
         # org_id was selected only to answer can_move, same as list_history.
         t.pop("org_id", None)
+        _hide_platform_admin_author(t, "author_is_platform_admin", scope)
         if not scope.is_admin:
             # The internal user id stays admin-only; the EMAIL does not --
             # a folder is shared, so a colleague's test reaches this caller,
             # and an unattributed row would leave the org unable to say who
-            # authored what.
+            # authored what. D7 is the ONE exception, applied just above.
             t.pop("user_id", None)
     return {
         "tests": tests,
@@ -278,17 +314,19 @@ def test_detail(
     list's discipline for the same data. org_id is internal and is dropped
     for every caller. The internal user id is admin-only -- and `created_by`
     on each version goes with it, because it holds a user id rather than an
-    email and today always holds the TEST'S author: _attach_test's mint
-    writes it from the same value it writes into tests.user_id, and the
-    migration collapse writes it from a run whose user_id is the very
-    grouping key that becomes tests.user_id. Returning it would hand back
-    the id the pop above just removed. user_email stays for everyone, so a
-    shared folder can still say who authored what.
+    email: per-version IDENTITY is admin-only on this surface. It is NOT
+    true that created_by always holds the test's author. That was true when
+    this pop was written and Task 7 falsified it: create_test_version's
+    update mode admits an org_admin who is not the author, and _attach_test's
+    append writes the APPENDER's user_id. Only the mint and the migration
+    collapse write the author.
 
-    Naming a version's author will need more than this once Task 7 lets
-    someone other than the author append one; the fix is an email beside
-    the id, as `tests.user_email` already does for the test, not relaxing
-    this pop.
+    user_email and created_by_email stay, so a shared folder can still say
+    who authored what -- with one exception, D7: an address recorded under
+    platform-admin authority is withheld from everyone who does not hold it,
+    by _hide_platform_admin_author, exactly as Activity does for a run. That
+    exception is why the redaction here is no longer inverted: it used to
+    drop the opaque uuid and keep the real address.
     """
     try:
         test_id = str(uuid.UUID(test_id))
@@ -319,6 +357,13 @@ def test_detail(
         # and a second copy of the tuple is a second rule that can drift.
         r["has_report"] = r["status"] in _REPORT_STATUSES
     detail["test"].pop("org_id", None)
+    # D7, per row: the test carries its AUTHOR's address, each version its
+    # own CREATOR's, and since Task 7 those can be different people -- so the
+    # two are asked separately rather than one standing in for the other.
+    _hide_platform_admin_author(
+        detail["test"], "author_is_platform_admin", scope)
+    for v in detail["versions"]:
+        _hide_platform_admin_author(v, "creator_is_platform_admin", scope)
     if not scope.is_admin:
         detail["test"].pop("user_id", None)
         for v in detail["versions"]:

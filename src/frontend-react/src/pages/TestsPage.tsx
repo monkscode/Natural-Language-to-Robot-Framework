@@ -46,7 +46,7 @@ import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, Ref
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
-import { labelFrom, versionLabel } from '@/lib/testLabels'
+import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
@@ -97,6 +97,10 @@ interface TestVersion {
   user_query: string | null
   robot_code: string | null
   created_by_email: string | null
+  /** D7: the server withheld created_by_email because this version was made
+   *  with platform-admin authority. Same field shape as a run's
+   *  ran_as_platform_admin, so both surfaces label it the same way. */
+  creator_is_platform_admin?: boolean
   reason: string | null
   created_at: string
 }
@@ -633,9 +637,15 @@ function DrawerVersions({ versions, current }: Readonly<{
               <span className="text-muted-foreground" title={formatDate(v.created_at)}>
                 {timeAgo(v.created_at)}
               </span>
-              {/* An appender the server could not name stays unnamed: naming
-                  the test's author beside someone else's version is worse. */}
-              <span className="text-muted-foreground">{v.created_by_email ?? 'author unknown'}</span>
+              {/* Address if the server sent one; otherwise "Platform admin"
+                  when it withheld one under D7, exactly as Activity's
+                  drawerAuthor resolves it. An appender the server could not
+                  name at all stays unnamed: naming the test's author beside
+                  someone else's version is worse. */}
+              <span className="text-muted-foreground">
+                {v.created_by_email
+                  ?? (v.creator_is_platform_admin ? PLATFORM_ADMIN : 'author unknown')}
+              </span>
               {v.reason && (
                 <span className="text-muted-foreground">{REASON_WORDS[v.reason] ?? v.reason}</span>
               )}

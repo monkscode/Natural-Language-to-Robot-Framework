@@ -8,6 +8,16 @@
  * shape a drift defect takes on this branch.
  */
 
+/** "Platform admin" -- what an act carried out with platform-admin authority
+ *  names as its author, to every viewer who does not hold that authority.
+ *
+ *  ONE definition for three surfaces: Activity's author column, Activity's
+ *  drawer header, and the Tests drawer's version timeline. It lives here
+ *  rather than in HistoryPage because the Tests page needed it too -- the
+ *  same reason labelFrom is here, and the D7 rule is now applied to tests
+ *  and versions as well as to runs. */
+export const PLATFORM_ADMIN = 'Platform admin'
+
 /** What a test is called: its name, else its description.
  *
  *  Takes the two fields rather than a row, because the drawer and Activity

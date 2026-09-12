@@ -2545,6 +2545,24 @@ class RunRegistry:
                 rows = conn.execute(
                     "SELECT te.test_id, te.name, te.user_query, te.user_id, "
                     "       te.user_email, te.org_id, "
+                    # D7 on the Tests surface. Activity withholds a platform
+                    # admin's address; without this the SAME address was one
+                    # click away, on the same person's test, for the same act
+                    # -- reachable with no cross-org action at all, because a
+                    # plain Generate by a platform admin sets the run flag.
+                    # DERIVED, not stored: a run already carries the authority
+                    # it was made with, so a new mint or append inherits this
+                    # rule for free, where a stored column has to be remembered
+                    # at every write site and a forgotten one fails OPEN.
+                    # Matched on the AUTHOR'S OWN runs, so a platform admin
+                    # merely re-running a colleague's test never hides the
+                    # colleague. Anchored on test_id, which
+                    # idx_test_runs_test_time leads on.
+                    "       EXISTS (SELECT 1 FROM test_runs ra "
+                    "          WHERE ra.test_id = te.test_id "
+                    "            AND ra.user_id = te.user_id "
+                    "            AND ra.ran_as_platform_admin) "
+                    "          AS author_is_platform_admin, "
                     "       g.group_id, g.name AS group_name, "
                     "       te.current_version, "
                     "       (SELECT COUNT(*) FROM test_versions v2 "
@@ -2589,6 +2607,10 @@ class RunRegistry:
                     "user_id": r["user_id"],
                     "org_id": r["org_id"],
                     "user_email": r["user_email"],
+                    # Consumed by the API's D7 rule and popped there;
+                    # it never reaches the client.
+                    "author_is_platform_admin":
+                        r["author_is_platform_admin"],
                     "group_id": r["group_id"],
                     "group_name": r["group_name"],
                     "current_version": r["current_version"],
@@ -2970,6 +2992,12 @@ class RunRegistry:
                 row = conn.execute(
                     "SELECT te.test_id, te.name, te.user_query, te.user_id, "
                     "       te.user_email, te.org_id, "
+                    # D7, exactly as list_tests above states it.
+                    "       EXISTS (SELECT 1 FROM test_runs ra "
+                    "          WHERE ra.test_id = te.test_id "
+                    "            AND ra.user_id = te.user_id "
+                    "            AND ra.ran_as_platform_admin) "
+                    "          AS author_is_platform_admin, "
                     "       g.group_id, g.name AS group_name, "
                     "       te.current_version, te.created_at, "
                     "       te.updated_at, "
@@ -2983,9 +3011,25 @@ class RunRegistry:
                 if row is None:
                     return None
                 versions = conn.execute(
-                    "SELECT n, user_query, robot_code, created_by,"
-                    " created_by_email, reason, created_at FROM test_versions"
-                    " WHERE test_id = %s ORDER BY n DESC",
+                    "SELECT v.n, v.user_query, v.robot_code, v.created_by,"
+                    " v.created_by_email, v.reason, v.created_at,"
+                    # D7 per VERSION: was this row's OWN creator acting with
+                    # platform-admin authority when they made it? Task 7 lets
+                    # someone other than the author append, so the test-level
+                    # answer above cannot stand in for this one.
+                    #
+                    # ra.test_id is redundant for correctness and load-bearing
+                    # for cost: nothing indexes test_version_id, so without it
+                    # this is a scan of test_runs per version rather than an
+                    # index probe under idx_test_runs_test_time.
+                    " EXISTS (SELECT 1 FROM test_runs ra"
+                    "          WHERE ra.test_id = v.test_id"
+                    "            AND ra.test_version_id = v.version_id"
+                    "            AND ra.user_id = v.created_by"
+                    "            AND ra.ran_as_platform_admin)"
+                    "        AS creator_is_platform_admin"
+                    " FROM test_versions v"
+                    " WHERE v.test_id = %s ORDER BY v.n DESC",
                     (test_id,),
                 ).fetchall()
                 # Same predicate as the page below, built once: a count that
@@ -3020,6 +3064,8 @@ class RunRegistry:
                 "user_query": row["user_query"],
                 "user_id": row["user_id"],
                 "user_email": row["user_email"],
+                "author_is_platform_admin":
+                    row["author_is_platform_admin"],
                 "org_id": row["org_id"],
                 "group_id": row["group_id"],
                 "group_name": row["group_name"],
@@ -3051,6 +3097,8 @@ class RunRegistry:
                           if v["created_by"] is not None
                           and v["created_by"] == row["user_id"] else None)
                 ),
+                "creator_is_platform_admin":
+                    v["creator_is_platform_admin"],
                 "reason": v["reason"],
                 "created_at": v["created_at"].isoformat(),
             } for v in versions],
@@ -3627,8 +3675,25 @@ class RunRegistry:
             # Escape LIKE wildcards so a typed % / _ matches literally (default
             # ESCAPE is backslash); the search box is substring, not glob.
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            # D7 reaches the SEARCH BOX, not only the row. _hide_admin_author
+            # blanks the address on an admin-authority run, but this clause
+            # still MATCHED on it, and the match is a substring -- so a caller
+            # who did not know the address could derive it about 26 requests
+            # per character, through the public API, with no SPA involved.
+            # R11-2 chose server-side suppression precisely because "the next
+            # reader of row.user_email reintroduces the leak"; this clause was
+            # that reader.
+            #
+            # The disjunction is include_unowned, which history_endpoints
+            # computes as `scope.is_admin or scope.caller_user_id is None` --
+            # character for character what _hide_admin_author keeps the
+            # address for. Anyone who may READ the address may search it.
+            # user_query and run_id are untouched: neither names a person.
+            email_term = ("t.user_email ILIKE %s" if include_unowned
+                          else "(t.user_email ILIKE %s"
+                               " AND NOT t.ran_as_platform_admin)")
             clauses.append(
-                "(t.user_query ILIKE %s OR t.user_email ILIKE %s OR t.run_id ILIKE %s)"
+                f"(t.user_query ILIKE %s OR {email_term} OR t.run_id ILIKE %s)"
             )
             params.extend([like, like, like])
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""

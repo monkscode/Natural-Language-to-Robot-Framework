@@ -29,7 +29,7 @@ import {
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
-import { labelFrom, versionLabel } from '@/lib/testLabels'
+import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
@@ -180,11 +180,6 @@ function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
     </p>
   )
 }
-
-/** "Platform admin" — what a result made with platform-admin authority names
- *  as its author, to every viewer who does not hold that authority. One
- *  definition: the table's author column and the drawer's header both use it. */
-const PLATFORM_ADMIN = 'Platform admin'
 
 /** Which test a result belongs to, and the version of it that ran — the chip
  *  that replaced the re-run pill (spec 7.5).

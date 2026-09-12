@@ -781,6 +781,29 @@ describe('TestsPage — the drawer’s code and versions', () => {
     expect(list.textContent).toContain('author unknown')
     expect(list.textContent).not.toContain('a@b.com')
   })
+
+  it('says Platform admin where the server withheld the address under D7', async () => {
+    // The server blanks created_by_email on a version made with
+    // platform-admin authority and leaves the flag, exactly as it does for a
+    // run. Activity already labels that case; the drawer must not fall
+    // through to "author unknown", which says less than the server knows.
+    setup({
+      detail: {
+        ...DETAIL,
+        versions: [{
+          ...DETAIL.versions[0],
+          created_by_email: null,
+          creator_is_platform_admin: true,
+        }],
+      },
+    })
+    renderPage()
+    const drawer = await openDrawer()
+
+    const list = await within(drawer).findByRole('list', { name: 'Versions, newest first' })
+    expect(list.textContent).toContain('Platform admin')
+    expect(list.textContent).not.toContain('author unknown')
+  })
 })
 
 describe('TestsPage — Move', () => {
