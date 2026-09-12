@@ -291,6 +291,46 @@ def test_a_folder_in_another_org_publishes_nothing_to_this_caller(reg):
     assert row["health"] == "passing"
 
 
+def test_no_folder_publishes_anything_to_a_caller_who_has_no_org(reg):
+    """The `identified` half of the same join, which the test above cannot
+    reach: a caller who HAS an identity but no org.
+
+    `run_groups.org_id` is NOT NULL, so there is no org-less folder for such
+    a caller to share. Their folder join is therefore `ON FALSE` — not an org
+    term, which has no org to bind — and _VISIBLE_RUN_SQL falls back to the
+    bare owner check. Drop `identified` and the join loses its ON FALSE and
+    its org term together: EVERY org's folder resolves, and the org-less
+    caller counts, and is handed a last_run_id for, a result belonging to
+    another tenant entirely.
+
+    This is a regression guard on correct code. The population is narrow —
+    _token_payload self-heals an org-less ACTIVE user before minting, so what
+    is left is a script/API token with no org claim, or one minted before
+    that self-heal and not yet expired.
+    """
+    r, admin = reg
+    folder = _folder(admin)                     # belongs to ORG_A
+    test_id = _test_row(admin, key_n=1, org_id=None)
+    version_id = _version_row(admin, test_id)
+    mine = _run_row(admin, test_id, version_id, "passed",
+                    "2026-01-01T10:00:00Z", org_id=None)
+    # The documented shape: a run whose own group_id names a folder while the
+    # test above it is unfiled, so _group_join's COALESCE falls back to it.
+    theirs = _run_row(admin, test_id, version_id, "failed",
+                      "2026-01-01T11:00:00Z", user_id=ADMIN, org_id=None)
+    admin.execute("UPDATE test_runs SET group_id = %s WHERE run_id = %s",
+                  (folder, theirs))
+
+    rows, total = r.list_tests(user_id=MEMBER, org_id=None, folder_org_id=None)
+    assert total == 1
+    row = rows[0]
+    assert row["result_count"] == 1
+    assert row["last_run_id"] == mine
+    assert row["last_run_id"] != theirs
+    assert row["last_status"] == "passed"
+    assert row["health"] == "passing"
+
+
 def test_a_published_test_still_counts_every_result(reg):
     """The narrowing must not shrink what the org genuinely shares.
 
