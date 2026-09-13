@@ -327,6 +327,42 @@ def test_one_unfilable_test_in_a_batch_refuses_the_whole_move(reg):
         "the batch wrote a test through a run the caller could not file")
 
 
+@pytest.mark.parametrize(
+    "caller, is_org_admin, broken",
+    [("bob", False, "user_id"),
+     ("bob", False, "org_id"),
+     ("carol", True, "org_id")],
+    ids=["member-author-less", "member-org-less", "org_admin-org-less"])
+def test_a_test_with_a_null_identity_is_refused_not_filed(
+        reg, caller, is_org_admin, broken):
+    """The COALESCE in the test-authority refusal is load-bearing, and this
+    is what holds it. tests.user_id and tests.org_id are both nullable, and a
+    NULL in either makes the authority comparison NULL. With a bare NOT the
+    refusal's WHERE is then NULL too, finds no row, and the call files the
+    test. COALESCE(..., FALSE) turns that NULL into "not authorised".
+
+    Each caller owns the run, so the run rule alone would let every case
+    through -- only the test half refuses. The member branch compares both
+    columns and the org_admin branch only the org, which is why there are
+    three cases. The NULL is forced by UPDATE, as the helpers above force
+    folder state: this pins the refusal, not how such a row arises."""
+    r, admin = reg
+    _folder(admin, "g-1")
+    r.record_start("r0", {"user_id": caller, "org_id": "org-a",
+                          "email": f"{caller}@x.com"},
+                   "q", "generated", robot_code="c")
+    tid = _test_id(admin, "r0")
+    admin.execute(f"UPDATE tests SET {broken} = NULL WHERE test_id = %s",
+                  (tid,))
+
+    assert r.assign_runs("org-a", caller, is_org_admin, ["r0"], "g-1") is False
+    assert _folder_of_test(admin, tid) is None, (
+        f"a test with a NULL {broken} was filed")
+    assert admin.execute(
+        "SELECT group_id FROM test_runs WHERE run_id = 'r0'"
+    ).fetchone()[0] is None
+
+
 def test_a_run_with_no_test_still_moves_on_run_authority(reg):
     """The narrowness of the rule above. A run with no robot_code has no test
     (D8 scenario a), so there is no test authority to have -- its own owner
