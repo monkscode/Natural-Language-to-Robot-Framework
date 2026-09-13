@@ -123,7 +123,8 @@ class TestVersionIn(BaseModel):
 
 
 def _hide_platform_admin_author(row: dict, flag: str, scope) -> None:
-    """D7 on the Tests surface, and the same rule Activity applies to a run.
+    """D7 on the Tests surface. Who keeps the address is Activity's rule
+    exactly; what sets the flag is not -- see test_detail.
 
     `_hide_admin_author` withholds the author's ADDRESS on a RESULT made with
     platform-admin authority. A test and its versions are the same person's

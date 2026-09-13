@@ -3090,16 +3090,17 @@ class RunRegistry:
                     "SELECT v.n, v.user_query, v.robot_code, v.created_by,"
                     " v.created_by_email, v.reason, v.created_at,"
                     # D7 per VERSION: has this row's OWN creator EVER run
-                    # this version with platform-admin authority? The mint
-                    # or append that made it counts, and so does any later
-                    # run of it by the same person: a re-run carries its
-                    # source's test_version_id and a Tests-page Run the
-                    # current version's. So a version a member made flips
-                    # once they run it again as a platform admin. "Ever" can
-                    # only withhold more than "when it was made", never
-                    # less. Task 7 lets someone other than the author
-                    # append, so the test-level answer above cannot stand
-                    # in for this one.
+                    # this version with platform-admin authority? Any run of
+                    # theirs attributed to this version counts: the mint or
+                    # append that made it and every later run labelled with
+                    # it -- including a re-run of a code-less run the
+                    # collapse attached, which _attach_test's rerun_of branch
+                    # labels with the test's CURRENT version. So a version a
+                    # member made flips once they run it again as a platform
+                    # admin. "Ever" can only withhold more than "when it was
+                    # made", never less. Task 7 lets someone other than the
+                    # author append, so the test-level answer above cannot
+                    # stand in for this one.
                     #
                     # ra.test_id is redundant for correctness and load-bearing
                     # for cost: nothing indexes test_version_id, so without it

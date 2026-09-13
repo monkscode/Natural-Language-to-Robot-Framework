@@ -97,9 +97,11 @@ interface TestVersion {
   user_query: string | null
   robot_code: string | null
   created_by_email: string | null
-  /** D7: the server withheld created_by_email because this version's
-   *  creator has run it with platform-admin authority — when they made it,
-   *  or on any later run of it. Same field shape as a run's
+  /** D7: this version's creator has run it with platform-admin authority —
+   *  when they made it, or on any later run of it. The server withholds
+   *  created_by_email from a signed-in viewer who does not hold that
+   *  authority, so render the address when it is present and name the
+   *  role only in its place. Same field shape as a run's
    *  ran_as_platform_admin, so both surfaces label it the same way. */
   creator_is_platform_admin?: boolean
   reason: string | null

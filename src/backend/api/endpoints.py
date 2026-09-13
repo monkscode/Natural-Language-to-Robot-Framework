@@ -80,9 +80,10 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     arguments: the owner, while their token names the run's org (or names
     none, the legacy-token fallback); an org_admin of the run's org; any
     same-org caller on a run PUBLISHED into one of that org's folders (D5 —
-    the comment on the gate below says why); or a validated admin — or any
-    caller when AUTH_ENFORCED is off. With it on, unattributed legacy rows
-    are admin-only. Everything else 404s, unknown ids included.
+    the comment on the gate below says why); or a validated admin — or, with
+    AUTH_ENFORCED off, a caller with no token at all. For every caller with a
+    token, unattributed legacy rows are admin-only. Everything else the gate
+    refuses 404s, unknown ids included.
     """
     try:
         source_run_id = str(uuid.UUID(source_run_id))

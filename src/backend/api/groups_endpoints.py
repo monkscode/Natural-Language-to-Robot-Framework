@@ -152,8 +152,8 @@ def list_groups(user: dict | None = Depends(require_user)):
     folder belongs to the org, so its count does too. Scoping it per user
     was what put a member's chip at 1 beside a folder holding 2. It does
     leave out whatever the table beneath it leaves out, such as a run nobody
-    owns for anyone but a platform admin or the token-less dev caller,
-    because a chip must equal its table.
+    owns, which only a platform admin's chip counts, because a chip must
+    equal its table.
 
     Each folder also carries test_count since the 2026-09-07 split: how many
     TESTS are filed there, beside run_count's tally of RESULTS. Purely
