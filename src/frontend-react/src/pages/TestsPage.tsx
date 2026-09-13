@@ -97,8 +97,9 @@ interface TestVersion {
   user_query: string | null
   robot_code: string | null
   created_by_email: string | null
-  /** D7: the server withheld created_by_email because this version was made
-   *  with platform-admin authority. Same field shape as a run's
+  /** D7: the server withheld created_by_email because this version's
+   *  creator has run it with platform-admin authority — when they made it,
+   *  or on any later run of it. Same field shape as a run's
    *  ran_as_platform_admin, so both surfaces label it the same way. */
   creator_is_platform_admin?: boolean
   reason: string | null
@@ -454,9 +455,10 @@ function TestRowView({ row, groupFilter, groups, running, runDisabled, onOpen, o
             </span>
           )}
           {/* Offered on the same term as Move, because the route asks the
-              same question of an update (_may_move_test). Offered even where
-              can_run is false: a test whose current version has no code is
-              exactly one you regenerate — which is what NO_CODE says to do. */}
+              same question of an update (history_scope.may_move_test).
+              Offered even where can_run is false: a test whose current
+              version has no code is exactly one you regenerate — which is
+              what NO_CODE says to do. */}
           {row.can_move && (
             <Button
               variant="ghost" size="icon" className="h-7 w-7"
@@ -698,8 +700,8 @@ interface SavedVersion {
  *  Regenerate it replaces left the page and lost every bit of context.
  *
  * Offered exactly where `can_move` is true, which is the authority the route
- * itself applies to `mode: "update"` (_may_move_test, plus visibility) — so
- * "may move" and "may update" are one answer on every row.
+ * itself applies to `mode: "update"` (history_scope.may_move_test, plus
+ * visibility) — so "may move" and "may update" are one answer on every row.
  *
  * It makes its own read rather than taking the drawer's, because it opens
  * from a row too, and a row carries no code and no version list.

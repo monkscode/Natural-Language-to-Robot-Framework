@@ -298,9 +298,13 @@ def test_detail(
     collapse write the author.
 
     user_email and created_by_email stay, so a shared folder can still say
-    who authored what -- with one exception, D7: an address recorded under
-    platform-admin authority is withheld from everyone who does not hold it,
-    by _hide_platform_admin_author, exactly as Activity does for a run. That
+    who authored what -- with one exception, D7: the address of an author
+    (on a version, its creator) who has EVER run it with platform-admin
+    authority -- the mint or append, or any later run -- is withheld by
+    _hide_platform_admin_author from every caller who does not hold that
+    authority, the token-less dev caller excepted. Activity decides the
+    same thing per run, so this can withhold an address Activity still
+    shows on that person's member-made run. That
     exception is why the redaction here is no longer inverted: it used to
     drop the opaque uuid and keep the real address.
     """

@@ -363,10 +363,11 @@ def list_history(
 def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     """One run plus its stored Robot code — the History drawer's data source.
 
-    Same scoping as the list: the owner, an org_admin of the run's org,
-    any same-org caller on a run PUBLISHED into one of that org's
-    folders (D5, via _can_open's is_grouped), or a validated admin —
-    or any caller when AUTH_ENFORCED is off. Unattributed legacy rows
+    Same scoping as the list: the owner, while their token names the run's
+    org (or names none, the legacy-token fallback); an org_admin of the
+    run's org; any same-org caller on a run PUBLISHED into one of that org's
+    folders (D5, via _can_open's is_grouped); or a validated admin — or any
+    caller when AUTH_ENFORCED is off. With it on, unattributed legacy rows
     are admin-only, matching the /reports gate's fail-closed rule.
     Everything else 404s, unknown ids included.
     """

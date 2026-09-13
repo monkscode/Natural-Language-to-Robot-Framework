@@ -1675,9 +1675,10 @@ class RunRegistry:
         listed every org's folders.
 
         test_count arrived with the 2026-09-07 split and is additive —
-        run_count keeps its name AND its meaning, a count of RESULTS. Its
-        subquery IS scoped by run_org_id now, and the note that once stood
-        here — that adding an org scope would zero the count for the
+        run_count keeps its name AND its meaning, a count of RESULTS.
+        test_count's subquery IS scoped by run_org_id now, and the note
+        that once stood here — that adding an org scope would zero the
+        count for the
         token-less dev caller — is answered by the guard rather than by
         leaving the term out: that caller's run_org_id is None, which emits
         no term at all, exactly as it does for the run count beside it.
@@ -2681,8 +2682,9 @@ class RunRegistry:
                     "user_id": r["user_id"],
                     "org_id": r["org_id"],
                     "user_email": r["user_email"],
-                    # Consumed by the API's D7 rule and popped there;
-                    # it never reaches the client.
+                    # Read by the API's D7 rule, which keeps it on the row
+                    # whether or not it blanks user_email, so it does reach
+                    # the client -- as ran_as_platform_admin does on a run.
                     "author_is_platform_admin":
                         r["author_is_platform_admin"],
                     "group_id": r["group_id"],
@@ -3087,10 +3089,17 @@ class RunRegistry:
                 versions = conn.execute(
                     "SELECT v.n, v.user_query, v.robot_code, v.created_by,"
                     " v.created_by_email, v.reason, v.created_at,"
-                    # D7 per VERSION: was this row's OWN creator acting with
-                    # platform-admin authority when they made it? Task 7 lets
-                    # someone other than the author append, so the test-level
-                    # answer above cannot stand in for this one.
+                    # D7 per VERSION: has this row's OWN creator EVER run
+                    # this version with platform-admin authority? The mint
+                    # or append that made it counts, and so does any later
+                    # run of it by the same person: a re-run carries its
+                    # source's test_version_id and a Tests-page Run the
+                    # current version's. So a version a member made flips
+                    # once they run it again as a platform admin. "Ever" can
+                    # only withhold more than "when it was made", never
+                    # less. Task 7 lets someone other than the author
+                    # append, so the test-level answer above cannot stand
+                    # in for this one.
                     #
                     # ra.test_id is redundant for correctness and load-bearing
                     # for cost: nothing indexes test_version_id, so without it

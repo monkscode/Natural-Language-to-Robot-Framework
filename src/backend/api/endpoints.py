@@ -76,10 +76,13 @@ def _rerun_from_history(source_run_id: str, user: dict | None) -> StreamingRespo
     which is root-flattened below and would send a re-run of a since-moved
     re-run back to the ORIGINAL run's folder.
 
-    Access mirrors the detail endpoint: the owner, an org_admin of the
-    run's org, any same-org caller on a run PUBLISHED into one of that
-    org's folders (D5 — the comment on the gate below says why), or a
-    validated admin. Everything else 404s, unknown ids included.
+    Access is the detail endpoint's gate, caller_can_access with the same
+    arguments: the owner, while their token names the run's org (or names
+    none, the legacy-token fallback); an org_admin of the run's org; any
+    same-org caller on a run PUBLISHED into one of that org's folders (D5 —
+    the comment on the gate below says why); or a validated admin — or any
+    caller when AUTH_ENFORCED is off. With it on, unattributed legacy rows
+    are admin-only. Everything else 404s, unknown ids included.
     """
     try:
         source_run_id = str(uuid.UUID(source_run_id))

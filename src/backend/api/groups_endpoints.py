@@ -148,15 +148,19 @@ def list_groups(user: dict | None = Depends(require_user)):
     every mutation binds. Before that, /api/groups answered with every org's
     folder names while every write answered 404 for exactly those folders.
 
-    run_count is the folder's WHOLE contents, not the caller's slice of it —
-    a folder belongs to the org, so its count does too. Scoping it per user
-    was what put a member's chip at 1 beside a folder holding 2.
+    run_count is the folder's contents, not the caller's slice of them — a
+    folder belongs to the org, so its count does too. Scoping it per user
+    was what put a member's chip at 1 beside a folder holding 2. It does
+    leave out whatever the table beneath it leaves out, such as a run nobody
+    owns for anyone but a platform admin or the token-less dev caller,
+    because a chip must equal its table.
 
     Each folder also carries test_count since the 2026-09-07 split: how many
     TESTS are filed there, beside run_count's tally of RESULTS. Purely
     additive — run_count keeps its name and its meaning — and passed straight
     through from the registry, whose list_groups docstring is the authority on
-    why that subquery is deliberately not narrowed by the run scope.
+    how that subquery is scoped: by the same run scope and owned-row rule as
+    run_count.
 
     ungrouped_test_count is that same split applied to the Ungrouped chip:
     count_ungrouped_tests, called with the identical scope args as
