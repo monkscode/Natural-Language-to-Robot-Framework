@@ -9,8 +9,8 @@ The defects (measured 2026-09-14):
   in a real container.
 - A full local gate wrote application.log, a temp_metrics/<uuid>.json and both
   crewai logs into the repo's logs/, which the running API container writes
-  too. Two of its records were fake slowapi "ratelimit" lines that the 429
-  count matches, and a test process rotated the live application.log.
+  too. Each gate added two fake slowapi "ratelimit" lines to application.log,
+  which the 429 count matches, and a test process rotated the live file.
 
 Two halves:
 - redirect_staging() and redirect_logs() point every copy of those paths at

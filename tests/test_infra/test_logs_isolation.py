@@ -38,7 +38,7 @@ def _session_log_dir() -> Path:
 
 def test_the_session_log_dir_is_outside_the_repo():
     """main.py opens application.log under LOG_DIR when it is imported, and
-    four test modules import it during collection."""
+    test modules that import it at module level do so during collection."""
     log_dir = os.environ.get("LOG_DIR")
 
     assert log_dir, "tests/conftest.py must set LOG_DIR before anything imports src.backend.main"

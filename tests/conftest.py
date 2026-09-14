@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
 # application.log goes to LOG_DIR (src/backend/main.py), and main.py opens it
-# at IMPORT time — four test modules import main at module level, i.e. during
+# at IMPORT time — test modules that import main at module level do so during
 # collection, before any fixture runs. So it is pinned here like the
 # OBSERVABILITY_BACKEND pin above, and forced rather than setdefault: a shell
 # that exported a real LOG_DIR must not reach the session. isolate_session()
@@ -497,7 +497,7 @@ def _clear_structlog_contextvars():
     test runs it on the main one. tools/browser_use_tool.py reads workflow_id
     from that context, so every later test that called the tool wrote a
     temp-metrics file under it. Autouse here, so it tears down after every
-    fixture a test module adds."""
+    function-scoped fixture a test module adds."""
     yield
     import structlog
 

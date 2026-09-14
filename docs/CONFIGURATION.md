@@ -232,6 +232,11 @@ LOG_DIR=logs
   `run.sh` exports `.env` (`set -a`) and compose passes it through `env_file`,
   so both see a value set there. A bare `uvicorn src.backend.main:app` does
   not — export it in the shell instead.
+- **Its parent directory must exist.** `setup_logging()` creates the directory
+  itself but not its parents, and outside its error handling: a missing parent,
+  or a path that names a file, stops the API at import with
+  `FileNotFoundError` / `FileExistsError`. A mistyped value fails loudly rather
+  than logging somewhere unexpected.
 - **Compose mounts `./logs` at `/app/logs`.** Inside a container, a `LOG_DIR`
   outside `/app/logs` takes `application.log` off that mount, so it no longer
   reaches the host's `./logs`. Alloy is unaffected either way: it ships
