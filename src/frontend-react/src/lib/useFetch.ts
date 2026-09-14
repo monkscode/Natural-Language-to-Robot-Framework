@@ -3,7 +3,7 @@
  * Returns { data, loading, error, reload }. Pass null to skip fetching.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from './api'
 
 export function useFetch<T = unknown>(path: string | null) {
@@ -21,11 +21,15 @@ export function useFetch<T = unknown>(path: string | null) {
   // awaits an action and then calls reload() gets the one from the render that
   // started the action. If the path moved meanwhile, that reload() names a
   // path nobody is looking at, and as the newest request its answer would land
-  // over the current path's — so it does nothing instead. Updated in an effect
-  // declared before the fetch effect below, so it is current by the time that
-  // one runs.
+  // over the current path's — so it does nothing instead. Updated in a LAYOUT
+  // effect, which runs inside the commit: a plain effect runs later (after
+  // paint, for an update that is not a click), and a reload() that fired in
+  // between found the old path here and refetched it. Not written during
+  // render either: a render React throws away would leave it naming a path
+  // that never committed, and the committed path's own reload() would then do
+  // nothing.
   const latestPath = useRef(path)
-  useEffect(() => { latestPath.current = path }, [path])
+  useLayoutEffect(() => { latestPath.current = path }, [path])
 
   const reload = useCallback(async () => {
     if (path !== latestPath.current) return

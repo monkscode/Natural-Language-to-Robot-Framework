@@ -32,7 +32,7 @@
  * two.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { StrictMode, createElement, type ReactNode } from 'react'
+import { StrictMode, createElement, useLayoutEffect, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./api', () => ({ api: vi.fn() }))
@@ -376,5 +376,29 @@ describe('useFetch — a reload() that outlived its path', () => {
     await act(async () => { await staleReload() })
 
     expect(result.current.data).toEqual(ROWS_B)
+  })
+
+  it('does nothing even when it runs between the path change’s commit and its effects', async () => {
+    // React runs useEffect callbacks AFTER the commit — for an update that is
+    // not a click, after paint — so a stale reload() that fires in that window
+    // (an action's await resolving) used to find the guard still holding the
+    // OLD path and refetch it. A layout effect in the committing render runs
+    // exactly there, which is what makes this deterministic.
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    let stale: (() => Promise<void>) | null = null
+    const { result, rerender } = renderHook(({ p }) => {
+      const r = useFetch<typeof ROWS_A>(p)
+      useLayoutEffect(() => {
+        if (stale && p !== '/runs') void stale()
+      }, [p])
+      return r
+    }, { initialProps: { p: '/runs' } })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+    stale = result.current.reload
+
+    rerender({ p: '/runs?status=failed' })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_B))
+
+    expect(mockApi.mock.calls.filter(c => c[0] === '/runs')).toHaveLength(1)
   })
 })
