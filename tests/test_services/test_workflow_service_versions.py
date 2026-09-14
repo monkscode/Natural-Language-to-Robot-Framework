@@ -29,7 +29,8 @@ from src.backend.services import workflow_service as ws
 
 _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 _TEST_ID = "8c1f0a52-6d4e-4a1b-9f33-2b7c5e0d4a10"
-_ADMIN = {"user_id": "root", "org_id": "org-a", "email": "r@x.com"}
+_ADMIN = {"user_id": "root", "org_id": "org-a", "email": "r@x.com",
+          "role": "admin"}
 
 _OK_EVENTS = [
     {"status": "running", "message": "planning", "workflow_id": _WF_ID},
@@ -179,11 +180,17 @@ def test_the_retry_carries_the_same_platform_admin_flag():
     """A NEW _record_run call site. ran_as_platform_admin is write-once on
     the row that CREATED it, and the retry can BE that row when the first
     write was lost outright -- so omitting it here would silently record an
-    admin's regeneration as an ordinary one."""
-    calls, _ = _drive(_OK_EVENTS, read_back=_one_miss_then_found(),
-                      user=_ADMIN, regenerate_test_id=_TEST_ID,
-                      version_reason="edited", report_version=True)
+    admin's regeneration as an ordinary one.
+
+    The caller must be a VALIDATED platform admin, or both writes carry
+    False and the comparison passes whatever the retry sends."""
+    with patch.object(ws, "is_validated_admin", return_value=True):
+        calls, _ = _drive(_OK_EVENTS, read_back=_one_miss_then_found(),
+                          user=_ADMIN, regenerate_test_id=_TEST_ID,
+                          version_reason="edited", report_version=True)
     first, retry = _generated(calls)
+    assert first["is_platform_admin"] is True, (
+        "premise: the caller is a validated platform admin")
     assert "is_platform_admin" in retry
     assert retry["is_platform_admin"] == first["is_platform_admin"]
 
