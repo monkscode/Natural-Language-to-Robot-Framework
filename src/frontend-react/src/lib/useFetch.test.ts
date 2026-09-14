@@ -316,3 +316,65 @@ describe('useFetch — teardown and pile-ups', () => {
     expect(result.current.error).toBe('')
   })
 })
+
+describe('useFetch — a reload() that outlived its path', () => {
+  // A caller that awaits an action and then calls reload() gets the reload()
+  // from the render that STARTED the action (LearningPage's act(), decide()
+  // and applyApproved() all do this). If the path moved while the action was
+  // out — a filter clicked, another review session opened — that reload()
+  // still names the old path, and as the newest request its answer landed on
+  // top of the new path's. Measured on the Hints table: retract a hint, click
+  // "Retracted" before the POST returns, and the All-filter rows came back
+  // under the Retracted button.
+  const staleAfterPathChange = async (opts = {}) => {
+    const hook = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), { initialProps: { p: '/runs' }, ...opts })
+    await waitFor(() => expect(hook.result.current.data).toEqual(ROWS_A))
+    const staleReload = hook.result.current.reload
+    hook.rerender({ p: '/runs?status=failed' })
+    await waitFor(() => expect(hook.result.current.data).toEqual(ROWS_B))
+    return { ...hook, staleReload }
+  }
+
+  it('neither refetches the old path nor replaces the new path’s data', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange()
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_B)
+    expect(mockApi.mock.calls.filter(c => c[0] === '/runs')).toHaveLength(1)
+  })
+
+  it('does not put the old path’s failure over the new path’s data', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange()
+    mockApi.mockImplementation((async () => { throw new Error('old filter refused') }) as typeof api)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.error).toBe('')
+    expect(result.current.data).toEqual(ROWS_B)
+  })
+
+  it('still refetches once the path has come back to the one it names', async () => {
+    const ROWS_A_AGAIN = { total: 123, rows: ['a', 'a2'] }
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, rerender, staleReload } = await staleAfterPathChange()
+    rerender({ p: '/runs' })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+    mockApi.mockResolvedValue(ROWS_A_AGAIN)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_A_AGAIN)
+  })
+
+  it('does nothing under StrictMode either', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange(strict)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_B)
+  })
+})

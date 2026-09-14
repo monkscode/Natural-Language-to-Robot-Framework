@@ -17,8 +17,18 @@ export function useFetch<T = unknown>(path: string | null) {
   // it is only read on the failure path below, and it is written in the same
   // place `data` is.
   const dataPath = useRef<string | null>(null)
+  // The path the hook holds NOW. A reload() outlives its render: a caller that
+  // awaits an action and then calls reload() gets the one from the render that
+  // started the action. If the path moved meanwhile, that reload() names a
+  // path nobody is looking at, and as the newest request its answer would land
+  // over the current path's — so it does nothing instead. Updated in an effect
+  // declared before the fetch effect below, so it is current by the time that
+  // one runs.
+  const latestPath = useRef(path)
+  useEffect(() => { latestPath.current = path }, [path])
 
   const reload = useCallback(async () => {
+    if (path !== latestPath.current) return
     if (!path) {
       setLoading(false)
       return

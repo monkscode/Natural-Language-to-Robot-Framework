@@ -439,6 +439,55 @@ describe('Hints: hint lifecycle actions (act())', () => {
   })
 })
 
+describe('Hints: an action that lands after the filter moved (the real useFetch)', () => {
+  // The tests above mock useFetch, and a mock answers each path the same way
+  // whatever came before. act() awaits its POST and then calls the reload()
+  // of the render that started it, so the defect lives in what the REAL hook
+  // does when the filter moves while that POST is out.
+  it('does not bring the previous filter’s rows back over the new filter', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    mockUseAuth.mockReturnValue({
+      user: { id: 'u9', email: 'reviewer@test.local', display_name: 'R', role: 'user', status: 'active' },
+      isAdmin: false,
+      isOrgAdmin: true,
+      canViewLearning: true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockUseFetch.mockImplementation(actual.useFetch)
+    let releaseRetract: (v: unknown) => void = () => {}
+    mockApi.mockImplementation((async (path: string, init?: RequestInit) => {
+      if (path === '/api/learning/hints?limit=100') {
+        return { total: 1, hints: [{ id: 101, feedback_text: 'ALL-FILTER ROW', is_active: 1, conflict_flagged: 0 }] }
+      }
+      if (path === '/api/learning/hints?limit=100&status=retracted') {
+        return { total: 1, hints: [{ id: 303, feedback_text: 'RETRACTED-FILTER ROW', is_active: 0 }] }
+      }
+      if (path === '/api/learning/hints/101/retract' && init?.method === 'POST') {
+        return new Promise<unknown>(resolve => { releaseRetract = resolve })
+      }
+      throw new Error(`unrouted ${path}`)
+    }) as typeof api)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<LearningPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retract' }))
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/learning/hints/101/retract', expect.anything()))
+    fireEvent.click(screen.getByRole('button', { name: 'Retracted' }))
+    expect(await screen.findByText('RETRACTED-FILTER ROW')).toBeInTheDocument()
+
+    // Let the retract land and every read it could start settle; all mocks
+    // above answer at once, so 50ms is far more than the chain needs.
+    await act(async () => {
+      releaseRetract({})
+      await new Promise(resolve => setTimeout(resolve, 50))
+    })
+
+    expect(screen.getByText('RETRACTED-FILTER ROW')).toBeInTheDocument()
+    expect(screen.queryByText('ALL-FILTER ROW')).toBeNull()
+    expect(mockApi.mock.calls.filter(c => c[0] === '/api/learning/hints?limit=100')).toHaveLength(1)
+    confirmSpy.mockRestore()
+  })
+})
+
 describe('HealthBanner: renders per learning-health status', () => {
   function renderWithHealth(status: string) {
     mockUseAuth.mockReturnValue({
