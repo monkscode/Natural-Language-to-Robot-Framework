@@ -7,12 +7,14 @@ application.log (1,229 records, two of them fake slowapi "ratelimit" lines the
 temp_metrics/<uuid>.json, crewai.log.txt and crewai_steps.log.
 
 The redirect is pinned here: every log path the suite can reach points into
-the session's LOG_DIR, outside the repo. The guard that refuses whatever still
-reaches <repo>/logs is pinned in test_staging_isolation_guard.py.
+the session's LOG_DIR, outside the repo. So is the per-test clear of
+structlog's context: a workflow_id one test left bound made every later
+browser-tool test write a temp-metrics file. The guard that refuses whatever
+still reaches <repo>/logs is pinned in test_staging_isolation_guard.py.
 
 Referenced by: none (leaf test module).
-Depends on: tests/conftest.py (the LOG_DIR pin, _isolated_staging_root),
-tests/isolation_guard.py (redirect_logs).
+Depends on: tests/conftest.py (the LOG_DIR pin, _isolated_staging_root,
+_clear_structlog_contextvars), tests/isolation_guard.py (redirect_logs).
 """
 
 import os
@@ -93,5 +95,23 @@ def test_an_exported_log_dir_does_not_reach_the_session(tmp_path):
         def test_the_session_log_dir_is_not_the_exported_one():
             assert os.environ["LOG_DIR"] != {exported!r}
     """, dict(os.environ, LOG_DIR=exported))
+
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+
+
+def test_a_later_test_starts_with_an_empty_structlog_context(tmp_path):
+    """run_agentic_workflow binds a fresh workflow_id in the calling thread and
+    nothing clears it: production runs each workflow on its own thread, a test
+    runs it on the main one. The browser tool reads workflow_id from that
+    context, so every later test that called the tool wrote a temp-metrics file."""
+    result = _run_session_with_conftest(tmp_path, """
+        import structlog
+
+        def test_a_binds_a_workflow_id():
+            structlog.contextvars.bind_contextvars(workflow_id="wf-leak")
+
+        def test_b_starts_with_nothing_bound():
+            assert structlog.contextvars.get_contextvars() == {}
+    """, dict(os.environ))
 
     assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr

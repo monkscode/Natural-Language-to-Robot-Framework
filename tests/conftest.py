@@ -489,6 +489,22 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
+def _clear_structlog_contextvars():
+    """Drop whatever a test left bound in structlog's context once it is done.
+
+    run_agentic_workflow binds a fresh workflow_id in the calling thread and
+    nothing clears it: production runs every workflow on its own thread, a
+    test runs it on the main one. tools/browser_use_tool.py reads workflow_id
+    from that context, so every later test that called the tool wrote a
+    temp-metrics file under it. Autouse here, so it tears down after every
+    fixture a test module adds."""
+    yield
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+
+
+@pytest.fixture(autouse=True)
 def _disable_auth_rate_limit():
     """Disable the auth rate limiter by default so suites that hammer /login or
     /register aren't throttled. The dedicated rate-limit tests re-enable it."""
