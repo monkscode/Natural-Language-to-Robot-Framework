@@ -17,12 +17,11 @@
  * a refused read renders no error text (the behaviour GeneratePage's
  * FeedbackPanel already proved once for its own surface); and a row
  * switch never shows a PREVIOUS row's corrections under the newly-selected
- * row — not while that row's own fetch is still in flight, not once it has
- * settled to an error, and not in the single stale commit between the row
- * changing and the run-detail fetch catching up to it (useFetch clears
- * neither `data` nor, on the error path, anything at all beyond `error`
- * itself — see HistoryPage.tsx's comment above `feedbackPath` for why
- * `loading`, `error` AND `d` all have to gate `corrections`). The two
+ * row. The mocked tests pin the corrections reader's own guards (still
+ * loading, refused, not rendered until the detail names the open row); the
+ * last corrections block drives the REAL useFetch across a switch, because
+ * the stale answer lives in what the hook keeps and a mock keeps nothing
+ * (see HistoryPage.tsx's visibleCorrections and RunDrawerFeedback). The two
  * positive-rendering tests exist because the others are all
  * absence-assertions, which a mutation that hardcodes
  * `corrections` to `[]` sails through undetected — see the `it`s below for
@@ -159,13 +158,10 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s corrections while this row’s fetch is still in flight', async () => {
-    // The corrections payload carries no run_id of its own (only
-    // `applied_to`, the resolved ORIGINAL run — see HistoryPage.tsx), so a
-    // just-left row's stale `data` can only be caught via `loading`, not by
-    // comparing an echoed id the way the run-detail fetch does. loading:
-    // true is useFetch's real state for exactly this window: the effect for
-    // the newly-selected row's path has fired, but that fetch has not
-    // resolved yet.
+    // Pins the reader's `loading` guard: nothing renders while the open
+    // run's own read is still out. The mock forces another run's data into
+    // that window; with the real hook the keyed reader starts empty (the
+    // real-useFetch block below), so this guards the guard, not the key.
     setup({
       data: { applied_to: 'run-1', corrections: [{ hint_id: 1, feedback_text: 'stale from the last row' }] },
       error: '', loading: true,
@@ -177,17 +173,12 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s stale corrections when this row’s fetch fails (e.g. a 403 refusing a colleague’s shared run)', async () => {
-    // useFetch never clears `data` in its catch branch (useFetch.ts) — only
-    // `error` is set, and `loading` is already back to false by then. This
-    // is the fix-round-1 repro: open an owned run with corrections on
-    // file, then a colleague's shared run whose corrections read the
-    // server refuses (GET /api/history/{id} passes is_grouped=true and
-    // 200s; GET /api/feedback/{id} deliberately does not and 403s). A
-    // loading-only guard is blind to this: `loading` has already settled
-    // false by the time the failure lands, so the FIRST run's stale `data`
-    // — its correction text, and a "filed against" notice that may
-    // describe a run that isn't even a re-run — would render under the
-    // SECOND run's drawer.
+    // Pins the reader's `error` guard: a refused read renders nothing. The
+    // everyday refusal is a colleague's shared run, whose detail read 200s
+    // (GET /api/history/{id} passes is_grouped=true) while its corrections
+    // read deliberately 403s (GET /api/feedback/{id} does not). The mock
+    // forces another run's data alongside the error; a `loading`-only guard
+    // would render it — the correction text and a "filed against" notice.
     setup({
       data: {
         applied_to: 'run-A',
@@ -204,13 +195,10 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s corrections in the single stale commit before the detail fetch has caught up to the newly-selected row', async () => {
-    // This is the one window `loading`/`error` alone cannot see: feedback
-    // for the new row has already landed and settled (loading: false,
-    // error: '') carrying a real correction, but the run-detail fetch
-    // (mocked via detailRunId below) still names a DIFFERENT run — the
-    // render between `selected` changing and useFetch's own effect firing,
-    // where useFetch still returns the PREVIOUS path's fully settled state.
-    // Only `d`, folded into `corrections` in HistoryPage.tsx, catches this.
+    // Settled feedback (loading: false, error: '') carrying a real
+    // correction, while the run-detail fetch (mocked via detailRunId below)
+    // still names a DIFFERENT run. `loading` and `error` cannot see this;
+    // the reader is simply not rendered until `d` names the open row.
     setup(
       {
         data: {
@@ -258,6 +246,186 @@ describe('HistoryPage drawer — the corrections fetch', () => {
 
     expect(await screen.findByText(/Filed against the original run/)).toBeInTheDocument()
     expect(screen.getByText(ORIGINAL_ID)).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage drawer — corrections never outlive their run (the real useFetch)', () => {
+  // Every other test in this file mocks useFetch, and a mock answers a path
+  // the same way whatever came before it. The defect these pin lives in what
+  // the REAL hook keeps between two runs: it holds its last answer across a
+  // path change, and across a null path (keep-previous-data, useFetch.ts), so
+  // a corrections read that outlived its run served that run's corrections
+  // under the next one. `api` stays mocked and routed by path, so nothing
+  // leaves the process.
+  const RUN_A = { ...RUN, run_id: 'run-A', user_query: 'open run A first' }
+  const RUN_B = { ...RUN, run_id: 'run-B', user_query: 'then open run B' }
+  const A_TEXT = /RUN A CORRECTION MUST STAY WITH RUN A/
+  const B_TEXT = /run B correction/
+  // Rendered from the DETAIL read only (the list rows carry no test fields),
+  // so seeing it proves run B's detail landed and `d` names run B.
+  const B_DETAIL_TITLE = 'Test: then open run B — Ran version 7'
+
+  const detailA = { ...RUN_A, robot_code: null, can_read_feedback: true }
+  const detailB = (extra: Record<string, unknown>) => ({
+    ...RUN_B, robot_code: null, test_id: 't-B', test_name: null,
+    test_query: 'then open run B', test_version_n: 7, ...extra,
+  })
+  const feedbackA = { applied_to: 'run-A', corrections: [{ hint_id: 1, feedback_text: 'RUN A CORRECTION MUST STAY WITH RUN A' }] }
+
+  async function renderWithRealFetch(routes: Record<string, () => Promise<unknown>>) {
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    setup({ data: null, error: '' }) // auth + groups; the useFetch mock is replaced next
+    mockUseFetch.mockImplementation(actual.useFetch)
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history?')) return { runs: [RUN_A, RUN_B], total: 2, scope: 'own' }
+      const route = routes[path]
+      if (!route) throw new Error(`unrouted ${path}`)
+      return route()
+    })
+    render(<MemoryRouter><HistoryPage /></MemoryRouter>)
+  }
+
+  async function openAThenCloseIt() {
+    fireEvent.click(await screen.findByText('open run A first'))
+    // Premise: run A's corrections really reached the screen, so their
+    // absence below is not an empty read passing for a correct one.
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  }
+
+  it('does not show the last run’s corrections under a run whose corrections the server will not serve', async () => {
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: false }),
+    })
+    await openAThenCloseIt()
+
+    fireEvent.click(screen.getByText('then open run B'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+    expect(screen.queryByText(/Filed against the original run/)).toBeNull()
+  })
+
+  it('does not flash the last run’s corrections while the next run’s own read is still out', async () => {
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: true }),
+      // Never settles, so the only way run A's text can appear is a commit
+      // made before run B's read even started.
+      '/api/feedback/run-B': () => new Promise(() => {}),
+    })
+    await openAThenCloseIt()
+
+    // A final-state query cannot see a single commit that is undone by the
+    // next one, so record every node React ADDS from here on.
+    const added: string[] = []
+    const observer = new MutationObserver(records => {
+      for (const r of records) for (const n of Array.from(r.addedNodes)) added.push(n.textContent ?? '')
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    fireEvent.click(screen.getByText('then open run B'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/run-B'))
+    for (const r of observer.takeRecords()) for (const n of Array.from(r.addedNodes)) added.push(n.textContent ?? '')
+    observer.disconnect()
+
+    expect(added.filter(t => A_TEXT.test(t))).toEqual([])
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+  })
+
+  it('does not carry a re-run’s corrections to the original opened from inside the drawer', async () => {
+    // The drawer's own "re-run of" link switches runs without closing it —
+    // the other way a run changes under the corrections panel.
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => ({ ...detailA, rerun_of: 'run-B', rerun_of_accessible: true }),
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: false }),
+    })
+    fireEvent.click(await screen.findByText('open run A first'))
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Open the original run — feedback on this re-run applies to it'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+  })
+
+  it('keys the reader by run, so a detail read that answers a switch in the same render still starts the next run empty', async () => {
+    // Today `d` is null for at least one render on every switch (the detail
+    // read lags `selected`), and that alone unmounts the reader. The key does
+    // not depend on that lag. Here the detail answers at once, so `d` moves
+    // from run A to run B in a single render and only the key can reset the
+    // corrections read. The detail stays mocked (no hooks); the corrections
+    // read is the real useFetch.
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    setup({ data: null, error: '' })
+    const details: Record<string, unknown> = {
+      '/api/history/run-A': { ...detailA, rerun_of: 'run-B', rerun_of_accessible: true },
+      '/api/history/run-B': detailB({ can_read_feedback: true }),
+    }
+    mockUseFetch.mockImplementation(((path: string | null) => (
+      path?.startsWith('/api/feedback/')
+        ? actual.useFetch(path)
+        : { data: path ? details[path] ?? null : null, loading: false, error: '', reload: vi.fn() }
+    )) as typeof actual.useFetch)
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history?')) return { runs: [RUN_A, RUN_B], total: 2, scope: 'own' }
+      if (path === '/api/feedback/run-A') return feedbackA
+      if (path === '/api/feedback/run-B') return new Promise(() => {})
+      throw new Error(`unrouted ${path}`)
+    })
+    render(<MemoryRouter><HistoryPage /></MemoryRouter>)
+    fireEvent.click(await screen.findByText('open run A first'))
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+
+    // Run A's text is ALREADY on screen when the drawer switches, so a stale
+    // commit adds nothing — it only removes run A's corrections one commit too
+    // late. Record the ORDER instead: they must leave the DOM no later than
+    // run B's detail arrives in it.
+    const log: string[] = []
+    const hasBTitle = (n: Node) => n instanceof Element
+      && (n.getAttribute('title') === B_DETAIL_TITLE || n.querySelector(`[title="${B_DETAIL_TITLE}"]`) !== null)
+    const record = (records: MutationRecord[]) => {
+      for (const r of records) {
+        for (const n of Array.from(r.removedNodes)) if (A_TEXT.test(n.textContent ?? '')) log.push('A removed')
+        for (const n of Array.from(r.addedNodes)) if (hasBTitle(n)) log.push('B shown')
+      }
+    }
+    const observer = new MutationObserver(record)
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    fireEvent.click(screen.getByTitle('Open the original run — feedback on this re-run applies to it'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/run-B'))
+    await waitFor(() => expect(screen.queryByText(A_TEXT)).toBeNull())
+    record(observer.takeRecords())
+    observer.disconnect()
+
+    expect(log).toContain('A removed')
+    expect(log).toContain('B shown')
+    expect(log.indexOf('A removed')).toBeLessThan(log.indexOf('B shown'))
+  })
+
+  it('still shows the next run’s own corrections once its read lands', async () => {
+    // The control for the three above: a reader that showed nothing at all
+    // would pass every one of them.
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: true }),
+      '/api/feedback/run-B': async () => ({ applied_to: 'run-B', corrections: [{ hint_id: 2, feedback_text: 'run B correction' }] }),
+    })
+    await openAThenCloseIt()
+
+    fireEvent.click(screen.getByText('then open run B'))
+
+    expect(await screen.findByText(B_TEXT)).toBeInTheDocument()
+    expect(screen.queryByText(A_TEXT)).toBeNull()
   })
 })
 

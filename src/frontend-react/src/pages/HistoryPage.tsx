@@ -424,11 +424,12 @@ function RunDrawerActions({ d, selected, hasUser, groups, rerunDisabled, onRunAg
 
 /**
  * What this run has already told the learning system — read-only here;
- * Retract stays the Generate panel's action alone (see feedbackPath in
- * HistoryPage). `corrections` is already [] for every case that must render
- * nothing — still loading, stale for this row, refused, or genuinely empty —
- * so this needs no separate loading/error/staleness check: silence claims
- * nothing, same as RecordedCorrections' own empty-array case.
+ * Retract stays the Generate panel's action alone (see RunDrawerFeedback).
+ * `corrections` is already [] for every case that must render nothing — not
+ * offered, still loading, refused, or genuinely empty — and can never be
+ * another run's (RunDrawerFeedback's key), so this needs no separate
+ * loading/error/staleness check: silence claims nothing, same as
+ * RecordedCorrections' own empty-array case.
  */
 function RunDrawerCorrections({ corrections, appliedTo, selected, copied, onCopy }: Readonly<{
   corrections: RecordedCorrectionItem[]
@@ -506,46 +507,72 @@ function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<
 }
 
 /**
- * The corrections the drawer may show for the open row, or [] for every case
- * that must render nothing.
+ * The corrections the drawer may show for the open run, or [] while that
+ * run's own read is still out or was refused.
  *
- * `d` is borrowed on purpose. This payload carries no run_id of its own to
- * check against `selected` (only `applied_to`, the resolved ORIGINAL run,
- * which legitimately differs from `selected` on a re-run), so the "does the
- * response match the open row" trick doesn't apply to it directly. `loading`
- * and `error` are the first substitute, and BOTH are required: useFetch's
- * reload() sets loading true and error '' at the START of every attempt for
- * the CURRENT path (useFetch.ts) — from inside an EFFECT, so for the one
- * render between `feedbackPath` changing and that effect firing, both still
- * describe the PREVIOUS path. useFetch never clears `data` in either case, in
- * its catch branch least of all (only setError runs there), so a fetch that
- * FAILS for a freshly-selected row — the 403 case below is the everyday one,
- * not an edge one — leaves the PREVIOUS row's data sitting there with loading
- * already back to false. Gating on loading alone closes only the in-flight
- * window; without error too, opening an owned run with corrections on file
- * and then a colleague's shared run (whose corrections read the server
- * refuses) would go on showing the FIRST run's corrections, and a "filed
- * against" notice that may be entirely fabricated, under the SECOND run's
- * drawer.
- *
- * That leaves exactly the one render loading/error can't cover on their own —
- * and it is exactly the render where `d` is ALSO null, for the same reason
- * (detail hasn't caught up to `selected` either). Requiring `d` closes it,
- * and costs nothing on the success path: GET /api/history/{run_id} passes
- * is_grouped=true while GET /api/feedback/{run_id} deliberately does not, and
- * is_grouped only ADDS an allow rule (caller_can_access, ownership.py) — so
- * feedback-allowed strictly implies detail-allowed, and `d` is never null for
- * permission reasons while the corrections fetch itself succeeds.
+ * It does NOT decide whether an answer belongs to the open run, and cannot:
+ * the payload carries no run_id of its own (only `applied_to`, the resolved
+ * ORIGINAL run, which legitimately differs from the open run on a re-run), and
+ * useFetch keeps its last good answer while a new path's read is out, and
+ * across a null path (useFetch.ts). A reader that outlived its run therefore
+ * served that run's corrections under the next one in two ways: a run whose
+ * read is not offered gets a null path, which leaves loading false and error
+ * empty over the previous run's data; and the first render after a switch to
+ * another readable run comes before useFetch's effect marks the new read
+ * loading.
+ * RunDrawerFeedback owns the read and is keyed by run id, so its useFetch
+ * starts empty with every run and cannot hold another run's answer.
  */
 function visibleCorrections(
-  d: RunDetail | null,
   feedbackLoading: boolean,
   feedbackError: string,
   feedback: FeedbackCorrectionsResponse | null,
 ): RecordedCorrectionItem[] {
-  if (!d) return []
   if (feedbackLoading || feedbackError) return []
   return Array.isArray(feedback?.corrections) ? feedback.corrections : []
+}
+
+/**
+ * What this run has already contributed to the learning store — the History
+ * drawer's read of the same data GeneratePage's FeedbackPanel shows while the
+ * run is still on screen. Render it only as `key={d.run_id}`: the key is what
+ * ties the read's lifetime to one run (visibleCorrections above).
+ *
+ * Errors are read but never rendered as their own text, and that stays the
+ * backstop rather than the mechanism. A 403 here is legitimate and always
+ * was: GET /api/history/{run_id} passes is_grouped=true (a colleague's run
+ * published into a shared folder opens in this drawer), while
+ * GET /api/feedback/{run_id} deliberately does not — publishing a test does
+ * not publish the corrections filed against it (get_run_corrections,
+ * endpoints.py). An error banner would put a red box on every shared run in
+ * the org. An empty list degrades the same way, silently: silence claims
+ * nothing either way.
+ *
+ * The request is not offered when the server has already said it will refuse
+ * it. can_read_feedback is that answer, computed by run_detail with the same
+ * gate the feedback route applies — and only the server can compute it, since
+ * a platform admin and the token-less dev caller may both read a peer's
+ * corrections while the client knows it is neither. It is read from `d`, the
+ * detail that already names the open run, so the flag always belongs to the
+ * run on screen and the request waits for the detail read instead of racing
+ * it.
+ */
+function RunDrawerFeedback({ d, copied, onCopy }: Readonly<{
+  d: RunDetail
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  const feedbackPath = d.can_read_feedback ? `/api/feedback/${d.run_id}` : null
+  const { data: feedback, loading, error } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
+  return (
+    <RunDrawerCorrections
+      corrections={visibleCorrections(loading, error, feedback)}
+      appliedTo={feedback?.applied_to}
+      selected={d.run_id}
+      copied={copied}
+      onCopy={onCopy}
+    />
+  )
 }
 
 /** Run again needs stored code, an open row, no re-run of that row already in
@@ -877,41 +904,6 @@ export default function HistoryPage() {
   // briefly render the PREVIOUS run's code/query. Only trust detail once it
   // matches the open row.
   const d = detail?.run_id === selected ? detail : null
-
-  // What this run has already contributed to the learning store — the
-  // History drawer's read of the same data GeneratePage's FeedbackPanel
-  // shows while the run is still on screen.
-  //
-  // Which of those rows may actually be shown for the open drawer is a
-  // question about staleness rather than about fetching — visibleCorrections
-  // above states the rule and why each half of it is required.
-  //
-  // Errors are read but never rendered as their own text, and that stays the
-  // backstop rather than the mechanism. A 403 here is legitimate and always
-  // was: GET /api/history/{run_id} above passes is_grouped=true (a
-  // colleague's run published into a shared folder opens in this drawer),
-  // while GET /api/feedback/{run_id} deliberately does not — publishing a
-  // test does not publish the corrections filed against it
-  // (get_run_corrections, endpoints.py). An error banner would put a red
-  // box on every shared run in the org. An empty list degrades the same
-  // way, silently: silence claims nothing either way.
-  //
-  // What CHANGED is that the request is no longer offered when the server has
-  // already said it will refuse it. can_read_feedback is that answer,
-  // computed by run_detail with the same gate the feedback route applies —
-  // and only the server can compute it, since a platform admin and the
-  // token-less dev caller may both read a peer's corrections while the client
-  // knows it is neither. Until Task 11 this drawer discovered the refusal by
-  // RECEIVING it, once per open, which P1 turned from a rarity into the
-  // common case by letting peers see published siblings at all.
-  //
-  // Gated on `d` rather than on `selected`, so the flag always belongs to the
-  // row on screen. That also makes the request wait for the detail read
-  // instead of racing it, which costs nothing: the panel cannot render
-  // without `d` either (visibleCorrections).
-  const feedbackPath = d?.can_read_feedback ? `/api/feedback/${d.run_id}` : null
-  const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
-  const corrections = visibleCorrections(d, feedbackLoading, feedbackError, feedback)
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -1382,13 +1374,7 @@ export default function HistoryPage() {
               a move that failed from in here would otherwise be silent. */}
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
 
-          <RunDrawerCorrections
-            corrections={corrections}
-            appliedTo={feedback?.applied_to}
-            selected={selected}
-            copied={copied}
-            onCopy={copyText}
-          />
+          {d && <RunDrawerFeedback key={d.run_id} d={d} copied={copied} onCopy={copyText} />}
 
           <Separator />
 
