@@ -488,6 +488,18 @@ def _disable_auth_rate_limit():
         limiter.enabled = saved
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_staging_root(tmp_path_factory):
+    """Stage every run this session writes into a temp dir, never the repo's
+    robot_tests/ — see tests/isolation_guard.py for the defect and for why the
+    constant alone is not the only copy to rebind."""
+    from tests.isolation_guard import redirect_staging
+
+    staging = tmp_path_factory.mktemp("robot_tests")
+    redirect_staging(staging)
+    return staging
+
+
 @pytest.fixture
 def mock_settings():
     """Patched Settings with test defaults — no real env vars read."""
