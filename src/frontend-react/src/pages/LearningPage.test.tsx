@@ -967,3 +967,139 @@ describe('ReviewSessionPanel: recommendations, decisions, and applying', () => {
     await waitFor(() => expect(detailReload).toHaveBeenCalledTimes(1))
   })
 })
+
+describe('ReviewSessionPanel never outlives its session (the real useFetch)', () => {
+  // The panel is inline, not a modal: clicking another session's row changes
+  // its id while it stays mounted. Everything it holds belongs to ONE session —
+  // the detail read, the busy flag, the error and "Applied N" messages — so a
+  // switch must start the next session empty. The tests above mock useFetch,
+  // which keeps nothing between two sessions; the defect was in what the real
+  // hook and the panel's own state carried across.
+  const SESSIONS = {
+    is_any_running: false,
+    sessions: [
+      { id: 5, status: 'pending_review', hint_count: 4, llm_latency_ms: 1000, warning: null, created_at: '2026-08-01T00:00:00Z', completed_at: null },
+      { id: 6, status: 'pending_review', hint_count: 1, llm_latency_ms: 2000, warning: null, created_at: '2026-08-02T00:00:00Z', completed_at: null },
+    ],
+  }
+  const rec = (id: number, text: string, decision: string | null) => ({
+    id, hint_id: id + 100, recommendation: 'disable', reason: `reason ${id}`, exoneration_count: 0,
+    admin_decision: decision, admin_notes: null, applied: 0, feedback_text: text,
+  })
+  const DETAIL_5 = {
+    session: { id: 5, status: 'pending_review', hint_count: 4, created_at: '2026-08-01T00:00:00Z', warning: null, error_message: null },
+    recommendations: [rec(901, 'SESSION 5 REC ONE', 'approved'), rec(902, 'SESSION 5 REC TWO', 'approved'),
+      rec(903, 'SESSION 5 REC THREE', 'approved'), rec(904, 'SESSION 5 UNDECIDED', null)],
+  }
+  const DETAIL_6 = {
+    session: { id: 6, status: 'pending_review', hint_count: 1, created_at: '2026-08-02T00:00:00Z', warning: null, error_message: null },
+    recommendations: [rec(950, 'SESSION 6 REC', null)],
+  }
+
+  async function renderReviewWithRealFetch(route: (path: string, init?: RequestInit) => Promise<unknown> | undefined) {
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    mockUseAuth.mockReturnValue({
+      user: { id: 'u1', email: 'admin@test.local', display_name: 'A', role: 'admin', status: 'active' },
+      isAdmin: true,
+      isOrgAdmin: false,
+      canViewLearning: true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockUseFetch.mockImplementation(actual.useFetch)
+    mockApi.mockImplementation((async (path: string, init?: RequestInit) => {
+      if (path === '/api/learning/review-hints/sessions') return SESSIONS
+      const answer = route(path, init)
+      if (answer !== undefined) return answer
+      throw new Error(`unrouted ${path}`)
+    }) as typeof api)
+    render(<LearningPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'LLM Review' }))
+    await waitFor(() => expect(screen.getAllByRole('row')).toHaveLength(3))
+  }
+  const sessionRow = (n: 1 | 2) => screen.getAllByRole('row')[n]
+
+  it('does not show the last session’s recommendations or its Apply count while the next one loads', async () => {
+    await renderReviewWithRealFetch(path => {
+      if (path === '/api/learning/review-hints/sessions/5') return Promise.resolve(DETAIL_5)
+      if (path === '/api/learning/review-hints/sessions/6') return new Promise<unknown>(() => {})
+      return undefined
+    })
+    fireEvent.click(sessionRow(1))
+    expect(await screen.findByText('SESSION 5 REC ONE')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply approved (3)' })).toBeInTheDocument()
+
+    fireEvent.click(sessionRow(2))
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/learning/review-hints/sessions/6'))
+
+    expect(screen.getByText('Loading session…')).toBeInTheDocument()
+    expect(screen.queryByText('Session #5')).toBeNull()
+    expect(screen.queryByText('SESSION 5 REC ONE')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Apply approved/ })).toBeNull()
+  })
+
+  it('does not carry the last session’s "Applied" message to the next session', async () => {
+    await renderReviewWithRealFetch((path, init) => {
+      if (path === '/api/learning/review-hints/sessions/5') return Promise.resolve(DETAIL_5)
+      if (path === '/api/learning/review-hints/sessions/6') return Promise.resolve(DETAIL_6)
+      if (path === '/api/learning/review-hints/sessions/5/apply' && init?.method === 'POST') return Promise.resolve({ applied_count: 3 })
+      return undefined
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    fireEvent.click(sessionRow(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply approved (3)' }))
+    expect(await screen.findByText('Applied 3 recommendations.')).toBeInTheDocument()
+
+    fireEvent.click(sessionRow(2))
+    expect(await screen.findByText('SESSION 6 REC')).toBeInTheDocument()
+
+    expect(screen.queryByText('Applied 3 recommendations.')).toBeNull()
+    confirmSpy.mockRestore()
+  })
+
+  it('does not bring the last session back when a decision on it lands after the switch', async () => {
+    let releaseDecision: (v: unknown) => void = () => {}
+    await renderReviewWithRealFetch((path, init) => {
+      if (path === '/api/learning/review-hints/sessions/5') return Promise.resolve(DETAIL_5)
+      if (path === '/api/learning/review-hints/sessions/6') return Promise.resolve(DETAIL_6)
+      if (path === '/api/learning/review-hints/sessions/5/recommendations/904' && init?.method === 'PATCH') {
+        return new Promise<unknown>(resolve => { releaseDecision = resolve })
+      }
+      return undefined
+    })
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('')
+    fireEvent.click(sessionRow(1))
+    await screen.findByText('SESSION 5 UNDECIDED')
+    // SESSION 5 UNDECIDED is the fourth card, so its Approve is index 3.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' })[3])
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith(
+      '/api/learning/review-hints/sessions/5/recommendations/904', expect.objectContaining({ method: 'PATCH' })))
+
+    fireEvent.click(sessionRow(2))
+    expect(await screen.findByText('SESSION 6 REC')).toBeInTheDocument()
+    await act(async () => {
+      releaseDecision({ recommendation: {} })
+      await new Promise(resolve => setTimeout(resolve, 50))
+    })
+
+    expect(screen.getByText('Session #6')).toBeInTheDocument()
+    expect(screen.queryByText('SESSION 5 REC ONE')).toBeNull()
+    promptSpy.mockRestore()
+  })
+
+  it('shows the next session’s own recommendations once its read lands', async () => {
+    // The control for the three above: a panel that rendered nothing at all
+    // after a switch would pass every one of them.
+    await renderReviewWithRealFetch(path => {
+      if (path === '/api/learning/review-hints/sessions/5') return Promise.resolve(DETAIL_5)
+      if (path === '/api/learning/review-hints/sessions/6') return Promise.resolve(DETAIL_6)
+      return undefined
+    })
+    fireEvent.click(sessionRow(1))
+    await screen.findByText('SESSION 5 REC ONE')
+
+    fireEvent.click(sessionRow(2))
+
+    expect(await screen.findByText('SESSION 6 REC')).toBeInTheDocument()
+    expect(screen.getByText('Session #6')).toBeInTheDocument()
+    expect(sessionRow(2).textContent).toContain('Viewing')
+  })
+})
