@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 # time, which is before any fixture runs.
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
+# Installs the staging/runner guard's audit hook now, before any test code can
+# write or connect; see tests/isolation_guard.py. It imports no src.backend, so
+# it is safe ahead of the Postgres redirect below.
+from tests import isolation_guard  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Whole-session Postgres isolation guard
@@ -488,15 +493,20 @@ def _disable_auth_rate_limit():
         limiter.enabled = saved
 
 
+def pytest_configure(config):
+    """Register the isolation guard as a plugin so its pytest_sessionfinish can
+    fail a session in which a test reached the real staging root or the runner."""
+    if not config.pluginmanager.is_registered(isolation_guard):
+        config.pluginmanager.register(isolation_guard, "nlrf-isolation-guard")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_staging_root(tmp_path_factory):
     """Stage every run this session writes into a temp dir, never the repo's
     robot_tests/ — see tests/isolation_guard.py for the defect and for why the
     constant alone is not the only copy to rebind."""
-    from tests.isolation_guard import redirect_staging
-
     staging = tmp_path_factory.mktemp("robot_tests")
-    redirect_staging(staging)
+    isolation_guard.isolate_session(staging)
     return staging
 
 
